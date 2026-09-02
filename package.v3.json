@@ -22,5 +22,20 @@
     "release": true,
     "system_version": ">=3.0.0",
     "level": 1
+  },
+  "CloudPanStrmHelper": {
+    "name": "网盘STRM助手",
+    "description": "仿115网盘STRM助手：全量/增量STRM同步、整理监控、网盘目录整理。",
+    "labels": "云盘",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
+    "author": "helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "history": {
+      "v1.0.0": "首发：全量/增量STRM同步、整理事件监控、网盘整理"
+    }
   }
 }
