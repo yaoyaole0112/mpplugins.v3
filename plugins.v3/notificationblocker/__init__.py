@@ -289,7 +289,7 @@ class NotificationBlocker(_PluginBase):
     # 插件元信息
     plugin_name = "通知消息屏蔽"
     plugin_desc = "按正则关键词屏蔽消息通知：标题或正文命中即不推送（历史保留）。"
-    plugin_version = "1.3.2"
+    plugin_version = "1.3.3"
     plugin_author = "helios"
     plugin_order = 51
     plugin_config_prefix = "notificationblocker_"
@@ -376,7 +376,7 @@ class NotificationBlocker(_PluginBase):
                 for mtype, cnt in sorted(types.items(), key=lambda x: -x[1]):
                     lines.append(f"{mtype}：{cnt} 条")
             if records:
-                lines.extend(["", "📦 分类明细"])
+                lines.extend(["", "分类明细"])
                 for index, group in enumerate(_group_blocked_records(records), 1):
                     lines.extend(_render_group(group, index))
             if legacy:
