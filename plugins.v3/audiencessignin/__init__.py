@@ -139,7 +139,7 @@ class AudiencesSignIn(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = "专为观众站 audiences.me 的 Cloudflare Turnstile 每日签到。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112"
     plugin_config_prefix = "audiencessignin_"
@@ -872,16 +872,21 @@ class AudiencesSignIn(_PluginBase):
 
     def _notify_result(self, result: Dict[str, Any]) -> None:
         success = bool(result.get("success"))
-        message = result.get("message") or ""
+        message = (result.get("message") or "").strip()
+        bonus = None
+        match = re.search(r"获得\s*([\d.]+)\s*粒爆米花", message)
+        if match:
+            bonus = match.group(1)
         if success:
-            title = f"{PLUGIN_NAME}成功"
-            if result.get("already"):
-                text = f"{SITE_NAME} 今日已签到。{message}".strip()
+            title = "📝【观众】站点签到成功"
+            prefix = "📅今日已签到" if result.get("already") else "📅签到成功"
+            if bonus:
+                text = f"{prefix}，获得 {bonus} 粒爆米花🍿"
             else:
-                text = f"{SITE_NAME} {message or '签到成功'}"
+                text = f"{prefix}🍿"
         else:
-            title = f"{PLUGIN_NAME}失败"
-            text = f"{SITE_NAME} 签到失败：{message}"
+            title = "📝【观众】站点签到失败"
+            text = f"📅签到失败：{message}" if message else "📅签到失败"
         logger.info(f"{PLUGIN_NAME}: {text}")
         if not self._notify:
             return
