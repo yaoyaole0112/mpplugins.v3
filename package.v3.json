@@ -86,5 +86,20 @@
       "v1.0.1": "修复 YesCaptcha JSON 请求和密钥误报；配置打码后跳过卡住的无头浏览器，直接提交 Token",
       "v1.0.0": "首发：CloakBrowser 尝试完成 Turnstile，失败时可走 YesCaptcha/CapSolver/2Captcha，读取站点管理中的观众 Cookie"
     }
+  },
+  "CnMusicSource": {
+    "name": "华语音乐识别",
+    "description": "接入 QQ 音乐 / 网易云元数据，MusicBrainz 识别失败时回退匹配华语歌曲。",
+    "labels": "音乐,识别",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
+    "author": "helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "history": {
+      "v1.0.0": "首发：QQ 音乐 / 网易云音乐元数据源，自动整理在 MusicBrainz 失败时回退识别"
+    }
   }
 }
