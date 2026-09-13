@@ -74,7 +74,7 @@
     "name": "观众签到",
     "description": "专为观众站 audiences.me 的 Cloudflare Turnstile 每日签到。",
     "labels": "站点",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -82,6 +82,7 @@
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
+      "v1.0.1": "修复 YesCaptcha JSON 请求和密钥误报；配置打码后跳过卡住的无头浏览器，直接提交 Token",
       "v1.0.0": "首发：CloakBrowser 尝试完成 Turnstile，失败时可走 YesCaptcha/CapSolver/2Captcha，读取站点管理中的观众 Cookie"
     }
   }

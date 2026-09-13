@@ -54,14 +54,24 @@ DEFAULT_UA = (
 DEFAULT_CRON = "35 8 * * *"
 
 SUCCESS_RE = re.compile(
-    r"签到成功|已经签到|今日已签|签到已得|本次签到获得|连续签到\s*\d+\s*天",
+    r"签到成功|已经签到|今日已签|签到已得|本次签到获得",
     re.I,
 )
-BONUS_RE = re.compile(r"(?:获得|奖励|签到已得)\s*([\d.]+)\s*(?:粒)?爆米花")
+BONUS_RE = re.compile(
+    r'(?:本次获得爆米花|签到已得|获得)\s*[：:]?\s*\+?([\d.]+)\s*(?:粒)?(?:爆米花)?',
+    re.I,
+)
+BONUS_CARD_RE = re.compile(
+    r'attendance-stat__num">\+?([\d.]+)</span>\s*<span class="attendance-stat__label">本次获得爆米花',
+    re.I,
+)
 STREAK_RE = re.compile(r"连续签到\s*(\d+)\s*天")
+STREAK_CARD_RE = re.compile(
+    r'attendance-stat__num">(\d+)</span>\s*<span class="attendance-stat__label">连续签到天数',
+    re.I,
+)
 SITEKEY_RE = re.compile(r'data-sitekey=["\']([^"\']+)["\']', re.I)
-NEED_VERIFY_HINTS = ("cf-turnstile", "人机验证", "请验证您是真人")
-LOGIN_FAIL_HINTS = ("login.php", "userdetails.php?id=0")
+NEED_VERIFY_HINTS = ("cf-turnstile", "人机验证", "请验证您是真人", "attendance-card--verify")
 
 _SIGN_LOCK = Lock()
 
@@ -74,6 +84,13 @@ def _today() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def _mask_secret(value: str) -> str:
+    text = (value or "").strip()
+    if len(text) <= 8:
+        return "***"
+    return f"{text[:4]}***{text[-4:]}"
+
+
 def _html_has_turnstile(html: str) -> bool:
     text = html or ""
     return any(hint in text for hint in NEED_VERIFY_HINTS)
@@ -82,13 +99,11 @@ def _html_has_turnstile(html: str) -> bool:
 def _html_signed(html: str) -> bool:
     if not html:
         return False
-    if SUCCESS_RE.search(html):
-        return True
-    if "attendance-card--verify" in html or _html_has_turnstile(html):
+    if _html_has_turnstile(html):
         return False
     if "attendance-card--success" in html or "attendance-card--done" in html:
         return True
-    return False
+    return bool(SUCCESS_RE.search(html))
 
 
 def _html_logged_in(html: str) -> bool:
@@ -101,14 +116,14 @@ def _html_logged_in(html: str) -> bool:
             pass
     if "logout.php" in html or "userdetails.php" in html:
         return True
-    return "c_secure_uid" not in html and "login.php" not in html[:2000]
+    return "login.php" not in html[:3000]
 
 
 def _extract_detail(html: str) -> str:
     if not html:
         return ""
-    bonus = BONUS_RE.search(html)
-    streak = STREAK_RE.search(html)
+    bonus = BONUS_CARD_RE.search(html) or BONUS_RE.search(html)
+    streak = STREAK_CARD_RE.search(html) or STREAK_RE.search(html)
     parts = []
     if bonus:
         parts.append(f"获得 {bonus.group(1)} 粒爆米花")
@@ -124,7 +139,7 @@ class AudiencesSignIn(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = "专为观众站 audiences.me 的 Cloudflare Turnstile 每日签到。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112"
     plugin_config_prefix = "audiencessignin_"
@@ -236,6 +251,9 @@ class AudiencesSignIn(_PluginBase):
         finally:
             _SIGN_LOCK.release()
 
+    def _has_solver(self) -> bool:
+        return self._solver not in ("", "none", "None") and bool(self._solver_key)
+
     def _signin_with_retry(self) -> Dict[str, Any]:
         last = {"success": False, "message": "未执行"}
         attempts = max(1, self._retries + 1)
@@ -274,44 +292,41 @@ class AudiencesSignIn(_PluginBase):
 
         html = self._http_get(attendance_url, cookie, ua, proxies, timeout)
         if html and under_challenge(html):
-            logger.warning(f"{PLUGIN_NAME}: 普通请求命中 Cloudflare 防护，改用浏览器")
+            logger.warning(f"{PLUGIN_NAME}: 普通请求命中 Cloudflare 防护")
             html = ""
+        sitekey = DEFAULT_SITEKEY
         if html:
+            match = SITEKEY_RE.search(html)
+            if match:
+                sitekey = match.group(1)
             if not _html_logged_in(html):
                 return {"success": False, "message": "Cookie 已失效，请更新观众站 Cookie 和 UA"}
-            if _html_signed(html) and not _html_has_turnstile(html):
+            if _html_signed(html):
                 detail = _extract_detail(html) or "今日已签到"
                 return {"success": True, "message": detail, "already": True}
 
-        browser_result = self._signin_with_browser(attendance_url, cookie, ua, timeout)
-        if browser_result.get("success") or browser_result.get("token"):
-            if browser_result.get("success"):
-                return browser_result
-            token = browser_result.get("token")
-            posted = self._post_token(attendance_url, cookie, ua, proxies, timeout, token)
-            if posted.get("success"):
-                return posted
-
-        if self._solver != "none" and self._solver_key:
-            sitekey = browser_result.get("sitekey") or DEFAULT_SITEKEY
-            if html:
-                match = SITEKEY_RE.search(html)
-                if match:
-                    sitekey = match.group(1)
-            logger.info(f"{PLUGIN_NAME}: 浏览器未能完成验证，改用 {self._solver} 获取 Token")
+        if self._has_solver():
+            logger.info(f"{PLUGIN_NAME}: 使用 {self._solver} 获取 Turnstile Token")
             token = self._solve_turnstile(sitekey, attendance_url)
             if not token:
                 return {"success": False, "message": f"{self._solver} 未能获得 Turnstile Token"}
+            return self._post_token(attendance_url, cookie, ua, proxies, timeout, token)
+
+        browser_result = self._signin_with_browser(attendance_url, cookie, ua, min(45, timeout))
+        if browser_result.get("success"):
+            return browser_result
+        token = browser_result.get("token")
+        if token:
             posted = self._post_token(attendance_url, cookie, ua, proxies, timeout, token)
             if posted.get("success"):
                 return posted
-            return posted
-
+        if browser_result.get("sitekey"):
+            sitekey = browser_result["sitekey"]
         if browser_result.get("message"):
             return browser_result
         return {
             "success": False,
-            "message": "未能通过人机验证。Docker 无头浏览器经常过不了 Turnstile，请在插件中配置 YesCaptcha / CapSolver / 2Captcha",
+            "message": "未能通过人机验证。请在插件中填写 YesCaptcha ClientKey（个人中心完整密钥，不要截断）",
         }
 
     def _load_site(self) -> Dict[str, Any]:
@@ -355,7 +370,6 @@ class AudiencesSignIn(_PluginBase):
                         "url": indexer.get("url") or info["url"],
                         "cookie": indexer.get("cookie") or "",
                         "ua": indexer.get("ua") or DEFAULT_UA,
-                        "proxy": bool(indexer.get("proxy")),
                     })
             except Exception as err:
                 logger.debug(f"{PLUGIN_NAME}: SitesHelper 读取失败：{err}")
@@ -366,9 +380,27 @@ class AudiencesSignIn(_PluginBase):
             return None
         return getattr(settings, "PROXY_SERVER", None)
 
+    def _http_headers(self, cookie: str, ua: str, referer: str = "") -> Dict[str, str]:
+        headers = {
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Origin": f"https://{SITE_DOMAIN}",
+        }
+        if referer:
+            headers["Referer"] = referer
+        return headers
+
     def _http_get(self, url: str, cookie: str, ua: str, proxies, timeout: int) -> str:
         try:
-            res = RequestUtils(cookies=cookie, ua=ua, proxies=proxies, timeout=min(timeout, 30)).get_res(url)
+            res = RequestUtils(
+                cookies=cookie,
+                ua=ua,
+                proxies=proxies,
+                timeout=min(timeout, 30),
+                referer=url,
+                headers=self._http_headers(cookie, ua, url),
+            ).get_res(url)
             if res is not None and res.status_code == 200:
                 return res.text or ""
             logger.warning(f"{PLUGIN_NAME}: GET 失败 status={getattr(res, 'status_code', None)}")
@@ -388,13 +420,15 @@ class AudiencesSignIn(_PluginBase):
                 proxies=proxies,
                 timeout=timeout,
                 referer=url,
+                headers=self._http_headers(cookie, ua, url),
+                content_type="application/x-www-form-urlencoded; charset=UTF-8",
             ).post_res(url, data=data)
         except Exception as err:
             return {"success": False, "message": f"提交 Token 失败：{err}"}
         if res is None:
             return {"success": False, "message": "提交 Token 无响应"}
         html = res.text or ""
-        if _html_signed(html) and not _html_has_turnstile(html):
+        if _html_signed(html):
             detail = _extract_detail(html) or "签到成功"
             logger.info(f"{PLUGIN_NAME}: {detail}")
             return {"success": True, "message": detail}
@@ -406,6 +440,20 @@ class AudiencesSignIn(_PluginBase):
         return {"success": False, "message": f"提交 Token 后状态码 {res.status_code}"}
 
     def _signin_with_browser(self, url: str, cookie: str, ua: str, timeout: int) -> Dict[str, Any]:
+        bucket: Dict[str, Any] = {}
+
+        def worker() -> None:
+            bucket["result"] = self._signin_with_browser_inner(url, cookie, ua, timeout)
+
+        thread = Thread(target=worker, name="audiences-browser", daemon=True)
+        thread.start()
+        thread.join(max(20, timeout + 10))
+        if thread.is_alive():
+            logger.error(f"{PLUGIN_NAME}: 浏览器任务超时，已放弃等待")
+            return {"success": False, "message": "浏览器签到超时"}
+        return bucket.get("result") or {"success": False, "message": "浏览器签到未完成"}
+
+    def _signin_with_browser_inner(self, url: str, cookie: str, ua: str, timeout: int) -> Dict[str, Any]:
         try:
             from cloakbrowser import launch_context
         except Exception as err:
@@ -425,11 +473,10 @@ class AudiencesSignIn(_PluginBase):
             page = context.new_page()
             self._apply_cookies(context, page, cookie)
             page.set_extra_http_headers({
-                "cookie": cookie,
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             })
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
-            self._wait_cf_clearance(page, timeout=min(timeout, 30))
+            page.goto(url, wait_until="domcontentloaded", timeout=min(timeout, 30) * 1000)
+            self._wait_cf_clearance(page, timeout=min(timeout, 15))
             html = page.content() or ""
             match = SITEKEY_RE.search(html)
             if match:
@@ -437,15 +484,15 @@ class AudiencesSignIn(_PluginBase):
             if not _html_logged_in(html):
                 result["message"] = "浏览器打开签到页后未登录，Cookie 可能失效"
                 return result
-            if _html_signed(html) and not _html_has_turnstile(html):
+            if _html_signed(html):
                 result["success"] = True
                 result["message"] = _extract_detail(html) or "今日已签到"
                 result["already"] = True
                 return result
 
-            token = self._wait_turnstile_token(page, timeout=max(20, timeout - 15))
+            token = self._wait_turnstile_token(page, timeout=max(15, min(30, timeout)))
             html = page.content() or ""
-            if _html_signed(html) and not _html_has_turnstile(html):
+            if _html_signed(html):
                 result["success"] = True
                 result["message"] = _extract_detail(html) or "今日已签到"
                 result["already"] = True
@@ -455,7 +502,7 @@ class AudiencesSignIn(_PluginBase):
                 self._submit_attendance_form(page, token)
                 time.sleep(2)
                 html = page.content() or ""
-                if _html_signed(html) and not _html_has_turnstile(html):
+                if _html_signed(html):
                     result["success"] = True
                     result["message"] = _extract_detail(html) or "签到成功"
                     return result
@@ -468,6 +515,12 @@ class AudiencesSignIn(_PluginBase):
             result["message"] = f"浏览器签到失败：{err}"
             return result
         finally:
+            self._close_browser(context, page)
+        return result
+
+    @staticmethod
+    def _close_browser(context, page) -> None:
+        def _close() -> None:
             try:
                 if page:
                     page.close()
@@ -478,6 +531,10 @@ class AudiencesSignIn(_PluginBase):
                     context.close()
             except Exception:
                 pass
+
+        thread = Thread(target=_close, name="audiences-browser-close", daemon=True)
+        thread.start()
+        thread.join(8)
 
     def _apply_cookies(self, context, page, cookie: str) -> None:
         if not cookie or cookie_parse is None:
@@ -513,13 +570,13 @@ class AudiencesSignIn(_PluginBase):
                 return
             time.sleep(1)
 
-    def _wait_turnstile_token(self, page, timeout: int = 45) -> str:
+    def _wait_turnstile_token(self, page, timeout: int = 30) -> str:
         deadline = time.time() + timeout
         clicked = False
         while time.time() < deadline:
             try:
                 html = page.content() or ""
-                if _html_signed(html) and not _html_has_turnstile(html):
+                if _html_signed(html):
                     return ""
             except Exception:
                 html = ""
@@ -557,7 +614,6 @@ class AudiencesSignIn(_PluginBase):
         for selector in selectors:
             try:
                 page.click(selector, timeout=1500)
-                logger.debug(f"{PLUGIN_NAME}: 点击 {selector}")
                 break
             except Exception:
                 continue
@@ -580,13 +636,6 @@ class AudiencesSignIn(_PluginBase):
                         break
                     except Exception:
                         continue
-                for child in getattr(frame, "child_frames", []) or []:
-                    for selector in ("input[type=checkbox]", "label", "body"):
-                        try:
-                            child.click(selector, timeout=800)
-                            break
-                        except Exception:
-                            continue
         except Exception:
             pass
 
@@ -616,32 +665,100 @@ class AudiencesSignIn(_PluginBase):
 
     def _solve_turnstile(self, sitekey: str, pageurl: str) -> str:
         solver = self._solver
-        if solver in ("yescaptcha", "capsolver"):
-            if solver == "yescaptcha":
-                api = "https://api.yescaptcha.com"
-                task_type = "TurnstileTaskProxyless"
-            else:
-                api = "https://api.capsolver.com"
-                task_type = "AntiTurnstileTaskProxyLess"
-            return self._solve_task_api(api, task_type, sitekey, pageurl)
+        if solver == "yescaptcha":
+            return self._solve_yescaptcha(sitekey, pageurl)
+        if solver == "capsolver":
+            return self._solve_task_api(
+                ["https://api.capsolver.com"],
+                ["AntiTurnstileTaskProxyLess"],
+                sitekey,
+                pageurl,
+            )
         if solver in ("twocaptcha", "2captcha"):
             return self._solve_2captcha(sitekey, pageurl)
         logger.warning(f"{PLUGIN_NAME}: 未知打码平台 {solver}")
         return ""
 
-    def _solve_task_api(self, api: str, task_type: str, sitekey: str, pageurl: str) -> str:
-        proxies = settings.PROXY if self._use_proxy else None
-        create = RequestUtils(proxies=proxies, timeout=30).post_res(
-            f"{api}/createTask",
-            json={
-                "clientKey": self._solver_key,
-                "task": {
-                    "type": task_type,
-                    "websiteURL": pageurl,
-                    "websiteKey": sitekey,
-                },
-            },
+    def _solve_yescaptcha(self, sitekey: str, pageurl: str) -> str:
+        apis = ["https://api.yescaptcha.com", "https://cn.yescaptcha.com"]
+        types = ["TurnstileTaskProxyless", "TurnstileTaskProxylessM1"]
+        return self._solve_task_api(apis, types, sitekey, pageurl)
+
+    def _solver_http(self, proxies=None) -> RequestUtils:
+        return RequestUtils(
+            proxies=proxies,
+            timeout=30,
+            content_type="application/json",
+            accept_type="application/json",
         )
+
+    def _iter_solver_proxies(self):
+        proxies = settings.PROXY if self._use_proxy else None
+        seen = []
+        for item in (proxies, None):
+            marker = bool(item)
+            if marker in seen:
+                continue
+            seen.append(marker)
+            yield item
+
+    def _solve_task_api(self, apis: List[str], task_types: List[str], sitekey: str, pageurl: str) -> str:
+        last_error = ""
+        for proxies in self._iter_solver_proxies():
+            http = self._solver_http(proxies)
+            for api in apis:
+                if not self._solver_ready(http, api):
+                    continue
+                for task_type in task_types:
+                    token = self._create_and_poll(http, api, task_type, sitekey, pageurl)
+                    if token:
+                        return token
+                    last_error = f"{api} {task_type} 失败"
+        if last_error:
+            logger.error(f"{PLUGIN_NAME}: {last_error}")
+        return ""
+
+    def _solver_ready(self, http: RequestUtils, api: str) -> bool:
+        try:
+            res = http.post_res(f"{api}/getBalance", json={"clientKey": self._solver_key})
+        except Exception as err:
+            logger.warning(f"{PLUGIN_NAME}: {api} getBalance 异常：{err}")
+            return True
+        if res is None:
+            logger.warning(f"{PLUGIN_NAME}: {api} getBalance 无响应，继续尝试下单")
+            return True
+        try:
+            data = res.json()
+        except Exception:
+            logger.warning(f"{PLUGIN_NAME}: {api} getBalance 返回非 JSON")
+            return True
+        if data.get("errorId"):
+            desc = data.get("errorDescription") or data.get("errorCode") or "密钥无效"
+            logger.error(
+                f"{PLUGIN_NAME}: {api} 密钥校验失败：{desc} "
+                f"（填写的是 {_mask_secret(self._solver_key)}，请用 YesCaptcha 个人中心完整 ClientKey）"
+            )
+            return False
+        balance = data.get("balance")
+        logger.info(f"{PLUGIN_NAME}: {api} 余额 {balance}")
+        try:
+            if balance is not None and float(balance) <= 0:
+                logger.error(f"{PLUGIN_NAME}: {api} 余额为 0，请先充值")
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _create_and_poll(self, http: RequestUtils, api: str, task_type: str, sitekey: str, pageurl: str) -> str:
+        payload = {
+            "clientKey": self._solver_key,
+            "task": {
+                "type": task_type,
+                "websiteURL": pageurl,
+                "websiteKey": sitekey,
+            },
+        }
+        create = http.post_res(f"{api}/createTask", json=payload)
         if create is None:
             logger.error(f"{PLUGIN_NAME}: {api} createTask 无响应")
             return ""
@@ -651,16 +768,18 @@ class AudiencesSignIn(_PluginBase):
             logger.error(f"{PLUGIN_NAME}: {api} createTask 返回无法解析")
             return ""
         if created.get("errorId"):
-            logger.error(f"{PLUGIN_NAME}: {api} 错误：{created.get('errorDescription') or created}")
+            desc = created.get("errorDescription") or created.get("errorCode") or created
+            logger.error(f"{PLUGIN_NAME}: {api} 下单失败：{desc}")
             return ""
         task_id = created.get("taskId")
         if not task_id:
             logger.error(f"{PLUGIN_NAME}: {api} 未返回 taskId")
             return ""
-        deadline = time.time() + max(60, self._timeout)
+        logger.info(f"{PLUGIN_NAME}: {api} 已创建 {task_type} 任务")
+        deadline = time.time() + max(90, self._timeout + 30)
         while time.time() < deadline:
             time.sleep(3)
-            poll = RequestUtils(proxies=proxies, timeout=30).post_res(
+            poll = http.post_res(
                 f"{api}/getTaskResult",
                 json={"clientKey": self._solver_key, "taskId": task_id},
             )
@@ -673,10 +792,16 @@ class AudiencesSignIn(_PluginBase):
             status = data.get("status")
             if status == "ready":
                 solution = data.get("solution") or {}
-                token = solution.get("token") or solution.get("cf-turnstile-response") or ""
+                token = (
+                    solution.get("token")
+                    or solution.get("cf-turnstile-response")
+                    or solution.get("gRecaptchaResponse")
+                    or ""
+                )
                 if token:
                     logger.info(f"{PLUGIN_NAME}: {api} 已拿到 Token")
                     return token
+                logger.error(f"{PLUGIN_NAME}: {api} 结果里没有 Token")
                 return ""
             if data.get("errorId"):
                 logger.error(f"{PLUGIN_NAME}: {api} 取结果失败：{data.get('errorDescription') or data}")
@@ -706,7 +831,7 @@ class AudiencesSignIn(_PluginBase):
             logger.error(f"{PLUGIN_NAME}: 2Captcha 下单失败：{data}")
             return ""
         request_id = data.get("request")
-        deadline = time.time() + max(60, self._timeout)
+        deadline = time.time() + max(90, self._timeout + 30)
         while time.time() < deadline:
             time.sleep(5)
             poll = RequestUtils(proxies=proxies, timeout=30).get_res(
@@ -797,7 +922,7 @@ class AudiencesSignIn(_PluginBase):
                                     "component": "VSelect",
                                     "props": {
                                         "model": "solver",
-                                        "label": "Turnstile 打码平台（可选，推荐）",
+                                        "label": "Turnstile 打码平台（推荐 YesCaptcha）",
                                         "items": [
                                             {"title": "不使用（仅浏览器尝试）", "value": "none"},
                                             {"title": "YesCaptcha", "value": "yescaptcha"},
@@ -807,7 +932,12 @@ class AudiencesSignIn(_PluginBase):
                                     },
                                 }],
                             },
-                            self._text("solver_key", "打码平台 API Key", "Docker 无头环境过不了勾选框时需要", 6),
+                            self._text(
+                                "solver_key",
+                                "打码平台 ClientKey",
+                                "YesCaptcha 个人中心的完整 ClientKey，不要截断",
+                                6,
+                            ),
                         ],
                     },
                     {
@@ -828,10 +958,10 @@ class AudiencesSignIn(_PluginBase):
                                         "type": "info",
                                         "variant": "tonal",
                                         "text": (
-                                            "观众站签到页会先走 Cloudflare Turnstile，验证通过后自动 POST attendance.php。"
-                                            "官方「站点自动签到」只是打开页面，看到已登录就报成功，实际没勾验证。"
-                                            "建议把观众从自动签到名单里去掉，避免假成功。"
-                                            "本插件会读取站点管理中的观众 Cookie/UA；无头浏览器经常过不了勾选框，失败时请配置打码平台。"
+                                            "打码平台 API Key 填 YesCaptcha 个人中心的 ClientKey，不是 MoviePilot Token，也不是站点 Cookie。"
+                                            "必须填完整，截断后会报「帐户密钥错误」。"
+                                            "配置打码后插件会跳过 Docker 无头浏览器，直接拿 Token 再 POST attendance.php。"
+                                            "请把观众从官方「站点自动签到」名单里去掉，避免假成功。"
                                         ),
                                     },
                                 }],
