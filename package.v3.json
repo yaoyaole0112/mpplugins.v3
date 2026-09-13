@@ -69,5 +69,20 @@
       "v3.0.2": "修复 webapi 405：路径查询改走 proapi android/ios，fs_search 不再强制 webapi.115.com，并避免 405 递归刷日志",
       "v3.0.1": "MoviePilot V3 运行版同步"
     }
+  },
+  "AudiencesSignIn": {
+    "name": "观众签到",
+    "description": "专为观众站 audiences.me 的 Cloudflare Turnstile 每日签到。",
+    "labels": "站点",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
+    "author": "helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "history": {
+      "v1.0.0": "首发：CloakBrowser 尝试完成 Turnstile，失败时可走 YesCaptcha/CapSolver/2Captcha，读取站点管理中的观众 Cookie"
+    }
   }
 }
