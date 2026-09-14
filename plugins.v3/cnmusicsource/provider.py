@@ -30,7 +30,16 @@ _UA = (
 )
 _SPACE_RE = re.compile(r"\s+")
 _TOKEN_RE = re.compile(r"[\s\-–—−－_/|,，、]+")
+_ARTIST_SEP_RE = re.compile(
+    r"\s*[;/|｜,，、&＆＋+]\s*|\s*(?:feat\.?|ft\.?|featuring|with|vs\.?)\s+",
+    re.I,
+)
+_ARTIST_PAREN_RE = re.compile(r"^(?P<main>.+?)\s*[\(（](?P<alias>[^\)）]+)[\)）]\s*$")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+_PAREN_CHUNK_RE = re.compile(r"[\(（][^\)）]*[\)）]")
 _COVER_COVER_HINTS = ("cover", "piano", "伴奏", "翻唱", "live", "现场", "beat")
+_ARTIST_NOISE = {"feat", "ft", "featuring", "with", "cover", "vs", "and", "x"}
 
 
 def _text(value: Any) -> str:
@@ -43,6 +52,51 @@ def _compact(value: Any) -> str:
 
 def _tokens(value: Any) -> list[str]:
     return [part for part in _TOKEN_RE.split(_text(value)) if part]
+
+
+def _core_title(value: Any) -> str:
+    """去掉括号版本信息，便于「我的楼兰 (烟嗓版)」匹配「我的楼兰」。"""
+    text = _PAREN_CHUNK_RE.sub("", _text(value))
+    return _compact(text)
+
+
+def _looks_cjk_artist_list(value: str) -> bool:
+    parts = [part for part in value.split() if part]
+    if len(parts) < 2:
+        return False
+    return all(_CJK_RE.search(part) and not _LATIN_RE.search(part) for part in parts)
+
+
+def _split_artist_names(names: Iterable[str] | None) -> list[str]:
+    """拆开合奏标签：薛之谦 韩红、古巨基;刘涛、Jay Chou (周杰倫)。"""
+    result: list[str] = []
+    seen: set[str] = set()
+
+    def add(part: Any) -> None:
+        name = _text(part)
+        key = _compact(name)
+        if not key or key in seen or key in _ARTIST_NOISE:
+            return
+        seen.add(key)
+        result.append(name)
+
+    for raw in names or []:
+        text_value = _text(raw)
+        if not text_value:
+            continue
+        chunks = [_text(part) for part in _ARTIST_SEP_RE.split(text_value) if _text(part)]
+        if len(chunks) <= 1 and _looks_cjk_artist_list(text_value):
+            chunks = [_text(part) for part in text_value.split() if _text(part)]
+        if not chunks:
+            chunks = [text_value]
+        for chunk in chunks:
+            matched = _ARTIST_PAREN_RE.match(chunk)
+            if matched:
+                add(matched.group("main"))
+                add(matched.group("alias"))
+            else:
+                add(chunk)
+    return result
 
 
 def _year_of(value: Any) -> Optional[int]:
@@ -101,7 +155,7 @@ class SearchQuery:
     @classmethod
     def from_meta(cls, meta: Optional[MetaMusic], extra_title: Optional[str] = None) -> "SearchQuery":
         title = _text(getattr(meta, "title", None) or extra_title)
-        artists = [name for name in list(getattr(meta, "artists", None) or []) if _text(name)]
+        artists = _split_artist_names(getattr(meta, "artists", None) or [])
         album = _text(getattr(meta, "album", None)) or None
         original = _text(getattr(meta, "org_string", None) or extra_title or title)
         hints: list[str] = []
@@ -376,9 +430,7 @@ class CnMusicProvider:
         data = (payload or {}).get("data") or {}
         if not data:
             return None
-        artists = [_text(data.get("singername"))] if data.get("singername") else []
-        if "/" in (artists[0] if artists else ""):
-            artists = [name for name in artists[0].split("/") if name]
+        artists = _split_artist_names([_text(data.get("singername"))] if data.get("singername") else [])
         tracks = [
             info for item in (data.get("list") or [])
             if (info := self._qq_song_from_album_track(item, data))
@@ -407,7 +459,9 @@ class CnMusicProvider:
         if not song_mid:
             return None
         singers = item.get("singer") or []
-        artists = [_text(singer.get("name")) for singer in singers if _text(singer.get("name"))]
+        artists = _split_artist_names(
+            [_text(singer.get("name")) for singer in singers if _text(singer.get("name"))]
+        )
         artist_ids = [_text(singer.get("mid") or singer.get("id")) for singer in singers]
         album_mid = _text(item.get("albummid"))
         album_name = _text(item.get("albumname"))
@@ -451,7 +505,9 @@ class CnMusicProvider:
         if not song_mid:
             return None
         singers = item.get("singer") or []
-        artists = [_text(singer.get("name")) for singer in singers if _text(singer.get("name"))]
+        artists = _split_artist_names(
+            [_text(singer.get("name")) for singer in singers if _text(singer.get("name"))]
+        )
         album = item.get("album") or {}
         album_mid = _text(album.get("mid"))
         album_name = _text(album.get("name") or album.get("title"))
@@ -483,7 +539,9 @@ class CnMusicProvider:
         if not song_mid:
             return None
         singers = item.get("singer") or []
-        artists = [_text(singer.get("name")) for singer in singers if _text(singer.get("name"))]
+        artists = _split_artist_names(
+            [_text(singer.get("name")) for singer in singers if _text(singer.get("name"))]
+        )
         album_mid = _text(album.get("mid"))
         return MusicInfo(
             media_source=QQ_SOURCE,
@@ -503,11 +561,13 @@ class CnMusicProvider:
     @staticmethod
     def _qq_album_artists(item: dict[str, Any]) -> list[str]:
         singers = item.get("singer_list") or []
-        names = [_text(singer.get("name")) for singer in singers if _text(singer.get("name"))]
+        names = _split_artist_names(
+            [_text(singer.get("name")) for singer in singers if _text(singer.get("name"))]
+        )
         if names:
             return names
         name = _text(item.get("singerName"))
-        return [part for part in re.split(r"[/&]", name) if part] if name else []
+        return _split_artist_names([name] if name else [])
 
     def _netease_search_songs(self, keyword: str, limit: int) -> list[MusicInfo]:
         url = (
@@ -538,7 +598,7 @@ class CnMusicProvider:
             if not album_id:
                 continue
             artist = item.get("artist") or {}
-            artists = [_text(artist.get("name"))] if artist.get("name") else []
+            artists = _split_artist_names([_text(artist.get("name"))] if artist.get("name") else [])
             pic = _text((item.get("picUrl") or item.get("blurPicUrl")))
             year = _year_of(item.get("publishTime"))
             if isinstance(item.get("publishTime"), int) and item.get("publishTime") > 10_000_000_000:
@@ -575,8 +635,7 @@ class CnMusicProvider:
         album = (payload or {}).get("album") or payload or {}
         if not album.get("id") and not album.get("name"):
             return None
-        artists = [_text((album.get("artist") or {}).get("name"))]
-        artists = [name for name in artists if name]
+        artists = _split_artist_names([_text((album.get("artist") or {}).get("name"))])
         songs = album.get("songs") or []
         tracks = [info for item in songs if (info := self._netease_song_from_search(item))]
         pic = _text(album.get("picUrl") or album.get("blurPicUrl"))
@@ -604,7 +663,9 @@ class CnMusicProvider:
         if not song_id:
             return None
         artists_payload = item.get("ar") or item.get("artists") or []
-        artists = [_text(artist.get("name")) for artist in artists_payload if _text(artist.get("name"))]
+        artists = _split_artist_names(
+            [_text(artist.get("name")) for artist in artists_payload if _text(artist.get("name"))]
+        )
         artist_ids = [_text(artist.get("id")) for artist in artists_payload]
         album = item.get("al") or item.get("album") or {}
         album_name = _text(album.get("name"))
@@ -644,8 +705,12 @@ class CnMusicProvider:
         score = 0
         title = _compact(info.title)
         expected = _compact(query.title)
+        core_title = _core_title(info.title)
+        core_expected = _core_title(query.title)
         if expected and title == expected:
             score += 10
+        elif core_expected and core_title == core_expected:
+            score += 8
         elif expected and expected in title:
             score += 4
         elif expected and title in expected and len(title) >= 2:
@@ -677,23 +742,39 @@ class CnMusicProvider:
 
     @staticmethod
     def _artist_hit(info: MusicInfo, artists: Iterable[str]) -> bool:
-        expected = {_compact(name) for name in artists if _compact(name)}
+        expected = {_compact(name) for name in _split_artist_names(artists)}
         if not expected:
             return True
-        actual = {_compact(name) for name in list(info.artists or []) + list(info.artist_aliases or [])}
+        actual = {
+            _compact(name)
+            for name in _split_artist_names(list(info.artists or []) + list(info.artist_aliases or []))
+        }
         if expected & actual:
             return True
-        joined = "".join(actual)
-        return any(name in joined for name in expected if len(name) >= 2)
+        # 允许「周杰倫」命中「Jay Chou (周杰倫)」，但避免「周杰」误伤「周杰伦」
+        for name in expected:
+            if len(name) < 3:
+                continue
+            if any(name in item or item in name for item in actual if len(item) >= 3):
+                return True
+        return False
 
     @staticmethod
     def _title_hit(info: MusicInfo, title: str) -> bool:
         expected = _compact(title)
         if not expected:
             return True
+        core_expected = _core_title(title)
         names = [info.title, *(info.title_aliases or []), *(info.names or [])]
-        compacted = [_compact(name) for name in names if name]
-        return any(expected == name or expected in name or name in expected for name in compacted if name)
+        for name in names:
+            if not name:
+                continue
+            compact = _compact(name)
+            if expected == compact or expected in compact or compact in expected:
+                return True
+            if core_expected and core_expected == _core_title(name):
+                return True
+        return False
 
 
 def _safe_int(value: Any) -> Optional[int]:

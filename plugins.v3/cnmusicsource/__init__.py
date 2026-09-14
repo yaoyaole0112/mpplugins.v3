@@ -28,7 +28,7 @@ class CnMusicSource(_PluginBase):
     plugin_name = "华语音乐识别"
     plugin_desc = "接入 QQ 音乐 / 网易云元数据。自动整理在 MusicBrainz 失败时回退匹配华语歌曲。"
     plugin_icon = "music.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "cnmusicsource_"
