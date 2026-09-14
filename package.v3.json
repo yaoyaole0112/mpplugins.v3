@@ -104,5 +104,23 @@
       "v1.0.1": "合奏/多艺人标签按空格、分号、括号拆开，命中其中一位即可",
       "v1.0.0": "首发：QQ 音乐 / 网易云音乐元数据源，自动整理在 MusicBrainz 失败时回退识别"
     }
+  },
+  "DownloadSiteTag": {
+    "name": "下载任务分类与标签",
+    "description": "自动给下载任务分类与打站点标签、媒体名称标签，支持电影、电视、动漫和音乐。",
+    "labels": "下载管理",
+    "version": "3.3.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Youtube-dl_B.png",
+    "author": "叮叮当 / helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "history": {
+      "v3.3.0": "适配 V3 音乐下载：新增音乐分类，避免音乐任务被当成电视剧/动漫",
+      "v3.2.0": "收敛下载历史读取边界，规范媒体身份并补充下载器标签与生命周期测试。",
+      "v3.1.0": "适配 V3 SDK 导入规范：插件内部导入全面迁移至 app.sdk 体系，去除对旧版兼容层的依赖。",
+      "v3.0.0": "V3 独立大版本：下载历史识别改用媒体来源和媒体 ID。"
+    }
   }
 }
