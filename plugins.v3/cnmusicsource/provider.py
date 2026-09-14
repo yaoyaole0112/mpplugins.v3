@@ -40,6 +40,18 @@ _LATIN_RE = re.compile(r"[A-Za-z]")
 _PAREN_CHUNK_RE = re.compile(r"[\(（][^\)）]*[\)）]")
 _COVER_COVER_HINTS = ("cover", "piano", "伴奏", "翻唱", "live", "现场", "beat")
 _ARTIST_NOISE = {"feat", "ft", "featuring", "with", "cover", "vs", "and", "x"}
+_GENERIC_ALBUM_RE = re.compile(
+    r"^(合[集辑]\s*\d*|精选[集辑]?|群星|various(?:\s*artists)?|va|unknown(?:\s*album)?|cd\s*\d+|disc\s*\d+|新文件夹)$",
+    re.I,
+)
+_GENERIC_ARTIST_RE = re.compile(
+    r"^(群星|various(?:\s*artists)?|va|unknown(?:\s*artist)?)$",
+    re.I,
+)
+_EDITION_SUFFIX_RE = re.compile(
+    r"\s*[\(（](?:explicit(?:\s*version)?|deluxe(?:\s*edition)?|remaster(?:ed)?(?:\s*version)?|豪华版|典藏版|明示版)[\)）]\s*$",
+    re.I,
+)
 
 
 def _text(value: Any) -> str:
@@ -775,6 +787,68 @@ class CnMusicProvider:
             if core_expected and core_expected == _core_title(name):
                 return True
         return False
+
+
+def _music_attr(mediainfo: Any, key: str) -> Any:
+    if mediainfo is None:
+        return None
+    if isinstance(mediainfo, dict):
+        return mediainfo.get(key)
+    return getattr(mediainfo, key, None)
+
+
+def is_generic_album(value: Any) -> bool:
+    text = _text(value)
+    if not text:
+        return True
+    compact = _SPACE_RE.sub("", text)
+    return bool(_GENERIC_ALBUM_RE.match(text.strip()) or _GENERIC_ALBUM_RE.match(compact))
+
+
+def is_generic_album_artist(value: Any) -> bool:
+    text = _text(value)
+    if not text:
+        return False
+    compact = _SPACE_RE.sub("", text)
+    return bool(_GENERIC_ARTIST_RE.match(text.strip()) or _GENERIC_ARTIST_RE.match(compact))
+
+
+def clean_recognized_album(value: Any) -> str:
+    text = _text(value)
+    if not text:
+        return ""
+    cleaned = _EDITION_SUFFIX_RE.sub("", text).strip(" -_")
+    return cleaned or text
+
+
+def apply_recognized_album_fields(rename_dict: dict[str, Any]) -> Optional[tuple[str, str]]:
+    """本地专辑是合集/群星占位时，改用识别到的专辑名和年份。"""
+    if not isinstance(rename_dict, dict):
+        return None
+    mediainfo = rename_dict.get("__mediainfo__")
+    media_type = _music_attr(mediainfo, "type")
+    media_type_value = getattr(media_type, "value", media_type)
+    if media_type_value not in (None, "音乐", "MUSIC"):
+        return None
+    recognized = clean_recognized_album(_music_attr(mediainfo, "album"))
+    if not recognized or is_generic_album(recognized):
+        return None
+    current = _text(rename_dict.get("album"))
+    changed = False
+    old = current
+    if is_generic_album(current) and _compact(current) != _compact(recognized):
+        rename_dict["album"] = recognized
+        changed = True
+    year = _music_attr(mediainfo, "year")
+    if changed and year:
+        rename_dict["year"] = year
+    album_artist = _text(_music_attr(mediainfo, "album_artist") or _music_attr(mediainfo, "artist"))
+    if album_artist and is_generic_album_artist(rename_dict.get("album_artist")):
+        rename_dict["album_artist"] = album_artist
+        changed = True
+    if not changed:
+        return None
+    return old, recognized
 
 
 def _safe_int(value: Any) -> Optional[int]:

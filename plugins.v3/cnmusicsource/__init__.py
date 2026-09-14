@@ -21,6 +21,7 @@ from .provider import (
     PLUGIN_SOURCES,
     QQ_SOURCE,
     CnMusicProvider,
+    apply_recognized_album_fields,
 )
 
 
@@ -28,7 +29,7 @@ class CnMusicSource(_PluginBase):
     plugin_name = "华语音乐识别"
     plugin_desc = "接入 QQ 音乐 / 网易云元数据。自动整理在 MusicBrainz 失败时回退匹配华语歌曲。"
     plugin_icon = "music.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "cnmusicsource_"
@@ -303,6 +304,20 @@ class CnMusicSource(_PluginBase):
             f"华语音乐识别命中：{matched.title} - {matched.artist} "
             f"({matched.media_source}:{matched.media_id})"
         )
+
+    @eventmanager.register(ChainEventType.TransferRenameBuild)
+    def on_transfer_rename_build(self, event: Event):
+        """合集/群星等占位专辑名，改用识别到的真实专辑名。"""
+        if not self._enabled:
+            return
+        if not event or event.event_data is None:
+            return
+        rename_dict = self._event_get(event.event_data, "rename_dict")
+        replaced = apply_recognized_album_fields(rename_dict or {})
+        if not replaced:
+            return
+        old, recognized = replaced
+        logger.info(f"合集专辑标签已用识别结果覆盖：{old or '空'} -> {recognized}")
 
     @staticmethod
     def _event_get(data: Any, key: str, default=None):

@@ -92,7 +92,7 @@
     "name": "华语音乐识别",
     "description": "接入 QQ 音乐 / 网易云元数据，MusicBrainz 识别失败时回退匹配华语歌曲。",
     "labels": "音乐,识别",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -100,6 +100,7 @@
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
+      "v1.0.2": "合集/群星占位专辑名改为使用识别到的真实专辑名",
       "v1.0.1": "合奏/多艺人标签按空格、分号、括号拆开，命中其中一位即可",
       "v1.0.0": "首发：QQ 音乐 / 网易云音乐元数据源，自动整理在 MusicBrainz 失败时回退识别"
     }
