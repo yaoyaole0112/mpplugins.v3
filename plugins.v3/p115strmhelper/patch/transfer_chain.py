@@ -206,6 +206,13 @@ class TransferChainPatcher:
 
         logger.debug(f"【整理接管】检测到 115 → 115 整理任务: {fileitem.name}")
 
+        # 音乐由 MoviePilot 原生整理，插件不接管、不当成影视伴随音轨
+        if cls._is_music_task(task):
+            logger.info(
+                f"【整理接管】识别为音乐，回退 MoviePilot 原生整理: {fileitem.name}"
+            )
+            return None
+
         if configer.pan_transfer_linked_subtitle_audio and is_subtitle_or_audio_file(
             fileitem
         ):
@@ -346,6 +353,24 @@ class TransferChainPatcher:
         need_notify = True
         need_scrape = bool(task.scrape) if task.scrape is not None else False
         return need_rename, need_notify, need_scrape
+
+    @staticmethod
+    def _is_music_task(task) -> bool:
+        """识别为音乐时不接管，交给 MoviePilot 原生音乐整理。"""
+        from app.schemas.types import MediaType
+
+        mediainfo = getattr(task, "mediainfo", None)
+        media_type = getattr(mediainfo, "type", None)
+        if media_type == MediaType.MUSIC:
+            return True
+        if str(getattr(media_type, "value", media_type) or "") == "音乐":
+            return True
+        meta = getattr(task, "meta", None)
+        if meta is None:
+            return False
+        if getattr(meta, "type", None) == MediaType.MUSIC:
+            return True
+        return type(meta).__name__ == "MetaMusic"
 
     @classmethod
     def _should_intercept(cls, source_storage: str, target_storage: str) -> bool:
