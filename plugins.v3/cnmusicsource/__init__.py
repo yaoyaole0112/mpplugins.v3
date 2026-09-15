@@ -29,7 +29,7 @@ class CnMusicSource(_PluginBase):
     plugin_name = "华语音乐识别"
     plugin_desc = "接入 QQ 音乐 / 网易云元数据。自动整理在 MusicBrainz 失败时回退匹配华语歌曲。"
     plugin_icon = "music.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "cnmusicsource_"
@@ -189,8 +189,11 @@ class CnMusicSource(_PluginBase):
     def get_module(self) -> Dict[str, Any]:
         return {
             "search_music": self.search_music,
+            "async_search_music": self.search_music,
             "recognize_media": self.recognize_media,
+            "async_recognize_media": self.recognize_media,
             "music_album": self.music_album,
+            "async_music_album": self.music_album,
         }
 
     def search_music(
@@ -251,8 +254,8 @@ class CnMusicSource(_PluginBase):
 
     @eventmanager.register(ChainEventType.MusicMediaRecognize)
     def on_music_media_recognize(self, event: Event):
-        """MusicBrainz 等内置源未给出身份时，用 QQ/网易云补识别。"""
-        if not self._enabled or not self._fallback_on_auto or not self._provider:
+        """补齐 QQ/网易云按 ID 识别，并在内置源失败时按歌名回退。"""
+        if not self._enabled or not self._provider:
             return
         if not event or event.event_data is None:
             return
@@ -260,40 +263,51 @@ class CnMusicSource(_PluginBase):
         if self._event_get(data, "mediainfo"):
             return
         source = normalize_media_source(self._event_get(data, "media_source"))
-        if source in PLUGIN_SOURCES:
-            return
-        if source and source not in (
-            MediaSource.MusicBrainz,
-            MediaSource.TheAudioDB,
-            MediaSource.DoubanMusic,
-        ):
-            return
-        title = self._event_get(data, "title")
-        artists = self._event_get(data, "artists") or []
-        if isinstance(artists, str):
-            artists = [artists]
-        album = self._event_get(data, "album")
-        year = self._event_get(data, "year")
+        media_id = self._event_get(data, "media_id")
         music_type = self._event_get(data, "music_type") or MUSIC_ENTITY_RECORDING
-        if not title:
-            return
-        meta = MetaMusic.from_dict(
-            {
-                "title": title,
-                "artists": list(artists),
-                "album": album,
-                "year": year,
-                "org_string": title,
-            }
-        )
-        matched = self._provider.match(
-            meta,
-            music_type=music_type if music_type in (MUSIC_ENTITY_RECORDING, MUSIC_ENTITY_ALBUM) else None,
-            extra_title=title,
-            min_score=self._min_score,
-        )
+        matched = None
+        if source in PLUGIN_SOURCES and media_id:
+            matched = self._provider.recognize(
+                media_source=source,
+                media_id=str(media_id),
+                music_type=music_type,
+            )
+        elif self._fallback_on_auto:
+            if source in PLUGIN_SOURCES:
+                return
+            if source and source not in (
+                MediaSource.MusicBrainz,
+                MediaSource.TheAudioDB,
+                MediaSource.DoubanMusic,
+            ):
+                return
+            title = self._event_get(data, "title")
+            artists = self._event_get(data, "artists") or []
+            if isinstance(artists, str):
+                artists = [artists]
+            album = self._event_get(data, "album")
+            year = self._event_get(data, "year")
+            if not title:
+                return
+            meta = MetaMusic.from_dict(
+                {
+                    "title": title,
+                    "artists": list(artists),
+                    "album": album,
+                    "year": year,
+                    "org_string": title,
+                }
+            )
+            matched = self._provider.match(
+                meta,
+                music_type=music_type if music_type in (MUSIC_ENTITY_RECORDING, MUSIC_ENTITY_ALBUM) else None,
+                extra_title=title,
+                min_score=self._min_score,
+            )
+            if not matched:
+                logger.info(f"华语音乐识别未命中：{title} / {artists}")
+                return
         if not matched:
-            logger.info(f"华语音乐识别未命中：{title} / {artists}")
             return
         payload = matched.to_dict()
         if hasattr(data, "mediainfo"):
