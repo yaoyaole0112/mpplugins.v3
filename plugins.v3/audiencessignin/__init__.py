@@ -125,10 +125,10 @@ def _extract_detail(html: str) -> str:
     bonus = BONUS_CARD_RE.search(html) or BONUS_RE.search(html)
     streak = STREAK_CARD_RE.search(html) or STREAK_RE.search(html)
     parts = []
-    if bonus:
-        parts.append(f"获得 {bonus.group(1)} 粒爆米花")
     if streak:
         parts.append(f"连续签到 {streak.group(1)} 天")
+    if bonus:
+        parts.append(f"获得 {bonus.group(1)} 粒爆米花")
     if parts:
         return "，".join(parts)
     match = SUCCESS_RE.search(html)
@@ -139,7 +139,7 @@ class AudiencesSignIn(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = "专为观众站 audiences.me 的 Cloudflare Turnstile 每日签到。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112"
     plugin_config_prefix = "audiencessignin_"
@@ -874,16 +874,24 @@ class AudiencesSignIn(_PluginBase):
         success = bool(result.get("success"))
         message = (result.get("message") or "").strip()
         bonus = None
-        match = re.search(r"获得\s*([\d.]+)\s*粒爆米花", message)
-        if match:
-            bonus = match.group(1)
+        streak = None
+        bonus_match = re.search(r"获得\s*([\d.]+)\s*粒爆米花", message)
+        if bonus_match:
+            bonus = bonus_match.group(1)
+        streak_match = re.search(r"连续签到\s*(\d+)\s*天", message)
+        if streak_match:
+            streak = streak_match.group(1)
         if success:
-            title = "📝【观众】站点签到成功"
-            prefix = "📅今日已签到" if result.get("already") else "📅签到成功"
+            title = "📝【观众】站点签到成功！"
+            parts = []
+            if streak:
+                parts.append(f"连续签到 {streak} 天")
             if bonus:
-                text = f"{prefix}，获得 {bonus} 粒爆米花🍿"
+                parts.append(f"获得 {bonus} 粒爆米花")
+            if parts:
+                text = "📅" + "，".join(parts) + "🍿"
             else:
-                text = f"{prefix}🍿"
+                text = "📅今日已签到🍿" if result.get("already") else "📅签到成功🍿"
         else:
             title = "📝【观众】站点签到失败"
             text = f"📅签到失败：{message}" if message else "📅签到失败"
