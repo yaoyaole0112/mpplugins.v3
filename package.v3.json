@@ -129,7 +129,7 @@
     "name": "站点刷流",
     "description": "自动托管多个站点刷流任务，并独立调度、统计与诊断。",
     "labels": "刷流,仪表板",
-    "version": "6.1.3",
+    "version": "6.1.4",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -137,6 +137,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v6.1.4": "修复插件启动/更新后整表回写配置，把已保存的下载器标签重置为空。",
       "v6.1.3": "修复高级设置里已保存的下载器标签被覆盖成空，并在添加种子后移除临时随机标签。",
       "v6.1.2": "修复站点分享率数据缺失时误触发刷流，等待数据更新后再继续判断。",
       "v6.1.1": "修复站点刷流工作台首次加载时短暂显示插件未启用提示的问题。",

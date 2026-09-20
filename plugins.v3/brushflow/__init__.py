@@ -174,7 +174,7 @@ class BrushTaskConfig:
         self.site_hr_active = bool(config.get("site_hr_active", False))
         self.site_skip_tips = bool(config.get("site_skip_tips", False))
         self.rss_support = bool(config.get("rss_support", False))
-        self.tag = self._clean_text(config.get("tag"))
+        self.tag = self._read_tag(config)
 
     @property
     def brush_tag(self) -> str:
@@ -183,6 +183,15 @@ class BrushTaskConfig:
             return self.tag
         site_name = BrushFlow._get_site_name(self.site_id) if self.site_id else None
         return f"刷流-{site_name}" if site_name else f"刷流-{self.id[:8]}"
+
+    @staticmethod
+    def _read_tag(config: dict) -> Optional[str]:
+        """兼容读取 tag / downloader_tag，避免历史字段名导致启动时丢失下载器标签"""
+        for key in ("tag", "downloader_tag"):
+            value = BrushTaskConfig._clean_text(config.get(key))
+            if value:
+                return value
+        return None
 
     @staticmethod
     def _clean_text(value: Any) -> Optional[str]:
@@ -218,7 +227,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.1.3"
+    plugin_version = "6.1.4"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -267,10 +276,13 @@ class BrushFlow(_PluginBase):
         task_rows = task_rows or []
 
         self._task_configs: Dict[str, BrushTaskConfig] = {}
+        restored_tags = False
         for row in task_rows:
             if not isinstance(row, dict):
                 continue
             task = BrushTaskConfig(row)
+            if self._restore_task_tag(task, row):
+                restored_tags = True
             if not self._validate_task_reference(task, notify=False):
                 task.enabled = False
             self._task_configs[task.id] = task
@@ -278,7 +290,8 @@ class BrushFlow(_PluginBase):
             self._runtime[task.id] = {"state": "idle", "operation": None, "last_error": None}
 
         normalized = self._current_config()
-        if migrated or raw_config != normalized:
+        # 启动时不要因为类型/缺键等 dict 差异整表回写，否则已保存的下载器标签会被覆盖成空。
+        if migrated or restored_tags or self._schema_needs_persist(raw_config):
             self.update_config(normalized)
         self._migrate_legacy_data()
         self._migrate_torrent_identity_data()
@@ -630,6 +643,19 @@ class BrushFlow(_PluginBase):
         if event and event.event_data.get("plugin_id") == self.__class__.__name__:
             register_plugin_api(plugin_id=self.__class__.__name__)
             Scheduler().update_plugin_job(self.__class__.__name__)
+
+    @staticmethod
+    def _restore_task_tag(task: BrushTaskConfig, row: dict) -> bool:
+        """原始配置里有标签、归一化后丢失时写回，返回是否发生了恢复"""
+        raw_tag = BrushTaskConfig._read_tag(row)
+        if raw_tag and not task.tag:
+            task.tag = raw_tag
+            return True
+        return False
+
+    def _schema_needs_persist(self, raw_config: dict) -> bool:
+        """仅在 schema 版本变化时把规范化配置写回数据库"""
+        return (raw_config.get("schema_version") or 0) != self.DATA_SCHEMA_VERSION
 
     def _current_config(self) -> Dict[str, Any]:
         """返回插件当前可持久化配置快照"""

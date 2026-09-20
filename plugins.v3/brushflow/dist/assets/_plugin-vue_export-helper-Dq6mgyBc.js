@@ -110,6 +110,7 @@ function normalizeTask(task) {
   result.brush_interval = Number(result.brush_interval || 10);
   result.check_interval = Number(result.check_interval || 5);
   result.timezone_offset = Number(result.timezone_offset || 0);
+  result.downloader_tag = result.tag;
   return result
 }
 
