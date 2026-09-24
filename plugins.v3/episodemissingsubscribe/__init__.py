@@ -37,7 +37,7 @@ class EpisodeMissingSubscribe(_PluginBase):
     plugin_name = "剧集缺集检测订阅"
     plugin_desc = "检测自定义 Emby 媒体库中的缺失剧集，并可自动添加订阅。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.1.0"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "episodemissingsubscribe_"
@@ -60,6 +60,7 @@ class EpisodeMissingSubscribe(_PluginBase):
         self._ignore_future = True
         self._library_names: List[str] = []
         self._server_names: List[str] = []
+        self._skip_series_ids: Set[str] = set()
         self._results: List[Dict[str, Any]] = []
         self._last_scan_time = "从未扫描"
         self._is_scanning = False
@@ -94,9 +95,13 @@ class EpisodeMissingSubscribe(_PluginBase):
         server_names_value = config.get("server_names")
         self._library_names = self._parse_names(library_names_value)
         self._server_names = self._parse_names(server_names_value)
+        self._skip_series_ids = set(self._parse_names(config.get("skip_series_ids")))
         legacy_name_config = isinstance(library_names_value, str) or isinstance(
             server_names_value, str
         )
+
+        if self._skip_series_ids:
+            self._cancel_skipped_subscriptions()
 
         if self._clear:
             self._results = []
@@ -152,6 +157,7 @@ class EpisodeMissingSubscribe(_PluginBase):
                 "ignore_future": self._ignore_future,
                 "library_names": self._library_names,
                 "server_names": self._server_names,
+                "skip_series_ids": sorted(self._skip_series_ids),
             }
         )
 
@@ -189,7 +195,7 @@ class EpisodeMissingSubscribe(_PluginBase):
 
     def get_form(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """构建插件配置表单。"""
-        server_items, library_items = self._get_form_options()
+        server_items, library_items, series_items = self._get_form_options()
         return [
             {
                 "component": "VForm",
@@ -264,6 +270,12 @@ class EpisodeMissingSubscribe(_PluginBase):
                         server_items,
                         "留空检测全部 Emby 服务器",
                     ),
+                    self._selection_row(
+                        "skip_series_ids",
+                        "跳过检测并取消订阅的剧集",
+                        series_items,
+                        "选择后保存，将忽略检测并取消该剧的全部季度订阅",
+                    ),
                     {
                         "component": "VRow",
                         "content": [
@@ -278,7 +290,8 @@ class EpisodeMissingSubscribe(_PluginBase):
                                             "variant": "tonal",
                                             "text": (
                                                 "首次使用建议先选择“仅检查记录”，核对结果后再启用自动订阅。"
-                                                "服务器和媒体库支持多选，可直接勾选需要检测的范围。"
+                                                "服务器、媒体库和跳过剧集均支持多选。"
+                                                "保存跳过剧集后，将立即取消对应剧集的全部季度订阅。"
                                             ),
                                         },
                                     }
@@ -299,12 +312,23 @@ class EpisodeMissingSubscribe(_PluginBase):
             "ignore_future": True,
             "library_names": [],
             "server_names": [],
+            "skip_series_ids": [],
         }
 
-    def _get_form_options(self) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
-        """读取已配置的 Emby 服务器及其电视剧媒体库，生成多选项。"""
+    def _get_form_options(
+        self,
+    ) -> Tuple[
+        List[Dict[str, str]],
+        List[Dict[str, str]],
+        List[Dict[str, str]],
+    ]:
+        """读取 Emby 服务器、电视剧媒体库和剧集，生成多选项。"""
         server_names = set(self._server_names)
         library_names = set(self._library_names)
+        series_options: Dict[str, str] = {
+            tmdb_id: f"TMDB {tmdb_id}（已保存）"
+            for tmdb_id in self._skip_series_ids
+        }
         if self._mediaserver_helper:
             try:
                 services = self._mediaserver_helper.get_services(type_filter="emby") or {}
@@ -315,6 +339,8 @@ class EpisodeMissingSubscribe(_PluginBase):
                     server_name = str(service.config.name or "").strip()
                     if server_name:
                         server_names.add(server_name)
+                    if self._server_names and server_name not in self._server_names:
+                        continue
                     try:
                         libraries = service.instance.get_librarys(hidden=False) or []
                     except Exception as error:  # noqa: BLE001 - 单个服务器失败不影响表单
@@ -328,13 +354,78 @@ class EpisodeMissingSubscribe(_PluginBase):
                         library_name = str(getattr(library, "name", "") or "").strip()
                         if library_name:
                             library_names.add(library_name)
+                        if self._library_names and library_name not in self._library_names:
+                            continue
+                        try:
+                            series = service.instance.get_items(library.id) or []
+                            for item in series:
+                                if getattr(item, "item_type", None) not in {
+                                    "Series",
+                                    "show",
+                                }:
+                                    continue
+                                media_source = getattr(item, "media_source", None)
+                                if media_source != MediaSource.TMDB:
+                                    continue
+                                tmdb_id = str(getattr(item, "media_id", "") or "").strip()
+                                if not tmdb_id:
+                                    continue
+                                title = str(
+                                    getattr(item, "title", None)
+                                    or getattr(item, "original_title", None)
+                                    or f"TMDB {tmdb_id}"
+                                )
+                                year = str(getattr(item, "year", "") or "").strip()
+                                display_title = f"{title} ({year})" if year else title
+                                series_options[tmdb_id] = (
+                                    f"{display_title} · {server_name} / {library_name}"
+                                )
+                        except Exception as error:  # noqa: BLE001 - 单库失败不影响其他选项
+                            logger.warning(
+                                f"【{self.plugin_name}】读取 {server_name} / "
+                                f"{library_name} 剧集失败：{error}"
+                            )
             except Exception as error:  # noqa: BLE001 - 表单仍需展示已保存选项
                 logger.warning(f"【{self.plugin_name}】读取 Emby 选项失败：{error}")
 
         return (
             [{"title": name, "value": name} for name in sorted(server_names)],
             [{"title": name, "value": name} for name in sorted(library_names)],
+            [
+                {"title": title, "value": tmdb_id}
+                for tmdb_id, title in sorted(
+                    series_options.items(), key=lambda item: item[1]
+                )
+            ],
         )
+
+    def _cancel_skipped_subscriptions(self) -> None:
+        """取消跳过剧集对应的全部 MoviePilot 订阅。"""
+        if not self._subscribe_chain:
+            return
+        for tmdb_id in sorted(self._skip_series_ids):
+            try:
+                subscribes = self._subscribe_chain.subscription_repository.list_by_media_identity(
+                    MediaSource.TMDB,
+                    tmdb_id,
+                )
+                deleted = 0
+                for subscribe in subscribes or []:
+                    if getattr(subscribe, "type", None) != MediaType.TV.value:
+                        continue
+                    subscribe_id = getattr(subscribe, "id", None)
+                    if subscribe_id and self._subscribe_chain._delete_subscription(
+                        int(subscribe_id)
+                    ):
+                        deleted += 1
+                if deleted:
+                    logger.info(
+                        f"【{self.plugin_name}】TMDB {tmdb_id} 已取消 {deleted} 个季度订阅"
+                    )
+            except Exception as error:  # noqa: BLE001 - 单剧失败不影响其他跳过项
+                logger.error(
+                    f"【{self.plugin_name}】取消 TMDB {tmdb_id} 订阅失败：{error}"
+                )
 
     @staticmethod
     def _switch_col(model: str, label: str, hint: str = "") -> Dict[str, Any]:
@@ -527,6 +618,11 @@ class EpisodeMissingSubscribe(_PluginBase):
         provider_ids = series.get("ProviderIds") or {}
         tmdb_id = provider_ids.get("Tmdb") or provider_ids.get("tmdb") or provider_ids.get("TMDB")
         if not series_id or not tmdb_id:
+            return []
+        if str(tmdb_id) in self._skip_series_ids:
+            logger.debug(
+                f"【{self.plugin_name}】{series.get('Name') or tmdb_id} 已配置跳过检测"
+            )
             return []
 
         details = self._request_json(
