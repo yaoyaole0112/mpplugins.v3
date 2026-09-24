@@ -37,7 +37,7 @@ class EpisodeMissingSubscribe(_PluginBase):
     plugin_name = "剧集缺集检测订阅"
     plugin_desc = "检测自定义 Emby 媒体库中的缺失剧集，并可自动添加订阅。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "episodemissingsubscribe_"
@@ -405,13 +405,14 @@ class EpisodeMissingSubscribe(_PluginBase):
             return
         for tmdb_id in sorted(self._skip_series_ids):
             try:
-                subscribes = self._subscribe_chain.subscription_repository.list_by_media_identity(
-                    MediaSource.TMDB,
-                    tmdb_id,
-                )
+                subscribes = self._subscribe_chain.subscription_repository.list()
                 deleted = 0
                 for subscribe in subscribes or []:
                     if getattr(subscribe, "type", None) != MediaType.TV.value:
+                        continue
+                    if getattr(subscribe, "media_source", None) != MediaSource.TMDB:
+                        continue
+                    if str(getattr(subscribe, "media_id", "") or "") != tmdb_id:
                         continue
                     subscribe_id = getattr(subscribe, "id", None)
                     if subscribe_id and self._subscribe_chain._delete_subscription(
