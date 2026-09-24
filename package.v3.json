@@ -160,5 +160,21 @@
       "v1.0.1": "服务器白名单和媒体库白名单改为实时读取选项的多选框，避免手动输入错误",
       "v1.0.0": "首发：支持已有季过滤、缺失处理方式以及按服务器和媒体库自定义检测订阅"
     }
+  },
+  "MaoyanRank": {
+    "name": "猫眼榜单订阅",
+    "description": "监控猫眼电影票房、网播热度、综艺和网络电影榜单，自动添加订阅。",
+    "labels": "榜单,订阅",
+    "version": "4.2.0",
+    "icon": "https://raw.githubusercontent.com/baozaodetudou/MoviePilot-Plugins/main/icons/maoyan.jpg",
+    "author": "逗猫 / helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "history": {
+      "v4.2.0": "适配猫眼 H5Guard 加密榜单接口，修复网播与网络电影榜单 403/空响应导致的 JSON 解析失败",
+      "v4.1.0": "适配 MoviePilot V3 媒体身份与浏览器接口"
+    }
   }
 }
