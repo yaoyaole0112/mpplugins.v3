@@ -27,7 +27,7 @@
     "name": "网盘STRM助手",
     "description": "仿115网盘STRM助手：全量/增量STRM同步、整理监控、网盘目录整理。插件ID：CloudPanStrmHelper",
     "labels": "云盘",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -157,6 +157,7 @@
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
+      "v1.0.1": "服务器白名单和媒体库白名单改为实时读取选项的多选框，避免手动输入错误",
       "v1.0.0": "首发：支持已有季过滤、缺失处理方式以及按服务器和媒体库自定义检测订阅"
     }
   }

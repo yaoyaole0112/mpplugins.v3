@@ -37,7 +37,7 @@ class EpisodeMissingSubscribe(_PluginBase):
     plugin_name = "剧集缺集检测订阅"
     plugin_desc = "检测自定义 Emby 媒体库中的缺失剧集，并可自动添加订阅。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "episodemissingsubscribe_"
@@ -90,8 +90,13 @@ class EpisodeMissingSubscribe(_PluginBase):
             self._missing_action = MissingAction.ONLY_HISTORY.value
         self._ignore_season_zero = bool(config.get("ignore_season_zero", True))
         self._ignore_future = bool(config.get("ignore_future", True))
-        self._library_names = self._parse_names(config.get("library_names"))
-        self._server_names = self._parse_names(config.get("server_names"))
+        library_names_value = config.get("library_names")
+        server_names_value = config.get("server_names")
+        self._library_names = self._parse_names(library_names_value)
+        self._server_names = self._parse_names(server_names_value)
+        legacy_name_config = isinstance(library_names_value, str) or isinstance(
+            server_names_value, str
+        )
 
         if self._clear:
             self._results = []
@@ -112,7 +117,9 @@ class EpisodeMissingSubscribe(_PluginBase):
             self._scheduler.start()
             self._onlyonce = False
 
-        if config and (config.get("onlyonce") or config.get("clear")):
+        if config and (
+            config.get("onlyonce") or config.get("clear") or legacy_name_config
+        ):
             self._save_config()
 
     @staticmethod
@@ -143,8 +150,8 @@ class EpisodeMissingSubscribe(_PluginBase):
                 "missing_action": self._missing_action,
                 "ignore_season_zero": self._ignore_season_zero,
                 "ignore_future": self._ignore_future,
-                "library_names": ",".join(self._library_names),
-                "server_names": ",".join(self._server_names),
+                "library_names": self._library_names,
+                "server_names": self._server_names,
             }
         )
 
@@ -182,6 +189,7 @@ class EpisodeMissingSubscribe(_PluginBase):
 
     def get_form(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """构建插件配置表单。"""
+        server_items, library_items = self._get_form_options()
         return [
             {
                 "component": "VForm",
@@ -244,15 +252,17 @@ class EpisodeMissingSubscribe(_PluginBase):
                             },
                         ],
                     },
-                    self._text_row(
+                    self._selection_row(
                         "library_names",
                         "电视剧媒体库白名单",
-                        "留空检测全部电视剧媒体库，多个名称用英文逗号分隔",
+                        library_items,
+                        "留空检测全部电视剧媒体库",
                     ),
-                    self._text_row(
+                    self._selection_row(
                         "server_names",
                         "Emby 媒体服务器名称白名单",
-                        "留空检测全部 Emby 服务器，多个名称用英文逗号分隔",
+                        server_items,
+                        "留空检测全部 Emby 服务器",
                     ),
                     {
                         "component": "VRow",
@@ -268,7 +278,7 @@ class EpisodeMissingSubscribe(_PluginBase):
                                             "variant": "tonal",
                                             "text": (
                                                 "首次使用建议先选择“仅检查记录”，核对结果后再启用自动订阅。"
-                                                "媒体库名称必须与 Emby 中显示的名称完全一致。"
+                                                "服务器和媒体库支持多选，可直接勾选需要检测的范围。"
                                             ),
                                         },
                                     }
@@ -287,9 +297,44 @@ class EpisodeMissingSubscribe(_PluginBase):
             "missing_action": MissingAction.ONLY_HISTORY.value,
             "ignore_season_zero": True,
             "ignore_future": True,
-            "library_names": "",
-            "server_names": "",
+            "library_names": [],
+            "server_names": [],
         }
+
+    def _get_form_options(self) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+        """读取已配置的 Emby 服务器及其电视剧媒体库，生成多选项。"""
+        server_names = set(self._server_names)
+        library_names = set(self._library_names)
+        if self._mediaserver_helper:
+            try:
+                services = self._mediaserver_helper.get_services(type_filter="emby") or {}
+                service_values = (
+                    services.values() if isinstance(services, dict) else services
+                )
+                for service in service_values:
+                    server_name = str(service.config.name or "").strip()
+                    if server_name:
+                        server_names.add(server_name)
+                    try:
+                        libraries = service.instance.get_librarys(hidden=False) or []
+                    except Exception as error:  # noqa: BLE001 - 单个服务器失败不影响表单
+                        logger.warning(
+                            f"【{self.plugin_name}】读取 {server_name} 媒体库失败：{error}"
+                        )
+                        continue
+                    for library in libraries:
+                        if getattr(library, "type", None) != MediaType.TV.value:
+                            continue
+                        library_name = str(getattr(library, "name", "") or "").strip()
+                        if library_name:
+                            library_names.add(library_name)
+            except Exception as error:  # noqa: BLE001 - 表单仍需展示已保存选项
+                logger.warning(f"【{self.plugin_name}】读取 Emby 选项失败：{error}")
+
+        return (
+            [{"title": name, "value": name} for name in sorted(server_names)],
+            [{"title": name, "value": name} for name in sorted(library_names)],
+        )
 
     @staticmethod
     def _switch_col(model: str, label: str, hint: str = "") -> Dict[str, Any]:
@@ -305,8 +350,13 @@ class EpisodeMissingSubscribe(_PluginBase):
         }
 
     @staticmethod
-    def _text_row(model: str, label: str, placeholder: str) -> Dict[str, Any]:
-        """构建一个整行文本配置项。"""
+    def _selection_row(
+        model: str,
+        label: str,
+        items: List[Dict[str, str]],
+        placeholder: str,
+    ) -> Dict[str, Any]:
+        """构建一个支持勾选和标签展示的整行多选项。"""
         return {
             "component": "VRow",
             "content": [
@@ -315,11 +365,17 @@ class EpisodeMissingSubscribe(_PluginBase):
                     "props": {"cols": 12},
                     "content": [
                         {
-                            "component": "VTextField",
+                            "component": "VSelect",
                             "props": {
                                 "model": model,
                                 "label": label,
+                                "items": items,
                                 "placeholder": placeholder,
+                                "multiple": True,
+                                "chips": True,
+                                "closable-chips": True,
+                                "clearable": True,
+                                "no-data-text": "未读取到可选项",
                             },
                         }
                     ],
