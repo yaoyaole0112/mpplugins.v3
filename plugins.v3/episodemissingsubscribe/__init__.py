@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from pypinyin import lazy_pinyin
 
 from app.chain.subscribe import SubscribeChain
 from app.schemas.types import MediaSource, MediaType
@@ -37,7 +38,7 @@ class EpisodeMissingSubscribe(_PluginBase):
     plugin_name = "剧集缺集检测订阅"
     plugin_desc = "检测自定义 Emby 媒体库中的缺失剧集，并可自动添加订阅。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "episodemissingsubscribe_"
@@ -394,7 +395,12 @@ class EpisodeMissingSubscribe(_PluginBase):
             [
                 {"title": title, "value": tmdb_id}
                 for tmdb_id, title in sorted(
-                    series_options.items(), key=lambda item: item[1]
+                    series_options.items(),
+                    key=lambda item: (
+                        "".join(lazy_pinyin(item[1].split(" · ", 1)[0])).casefold(),
+                        item[1].casefold(),
+                        item[0],
+                    ),
                 )
             ],
         )
