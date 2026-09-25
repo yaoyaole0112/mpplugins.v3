@@ -384,7 +384,7 @@ onMounted(load)
           <label>cron 表达式<input v-model.trim="schedule.tools.cron" placeholder="0 3 * * *" /></label>
           <p class="eme-hint">保存后定时扫描目录：{{ savedStrmRoot }}（在“设置”页面更改）</p>
           <p v-if="schedule.tools.path && schedule.tools.path !== savedStrmRoot" class="eme-message eme-error">当前定时任务仍扫描旧目录 {{ schedule.tools.path }}；保存此任务后才会改用设置中的 STRM 根目录。请确认清理范围。</p>
-          <div class="eme-options"><label class="eme-switch-label"><input v-model="schedule.tools.auto_delete" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>自动隔离清理</span></label><label class="eme-confirm-mode"><span>定时清理确认方式</span><select v-model="schedule.tools.confirm_mode"><option value="none">无需确认（自动隔离）</option><option value="moviepilot">MoviePilot 页面确认</option><option value="telegram">Telegram 按钮确认</option></select></label></div>
+          <div class="eme-options eme-cleanup-settings"><label class="eme-switch-label"><input v-model="schedule.tools.auto_delete" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>自动隔离清理</span></label><label class="eme-confirm-mode"><span>定时清理确认方式</span><select v-model="schedule.tools.confirm_mode"><option value="none">无需确认（自动隔离）</option><option value="moviepilot">MoviePilot 页面确认</option><option value="telegram">Telegram 按钮确认</option></select></label></div>
           <p v-if="schedule.tools.confirm_mode === 'telegram'" class="eme-hint">Telegram 按钮通过已启用“插件”通知的 Bot 发送；仅该 Bot 的管理员可在私聊中确认，30 分钟内有效。</p>
           <div v-if="pendingJobs.length" class="eme-actions"><span>待确认的定时扫描：</span><button v-for="job in pendingJobs" :key="job.token" class="eme-button danger" :disabled="busy" @click="confirmScheduled(job.token)">确认隔离 {{ job.count }} 项</button><button class="eme-button secondary" @click="getPending">刷新待办</button></div>
         </section>
@@ -451,6 +451,7 @@ onMounted(load)
 .eme-card select{box-sizing:border-box;width:100%;margin-top:7px;padding:10px 12px;background:rgb(var(--v-theme-background));color:inherit;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;outline:none}
 .eme-card label.eme-confirm-mode:not(.eme-check):not(.eme-result){display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap}
 .eme-confirm-mode select{width:auto;min-width:210px;margin-top:0}
+.eme-cleanup-settings{column-gap:36px;row-gap:12px}
 .eme-cleanup-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}
 .eme-cleanup-item,.eme-move-row{display:flex;align-items:center;min-width:0;gap:8px;padding:8px 10px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px}
 .eme-folder-choice{min-width:0;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:center;font-weight:600}
