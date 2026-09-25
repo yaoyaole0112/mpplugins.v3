@@ -14,7 +14,8 @@ from emetools import EmeTools, ScheduleChange, ToolAction, _log_label
 from emetools.invalid_data import InvalidDataCleaner, QUARANTINE
 from emetools.p115 import P115Client
 from emetools.subscription_monitor import matches_subscription, matches_keyword, normalize_channel
-from app.schemas.types import EventType, NotificationChannel
+from app.schemas.types import EventType, NotificationChannel, MessageType
+from app.schemas.system import NotificationConf
 
 
 class InvalidDataTests(unittest.TestCase):
@@ -317,7 +318,8 @@ class PluginTests(unittest.TestCase):
         orphan = Path(self.directory.name) / "orphan.nfo"
         orphan.write_text("metadata", encoding="utf-8")
         self.plugin._schedule["tools"].update({"enabled": True, "path": self.directory.name,
-                                                "auto_delete": True, "confirm_cleanup": True})
+                                                "auto_delete": True, "confirm_cleanup": True,
+                                                "confirm_mode": "moviepilot"})
         self.plugin.chain = MagicMock()
         self.plugin._run_scheduled("tools")
         self.assertTrue(orphan.exists())
@@ -333,11 +335,94 @@ class PluginTests(unittest.TestCase):
         orphan = Path(self.directory.name) / "orphan.nfo"
         orphan.write_text("metadata", encoding="utf-8")
         self.plugin._schedule["tools"].update({"enabled": True, "path": self.directory.name,
-                                                "auto_delete": False, "confirm_cleanup": True})
+                                                "auto_delete": False, "confirm_cleanup": True,
+                                                "confirm_mode": "moviepilot"})
         self.plugin.chain = MagicMock()
         self.plugin._run_scheduled("tools")
         self.assertTrue(orphan.exists())
         self.assertEqual(self.run_async(self.plugin.action(ToolAction(operation="pending")))["pending"], [])
+
+    @staticmethod
+    def telegram_conf():
+        return NotificationConf(name="安全 Bot", type="telegram", enabled=True,
+                                switchs=[MessageType.Plugin.value], config={"TELEGRAM_ADMINS": "123"})
+
+    def test_telegram_confirmation_sends_buttons_without_deleting(self):
+        orphan = Path(self.directory.name) / "orphan.nfo"
+        orphan.write_text("metadata", encoding="utf-8")
+        self.plugin._schedule["tools"].update({"enabled": True, "path": self.directory.name,
+                                                "auto_delete": True, "confirm_mode": "telegram"})
+        with patch("emetools.get_service_configs", return_value=[self.telegram_conf()]):
+            self.plugin._run_scheduled("tools")
+        self.assertTrue(orphan.exists())
+        message = self.plugin.chain.post_message.call_args.args[0]
+        self.assertEqual(message.channel, NotificationChannel.Telegram)
+        self.assertEqual(message.mtype, MessageType.Plugin)
+        self.assertEqual(self.plugin.chain.post_message.call_count, 1)
+        self.assertIn("[PLUGIN]EmeTools|data:", message.buttons[0][0]["callback_data"])
+        token = self.run_async(self.plugin.action(ToolAction(operation="pending")))["pending"][0]["token"]
+        self.assertIn(token, message.buttons[0][0]["callback_data"])
+        data = {"channel": NotificationChannel.Telegram, "source": "安全 Bot", "userid": "123",
+                "original_chat_id": "123"}
+        with patch.object(self.plugin, "_telegram_confirmation_sources", return_value={"安全 Bot": {"TELEGRAM_ADMINS": "123"}}), \
+             patch("emetools.matches_channel_admin", side_effect=lambda _, cfg, uid: bool(cfg) and cfg.get("TELEGRAM_ADMINS") == uid):
+            self.plugin._handle_scheduled_confirmation(token, True, {**data, "original_chat_id": "456"})
+            self.plugin._handle_scheduled_confirmation(token, True, {**data, "source": "其他 Bot"})
+            self.assertTrue(orphan.exists())
+            self.assertEqual(self.plugin.chain.post_message.call_count, 1)
+            self.plugin._handle_scheduled_confirmation(token, True, data)
+            self.assertFalse(orphan.exists())
+            reply = self.plugin.chain.post_message.call_args.args[0]
+            self.assertEqual(reply.source, "安全 Bot")
+            self.assertEqual(reply.userid, "123")
+            self.assertEqual(self.plugin.chain.post_message.call_count, 2)
+            self.plugin._handle_scheduled_confirmation(token, True, data)
+            self.assertEqual(self.plugin.chain.post_message.call_count, 3)
+
+    def test_telegram_cancel_consumes_token_and_keeps_file(self):
+        orphan = Path(self.directory.name) / "orphan.nfo"
+        orphan.write_text("metadata", encoding="utf-8")
+        self.plugin._schedule["tools"]["confirm_mode"] = "telegram"
+        token = self.plugin._remember("scheduled_tools", self.plugin._cleaner.scan(self.directory.name))
+        with patch.object(self.plugin, "_telegram_confirmation_sources", return_value={"安全 Bot": {"TELEGRAM_ADMINS": "123"}}), \
+             patch("emetools.matches_channel_admin", return_value=True):
+            self.plugin._handle_scheduled_confirmation(token, False, {"channel": NotificationChannel.Telegram,
+                "source": "安全 Bot", "userid": "123", "original_chat_id": "123"})
+        self.assertTrue(orphan.exists())
+        self.assertEqual(self.run_async(self.plugin.action(ToolAction(operation="pending")))["pending"], [])
+
+    def test_telegram_channel_disappears_keeps_page_confirmation(self):
+        orphan = Path(self.directory.name) / "orphan.nfo"
+        orphan.write_text("metadata", encoding="utf-8")
+        self.plugin._schedule["tools"].update({"enabled": True, "path": self.directory.name,
+                                                "auto_delete": True, "confirm_mode": "telegram"})
+        with patch.object(self.plugin, "_telegram_confirmation_sources", return_value={}):
+            self.plugin._run_scheduled("tools")
+        self.assertTrue(orphan.exists())
+        self.assertEqual(len(self.run_async(self.plugin.action(ToolAction(operation="pending")))["pending"]), 1)
+        self.assertIsNone(self.plugin.chain.post_message.call_args.args[0].buttons)
+
+    def test_telegram_send_failure_keeps_page_confirmation(self):
+        orphan = Path(self.directory.name) / "orphan.nfo"
+        orphan.write_text("metadata", encoding="utf-8")
+        self.plugin._schedule["tools"].update({"enabled": True, "path": self.directory.name,
+                                                "auto_delete": True, "confirm_mode": "telegram"})
+        with patch.object(self.plugin, "_telegram_confirmation_sources", return_value={"安全 Bot": {}}), \
+             patch.object(self.plugin, "_send_scheduled_telegram_confirmation", side_effect=RuntimeError("send failed")):
+            self.plugin._run_scheduled("tools")
+        self.assertTrue(orphan.exists())
+        self.assertEqual(len(self.run_async(self.plugin.action(ToolAction(operation="pending")))["pending"]), 1)
+        self.assertEqual(self.plugin.chain.post_message.call_count, 1)
+
+    def test_telegram_mode_requires_admin_plugin_bot(self):
+        with patch("emetools.get_service_configs", return_value=[]), self.assertRaises(HTTPException):
+            self.run_async(self.plugin.save_schedule(ScheduleChange(section="tools", settings={
+                "enabled": True, "path": self.directory.name, "auto_delete": True, "confirm_mode": "telegram"})))
+
+    def test_legacy_confirmation_setting_preserves_moviepilot_mode(self):
+        legacy = object.__new__(EmeTools)
+        legacy.init_plugin({"strm_root": self.directory.name, "schedule": {"tools": {"confirm_cleanup": True}}})
+        self.assertEqual(legacy._schedule["tools"]["confirm_mode"], "moviepilot")
 
     def test_cleanup_aborts_if_remote_listing_changes(self):
         self.plugin.get_config.return_value = {"cookies": "test"}

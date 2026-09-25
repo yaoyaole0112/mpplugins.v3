@@ -5,11 +5,12 @@ import pluginIcon from '../icon.jpeg'
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
   pluginId: { type: String, default: 'EmeTools' },
+  appPage: { type: Boolean, default: false },
 })
 const emit = defineEmits(['close'])
 const sections = [
   { key: 'subscription', title: '订阅监控', icon: 'mdi-television-play', detail: '订阅与频道监控' },
-  { key: 'invalid', title: '清理无效数据', icon: 'mdi-folder-search-outline', detail: '扫描与清理 STRM 独立资料' },
+  { key: 'invalid', title: '清理数据', icon: 'mdi-folder-search-outline', detail: '扫描与清理 STRM 独立资料' },
   { key: 'cleanup', title: '清理文件', icon: 'mdi-folder-remove-outline', detail: '115 文件夹清理' },
   { key: 'trash', title: '清空 115 回收站', icon: 'mdi-delete-alert-outline', detail: '不可恢复的彻底删除' },
   { key: 'move', title: '文件转存', icon: 'mdi-folder-swap-outline', detail: '115 文件夹监控转存' },
@@ -23,7 +24,7 @@ const notice = ref('')
 const settings = reactive({ enabled: true, show_sidebar_nav: true, strm_root: '/strm',
   cookie_configured: false, rb_password: '', rb_password_configured: false })
 const schedule = reactive({
-  tools: { enabled: false, cron: '0 3 * * *', path: '/strm', auto_delete: true, confirm_cleanup: false },
+  tools: { enabled: false, cron: '0 3 * * *', path: '/strm', auto_delete: true, confirm_cleanup: false, confirm_mode: 'none' },
   p115_cleanup: { enabled: false, cron: '0 */2 * * *', dir_ids: [], dir_names: [] },
   p115_trash: { enabled: false, cron: '0 3 * * *' },
   p115_move: { enabled: false, check_interval: 120, rules: [] },
@@ -76,6 +77,7 @@ function applyStatus(data) {
   telegram.api_hash = ''
   telegram.forward_token = ''
   for (const key of Object.keys(schedule)) Object.assign(schedule[key], data.schedule?.[key] || {})
+  schedule.tools.confirm_mode = data.schedule?.tools?.confirm_mode || (schedule.tools.confirm_cleanup ? 'moviepilot' : 'none')
   cleanupDirs.value = (schedule.p115_cleanup.dir_ids || []).map((cid, index) => ({
     cid, name: schedule.p115_cleanup.dir_names?.[index] || '',
   }))
@@ -156,7 +158,8 @@ function logoutTelegram() {
 async function saveSchedule(section) {
   await work(async () => {
     let value = { ...schedule[section] }
-    if (section === 'tools') value = { enabled: value.enabled, cron: value.cron, path: savedStrmRoot.value, auto_delete: value.auto_delete, confirm_cleanup: value.confirm_cleanup }
+    if (section === 'tools') value = { enabled: value.enabled, cron: value.cron, path: savedStrmRoot.value,
+      auto_delete: value.auto_delete, confirm_cleanup: value.confirm_mode !== 'none', confirm_mode: value.confirm_mode }
     if (section === 'p115_cleanup') {
       const dirs = cleanupDirs.value.filter(item => String(item.cid || '').trim())
       value = { enabled: value.enabled, cron: value.cron, dir_ids: dirs.map(item => item.cid), dir_names: dirs.map(item => item.name) }
@@ -167,7 +170,7 @@ async function saveSchedule(section) {
       value = { enabled: value.enabled, check_interval: Math.max(60, Number(value.check_interval) || 120), rules: rules.value }
     }
     const result = await post('schedule', { section, settings: value })
-    if (section === 'tools') schedule.tools.path = savedStrmRoot.value
+    if (section === 'tools') { schedule.tools.path = savedStrmRoot.value; schedule.tools.confirm_cleanup = value.confirm_cleanup }
     if (section === 'p115_cleanup') { preview.value = null; cleanupToken.value = '' }
     if (section === 'p115_move') moveInfo.value = null
     notice.value = result.message || '配置已保存'
@@ -320,14 +323,13 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="eme-shell">
+  <div class="eme-shell" :class="{ 'eme-shell--app': appPage }">
     <aside class="eme-sidebar">
-      <div class="eme-brand"><img class="eme-brand-icon" :src="pluginIcon" alt="订阅清理转存图标" /><strong>订阅清理转存</strong></div>
+      <div class="eme-brand"><img class="eme-brand-icon" :src="pluginIcon" alt="MediaEnhance工具图标" /><strong>MediaEnhance工具</strong></div>
       <div class="eme-nav-label">工具</div>
       <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" @click="chooseSection(section.key)">
         <i :class="`mdi ${section.icon}`" /><span><strong>{{ section.title }}</strong><small>{{ section.detail }}</small></span><i class="mdi mdi-chevron-right eme-chevron" />
       </button>
-      <div class="eme-sidebar-footer"><span class="eme-dot" />由 MoviePilot 独立执行和调度</div>
     </aside>
     <main class="eme-main">
       <header class="eme-header">
@@ -382,7 +384,8 @@ onMounted(load)
           <label>cron 表达式<input v-model.trim="schedule.tools.cron" placeholder="0 3 * * *" /></label>
           <p class="eme-hint">保存后定时扫描目录：{{ savedStrmRoot }}（在“设置”页面更改）</p>
           <p v-if="schedule.tools.path && schedule.tools.path !== savedStrmRoot" class="eme-message eme-error">当前定时任务仍扫描旧目录 {{ schedule.tools.path }}；保存此任务后才会改用设置中的 STRM 根目录。请确认清理范围。</p>
-          <div class="eme-options"><label class="eme-switch-label"><input v-model="schedule.tools.auto_delete" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>自动隔离清理</span></label><label class="eme-switch-label"><input v-model="schedule.tools.confirm_cleanup" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>清理前在 MoviePilot 页面确认</span></label></div>
+          <div class="eme-options"><label class="eme-switch-label"><input v-model="schedule.tools.auto_delete" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>自动隔离清理</span></label><label>定时清理确认方式<select v-model="schedule.tools.confirm_mode"><option value="none">无需确认（自动隔离）</option><option value="moviepilot">MoviePilot 页面确认</option><option value="telegram">Telegram 按钮确认</option></select></label></div>
+          <p v-if="schedule.tools.confirm_mode === 'telegram'" class="eme-hint">Telegram 按钮通过已启用“插件”通知的 Bot 发送；仅该 Bot 的管理员可在私聊中确认，30 分钟内有效。</p>
           <div v-if="pendingJobs.length" class="eme-actions"><span>待确认的定时扫描：</span><button v-for="job in pendingJobs" :key="job.token" class="eme-button danger" :disabled="busy" @click="confirmScheduled(job.token)">确认隔离 {{ job.count }} 项</button><button class="eme-button secondary" @click="getPending">刷新待办</button></div>
         </section>
       </template>
@@ -426,6 +429,9 @@ onMounted(load)
 .eme-dialog{box-sizing:border-box;flex:none;width:min(500px,100%);height:min(480px,calc(100% - 64px));max-height:calc(100% - 32px);min-height:0;overflow:hidden;box-shadow:0 18px 50px rgba(0,0,0,.25)}
 .eme-folder-list{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
 .eme-shell{height:min(840px,calc(100dvh - 88px));min-height:0;overflow:hidden}
+.eme-shell.eme-shell--app{height:calc(100dvh - 112px);min-height:0;width:100%;box-sizing:border-box}
+.eme-shell--app .eme-main{overflow-y:auto;scrollbar-gutter:stable}
+.eme-shell--app .eme-sidebar{overflow-y:auto}
 .eme-card{padding-top:14px}
 .eme-sidebar,.eme-main{min-height:0}
 .eme-sidebar{overflow-y:auto}
@@ -442,6 +448,7 @@ onMounted(load)
 .eme-settings-switches{gap:24px;margin:4px 0 22px}
 .eme-settings-fields{display:grid;gap:18px}
 .eme-settings-fields>label{display:block;min-width:0}
+.eme-card select{box-sizing:border-box;width:100%;margin-top:7px;padding:10px 12px;background:rgb(var(--v-theme-background));color:inherit;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;outline:none}
 .eme-cleanup-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}
 .eme-cleanup-item,.eme-move-row{display:flex;align-items:center;min-width:0;gap:8px;padding:8px 10px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px}
 .eme-folder-choice{min-width:0;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:center;font-weight:600}

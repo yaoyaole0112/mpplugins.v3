@@ -114,6 +114,7 @@ class ScheduledNotificationTests(unittest.TestCase):
         self.sent.assert_not_called()
         schedule["auto_delete"] = True
         schedule["confirm_cleanup"] = True
+        schedule["confirm_mode"] = "moviepilot"
         self.run_job("tools")
         self.assertEqual(self.last_message.title, "⚠️【清理无效数据】待确认")
         token = self.plugin._pending_info()["pending"][0]["token"]
