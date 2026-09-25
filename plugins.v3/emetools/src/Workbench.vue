@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
+import pluginIcon from '../icon.jpeg'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -321,7 +322,7 @@ onMounted(load)
 <template>
   <div class="eme-shell">
     <aside class="eme-sidebar">
-      <div class="eme-brand"><span class="eme-brand-icon">✦</span><div><strong>订阅清理转存</strong><small>MoviePilot 独立插件</small></div></div>
+      <div class="eme-brand"><img class="eme-brand-icon" :src="pluginIcon" alt="订阅清理转存图标" /><div><strong>订阅清理转存</strong><small>MoviePilot 独立插件</small></div></div>
       <div class="eme-nav-label">工具</div>
       <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" @click="chooseSection(section.key)">
         <i :class="`mdi ${section.icon}`" /><span><strong>{{ section.title }}</strong><small>{{ section.detail }}</small></span><i class="mdi mdi-chevron-right eme-chevron" />

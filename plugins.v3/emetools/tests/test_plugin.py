@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from emetools import EmeTools, ScheduleChange, ToolAction
+from emetools import EmeTools, ScheduleChange, ToolAction, _log_label
 from emetools.invalid_data import InvalidDataCleaner, QUARANTINE
 from emetools.p115 import P115Client
 from emetools.subscription_monitor import matches_subscription, matches_keyword, normalize_channel
@@ -129,6 +129,32 @@ class PluginTests(unittest.TestCase):
         self.plugin._trash_clear.assert_not_called()
         self.plugin._cleanup_confirm.assert_not_called()
         self.plugin.chain.post_message.assert_not_called()
+
+    def test_scan_and_cleanup_logging_includes_item_and_result_without_token(self):
+        target = Path(self.directory.name) / "orphan.nfo"
+        target.write_text("orphan", encoding="utf-8")
+        with patch("emetools.logger.info") as logged:
+            scan = self.run_async(self.plugin.action(ToolAction(operation="scan", path=self.directory.name)))
+            result = self.run_async(self.plugin.action(ToolAction(
+                operation="delete", path=self.directory.name, scan_token=scan["scan_token"],
+                paths=[str(target)])))
+        self.assertTrue(result["ok"])
+        templates = " ".join(str(call.args[0]) for call in logged.call_args_list)
+        self.assertIn("扫描完成", templates)
+        self.assertIn("候选", templates)
+        self.assertIn("隔离结果", templates)
+        self.assertNotIn(scan["scan_token"], str(logged.call_args_list))
+
+    def test_log_labels_hide_links_and_credentials(self):
+        label = _log_label("movie\n token=123:secret https://example.invalid/path?cookie=secret")
+        self.assertNotIn("123:secret", label)
+        self.assertNotIn("example.invalid", label)
+        self.assertNotIn("\n", label)
+
+    def test_icon_is_shipped_with_plugin(self):
+        from emetools import ICON_URL
+        self.assertTrue(ICON_URL.endswith("/plugins.v3/emetools/icon.jpeg"))
+        self.assertEqual((Path(__file__).resolve().parents[1] / "icon.jpeg").read_bytes()[:3], b"\xff\xd8\xff")
 
     def test_old_eme_address_is_ignored(self):
         self.plugin.init_plugin({"eme_url": "http://nonexistent:7077", "strm_root": self.directory.name})

@@ -55,11 +55,14 @@ class MatchingTests(unittest.TestCase):
             client = http_class.return_value.__aenter__.return_value
             client.get = AsyncMock(return_value=MagicMock(**{"json.return_value": {
                 "ok": True, "result": {"username": "destination_bot"}}}))
-            asyncio.run(monitor._on_message(event))
-            asyncio.run(monitor._on_message(event))
+            with patch("emetools.subscription_monitor.logger.info") as logged:
+                asyncio.run(monitor._on_message(event))
+                asyncio.run(monitor._on_message(event))
         monitor.client.forward_messages.assert_awaited_once_with("destination", message)
         plugin._subscription_items.assert_called_once()
         self.assertEqual(len(monitor.hits), 1)
+        self.assertTrue(any("已转发" in str(call.args[0]) for call in logged.call_args_list))
+        self.assertNotIn("fake-bot-token", str(logged.call_args_list))
 
     def test_failed_subscription_fetch_is_diagnosable_and_retryable(self):
         plugin = MagicMock()
