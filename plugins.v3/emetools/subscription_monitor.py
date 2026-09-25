@@ -93,6 +93,8 @@ class SubscriptionMonitor:
         self._seen = set()
         self._seen_order = deque()
         self._load_seen()
+        self._last_msg_ids = {}
+        self._load_checkpoints()
         self._subscriptions = []
         self._last_refresh = 0
         self._watchdog = None
@@ -140,6 +142,27 @@ class SubscriptionMonitor:
             self.plugin.save_data("monitor_seen_messages", [list(item) for item in self._seen_order])
         except Exception as exc:
             logger.warning("ME工具 Telegram：保存消息去重记录失败：%s", type(exc).__name__)
+
+    def _load_checkpoints(self):
+        try:
+            saved = self.plugin.get_data("monitor_checkpoints") or {}
+            if isinstance(saved, dict):
+                self._last_msg_ids = {str(k): int(v) for k, v in saved.items() if int(v) > 0}
+        except (TypeError, ValueError, AttributeError):
+            self._last_msg_ids = {}
+
+    def _save_checkpoints(self):
+        try:
+            self.plugin.save_data("monitor_checkpoints", dict(self._last_msg_ids))
+        except Exception as exc:
+            logger.warning("ME工具 Telegram：保存频道游标失败：%s", type(exc).__name__)
+
+    def _advance_checkpoint(self, chat_id, message_id):
+        key = str(self._message_key(chat_id, message_id)[0])
+        msg_id = int(message_id)
+        if msg_id > self._last_msg_ids.get(key, 0):
+            self._last_msg_ids[key] = msg_id
+            self._save_checkpoints()
 
     def _ensure_loop(self):
         if self.thread and self.thread.is_alive():
@@ -235,8 +258,17 @@ class SubscriptionMonitor:
         ids = set()
         for channel in config["channels"]:
             entity = await client.get_entity(channel)
-            ids.add(int(entity.id))
+            peer_id = int(entity.id)
+            ids.add(peer_id)
+            checkpoint_key = str(peer_id)
+            if checkpoint_key not in self._last_msg_ids:
+                latest = await client.get_messages(entity, limit=1)
+                if latest:
+                    self._last_msg_ids[checkpoint_key] = int(latest[0].id)
+                    logger.info("ME工具 Telegram：初始化频道游标，频道ID=%s，消息ID=%s",
+                                peer_id, latest[0].id)
             logger.info("ME工具 Telegram：%s 已解析频道 @%s（ID %d）", scope, channel, entity.id)
+        self._save_checkpoints()
         self.channel_ids[scope] = ids
         self.plugin._monitor_config[scope]["enabled"] = True
         self.plugin._persist()
@@ -305,19 +337,19 @@ class SubscriptionMonitor:
                 checked = 0
                 recent = 0
                 for peer_id in self.channel_ids["sub"] | self.channel_ids["kw"]:
-                    messages = await asyncio.wait_for(client.get_messages(peer_id, limit=30), timeout=12)
+                    min_id = self._last_msg_ids.get(str(peer_id), 0)
+                    messages = await asyncio.wait_for(
+                        client.get_messages(peer_id, min_id=min_id, limit=50, reverse=True), timeout=12)
                     checked += 1
-                    for message in reversed(messages):
-                        if not message.raw_text or not message.date:
-                            continue
-                        # Never bulk-forward historical messages on first start.
-                        if message.date.timestamp() <= self._monitor_started_at:
+                    for message in messages:
+                        if not message.raw_text:
                             continue
                         recent += 1
                         await self._on_message(SimpleNamespace(chat_id=message.chat_id or -int(f"100{peer_id}"),
                                                                id=message.id, raw_text=message.raw_text, message=message))
+                        self._advance_checkpoint(peer_id, message.id)
                 self.last_poll = datetime.now().strftime("%m-%d %H:%M:%S")
-                logger.info("ME工具 Telegram：频道补漏完成，频道=%d，最近15分钟消息=%d，订阅=%d，累计命中=%d",
+                logger.info("ME工具 Telegram：频道补漏完成，频道=%d，新消息=%d，订阅=%d，累计命中=%d",
                             checked, recent, len(self._subscriptions), len(self.hits))
             except asyncio.CancelledError:
                 raise
@@ -345,6 +377,7 @@ class SubscriptionMonitor:
         key = self._message_key(event.chat_id, event.id)
         if key in self._seen:
             return
+        self._advance_checkpoint(event.chat_id, event.id)
         text = event.raw_text
         # Never log full posts: they can contain private links, credentials or user data.
         logger.info("ME工具 Telegram：收到频道消息，频道ID=%s，消息ID=%s，监控=%s，正文=%d 字",
