@@ -56,6 +56,12 @@ const missing = reactive({ config: { enabled: false, cron: '35 3 * * *', only_ex
 const missingOptions = reactive({ servers: [], libraries: [], series: [] })
 const missingOptionsLoading = ref(false)
 const missingPicker = reactive({ open: '', query: '' })
+const confirmPicker = reactive({ open: false })
+const confirmOptions = [
+  { value: 'none', title: '无需确认（自动隔离）' },
+  { value: 'moviepilot', title: 'MoviePilot 页面确认' },
+  { value: 'telegram', title: 'Telegram 按钮确认' },
+]
 
 function unpack(response) {
   if (response && Object.prototype.hasOwnProperty.call(response, 'success')) {
@@ -172,6 +178,14 @@ function missingPickerLabel(type) {
 function openMissingPicker(type) {
   missingPicker.open = missingPicker.open === type ? '' : type
   missingPicker.query = ''
+}
+function toggleConfirmPicker() { confirmPicker.open = !confirmPicker.open }
+function selectConfirmMode(value) {
+  schedule.tools.confirm_mode = value
+  confirmPicker.open = false
+}
+function confirmModeLabel() {
+  return confirmOptions.find(item => item.value === schedule.tools.confirm_mode)?.title || confirmOptions[0].title
 }
 async function missingCommand(operation) {
   await work(async () => {
@@ -393,7 +407,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
 </script>
 
 <template>
-  <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''">
+  <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''; confirmPicker.open = false">
     <aside class="eme-sidebar">
       <div class="eme-brand"><img class="eme-brand-icon" :src="pluginIcon" alt="增强工具图标" /><strong>增强工具</strong></div>
       <div class="eme-nav-label">工具</div>
@@ -479,7 +493,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
           <label>cron 表达式<input v-model.trim="schedule.tools.cron" placeholder="0 3 * * *" /></label>
           <p class="eme-hint">保存后定时扫描目录：{{ savedStrmRoot }}（在“设置”页面更改）</p>
           <p v-if="schedule.tools.path && schedule.tools.path !== savedStrmRoot" class="eme-message eme-error">当前定时任务仍扫描旧目录 {{ schedule.tools.path }}；保存此任务后才会改用设置中的 STRM 根目录。请确认清理范围。</p>
-          <div class="eme-options eme-cleanup-settings"><label class="eme-switch-label"><input v-model="schedule.tools.auto_delete" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>自动隔离清理</span></label><label class="eme-confirm-mode"><span>定时清理确认方式</span><select v-model="schedule.tools.confirm_mode"><option value="none">无需确认（自动隔离）</option><option value="moviepilot">MoviePilot 页面确认</option><option value="telegram">Telegram 按钮确认</option></select></label></div>
+          <div class="eme-options eme-cleanup-settings"><label class="eme-switch-label"><input v-model="schedule.tools.auto_delete" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>自动隔离清理</span></label><label class="eme-confirm-mode"><span>定时清理确认方式</span><div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="toggleConfirmPicker"><span>{{ confirmModeLabel() }}</span><i class="mdi" :class="confirmPicker.open ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="confirmPicker.open" class="eme-picker-menu"><button v-for="item in confirmOptions" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: schedule.tools.confirm_mode === item.value }" @click="selectConfirmMode(item.value)"><i class="mdi" :class="schedule.tools.confirm_mode === item.value ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item.title }}</button></div></div></label></div>
           <p v-if="schedule.tools.confirm_mode === 'telegram'" class="eme-hint">Telegram 按钮通过已启用“插件”通知的 Bot 发送；仅该 Bot 的管理员可在私聊中确认，30 分钟内有效。</p>
           <div v-if="pendingJobs.length" class="eme-actions"><span>待确认的定时扫描：</span><button v-for="job in pendingJobs" :key="job.token" class="eme-button danger" :disabled="busy" @click="confirmScheduled(job.token)">确认隔离 {{ job.count }} 项</button><button class="eme-button secondary" @click="getPending">刷新待办</button></div>
         </section>

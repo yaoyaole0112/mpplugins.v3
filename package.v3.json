@@ -3,7 +3,7 @@
     "name": "ME工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.7.3",
+    "version": "2.7.4",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -24,7 +24,8 @@
       "v2.3.0": "工具通知对齐 MediaEnhance 的触发条件与模板",
       "v2.2.0": "加入订阅监控和 Telegram 频道功能，并拆分基础设置与 Telegram 账号",
       "v2.1.0": "首发独立运行的媒体清理与文件转存工具",
-      "v2.7.3": "更名为增强工具，调整侧栏工具顺序，显示 Telegram 频道名称，并优化通用设置与缺集检测标题"
+      "v2.7.3": "更名为增强工具，调整侧栏工具顺序，显示 Telegram 频道名称，并优化通用设置与缺集检测标题",
+      "v2.7.4": "将定时清理确认方式改为与缺集检测范围一致的自定义选择框，优化单选交互和显示样式"
     }
   },
   "NotificationBlocker": {
