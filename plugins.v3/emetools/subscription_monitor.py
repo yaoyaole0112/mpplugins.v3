@@ -101,6 +101,10 @@ class SubscriptionMonitor:
         self.last_poll = ""
         self._forward_bot_username = ""
         self._forward_bot_token = ""
+        # Backfill must never replay posts that already existed when this
+        # monitor instance started (especially on the first upgrade before a
+        # persistent seen-list has been written).
+        self._monitor_started_at = time.time()
 
     @staticmethod
     def _message_key(chat_id, message_id):
@@ -307,7 +311,7 @@ class SubscriptionMonitor:
                         if not message.raw_text or not message.date:
                             continue
                         # Never bulk-forward historical messages on first start.
-                        if time.time() - message.date.timestamp() > 900:
+                        if message.date.timestamp() <= self._monitor_started_at:
                             continue
                         recent += 1
                         await self._on_message(SimpleNamespace(chat_id=message.chat_id or -int(f"100{peer_id}"),
