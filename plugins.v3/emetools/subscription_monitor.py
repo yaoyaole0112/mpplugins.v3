@@ -86,7 +86,13 @@ class SubscriptionMonitor:
         self.phone = None
         self.channel_ids = {"sub": set(), "kw": set()}
         self.hits = deque(maxlen=40)
+        # Keep de-duplication across MoviePilot/plugin restarts.  Telegram can
+        # deliver the same post once through the live handler and again through
+        # the one-minute backfill, so the key must use the canonical numeric
+        # peer id rather than the raw ``chat_id`` representation.
         self._seen = set()
+        self._seen_order = deque()
+        self._load_seen()
         self._subscriptions = []
         self._last_refresh = 0
         self._watchdog = None
@@ -95,6 +101,41 @@ class SubscriptionMonitor:
         self.last_poll = ""
         self._forward_bot_username = ""
         self._forward_bot_token = ""
+
+    @staticmethod
+    def _message_key(chat_id, message_id):
+        value = int(chat_id or 0)
+        text = str(value)
+        peer_id = int(text[4:]) if text.startswith("-100") else abs(value)
+        return peer_id, int(message_id)
+
+    def _load_seen(self):
+        try:
+            saved = self.plugin.get_data("monitor_seen_messages") or []
+        except Exception:
+            saved = []
+        if not isinstance(saved, list):
+            return
+        for item in saved[-3000:]:
+            try:
+                key = (int(item[0]), int(item[1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+            if key not in self._seen:
+                self._seen.add(key)
+                self._seen_order.append(key)
+
+    def _mark_seen(self, key):
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self._seen_order.append(key)
+        while len(self._seen_order) > 3000:
+            self._seen.discard(self._seen_order.popleft())
+        try:
+            self.plugin.save_data("monitor_seen_messages", [list(item) for item in self._seen_order])
+        except Exception as exc:
+            logger.warning("ME工具 Telegram：保存消息去重记录失败：%s", type(exc).__name__)
 
     def _ensure_loop(self):
         if self.thread and self.thread.is_alive():
@@ -297,7 +338,7 @@ class SubscriptionMonitor:
         if not scopes or not event.raw_text:
             return
         self.last_event = datetime.now().strftime("%m-%d %H:%M:%S")
-        key = (event.chat_id, event.id)
+        key = self._message_key(event.chat_id, event.id)
         if key in self._seen:
             return
         text = event.raw_text
@@ -316,7 +357,7 @@ class SubscriptionMonitor:
         if not names:
             logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 未命中（已比较订阅=%d）",
                         event.chat_id, event.id, len(self._subscriptions) if "sub" in scopes else 0)
-            self._seen.add(key)
+            self._mark_seen(key)
             return
         logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 命中 %d 项：%s，开始转发",
                     event.chat_id, event.id, len(names), ", ".join(re.sub(r"[\r\n\x00-\x1f]", " ", str(name))[:55]
@@ -339,7 +380,7 @@ class SubscriptionMonitor:
                 logger.info("ME工具 Telegram：已按 MP 网络配置解析转发 Bot（代理=%s）", bool(proxy))
             bot = await self.client.get_entity(self._forward_bot_username)
             await self.client.forward_messages(bot, event.message)
-            self._seen.add(key)
+            self._mark_seen(key)
             self.hits.appendleft({"time": datetime.now().strftime("%m-%d %H:%M:%S"), "channel": str(event.chat_id), "matches": names})
             self.last_error = ""
             logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 已转发到指定 Bot", event.chat_id, event.id)
@@ -347,5 +388,3 @@ class SubscriptionMonitor:
             self.last_error = f"转发失败：{type(exc).__name__}"
             logger.warning("ME工具 Telegram：频道ID=%s 消息ID=%s 转发失败：%s（不记录 Bot Token）",
                            event.chat_id, event.id, type(exc).__name__)
-        if len(self._seen) > 2000:
-            self._seen.clear()

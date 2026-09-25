@@ -10,6 +10,26 @@ from emetools.subscription_monitor import SubscriptionMonitor, matches_keyword, 
 
 
 class MatchingTests(unittest.TestCase):
+    def test_seen_keys_normalize_channel_ids_and_survive_monitor_restart(self):
+        plugin = MagicMock()
+        plugin.get_data.return_value = [[12345, 17]]
+        first = SubscriptionMonitor(plugin)
+        self.assertIn(first._message_key(-10012345, 17), first._seen)
+        first._mark_seen(first._message_key(12345, 18))
+        saved = plugin.save_data.call_args.args[1]
+        plugin.get_data.return_value = saved
+        restarted = SubscriptionMonitor(plugin)
+        self.assertIn(restarted._message_key(-10012345, 18), restarted._seen)
+
+    def test_seen_limit_evicts_oldest_without_clearing_all(self):
+        plugin = MagicMock()
+        monitor = SubscriptionMonitor(plugin)
+        for message_id in range(3001):
+            monitor._mark_seen((12345, message_id))
+        self.assertNotIn((12345, 0), monitor._seen)
+        self.assertIn((12345, 3000), monitor._seen)
+        self.assertEqual(len(monitor._seen), 3000)
+
     def test_subscription_metadata_must_agree(self):
         sub = {"name": "星际旅程", "year": "2026", "type": "电视剧", "season": 2,
                "media_source": "tmdb", "media_id": "12345"}
