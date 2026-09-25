@@ -9,6 +9,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from app.sdk.logging import logger
+from app.runtime.settings import get_runtime_setting
 
 try:
     from telethon import TelegramClient, events
@@ -92,6 +93,8 @@ class SubscriptionMonitor:
         self.last_error = ""
         self.last_event = ""
         self.last_poll = ""
+        self._forward_bot_username = ""
+        self._forward_bot_token = ""
 
     def _ensure_loop(self):
         if self.thread and self.thread.is_alive():
@@ -321,11 +324,20 @@ class SubscriptionMonitor:
         try:
             import httpx
             token = self.plugin._tg_forward_token
-            async with httpx.AsyncClient(timeout=15) as http:
-                result = (await http.get(f"https://api.telegram.org/bot{token}/getMe")).json()
-            if not result.get("ok") or not result.get("result", {}).get("username"):
-                raise ValueError("转发 Bot Token 无效")
-            bot = await self.client.get_entity(result["result"]["username"])
+            if token != self._forward_bot_token or not self._forward_bot_username:
+                # Match MoviePilot's Telegram notification channel: Bot API calls go
+                # through the host's HTTPS proxy, while Telethon uses its own connection.
+                proxies = get_runtime_setting("PROXY", None)
+                proxy = proxies.get("https") if isinstance(proxies, dict) else proxies
+                async with httpx.AsyncClient(proxy=proxy, timeout=15) as http:
+                    response = await http.get(f"https://api.telegram.org/bot{token}/getMe")
+                    result = response.json()
+                if not result.get("ok") or not result.get("result", {}).get("username"):
+                    raise ValueError("转发 Bot Token 无效")
+                self._forward_bot_username = str(result["result"]["username"])
+                self._forward_bot_token = token
+                logger.info("订阅清理转存 Telegram：已按 MP 网络配置解析转发 Bot（代理=%s）", bool(proxy))
+            bot = await self.client.get_entity(self._forward_bot_username)
             await self.client.forward_messages(bot, event.message)
             self._seen.add(key)
             self.hits.appendleft({"time": datetime.now().strftime("%m-%d %H:%M:%S"), "channel": str(event.chat_id), "matches": names})

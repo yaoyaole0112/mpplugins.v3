@@ -20,4 +20,6 @@
 
 MP Bot 支持 EME 同名的 `/cleanup`、`/cleanfiles`、`/cleartrash`，以及 `/ememove`（执行已保存的文件转存规则）。前三条只进行扫描或预览，彻底删除、隔离和清理必须在插件页面再次查询、预览和确认，Bot 命令不会直接清理。EME 的 `/stats`、`/list`、`/search`、`/seasons`、`/episodes`、`/missing`、`/checkall`、`/cleandupes` 属于其独立 Emby/TMDB 和媒体去重服务，当前插件未接管这些服务，因此不注册不能工作的命令。
 
+命令回复严格使用 MP 命令事件携带的 Telegram 渠道来源（Bot 配置名称）；来源缺失时拒绝发送，避免向所有 TG Bot 广播。Bot 命令触发的文件转存仅回复发起命令的 Bot，不额外发送全局工具通知。订阅监控解析转发 Bot 时，Bot API 的 `getMe` 请求沿用 MP Telegram 通知渠道的 HTTPS 代理配置；Telethon 用户账号连接仍由自身客户端负责。Bot 用户名解析结果在当前监控会话内缓存，Token 更新后重新解析，不记录 Token 内容。
+
 源码在本目录，`invalid_data.py` 是安全扫描与隔离，`p115.py` 是独立 115 客户端，`subscription_monitor.py` 为独立的 Telegram 监听器。前端模块联邦暴露 `Page`、`Config`、`AppPage`，插件注册 MP 侧栏入口。修改前端后执行 `npm install && npm run build`，生成 `dist/assets`。不需要运行 EME 容器。

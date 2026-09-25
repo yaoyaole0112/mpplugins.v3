@@ -51,16 +51,23 @@ class MatchingTests(unittest.TestCase):
         monitor.client.forward_messages = AsyncMock()
         message = object()
         event = SimpleNamespace(chat_id=-10012345, id=17, raw_text="星际旅程 S02 (2026)", message=message)
-        with patch("httpx.AsyncClient") as http_class:
+        with patch("emetools.subscription_monitor.get_runtime_setting",
+                   return_value={"https": "http://mp-proxy.invalid:7890"}) as proxy_config, patch("httpx.AsyncClient") as http_class:
             client = http_class.return_value.__aenter__.return_value
             client.get = AsyncMock(return_value=MagicMock(**{"json.return_value": {
                 "ok": True, "result": {"username": "destination_bot"}}}))
             with patch("emetools.subscription_monitor.logger.info") as logged:
                 asyncio.run(monitor._on_message(event))
                 asyncio.run(monitor._on_message(event))
-        monitor.client.forward_messages.assert_awaited_once_with("destination", message)
+                asyncio.run(monitor._on_message(SimpleNamespace(
+                    chat_id=-10012345, id=18, raw_text="星际旅程 S02 (2026)", message=message)))
+        self.assertEqual(monitor.client.forward_messages.await_count, 2)
+        monitor.client.forward_messages.assert_awaited_with("destination", message)
         plugin._subscription_items.assert_called_once()
-        self.assertEqual(len(monitor.hits), 1)
+        self.assertEqual(len(monitor.hits), 2)
+        self.assertEqual(client.get.await_count, 1)
+        proxy_config.assert_called_once_with("PROXY", None)
+        self.assertEqual(http_class.call_args.kwargs["proxy"], "http://mp-proxy.invalid:7890")
         self.assertTrue(any("已转发" in str(call.args[0]) for call in logged.call_args_list))
         self.assertNotIn("fake-bot-token", str(logged.call_args_list))
 

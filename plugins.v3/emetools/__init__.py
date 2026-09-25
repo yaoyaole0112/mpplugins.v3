@@ -85,7 +85,7 @@ class EmeTools(_PluginBase):
     plugin_name = "订阅清理转存"
     plugin_desc = "订阅频道监控、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.5.0"
+    plugin_version = "2.5.1"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -150,13 +150,14 @@ class EmeTools(_PluginBase):
         if not self._enabled or action not in {"emetools_cleanup", "emetools_cleanfiles", "emetools_cleartrash", "emetools_move"}:
             return
         # Command replies must have a real destination; never turn them into broadcasts.
-        if not data.get("user") or not data.get("channel"):
+        if not data.get("user") or not data.get("channel") or not data.get("source"):
+            logger.warning("订阅清理转存 Bot 命令缺少用户、渠道或来源，已拒绝回复以避免广播")
             return
         threading.Thread(target=self._run_tool_command, args=(action, data.copy()), daemon=True).start()
 
     def _run_tool_command(self, action: str, data: dict) -> None:
         try:
-            logger.info("订阅清理转存 Bot 命令开始：%s", action)
+            logger.info("订阅清理转存 Bot 命令开始：%s，来源=%s", action, _log_label(data["source"]))
             if action == "emetools_cleanup":
                 result = self._cleaner.start_scan(self._strm_root)
                 text = f"发现 {result['count']} 项无效数据。请在插件「清理无效数据」页面重新扫描并确认隔离。" if result["count"] else "未发现无效数据。"
@@ -172,12 +173,15 @@ class EmeTools(_PluginBase):
                 text = result.get("message") or f"文件转存完成：移动 {result.get('moved', 0)} 项，失败 {len(result.get('errors') or [])} 项。"
                 notice = notices.file_move(result) if "moved" in result else None
                 if notice:
-                    self._send_tool_notice(*notice)
-            self.chain.post_message(Message(channel=data["channel"], userid=str(data["user"]), title="订阅清理转存", text=text))
+                    # A command is a private reply to its originating bot, not a scheduled
+                    # notification to every bot subscribed to the Plugin message type.
+                    text = f"{notice[0]}\n{notice[1]}"
+            self.chain.post_message(Message(channel=data["channel"], source=data["source"],
+                                            userid=str(data["user"]), title="订阅清理转存", text=text))
             logger.info("订阅清理转存 Bot 命令完成：%s", action)
         except Exception as exc:
             logger.warning("订阅清理转存命令 %s 执行失败: %s", action, type(exc).__name__)
-            self.chain.post_message(Message(channel=data["channel"], userid=str(data["user"]),
+            self.chain.post_message(Message(channel=data["channel"], source=data["source"], userid=str(data["user"]),
                                             title="订阅清理转存", text=f"命令执行失败：{type(exc).__name__}，请查看插件日志。"))
 
     def stop_service(self) -> None:

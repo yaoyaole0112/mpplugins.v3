@@ -130,6 +130,37 @@ class PluginTests(unittest.TestCase):
         self.plugin._cleanup_confirm.assert_not_called()
         self.plugin.chain.post_message.assert_not_called()
 
+    def test_command_reply_uses_only_originating_bot_source(self):
+        from app.schemas.types import NotificationChannel
+        self.plugin._cleaner.start_scan = MagicMock(return_value={"count": 0})
+        self.plugin._run_tool_command("emetools_cleanup", {
+            "channel": NotificationChannel.Telegram, "source": "通知 Bot", "user": "123"})
+        message = self.plugin.chain.post_message.call_args.args[0]
+        self.assertEqual(message.channel, NotificationChannel.Telegram)
+        self.assertEqual(message.source, "通知 Bot")
+        self.assertEqual(message.userid, "123")
+        self.assertEqual(self.plugin.chain.post_message.call_count, 1)
+
+    def test_command_move_does_not_send_global_tool_notice(self):
+        self.plugin._move_run = MagicMock(return_value={"ok": True, "moved": 1,
+                                                        "errors": [], "details": []})
+        self.plugin._send_tool_notice = MagicMock()
+        self.plugin._run_tool_command("emetools_move", {
+            "channel": NotificationChannel.Telegram, "source": "入库 Bot", "user": "123"})
+        self.plugin._send_tool_notice.assert_not_called()
+        message = self.plugin.chain.post_message.call_args.args[0]
+        self.assertEqual(message.source, "入库 Bot")
+        self.assertEqual(self.plugin.chain.post_message.call_count, 1)
+
+    def test_command_failure_also_replies_only_to_originating_bot(self):
+        self.plugin._cleaner.start_scan = MagicMock(side_effect=RuntimeError("secret=hidden"))
+        self.plugin._run_tool_command("emetools_cleanup", {
+            "channel": NotificationChannel.Telegram, "source": "通知 Bot", "user": "123"})
+        message = self.plugin.chain.post_message.call_args.args[0]
+        self.assertEqual(message.source, "通知 Bot")
+        self.assertNotIn("secret=hidden", message.text)
+        self.assertEqual(self.plugin.chain.post_message.call_count, 1)
+
     def test_scan_and_cleanup_logging_includes_item_and_result_without_token(self):
         target = Path(self.directory.name) / "orphan.nfo"
         target.write_text("orphan", encoding="utf-8")
