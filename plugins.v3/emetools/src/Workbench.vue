@@ -410,14 +410,13 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
   <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''; confirmPicker.open = false">
     <aside class="eme-sidebar">
       <div class="eme-brand"><img class="eme-brand-icon" :src="pluginIcon" alt="增强工具图标" /><strong>增强工具</strong></div>
-      <div class="eme-nav-label">工具</div>
       <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" @click="chooseSection(section.key)">
         <i :class="`mdi ${section.icon}`" /><span><strong>{{ section.title }}</strong><small>{{ section.detail }}</small></span><i class="mdi mdi-chevron-right eme-chevron" />
       </button>
     </aside>
     <main class="eme-main">
       <header class="eme-header">
-        <div><span class="eme-kicker">{{ active === 'settings' ? '插件配置' : '工具配置' }}</span><h2>{{ current.title }}</h2><p>{{ current.detail }}</p></div>
+        <div><h2>{{ current.title }}</h2><p>{{ current.detail }}</p></div>
       </header>
       <div v-if="loading" class="eme-message">正在加载插件配置…</div>
       <div v-if="error" class="eme-message eme-error" role="alert">{{ error }}</div>
@@ -567,9 +566,10 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
 .eme-card>.eme-switch-label+label{margin-top:0}
 .eme-card>.eme-options+label{margin-top:0}
 .eme-card>.eme-card-heading+label.eme-switch-label{margin-top:0}
-.eme-confirm-mode .eme-picker{width:clamp(280px,32vw,420px);max-width:100%;margin-top:0;flex:none}
+.eme-brand{padding-bottom:14px}
+.eme-confirm-mode .eme-picker{width:210px;max-width:100%;margin-top:0;flex:none}
 .eme-confirm-mode .eme-picker-option{white-space:nowrap}
-@media(max-width:760px){.eme-confirm-mode .eme-picker{width:min(420px,100%)}.eme-confirm-mode .eme-picker-option{white-space:normal}}
+@media(max-width:760px){.eme-confirm-mode .eme-picker{width:min(210px,100%)}.eme-confirm-mode .eme-picker-option{white-space:normal}}
 .eme-cleanup-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}
 .eme-cleanup-item,.eme-move-row{display:flex;align-items:center;min-width:0;gap:8px;padding:8px 10px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px}
 .eme-folder-choice{min-width:0;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:center;font-weight:600}
