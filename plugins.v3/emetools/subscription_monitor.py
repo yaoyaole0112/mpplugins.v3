@@ -3,8 +3,10 @@
 import asyncio
 import re
 import threading
+import time
 from collections import deque
 from datetime import datetime
+from types import SimpleNamespace
 
 from app.sdk.logging import logger
 
@@ -33,7 +35,9 @@ def matches_subscription(text, sub):
     named = bool(name and re.search(re.escape(name), title if len(name) <= 3 else text, re.I))
     if named and len(name) <= 3:
         named = bool(re.search(rf"《\s*{re.escape(name)}\s*》|(?<![\w\u3400-\u9fff]){re.escape(name)}(?![\w\u3400-\u9fff]).{{0,30}}(?:[Ss]\d+|第\s*\d+\s*[季集])", title, re.I))
-    id_hit = bool(media_id and re.search(rf"(?:tmdb|themoviedb)\s*[:：]?\s*{re.escape(media_id)}\b", text, re.I))
+    id_hit = bool(media_id and re.search(
+        rf"(?:(?:tmdb|themoviedb)\s*(?:id)?\s*[:：#]?\s*|themoviedb\.org/(?:tv|movie)/){re.escape(media_id)}\b",
+        text, re.I))
     if not (named or id_hit):
         return False
     declared_id = re.search(r"(?:tmdb|themoviedb)\s*[:：]?\s*(\d+)", text, re.I)
@@ -84,6 +88,10 @@ class SubscriptionMonitor:
         self._seen = set()
         self._subscriptions = []
         self._last_refresh = 0
+        self._watchdog = None
+        self.last_error = ""
+        self.last_event = ""
+        self.last_poll = ""
 
     def _ensure_loop(self):
         if self.thread and self.thread.is_alive():
@@ -176,6 +184,8 @@ class SubscriptionMonitor:
         self.channel_ids[scope] = ids
         self.plugin._monitor_config[scope]["enabled"] = True
         self.plugin._persist()
+        if self._watchdog is None or self._watchdog.done():
+            self._watchdog = asyncio.create_task(self._poll_channels())
         return {"ok": True}
 
     async def stop(self, scope):
@@ -192,49 +202,95 @@ class SubscriptionMonitor:
                 try:
                     await self.start(scope)
                 except Exception as exc:
-                    logger.warning(f"媒体清理转存工具 {scope} 监控恢复失败: {exc}")
-                    self.plugin._monitor_config[scope]["enabled"] = False
-                    self.plugin._persist()
+                    self.last_error = f"{scope} 监控恢复失败：{type(exc).__name__}"
+                    logger.warning("订阅清理转存 %s 监控恢复失败: %s", scope, type(exc).__name__)
+        if any(self.plugin._monitor_config[scope]["enabled"] for scope in ("sub", "kw")):
+            if self._watchdog is None or self._watchdog.done():
+                self._watchdog = asyncio.create_task(self._poll_channels())
 
     async def shutdown(self):
+        if self._watchdog:
+            self._watchdog.cancel()
+            self._watchdog = None
         if self.client:
             await self.client.disconnect()
             self.client = None
         self.channel_ids = {"sub": set(), "kw": set()}
 
     async def status(self):
-        logged = bool(self.client and self.client.is_connected() and await self.client.is_user_authorized())
+        logged = bool(self.client and self.client.is_connected())
         if not logged and self.plugin._tg_session and self.plugin._tg_api_id:
             try:
-                logged = await self._connect() is not None and await self.client.is_user_authorized()
-            except Exception:
-                pass
+                await asyncio.wait_for(self._authorized(), timeout=8)
+                logged = True
+            except Exception as exc:
+                self.last_error = f"Telegram 状态检查失败：{type(exc).__name__}"
         return {"configured": bool(self.plugin._tg_api_id and self.plugin._tg_api_hash), "logged_in": logged,
                 "dependency_ready": TelegramClient is not None, "hits": list(self.hits),
+                "last_error": self.last_error, "last_event": self.last_event,
+                "last_poll": self.last_poll,
+                "listening_channels": {scope: len(self.channel_ids[scope]) for scope in ("sub", "kw")},
+                "subscription_count": len(self._subscriptions),
                 "sub": dict(self.plugin._monitor_config["sub"]), "kw": dict(self.plugin._monitor_config["kw"])}
+
+    async def _poll_channels(self):
+        """Backfill recent channel posts, including messages missed during a disconnect."""
+        while any(self.plugin._monitor_config[scope]["enabled"] for scope in ("sub", "kw")):
+            try:
+                if self.plugin._monitor_config["sub"]["enabled"] and time.monotonic() - self._last_refresh > 300:
+                    await self._refresh_subscriptions()
+                for scope in ("sub", "kw"):
+                    if self.plugin._monitor_config[scope]["enabled"] and not self.channel_ids[scope]:
+                        await self.start(scope)
+                client = await asyncio.wait_for(self._authorized(), timeout=12)
+                for peer_id in self.channel_ids["sub"] | self.channel_ids["kw"]:
+                    messages = await asyncio.wait_for(client.get_messages(peer_id, limit=30), timeout=12)
+                    for message in reversed(messages):
+                        if not message.raw_text or not message.date:
+                            continue
+                        # Never bulk-forward historical messages on first start.
+                        if time.time() - message.date.timestamp() > 900:
+                            continue
+                        await self._on_message(SimpleNamespace(chat_id=message.chat_id or -int(f"100{peer_id}"),
+                                                               id=message.id, raw_text=message.raw_text, message=message))
+                self.last_poll = datetime.now().strftime("%m-%d %H:%M:%S")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.last_error = f"频道补漏失败：{type(exc).__name__}"
+                logger.warning("订阅清理转存频道补漏失败: %s", type(exc).__name__)
+            await asyncio.sleep(60)
+
+    async def _refresh_subscriptions(self):
+        try:
+            self._subscriptions = await asyncio.wait_for(
+                asyncio.to_thread(self.plugin._subscription_items), timeout=12)
+            self._last_refresh = time.monotonic()
+        except Exception as exc:
+            self.last_error = f"读取 MoviePilot 订阅失败：{type(exc).__name__}"
+            logger.warning("订阅清理转存读取订阅失败: %s", type(exc).__name__)
 
     async def _on_message(self, event):
         peer_id = int(str(event.chat_id)[4:]) if str(event.chat_id).startswith("-100") else abs(int(event.chat_id or 0))
         scopes = [scope for scope in ("sub", "kw") if self.plugin._monitor_config[scope]["enabled"] and peer_id in self.channel_ids[scope]]
         if not scopes or not event.raw_text:
             return
+        self.last_event = datetime.now().strftime("%m-%d %H:%M:%S")
         key = (event.chat_id, event.id)
         if key in self._seen:
             return
-        self._seen.add(key)
-        if len(self._seen) > 2000:
-            self._seen.clear()
         text = event.raw_text
         names = []
         if "sub" in scopes:
-            import time
             if time.monotonic() - self._last_refresh > 300:
-                self._subscriptions = await asyncio.to_thread(self.plugin._subscription_items)
-                self._last_refresh = time.monotonic()
+                await self._refresh_subscriptions()
+                if not self._last_refresh:
+                    return
             names.extend(sub["name"] for sub in self._subscriptions if matches_subscription(text, sub))
         if "kw" in scopes and matches_keyword(text, self.plugin._monitor_config["kw"]["keywords"], self.plugin._monitor_config["kw"]["blacklist"]):
             names.append("关键词匹配")
         if not names:
+            self._seen.add(key)
             return
         try:
             import httpx
@@ -245,6 +301,11 @@ class SubscriptionMonitor:
                 raise ValueError("转发 Bot Token 无效")
             bot = await self.client.get_entity(result["result"]["username"])
             await self.client.forward_messages(bot, event.message)
+            self._seen.add(key)
             self.hits.appendleft({"time": datetime.now().strftime("%m-%d %H:%M:%S"), "channel": str(event.chat_id), "matches": names})
+            self.last_error = ""
         except Exception as exc:
-            logger.warning(f"媒体清理转存工具 Telegram 转发失败: {type(exc).__name__}")
+            self.last_error = f"转发失败：{type(exc).__name__}"
+            logger.warning("订阅清理转存 Telegram 转发失败: %s", type(exc).__name__)
+        if len(self._seen) > 2000:
+            self._seen.clear()

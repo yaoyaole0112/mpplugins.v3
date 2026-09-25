@@ -41,7 +41,7 @@ const base = computed(() => `plugin/${props.pluginId}`)
 const current = computed(() => sections.find(section => section.key === active.value))
 const rules = computed(() => schedule.p115_move.rules || [])
 const cleanupDirs = ref([])
-const monitor = reactive({ configured: false, logged_in: false, dependency_ready: false, hits: [],
+const monitor = reactive({ configured: false, logged_in: false, dependency_ready: false, hits: [], last_error: '', last_event: '', listening_channels: {}, subscription_count: 0,
   sub: { enabled: false, channels: [], keywords: [], blacklist: [] }, kw: { enabled: false, channels: [], keywords: [], blacklist: [] } })
 const drafts = reactive({ sub: { channels: [], keywords: [], blacklist: [] }, kw: { channels: [], keywords: [], blacklist: [] } })
 const entry = reactive({ sub: { channels: '' }, kw: { channels: '', keywords: '', blacklist: '' } })
@@ -321,7 +321,7 @@ onMounted(load)
 <template>
   <div class="eme-shell">
     <aside class="eme-sidebar">
-      <div class="eme-brand"><span class="eme-brand-icon">✦</span><div><strong>媒体清理转存工具</strong><small>MoviePilot 独立插件</small></div></div>
+      <div class="eme-brand"><span class="eme-brand-icon">✦</span><div><strong>订阅清理转存</strong><small>MoviePilot 独立插件</small></div></div>
       <div class="eme-nav-label">工具</div>
       <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" @click="chooseSection(section.key)">
         <i :class="`mdi ${section.icon}`" /><span><strong>{{ section.title }}</strong><small>{{ section.detail }}</small></span><i class="mdi mdi-chevron-right eme-chevron" />
@@ -358,7 +358,8 @@ onMounted(load)
       </section>
       <template v-if="active === 'subscription'">
         <section v-for="scope in ['sub', 'kw']" :key="scope" class="eme-card"><div class="eme-card-heading"><div><h3>{{ scope === 'sub' ? '订阅监控' : '关键词监控' }}</h3><p>{{ scope === 'sub' ? '按订阅名称、TMDB ID、年份、类型和季号校验频道消息。' : '按自定义关键词及黑名单筛选频道消息。' }}命中后原样转发给设置中的 Bot。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || monitor[scope].enabled" @click="saveMonitor(scope)">保存</button><button class="eme-button primary" :disabled="busy || (!monitor.logged_in && !monitor[scope].enabled)" @click="toggleMonitor(scope)">{{ monitor[scope].enabled ? '停止监控' : '启动监控' }}</button></div></div>
-          <p class="eme-hint">状态：{{ monitor[scope].enabled ? '运行中' : '已停止' }} · {{ drafts[scope].channels.length }} 个频道</p>
+          <p class="eme-hint">状态：{{ monitor[scope].enabled ? (monitor.logged_in && monitor.listening_channels?.[scope] ? '运行中' : '等待连接') : '已停止' }} · 已监听 {{ monitor.listening_channels?.[scope] || 0 }} / {{ drafts[scope].channels.length }} 个频道<span v-if="scope === 'sub'"> · 已读取 {{ monitor.subscription_count || 0 }} 条 MP 订阅</span><span v-if="monitor.last_poll"> · 最近检查频道 {{ monitor.last_poll }}</span><span v-if="monitor.last_event"> · 最近收到消息 {{ monitor.last_event }}</span></p>
+          <p v-if="monitor.last_error" class="eme-message eme-error">{{ monitor.last_error }}</p>
           <label>监控频道（公开频道 @用户名或 t.me/链接）<div class="eme-inline"><input v-model.trim="entry[scope].channels" :disabled="monitor[scope].enabled" placeholder="@channelname" @keyup.enter="addEntry(scope, 'channels')" /><button class="eme-button secondary" :disabled="monitor[scope].enabled" @click="addEntry(scope, 'channels')">添加</button></div></label>
           <div class="eme-chips"><span v-for="(value, index) in drafts[scope].channels" :key="value" class="eme-chip">{{ value }}<button :disabled="monitor[scope].enabled" @click="drafts[scope].channels.splice(index, 1)">×</button></span></div>
           <template v-if="scope === 'kw'"><div v-for="field in ['keywords', 'blacklist']" :key="field"><label>{{ field === 'keywords' ? '匹配关键词' : '排除关键词（黑名单）' }}（支持正则）<div class="eme-inline"><input v-model.trim="entry.kw[field]" :disabled="monitor.kw.enabled" :placeholder="field === 'keywords' ? '添加匹配关键词' : '添加排除关键词'" @keyup.enter="addEntry('kw', field)" /><button class="eme-button secondary" :disabled="monitor.kw.enabled" @click="addEntry('kw', field)">添加</button></div></label><div class="eme-chips"><span v-for="(value, index) in drafts.kw[field]" :key="value" class="eme-chip">{{ value }}<button :disabled="monitor.kw.enabled" @click="drafts.kw[field].splice(index, 1)">×</button></span></div></div></template>
@@ -421,7 +422,8 @@ onMounted(load)
 .eme-overlay{position:absolute;box-sizing:border-box;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;overflow:hidden}
 .eme-dialog{box-sizing:border-box;flex:none;width:min(500px,100%);height:min(480px,calc(100% - 64px));max-height:calc(100% - 32px);min-height:0;overflow:hidden;box-shadow:0 18px 50px rgba(0,0,0,.25)}
 .eme-folder-list{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
-.eme-shell{height:min(720px,calc(100dvh - 120px));min-height:0;overflow:hidden}
+.eme-shell{height:min(840px,calc(100dvh - 88px));min-height:0;overflow:hidden}
+.eme-card{padding-top:14px}
 .eme-sidebar,.eme-main{min-height:0}
 .eme-sidebar{overflow-y:auto}
 .eme-header h2,.eme-card-heading h3{font-weight:700}

@@ -16,10 +16,11 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.plugins import _PluginBase
+from app.sdk.events import eventmanager, Event
 from app.scheduler import Scheduler
 from app.sdk.logging import logger
 from app.schemas.message import Message
-from app.schemas.types import NotificationChannel
+from app.schemas.types import EventType, MessageType, NotificationChannel
 
 from .invalid_data import InvalidDataCleaner
 from .p115 import P115Client
@@ -68,10 +69,10 @@ class MonitorChange(BaseModel):
 
 
 class EmeTools(_PluginBase):
-    plugin_name = "媒体清理转存工具"
+    plugin_name = "订阅清理转存"
     plugin_desc = "订阅频道监控、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "2.3.0"
+    plugin_version = "2.4.0"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -116,7 +117,48 @@ class EmeTools(_PluginBase):
 
     @staticmethod
     def get_command() -> List[dict]:
-        return []
+        return [{"cmd": command, "event": EventType.PluginAction, "desc": description,
+                 "category": "工具", "data": {"action": f"emetools_{action}"}}
+                for command, action, description in (
+                    ("/cleanup", "cleanup", "扫描无效数据（在插件页面确认清理）"),
+                    ("/cleanfiles", "cleanfiles", "预览 115 清理目录（在插件页面确认）"),
+                    ("/cleartrash", "cleartrash", "查看 115 回收站（在插件页面确认清空）"),
+                    ("/ememove", "move", "执行已保存的 115 文件转存规则"))]
+
+    @eventmanager.register(EventType.PluginAction)
+    def tool_command(self, event: Event) -> None:
+        data = event.event_data if event else None
+        action = (data or {}).get("action", "")
+        if not self._enabled or action not in {"emetools_cleanup", "emetools_cleanfiles", "emetools_cleartrash", "emetools_move"}:
+            return
+        # Command replies must have a real destination; never turn them into broadcasts.
+        if not data.get("user") or not data.get("channel"):
+            return
+        threading.Thread(target=self._run_tool_command, args=(action, data.copy()), daemon=True).start()
+
+    def _run_tool_command(self, action: str, data: dict) -> None:
+        try:
+            if action == "emetools_cleanup":
+                result = self._cleaner.start_scan(self._strm_root)
+                text = f"发现 {result['count']} 项无效数据。请在插件「清理无效数据」页面重新扫描并确认隔离。" if result["count"] else "未发现无效数据。"
+            elif action == "emetools_cleanfiles":
+                result = self._cleanup_preview()
+                text = (f"待清理 {result['file_count']} 个文件、{result['dir_count']} 个文件夹。请在插件「清理文件」页面预览并二次确认。"
+                        if result.get("ok") else result.get("message", "预览失败"))
+            elif action == "emetools_cleartrash":
+                result = self._trash_info()
+                text = f"回收站有 {result['count']} 项；请在插件「清空 115 回收站」页面重新查询并二次确认。" if result["count"] else "回收站为空。"
+            else:
+                result = self._move_run()
+                text = result.get("message") or f"文件转存完成：移动 {result.get('moved', 0)} 项，失败 {len(result.get('errors') or [])} 项。"
+                notice = notices.file_move(result) if "moved" in result else None
+                if notice:
+                    self._send_tool_notice(*notice)
+            self.chain.post_message(Message(channel=data["channel"], userid=str(data["user"]), title="订阅清理转存", text=text))
+        except Exception as exc:
+            logger.warning("订阅清理转存命令 %s 执行失败: %s", action, type(exc).__name__)
+            self.chain.post_message(Message(channel=data["channel"], userid=str(data["user"]),
+                                            title="订阅清理转存", text=f"命令执行失败：{type(exc).__name__}，请查看插件日志。"))
 
     def stop_service(self) -> None:
         monitor = getattr(self, "_monitor", None)
@@ -124,7 +166,7 @@ class EmeTools(_PluginBase):
             try:
                 asyncio.run_coroutine_threadsafe(monitor.shutdown(), monitor.loop).result(timeout=8)
             except Exception as exc:
-                logger.warning(f"媒体清理转存工具 Telegram 客户端关闭失败: {type(exc).__name__}")
+                logger.warning(f"订阅清理转存 Telegram 客户端关闭失败: {type(exc).__name__}")
             monitor.loop.call_soon_threadsafe(monitor.loop.stop)
             monitor.thread.join(timeout=3)
 
@@ -135,7 +177,7 @@ class EmeTools(_PluginBase):
     def get_sidebar_nav(self) -> List[dict]:
         if not self._enabled or not self._show_sidebar_nav:
             return []
-        return [{"nav_key": "main", "title": "媒体清理转存工具", "icon": "mdi-tools",
+        return [{"nav_key": "main", "title": "订阅清理转存", "icon": "mdi-tools",
                  "section": "organize", "permission": "manage", "order": 46}]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -155,14 +197,14 @@ class EmeTools(_PluginBase):
                 try:
                     trigger = CronTrigger.from_crontab(config["cron"])
                 except (KeyError, ValueError) as error:
-                    logger.error(f"媒体清理转存工具 {name} 定时表达式无效：{error}")
+                    logger.error(f"订阅清理转存 {name} 定时表达式无效：{error}")
                     continue
-                services.append({"id": f"EmeTools_{name}", "name": f"媒体清理转存工具 {name}",
+                services.append({"id": f"EmeTools_{name}", "name": f"订阅清理转存 {name}",
                                  "trigger": trigger, "func": self._run_scheduled,
                                  "kwargs": {}, "func_kwargs": {"section": name}})
         move = self._schedule["p115_move"]
         if move.get("enabled") and move.get("rules"):
-            services.append({"id": "EmeTools_p115_move", "name": "媒体清理转存工具文件转存",
+            services.append({"id": "EmeTools_p115_move", "name": "订阅清理转存文件转存",
                              "trigger": "interval", "func": self._run_scheduled,
                              "kwargs": {"seconds": max(60, int(move.get("check_interval") or 120))},
                              "func_kwargs": {"section": "p115_move"}})
@@ -281,7 +323,14 @@ class EmeTools(_PluginBase):
                 if getattr(item, "name", None) or getattr(item, "media_id", None)]
 
     async def monitor_status(self) -> dict:
-        return await self._monitor.call(self._monitor.status())
+        try:
+            return await asyncio.wait_for(self._monitor.call(self._monitor.status()), timeout=12)
+        except asyncio.TimeoutError:
+            return {"configured": bool(self._tg_api_id and self._tg_api_hash), "logged_in": False,
+                    "dependency_ready": True, "last_error": "Telegram 状态查询超时，请检查网络后重试",
+                    "last_event": "", "listening_channels": {"sub": 0, "kw": 0},
+                    "subscription_count": 0, "hits": [],
+                    "sub": dict(self._monitor_config["sub"]), "kw": dict(self._monitor_config["kw"])}
 
     async def monitor_action(self, change: MonitorChange) -> dict:
         operation, scope = change.operation, change.scope
@@ -322,7 +371,7 @@ class EmeTools(_PluginBase):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
-            logger.warning(f"媒体清理转存工具 Telegram 操作失败: {type(exc).__name__}")
+            logger.warning(f"订阅清理转存 Telegram 操作失败: {type(exc).__name__}")
             raise HTTPException(status_code=400, detail=f"Telegram 操作失败：{type(exc).__name__}；请检查登录信息和网络连接") from exc
 
     async def save_schedule(self, change: ScheduleChange) -> dict:
@@ -578,14 +627,14 @@ class EmeTools(_PluginBase):
                 count += nested_count
                 size += nested_size
             except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
-                logger.warning(f"媒体清理转存工具统计目录 {cid} 大小失败：{error}")
+                logger.warning(f"订阅清理转存统计目录 {cid} 大小失败：{error}")
                 size += known_size
         return count, size
 
     def _send_tool_notice(self, title: str, text: str) -> None:
         # Skip _PluginBase.post_message's automatic "查看详情" plugin link: EME's
         # Telegram notification contains only its configured title and body.
-        self.chain.post_message(Message(channel=NotificationChannel.Telegram,
+        self.chain.post_message(Message(channel=NotificationChannel.Telegram, mtype=MessageType.Plugin,
                                         title=title or None, text=text, link=None))
 
     def _run_scheduled(self, section: str) -> None:
@@ -610,7 +659,7 @@ class EmeTools(_PluginBase):
                 else:
                     preview = self._cleanup_preview()
                     if not preview.get("ok"):
-                        logger.warning(f"媒体清理转存工具清理文件：{preview.get('message')}")
+                        logger.warning(f"订阅清理转存清理文件：{preview.get('message')}")
                     elif preview.get("file_count") or preview.get("dir_count"):
                         result = self._cleanup_confirm(self._remember("cleanup", preview["snapshots"]))
                         if "deleted" in result:
@@ -641,7 +690,7 @@ class EmeTools(_PluginBase):
             if notification:
                 self._send_tool_notice(*notification)
         except Exception as error:
-            logger.error(f"媒体清理转存工具 {section} 定时任务失败：{error}")
+            logger.error(f"订阅清理转存 {section} 定时任务失败：{error}")
 
     def _pending_info(self):
         with self._pending_lock:

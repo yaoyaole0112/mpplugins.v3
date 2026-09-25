@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from emetools import EmeTools, ToolAction
 from emetools import tool_notifications as notices
-from app.schemas.types import NotificationChannel
+from app.schemas.types import MessageType, NotificationChannel
 
 
 class NotificationTemplateTests(unittest.TestCase):
@@ -75,6 +75,7 @@ class ScheduledNotificationTests(unittest.TestCase):
         self.sent.assert_called_once()
         self.assertEqual(self.last_message.title, "📁 文件转存")
         self.assertEqual(self.last_message.channel, NotificationChannel.Telegram)
+        self.assertEqual(self.last_message.mtype, MessageType.Plugin)
         self.assertIsNone(self.last_message.link)
         self.plugin._move_run.return_value = {"ok": False, "moved": 0, "errors": ["读取失败"], "details": []}
         self.run_job("p115_move")

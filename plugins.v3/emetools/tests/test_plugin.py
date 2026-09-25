@@ -14,6 +14,7 @@ from emetools import EmeTools, ScheduleChange, ToolAction
 from emetools.invalid_data import InvalidDataCleaner, QUARANTINE
 from emetools.p115 import P115Client
 from emetools.subscription_monitor import matches_subscription, matches_keyword, normalize_channel
+from app.schemas.types import EventType, NotificationChannel
 
 
 class InvalidDataTests(unittest.TestCase):
@@ -117,6 +118,17 @@ class PluginTests(unittest.TestCase):
 
     def run_async(self, coroutine):
         return asyncio.run(coroutine)
+
+    def test_bot_commands_require_explicit_user_and_never_delete_directly(self):
+        commands = {item["cmd"]: item for item in self.plugin.get_command()}
+        self.assertEqual(set(commands), {"/cleanup", "/cleanfiles", "/cleartrash", "/ememove"})
+        self.assertTrue(all(item["event"] == EventType.PluginAction for item in commands.values()))
+        self.plugin._trash_clear = MagicMock()
+        self.plugin._cleanup_confirm = MagicMock()
+        self.plugin.tool_command(MagicMock(event_data={"action": "emetools_cleartrash", "channel": NotificationChannel.Telegram}))
+        self.plugin._trash_clear.assert_not_called()
+        self.plugin._cleanup_confirm.assert_not_called()
+        self.plugin.chain.post_message.assert_not_called()
 
     def test_old_eme_address_is_ignored(self):
         self.plugin.init_plugin({"eme_url": "http://nonexistent:7077", "strm_root": self.directory.name})

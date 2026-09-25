@@ -39,7 +39,7 @@ def invalid_confirmation(snapshot):
         f"扫描目录：{root}\n待清理：{len(items)} 项\n"
         "确认有效期：发送后 30 分钟；服务重启后失效，过期请重新扫描。\n"
         "这些项目将在二次核验后移入隔离区，不会立即永久删除。\n\n"
-        f"{preview}\n\n请在媒体清理转存工具的待办中确认或取消。"
+        f"{preview}\n\n请在订阅清理转存的待办中确认或取消。"
     )
 
 
@@ -90,7 +90,7 @@ def file_cleanup_confirmation(preview):
         lines.append(f"📁{name}：{folder['error'] if folder.get('error') else _count_text(folder.get('files', 0), folder.get('dirs', 0), folder.get('size', 0))}")
     if len(folders) > 8:
         lines.append(f"…等共 {len(folders)} 个目录")
-    lines.extend(["", "请在媒体清理转存工具页面确认或取消。"])
+    lines.extend(["", "请在订阅清理转存页面确认或取消。"])
     return "⚠️【清理文件】待确认", "\n".join(lines)
 
 
