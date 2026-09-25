@@ -55,6 +55,7 @@ const missing = reactive({ config: { enabled: false, cron: '35 3 * * *', only_ex
   results: [], last_scan_time: '从未扫描', scanning: false, legacy_enabled: false })
 const missingOptions = reactive({ servers: [], libraries: [], series: [] })
 const missingOptionsLoading = ref(false)
+const missingPicker = reactive({ open: '', query: '' })
 
 function unpack(response) {
   if (response && Object.prototype.hasOwnProperty.call(response, 'success')) {
@@ -145,6 +146,32 @@ async function loadMissingOptions() {
   try { Object.assign(missingOptions, await get('missing/options')) }
   catch (err) { error.value = err?.message || '读取 Emby 选项失败' }
   finally { missingOptionsLoading.value = false }
+}
+function missingOptionItems(type) {
+  const items = missingOptions[type] || []
+  const selected = new Set(missing.config[type === 'servers' ? 'server_names' : type === 'libraries' ? 'library_names' : 'skip_series_ids'])
+  const saved = [...selected].filter(value => !items.some(item => item.value === value)).map(value => ({ value, title: type === 'series' ? `TMDB ${value}（已保存）` : `${value}（已保存）` }))
+  const all = [...items, ...saved]
+  const query = missingPicker.query.trim().toLowerCase()
+  return query ? all.filter(item => `${item.title} ${item.value}`.toLowerCase().includes(query)) : all
+}
+function missingSelected(type) {
+  return missing.config[type === 'servers' ? 'server_names' : type === 'libraries' ? 'library_names' : 'skip_series_ids']
+}
+function toggleMissingOption(type, value) {
+  const selected = missingSelected(type)
+  const index = selected.indexOf(value)
+  if (index >= 0) selected.splice(index, 1)
+  else selected.push(value)
+}
+function missingPickerLabel(type) {
+  const count = missingSelected(type).length
+  if (!count) return '未选择（空白表示全部）'
+  return `已选择 ${count} 项`
+}
+function openMissingPicker(type) {
+  missingPicker.open = missingPicker.open === type ? '' : type
+  missingPicker.query = ''
 }
 async function missingCommand(operation) {
   await work(async () => {
@@ -366,7 +393,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
 </script>
 
 <template>
-  <div class="eme-shell" :class="{ 'eme-shell--app': appPage }">
+  <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''">
     <aside class="eme-sidebar">
       <div class="eme-brand"><img class="eme-brand-icon" :src="pluginIcon" alt="ME工具图标" /><strong>ME工具</strong></div>
       <div class="eme-nav-label">工具</div>
@@ -395,10 +422,11 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
           <p class="eme-hint">“标记为存在”仅记录处理结果，与原插件一致；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新可选项' }}</button></div>
-          <div class="eme-missing-selects"><label>Emby 服务器（可多选）<select v-model="missing.config.server_names" multiple size="4"><option v-for="item in missingOptions.servers" :key="item.value" :value="item.value">{{ item.title }}</option><option v-for="item in missing.config.server_names.filter(name => !missingOptions.servers.some(opt => opt.value === name))" :key="item" :value="item">{{ item }}（已保存）</option></select></label>
-            <label>电视剧媒体库（可多选）<select v-model="missing.config.library_names" multiple size="4"><option v-for="item in missingOptions.libraries" :key="item.value" :value="item.value">{{ item.title }}</option><option v-for="item in missing.config.library_names.filter(name => !missingOptions.libraries.some(opt => opt.value === name))" :key="item" :value="item">{{ item }}（已保存）</option></select></label>
-            <label>跳过检测剧集（按拼音排序，可多选）<select v-model="missing.config.skip_series_ids" multiple size="6"><option v-for="item in missingOptions.series" :key="item.value" :value="item.value">{{ item.title }}</option><option v-for="item in missing.config.skip_series_ids.filter(id => !missingOptions.series.some(opt => opt.value === id))" :key="item" :value="item">TMDB {{ item }}（已保存）</option></select></label>
-          </div><p class="eme-hint">按 Ctrl / ⌘ 键可多选；再次点击已选项可取消。更改检测范围后请先保存配置。</p>
+          <div class="eme-missing-selects">
+            <label>Emby 服务器（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('servers')"><span>{{ missingPickerLabel('servers') }}</span><i class="mdi" :class="missingPicker.open === 'servers' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'servers'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索服务器" @click.stop /><button v-for="item in missingOptionItems('servers')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.server_names.includes(item.value) }" @click="toggleMissingOption('servers', item.value)"><i class="mdi" :class="missing.config.server_names.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('servers').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
+            <label>电视剧媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('libraries')"><span>{{ missingPickerLabel('libraries') }}</span><i class="mdi" :class="missingPicker.open === 'libraries' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'libraries'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索媒体库" @click.stop /><button v-for="item in missingOptionItems('libraries')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.library_names.includes(item.value) }" @click="toggleMissingOption('libraries', item.value)"><i class="mdi" :class="missing.config.library_names.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('libraries').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
+            <label>跳过检测剧集（按拼音排序，可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('series')"><span>{{ missingPickerLabel('series') }}</span><i class="mdi" :class="missingPicker.open === 'series' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'series'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索剧集名称或 TMDB ID" @click.stop /><button v-for="item in missingOptionItems('series')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.skip_series_ids.includes(item.value) }" @click="toggleMissingOption('series', item.value)"><i class="mdi" :class="missing.config.skip_series_ids.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('series').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
+          </div><p class="eme-hint">点击选择框即可展开，支持搜索和多选；再次点击已选项可取消。更改检测范围后请先保存配置。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测结果</h3><p>{{ missing.scanning ? '后台扫描中' : `上次扫描：${missing.last_scan_time}` }} · {{ missing.results.length }} 条缺失季</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy" @click="loadMissing">刷新结果</button><button class="eme-button secondary" :disabled="busy" @click="downloadMissingCsv">导出 CSV</button></div></div>
           <div class="eme-actions"><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('scan')">立即检测</button><button class="eme-button danger" :disabled="busy || missing.scanning || !missing.results.length" @click="clearMissing">清理检查记录</button></div>
@@ -528,7 +556,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
 .eme-move-label,.eme-move-arrow{flex:none;font-weight:700;color:rgba(var(--v-theme-on-surface),.65)}
 .eme-move-arrow{font-size:18px}
 .eme-chips{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:12px 0}.eme-chip{padding:5px 8px;border-radius:9px;background:rgba(var(--v-theme-primary),.1);overflow-wrap:anywhere}.eme-chip button{border:0;background:transparent;color:#e45c5c;cursor:pointer;font-size:18px;margin-left:5px}
-.eme-missing-selects{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.eme-missing-selects>label:last-child{grid-column:1/-1}.eme-missing-selects select{height:auto;min-height:110px}.eme-missing-results{overflow:auto;max-height:360px;margin-top:16px}.eme-missing-results table{border-collapse:collapse;width:100%;min-width:740px;text-align:left}.eme-missing-results th,.eme-missing-results td{padding:10px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));white-space:normal}.eme-missing-results th{font-weight:700;white-space:nowrap}
+.eme-missing-selects{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.eme-missing-selects>label:last-child{grid-column:1/-1}.eme-picker{position:relative;margin-top:7px}.eme-picker-trigger{box-sizing:border-box;width:100%;min-height:42px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;background:rgb(var(--v-theme-background));color:inherit;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;cursor:pointer;text-align:left}.eme-picker-trigger:hover,.eme-picker-trigger:focus-visible{border-color:rgb(var(--v-theme-primary));outline:none}.eme-picker-menu{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 5px);max-height:300px;overflow:auto;padding:8px;background:rgb(var(--v-theme-surface));border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px;box-shadow:0 12px 28px rgba(0,0,0,.3)}.eme-picker-search{width:100%!important;box-sizing:border-box;margin:0 0 7px!important}.eme-picker-option{width:100%;display:flex;align-items:flex-start;gap:8px;padding:8px;border:0;border-radius:7px;background:transparent;color:inherit;text-align:left;cursor:pointer;line-height:1.35}.eme-picker-option:hover,.eme-picker-option.selected{background:rgba(var(--v-theme-primary),.12);color:rgb(var(--v-theme-primary))}.eme-picker-option i{font-size:18px;flex:none}.eme-picker-empty{padding:10px;margin:0;color:rgba(var(--v-theme-on-surface),.6)}.eme-missing-results{overflow:auto;max-height:360px;margin-top:16px}.eme-missing-results table{border-collapse:collapse;width:100%;min-width:740px;text-align:left}.eme-missing-results th,.eme-missing-results td{padding:10px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));white-space:normal}.eme-missing-results th{font-weight:700;white-space:nowrap}
 @media(max-width:760px){.eme-cleanup-grid{grid-template-columns:1fr}.eme-move-row{flex-wrap:wrap}.eme-move-row .eme-folder-choice{max-width:none;min-width:80px}}
 @media(max-width:760px){.eme-missing-selects{grid-template-columns:1fr}}
 </style>
