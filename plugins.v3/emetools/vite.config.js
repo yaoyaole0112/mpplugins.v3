@@ -18,5 +18,7 @@ export default defineConfig({
     },
     format: 'esm',
   })],
-  build: { target: 'esnext', cssCodeSplit: true },
+  // The plugin is mounted under MoviePilot's federated route; /assets is not
+  // the plugin asset directory. Inline the 28 KB brand image in its JS chunk.
+  build: { target: 'esnext', cssCodeSplit: true, assetsInlineLimit: 32768 },
 })

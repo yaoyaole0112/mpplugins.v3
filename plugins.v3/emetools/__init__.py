@@ -85,7 +85,7 @@ class EmeTools(_PluginBase):
     plugin_name = "订阅清理转存"
     plugin_desc = "订阅频道监控、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.5.1"
+    plugin_version = "2.5.2"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
