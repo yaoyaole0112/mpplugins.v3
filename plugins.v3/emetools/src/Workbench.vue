@@ -56,6 +56,8 @@ const missing = reactive({ config: { enabled: false, cron: '35 3 * * *', only_ex
 const missingOptions = reactive({ servers: [], libraries: [], series: [] })
 const missingOptionsLoading = ref(false)
 const missingPicker = reactive({ open: '', query: '' })
+const missingActionPicker = ref(false)
+const missingActionOptions = ['仅检查记录', '添加到订阅', '标记为存在']
 const confirmPicker = reactive({ open: false })
 const confirmOptions = [
   { value: 'none', title: '无需确认（自动隔离）' },
@@ -176,8 +178,13 @@ function missingPickerLabel(type) {
   return `已选择 ${count} 项`
 }
 function openMissingPicker(type) {
+  missingActionPicker.value = false
   missingPicker.open = missingPicker.open === type ? '' : type
   missingPicker.query = ''
+}
+function selectMissingAction(value) {
+  missing.config.missing_action = value
+  missingActionPicker.value = false
 }
 function toggleConfirmPicker() { confirmPicker.open = !confirmPicker.open }
 function selectConfirmMode(value) {
@@ -407,7 +414,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
 </script>
 
 <template>
-  <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''; confirmPicker.open = false">
+  <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''; missingActionPicker = false; confirmPicker.open = false">
     <aside class="eme-sidebar">
       <div class="eme-brand"><img class="eme-brand-icon" :src="pluginIcon" alt="增强工具图标" /><strong>增强工具</strong></div>
       <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" @click="chooseSection(section.key)">
@@ -431,7 +438,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
             <label class="eme-switch-label"><input v-model="missing.config.ignore_season_zero" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>忽略特别篇（S00/SP）</span></label>
             <label class="eme-switch-label"><input v-model="missing.config.ignore_future" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>忽略未上映剧集</span></label>
           </div>
-          <div class="eme-fields"><label>执行周期（cron表达式）<input v-model.trim="missing.config.cron" placeholder="35 3 * * *" /></label><label>缺集处理方式<select v-model="missing.config.missing_action"><option>仅检查记录</option><option>添加到订阅</option><option>标记为存在</option></select></label></div>
+          <div class="eme-fields"><label>执行周期（cron表达式）<input v-model.trim="missing.config.cron" placeholder="35 3 * * *" /></label><label>缺集处理方式<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" aria-label="缺集处理方式" :aria-expanded="missingActionPicker" @click="missingPicker.open = ''; missingActionPicker = !missingActionPicker"><span>{{ missing.config.missing_action }}</span><i class="mdi" :class="missingActionPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingActionPicker" class="eme-picker-menu" role="listbox" aria-label="缺集处理方式"><button v-for="item in missingActionOptions" :key="item" type="button" role="option" :aria-selected="missing.config.missing_action === item" class="eme-picker-option" :class="{ selected: missing.config.missing_action === item }" @click="selectMissingAction(item)"><i class="mdi" :class="missing.config.missing_action === item ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item }}</button></div></div></label></div>
           <p class="eme-hint">“标记为存在”仅记录处理结果，与原插件一致；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新可选项' }}</button></div>
