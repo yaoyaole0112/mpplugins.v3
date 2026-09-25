@@ -133,6 +133,14 @@ class PluginTests(unittest.TestCase):
         for secret in ("a" * 32, "secret-session", "123:" + "z" * 35):
             self.assertNotIn(secret, str(status))
 
+    def test_subscription_list_not_published_but_monitor_still_reads_mp(self):
+        from emetools.subscription_monitor import SubscriptionMonitor
+        paths = {route["path"] for route in self.plugin.get_api()}
+        self.assertNotIn("/subscriptions", paths)
+        self.assertIn("/monitor/status", paths)
+        self.assertTrue(callable(self.plugin._subscription_items))
+        self.assertTrue(callable(SubscriptionMonitor._on_message))
+
     def test_monitor_save_and_validation(self):
         from emetools import MonitorChange
         self.run_async(self.plugin.monitor_action(MonitorChange(

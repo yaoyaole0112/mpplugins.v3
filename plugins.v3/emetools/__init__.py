@@ -68,7 +68,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体清理转存工具"
     plugin_desc = "订阅频道监控、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "2.2.0"
+    plugin_version = "2.2.1"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -276,9 +276,6 @@ class EmeTools(_PluginBase):
                   "poster", "state", "lack_episode", "total_episode", "start_episode")
         return [{key: getattr(item, key, None) for key in fields} for item in SubscribeOper().list()
                 if getattr(item, "name", None) or getattr(item, "media_id", None)]
-
-    async def subscriptions(self) -> dict:
-        return {"items": await asyncio.to_thread(self._subscription_items)}
 
     async def monitor_status(self) -> dict:
         return await self._monitor.call(self._monitor.status())
@@ -640,7 +637,6 @@ class EmeTools(_PluginBase):
             {"path": "/settings", "endpoint": self.save_settings, "methods": ["POST"], "auth": "bear", "summary": "保存插件连接"},
             {"path": "/schedule", "endpoint": self.save_schedule, "methods": ["POST"], "auth": "bear", "summary": "保存插件任务"},
             {"path": "/action", "endpoint": self.action, "methods": ["POST"], "auth": "bear", "summary": "执行插件工具"},
-            {"path": "/subscriptions", "endpoint": self.subscriptions, "methods": ["GET"], "auth": "bear", "summary": "MoviePilot 我的订阅"},
             {"path": "/monitor/status", "endpoint": self.monitor_status, "methods": ["GET"], "auth": "bear", "summary": "Telegram 监控状态"},
             {"path": "/monitor/action", "endpoint": self.monitor_action, "methods": ["POST"], "auth": "bear", "summary": "Telegram 监控操作"},
         ]
