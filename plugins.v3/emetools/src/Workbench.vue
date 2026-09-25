@@ -187,7 +187,7 @@ async function deleteSelected() {
   if (!needsConfirmation && !window.confirm(`将 ${selected.value.length} 项无效数据移入插件隔离区？清理前会再次核验。`)) return
   await work(async () => {
     const result = await execute(needsConfirmation ? 'request_delete' : 'delete', {
-      scan_token: scan.value.scan_token, paths: selected.value,
+      scan_token: scan.value.scan_token, paths: selected.value, path: scan.value.root || scanPath.value,
     })
     notice.value = result.message || (needsConfirmation ? '待确认' : `已隔离 ${(result.deleted || []).length} 项`)
     if (needsConfirmation) pendingDeleteToken.value = result.token

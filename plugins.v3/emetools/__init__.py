@@ -18,10 +18,13 @@ from pydantic import BaseModel, Field
 from app.plugins import _PluginBase
 from app.scheduler import Scheduler
 from app.sdk.logging import logger
+from app.schemas.message import Message
+from app.schemas.types import NotificationChannel
 
 from .invalid_data import InvalidDataCleaner
 from .p115 import P115Client
 from .subscription_monitor import SubscriptionMonitor, normalize_channel
+from . import tool_notifications as notices
 
 
 DEFAULT_SCHEDULE = {
@@ -68,7 +71,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体清理转存工具"
     plugin_desc = "订阅频道监控、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "2.2.2"
+    plugin_version = "2.3.0"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -399,7 +402,9 @@ class EmeTools(_PluginBase):
                 result = client.clear_recyclebin(self._rb_password)
                 if not result.get("state"):
                     return {"ok": False, "message": str(result.get("error") or result.get("msg") or "清空失败")}
-                return {"ok": True, "count": current["count"], "message": f"已彻底清空 {current['count']} 个文件"}
+                return {"ok": True, "count": current["count"],
+                        "size_bytes": sum(int(item.get("file_size") or 0) for item in current["items"]),
+                        "message": f"已彻底清空 {current['count']} 个文件"}
 
         return self._locked("p115_trash", clear)
 
@@ -417,7 +422,7 @@ class EmeTools(_PluginBase):
                     files = client.list_files_in_dir(cid)
                     _, children = client.list_children(cid)
                     snapshots[cid] = {"files": sorted(file["fid"] for file in files),
-                                      "dirs": sorted(item["cid"] for item in children)}
+                                      "dirs": sorted(item["cid"] for item in children), "name": name}
                     folders.append({"cid": cid, "name": name, "files": len(files), "dirs": len(children),
                                     "size": sum(file["size"] for file in files), "error": ""})
                 except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
@@ -436,6 +441,7 @@ class EmeTools(_PluginBase):
             return {"ok": True, "empty": True, "message": "清理目录均为空"}
         snapshot = preview.pop("snapshots")
         token = self._remember("cleanup", snapshot)
+        self._send_tool_notice(*notices.file_cleanup_confirmation(preview))
         return {"ok": True, "pending": True, "token": token,
                 "message": f"确认将 {preview['file_count']} 个文件及 {preview['dir_count']} 个文件夹移入回收站？"}
 
@@ -445,16 +451,20 @@ class EmeTools(_PluginBase):
         def clean():
             if set(snapshot) != set(self._schedule["p115_cleanup"]["dir_ids"]):
                 return {"ok": False, "message": "清理目录配置已变化，请重新预览"}
-            deleted, deleted_dirs, errors = 0, 0, []
+            deleted, deleted_dirs, errors, folders = 0, 0, [], []
             with self._client() as client:
                 for cid, expected in snapshot.items():
                     directory_failed = False
+                    detail = {"name": expected.get("name") or cid, "files": 0, "dirs": 0,
+                              "size": 0, "error": ""}
+                    folders.append(detail)
                     try:
                         files = client.list_files_in_dir(cid)
                         _, children = client.list_children(cid)
                         if (sorted(item["fid"] for item in files) != expected["files"] or
                                 sorted(item["cid"] for item in children) != expected["dirs"]):
-                            errors.append(f"目录 {cid} 内容已变化，跳过")
+                            detail["error"] = "内容已变化，跳过"
+                            errors.append(f"目录 {cid} {detail['error']}")
                             continue
                         identifiers = [item["fid"] for item in files]
                         directories = [item["cid"] for item in children]
@@ -462,20 +472,28 @@ class EmeTools(_PluginBase):
                             response = client.delete_files(batch)
                             if response.get("state"):
                                 deleted += len(batch)
+                                detail["files"] += len(batch)
+                                detail["size"] += sum(int(item.get("size") or 0) for item in files
+                                                      if item["fid"] in batch)
                             else:
                                 directory_failed = True
-                                errors.append(f"目录 {cid} 文件删除失败：{response.get('msg') or response.get('error')}")
+                                detail["error"] = f"文件删除失败：{response.get('msg') or response.get('error')}"
+                                errors.append(f"目录 {cid} {detail['error']}")
                         if directory_failed:
                             continue
                         for batch in (directories[index:index + 50] for index in range(0, len(directories), 50)):
                             response = client.delete_files(batch)
                             if response.get("state"):
                                 deleted_dirs += len(batch)
+                                detail["dirs"] += len(batch)
                             else:
-                                errors.append(f"目录 {cid} 文件夹删除失败：{response.get('msg') or response.get('error')}")
+                                detail["error"] = f"文件夹删除失败：{response.get('msg') or response.get('error')}"
+                                errors.append(f"目录 {cid} {detail['error']}")
                     except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
-                        errors.append(f"目录 {cid} 失败：{error}")
-            return {"ok": not errors, "deleted": deleted, "dir_count": deleted_dirs, "errors": errors,
+                        detail["error"] = f"失败：{error}"
+                        errors.append(f"目录 {cid} {detail['error']}")
+            return {"ok": not errors, "deleted": deleted, "dir_count": deleted_dirs,
+                    "errors": errors, "folders": folders,
                     "message": f"清理结束：文件 {deleted} 个，文件夹 {deleted_dirs} 个"}
 
         return self._locked("p115_cleanup", clean)
@@ -501,65 +519,127 @@ class EmeTools(_PluginBase):
             return {"ok": False, "message": "请先保存转存规则"}
 
         def move():
-            moved, errors = 0, []
+            moved, errors, details = 0, [], []
             with self._client() as client:
                 for rule in rules:
                     source, destination = rule["src_id"], rule["dst_id"]
+                    detail = {"src_id": source, "dst_id": destination,
+                              "src_name": rule.get("src_name"), "dst_name": rule.get("dst_name"),
+                              "status": "empty", "file_count": 0, "total_bytes": 0}
+                    details.append(detail)
                     try:
                         files, directories = client.list_children(source)
                         identifiers = [item["fid"] for item in files] + [item["cid"] for item in directories]
                         if not identifiers:
                             continue
+                        moved_ids = set()
                         for index in range(0, len(identifiers), 500):
                             batch = identifiers[index:index + 500]
                             result = client.move_files(batch, destination)
                             if result.get("state"):
                                 moved += len(batch)
+                                moved_ids.update(batch)
                             else:
                                 errors.append(f"{source} → {destination}：{result.get('error') or result.get('msg')}")
+                                detail["status"] = "failed"
                                 break
+                        if moved_ids:
+                            moved_files = [item for item in files if item["fid"] in moved_ids]
+                            moved_dirs = [item for item in directories if item["cid"] in moved_ids]
+                            count, size = self._move_tree_stats(client, moved_dirs)
+                            detail["file_count"] = len(moved_files) + count
+                            detail["total_bytes"] = sum(int(item.get("size") or 0) for item in moved_files) + size
+                            detail["status"] = "success"
                     except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
                         errors.append(f"{source} → {destination}：{error}")
+                        detail["status"] = "failed"
             self._last_run["p115_move"] = datetime.now().isoformat()
-            return {"ok": not errors, "moved": moved, "errors": errors,
+            return {"ok": not errors, "moved": moved, "errors": errors, "details": details,
                     "message": f"转存完成：移动 {moved} 项，失败 {len(errors)} 条"}
 
         return self._locked("p115_move", move)
+
+    @staticmethod
+    def _move_tree_stats(client, directories, visited=None):
+        visited = visited if visited is not None else set()
+        count, size = 0, 0
+        for item in directories:
+            cid = str(item.get("cid") or "")
+            known_size = int(item.get("size") or 0)
+            if not cid or cid in visited:
+                size += known_size
+                continue
+            visited.add(cid)
+            try:
+                files, children = client.list_children(cid)
+                count += len(files)
+                size += sum(int(file.get("size") or 0) for file in files)
+                nested_count, nested_size = EmeTools._move_tree_stats(client, children, visited)
+                count += nested_count
+                size += nested_size
+            except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
+                logger.warning(f"媒体清理转存工具统计目录 {cid} 大小失败：{error}")
+                size += known_size
+        return count, size
+
+    def _send_tool_notice(self, title: str, text: str) -> None:
+        # Skip _PluginBase.post_message's automatic "查看详情" plugin link: EME's
+        # Telegram notification contains only its configured title and body.
+        self.chain.post_message(Message(channel=NotificationChannel.Telegram,
+                                        title=title or None, text=text, link=None))
 
     def _run_scheduled(self, section: str) -> None:
         if not self._enabled or not self._schedule.get(section, {}).get("enabled"):
             return
         try:
+            notification = None
             if section == "tools":
                 config = self._schedule[section]
                 snapshot = self._cleaner.scan(config["path"])
                 count = len(snapshot["items"])
                 if count and config["auto_delete"] and not config["confirm_cleanup"]:
                     result = self._locked("tools", lambda: self._cleaner.quarantine(snapshot, [item["path"] for item in snapshot["items"]]))
-                    text = f"已隔离 {len(result.get('deleted', []))} 项，跳过 {len(result.get('failed', []))} 项"
+                    if result.get("ok"):
+                        notification = notices.invalid_cleanup(result, snapshot["root"])
                 elif count and config["auto_delete"] and config["confirm_cleanup"]:
-                    token = self._remember("scheduled_tools", snapshot)
-                    text = f"发现 {count} 项待确认，请在媒体清理转存工具打开待办并确认（有效期 30 分钟，令牌 {token[:8]}）"
-                else:
-                    text = f"扫描完成，发现 {count} 项；自动清理未开启"
+                    self._remember("scheduled_tools", snapshot)
+                    notification = notices.invalid_confirmation(snapshot)
             elif section == "p115_cleanup":
-                preview = self._cleanup_preview()
-                if preview.get("file_count") or preview.get("dir_count"):
-                    snapshot = preview.pop("snapshots")
-                    result = self._cleanup_confirm(self._remember("cleanup", snapshot))
-                    text = result["message"]
+                if not self._source_cookie():
+                    notification = ("", "⏰ 115 定时清理跳过：未配置 115 Cookie")
                 else:
-                    text = "没有待清理文件"
+                    preview = self._cleanup_preview()
+                    if not preview.get("ok"):
+                        logger.warning(f"媒体清理转存工具清理文件：{preview.get('message')}")
+                    elif preview.get("file_count") or preview.get("dir_count"):
+                        result = self._cleanup_confirm(self._remember("cleanup", preview["snapshots"]))
+                        if "deleted" in result:
+                            notification = notices.file_cleanup(result, preview)
+                    elif any(item.get("error") for item in preview.get("folders") or []):
+                        notification = notices.file_cleanup({}, preview)
             elif section == "p115_trash":
-                info = self._trash_info()
-                result = self._trash_clear(info["token"])
-                text = result["message"]
+                if not self._source_cookie():
+                    notification = ("", "⏰ 115 回收站清空跳过：未配置 115 Cookie")
+                else:
+                    info = self._trash_info()
+                    if info.get("count"):
+                        result = self._trash_clear(info["token"])
+                        if result.get("ok"):
+                            notification = notices.empty_trash(info)
+                        else:
+                            notification = ("", f"⏰ 115 回收站定时清空失败：{result.get('message') or '未知错误'}")
             else:
-                result = self._move_run()
-                text = result["message"]
+                if not self._source_cookie():
+                    notification = ("", "⏰ 115 监控转存跳过：未配置 115 Cookie")
+                elif not self._schedule[section].get("rules"):
+                    notification = ("", "⏰ 115 监控转存跳过：未配置源/目标文件夹")
+                else:
+                    result = self._move_run()
+                    if "moved" in result:
+                        notification = notices.file_move(result)
             self._last_run[section] = datetime.now().isoformat()
-            if text and not text.startswith(("没有", "扫描完成，发现 0", "回收站为空")):
-                self.post_message(title="媒体清理转存工具定时任务", text=f"{section}：{text}")
+            if notification:
+                self._send_tool_notice(*notification)
         except Exception as error:
             logger.error(f"媒体清理转存工具 {section} 定时任务失败：{error}")
 
@@ -572,7 +652,11 @@ class EmeTools(_PluginBase):
 
     def _confirm_scheduled_tools(self, token: str):
         snapshot = self._consume(token, "scheduled_tools")
-        return self._locked("tools", lambda: self._cleaner.quarantine(snapshot, [item["path"] for item in snapshot["items"]]))
+        result = self._locked("tools", lambda: self._cleaner.quarantine(snapshot, [item["path"] for item in snapshot["items"]]))
+        if result.get("ok") and (result.get("deleted") or result.get("failed")):
+            title, text = notices.invalid_cleanup(result, snapshot["root"])
+            self._send_tool_notice(title, text)
+        return result
 
     async def action(self, action: ToolAction) -> dict:
         operation = action.operation
@@ -582,15 +666,25 @@ class EmeTools(_PluginBase):
             if operation == "delete":
                 if not action.scan_token or not action.paths:
                     raise HTTPException(status_code=400, detail="请先扫描并选择清理项目")
-                return await asyncio.to_thread(self._locked, "tools", lambda: self._cleaner.delete(action.scan_token, action.paths))
+                result = await asyncio.to_thread(self._locked, "tools", lambda: self._cleaner.delete(action.scan_token, action.paths))
+                if result.get("ok") and (result.get("deleted") or result.get("failed")):
+                    self._send_tool_notice(*notices.invalid_cleanup(result, self._cleaner.resolve(action.path or self._strm_root)))
+                return result
             if operation == "request_delete":
                 if not action.scan_token or not action.paths:
                     raise HTTPException(status_code=400, detail="请先扫描并选择清理项目")
-                token = self._remember("manual_tools", {"scan_token": action.scan_token, "paths": action.paths})
+                root = self._cleaner.resolve(action.path or self._strm_root)
+                token = self._remember("manual_tools", {"scan_token": action.scan_token, "paths": action.paths,
+                                                        "root": root})
+                self._send_tool_notice(*notices.invalid_confirmation(
+                    {"root": root, "items": [{"path": item} for item in action.paths]}))
                 return {"ok": True, "token": token, "pending": True, "message": "请在本页面再次确认隔离"}
             if operation == "confirm_delete":
                 saved = self._consume(action.token, "manual_tools")
-                return await asyncio.to_thread(self._locked, "tools", lambda: self._cleaner.delete(saved["scan_token"], saved["paths"]))
+                result = await asyncio.to_thread(self._locked, "tools", lambda: self._cleaner.delete(saved["scan_token"], saved["paths"]))
+                if result.get("ok") and (result.get("deleted") or result.get("failed")):
+                    self._send_tool_notice(*notices.invalid_cleanup(result, saved["root"]))
+                return result
             if operation == "pending":
                 return self._pending_info()
             if operation == "confirm_scheduled":
@@ -614,7 +708,12 @@ class EmeTools(_PluginBase):
             if operation == "trash_info":
                 return await asyncio.to_thread(self._trash_info)
             if operation == "trash_clear":
-                return await asyncio.to_thread(self._trash_clear, action.token)
+                result = await asyncio.to_thread(self._trash_clear, action.token)
+                if result.get("ok") and result.get("count"):
+                    self._send_tool_notice(*notices.empty_trash(result))
+                elif not result.get("ok"):
+                    self._send_tool_notice("", f"🧹 清空115 回收站失败：{result.get('message') or '未知错误'}")
+                return result
             if operation == "cleanup_preview":
                 preview = await asyncio.to_thread(self._cleanup_preview)
                 preview.pop("snapshots", None)
@@ -622,7 +721,11 @@ class EmeTools(_PluginBase):
             if operation == "cleanup_request":
                 return await asyncio.to_thread(self._cleanup_request)
             if operation == "cleanup_confirm":
-                return await asyncio.to_thread(self._cleanup_confirm, action.token)
+                result = await asyncio.to_thread(self._cleanup_confirm, action.token)
+                notification = notices.file_cleanup(result, {"folders": []}) if "deleted" in result else None
+                if notification:
+                    self._send_tool_notice(*notification)
+                return result
             if operation == "move_info":
                 return await asyncio.to_thread(self._move_info)
             if operation == "move_run":

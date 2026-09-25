@@ -113,6 +113,7 @@ class PluginTests(unittest.TestCase):
         self.plugin.init_plugin({"strm_root": self.directory.name})
         self.plugin.update_config = MagicMock()
         self.plugin.get_config = MagicMock(return_value={})
+        self.plugin.chain = MagicMock()
 
     def run_async(self, coroutine):
         return asyncio.run(coroutine)
@@ -248,7 +249,7 @@ class PluginTests(unittest.TestCase):
         orphan.write_text("metadata", encoding="utf-8")
         self.plugin._schedule["tools"].update({"enabled": True, "path": self.directory.name,
                                                 "auto_delete": True, "confirm_cleanup": True})
-        self.plugin.post_message = MagicMock()
+        self.plugin.chain = MagicMock()
         self.plugin._run_scheduled("tools")
         self.assertTrue(orphan.exists())
         pending = self.run_async(self.plugin.action(ToolAction(operation="pending")))["pending"]
@@ -257,13 +258,14 @@ class PluginTests(unittest.TestCase):
             operation="confirm_scheduled", token=pending[0]["token"])))
         self.assertEqual(len(confirmed["deleted"]), 1)
         self.assertFalse(orphan.exists())
+        self.assertEqual(self.plugin.chain.post_message.call_count, 2)
 
     def test_disabling_auto_cleanup_does_not_create_pending(self):
         orphan = Path(self.directory.name) / "orphan.nfo"
         orphan.write_text("metadata", encoding="utf-8")
         self.plugin._schedule["tools"].update({"enabled": True, "path": self.directory.name,
                                                 "auto_delete": False, "confirm_cleanup": True})
-        self.plugin.post_message = MagicMock()
+        self.plugin.chain = MagicMock()
         self.plugin._run_scheduled("tools")
         self.assertTrue(orphan.exists())
         self.assertEqual(self.run_async(self.plugin.action(ToolAction(operation="pending")))["pending"], [])
