@@ -21,6 +21,7 @@ from app.sdk.logging import logger
 
 from .invalid_data import InvalidDataCleaner
 from .p115 import P115Client
+from .subscription_monitor import SubscriptionMonitor, normalize_channel
 
 
 DEFAULT_SCHEDULE = {
@@ -52,11 +53,22 @@ class ScheduleChange(BaseModel):
     settings: Dict[str, Any]
 
 
+class MonitorChange(BaseModel):
+    operation: str
+    scope: str = "sub"
+    channels: List[str] = Field(default_factory=list)
+    keywords: List[str] = Field(default_factory=list)
+    blacklist: List[str] = Field(default_factory=list)
+    phone: str = ""
+    code: str = ""
+    password: str = ""
+
+
 class EmeTools(_PluginBase):
     plugin_name = "媒体清理转存工具"
-    plugin_desc = "独立运行无效数据清理、115 文件清理、回收站清空与文件转存。"
+    plugin_desc = "订阅频道监控、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "2.1.0"
+    plugin_version = "2.2.0"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -68,6 +80,19 @@ class EmeTools(_PluginBase):
         self._show_sidebar_nav = bool(config.get("show_sidebar_nav", True))
         self._strm_root = str(config.get("strm_root") or "/strm").strip()
         self._rb_password = str(config.get("rb_password") or "000000")
+        self._tg_api_id = str(config.get("tg_api_id") or "").strip()
+        self._tg_api_hash = str(config.get("tg_api_hash") or "").strip()
+        self._tg_forward_token = str(config.get("tg_forward_token") or "").strip()
+        self._tg_session = str(config.get("tg_session") or "")
+        saved_monitor = config.get("monitor") or {}
+        self._monitor_config = {
+            scope: {"enabled": bool((saved_monitor.get(scope) or {}).get("enabled", False)),
+                    "channels": list((saved_monitor.get(scope) or {}).get("channels") or []),
+                    "keywords": list((saved_monitor.get(scope) or {}).get("keywords") or []),
+                    "blacklist": list((saved_monitor.get(scope) or {}).get("blacklist") or [])}
+            for scope in ("sub", "kw")
+        }
+        self._monitor = SubscriptionMonitor(self)
         self._schedule = copy.deepcopy(DEFAULT_SCHEDULE)
         for name, defaults in self._schedule.items():
             saved = (config.get("schedule") or {}).get(name) or {}
@@ -79,6 +104,9 @@ class EmeTools(_PluginBase):
         self._last_run = {}
         if "cookie" in config or "proxy" in config:
             self._persist()
+        if self._enabled and self._tg_session and any(item["enabled"] for item in self._monitor_config.values()):
+            self._monitor._ensure_loop()
+            asyncio.run_coroutine_threadsafe(self._monitor.resume(), self._monitor.loop)
 
     def get_state(self) -> bool:
         return self._enabled
@@ -88,7 +116,14 @@ class EmeTools(_PluginBase):
         return []
 
     def stop_service(self) -> None:
-        pass
+        monitor = getattr(self, "_monitor", None)
+        if monitor and monitor.loop and monitor.thread and monitor.thread.is_alive():
+            try:
+                asyncio.run_coroutine_threadsafe(monitor.shutdown(), monitor.loop).result(timeout=8)
+            except Exception as exc:
+                logger.warning(f"媒体清理转存工具 Telegram 客户端关闭失败: {type(exc).__name__}")
+            monitor.loop.call_soon_threadsafe(monitor.loop.stop)
+            monitor.thread.join(timeout=3)
 
     @staticmethod
     def get_render_mode() -> Tuple[str, str]:
@@ -133,12 +168,17 @@ class EmeTools(_PluginBase):
     def _settings(self) -> dict:
         return {"enabled": self._enabled, "show_sidebar_nav": self._show_sidebar_nav,
                 "strm_root": self._strm_root, "cookie_configured": bool(self._source_cookie()),
-                "rb_password_configured": self._rb_password != "000000"}
+                "rb_password_configured": self._rb_password != "000000", "tg_api_id": self._tg_api_id,
+                "tg_api_hash_configured": bool(self._tg_api_hash),
+                "tg_forward_token_configured": bool(self._tg_forward_token)}
 
     def _persist(self) -> None:
         self.update_config({"enabled": self._enabled, "show_sidebar_nav": self._show_sidebar_nav,
                             "strm_root": self._strm_root, "rb_password": self._rb_password,
-                            "schedule": copy.deepcopy(self._schedule)})
+                            "schedule": copy.deepcopy(self._schedule),
+                            "tg_api_id": self._tg_api_id, "tg_api_hash": self._tg_api_hash,
+                            "tg_forward_token": self._tg_forward_token, "tg_session": self._tg_session,
+                            "monitor": copy.deepcopy(self._monitor_config)})
 
     def _source_cookie(self) -> str:
         config = self.get_config("P115StrmHelper") or {}
@@ -183,7 +223,8 @@ class EmeTools(_PluginBase):
                 "last_run": dict(self._last_run)}
 
     async def save_settings(self, settings: dict) -> dict:
-        allowed = {"enabled", "show_sidebar_nav", "strm_root", "rb_password"}
+        allowed = {"enabled", "show_sidebar_nav", "strm_root", "rb_password",
+                   "tg_api_id", "tg_api_hash", "tg_forward_token"}
         if set(settings) - allowed:
             raise HTTPException(status_code=400, detail="连接设置包含未知字段")
         root = str(settings.get("strm_root", self._strm_root)).strip()
@@ -201,6 +242,17 @@ class EmeTools(_PluginBase):
         password = str(settings.get("rb_password") or self._rb_password)
         if not re.fullmatch(r"\d{6}", password):
             raise HTTPException(status_code=400, detail="115 回收站安全密钥必须为 6 位数字")
+        api_id = str(settings.get("tg_api_id", self._tg_api_id) or "").strip()
+        api_hash = str(settings.get("tg_api_hash") or self._tg_api_hash).strip()
+        token = str(settings.get("tg_forward_token") or self._tg_forward_token).strip()
+        if api_id and (not api_id.isdecimal() or int(api_id) < 1):
+            raise HTTPException(status_code=400, detail="Telegram API ID 必须是正整数")
+        if api_hash and not re.fullmatch(r"[a-fA-F0-9]{32}", api_hash):
+            raise HTTPException(status_code=400, detail="Telegram API Hash 必须是 32 位十六进制字符串")
+        if token and not re.fullmatch(r"\d+:[A-Za-z0-9_-]{30,}", token):
+            raise HTTPException(status_code=400, detail="转发 Bot Token 格式不正确")
+        if (api_id, api_hash) != (self._tg_api_id, self._tg_api_hash) and self._tg_session:
+            raise HTTPException(status_code=400, detail="更改 Telegram API 凭据前，请先退出当前账号")
         self._enabled = bool(settings.get("enabled", self._enabled))
         self._show_sidebar_nav = bool(settings.get("show_sidebar_nav", self._show_sidebar_nav))
         self._strm_root = root
@@ -208,9 +260,70 @@ class EmeTools(_PluginBase):
         if reset_tools_path:
             self._schedule["tools"]["path"] = root
         self._rb_password = password
+        self._tg_api_id, self._tg_api_hash, self._tg_forward_token = api_id, api_hash, token
+        if not self._enabled:
+            for scope in ("sub", "kw"):
+                self._monitor_config[scope]["enabled"] = False
+                self._monitor.channel_ids[scope].clear()
         self._persist()
         Scheduler().update_plugin_job(self.__class__.__name__)
         return {"ok": True, "settings": self._settings()}
+
+    @staticmethod
+    def _subscription_items() -> List[dict]:
+        from app.db.oper.subscribe import SubscribeOper
+        fields = ("id", "name", "year", "type", "media_source", "media_id", "season",
+                  "poster", "state", "lack_episode", "total_episode", "start_episode")
+        return [{key: getattr(item, key, None) for key in fields} for item in SubscribeOper().list()
+                if getattr(item, "name", None) or getattr(item, "media_id", None)]
+
+    async def subscriptions(self) -> dict:
+        return {"items": await asyncio.to_thread(self._subscription_items)}
+
+    async def monitor_status(self) -> dict:
+        return await self._monitor.call(self._monitor.status())
+
+    async def monitor_action(self, change: MonitorChange) -> dict:
+        operation, scope = change.operation, change.scope
+        if operation == "send_code":
+            coro = self._monitor.send_code(change.phone)
+        elif operation == "sign_in":
+            coro = self._monitor.sign_in(change.code, change.password)
+        elif operation == "logout":
+            coro = self._monitor.logout()
+        elif scope not in ("sub", "kw"):
+            raise HTTPException(status_code=400, detail="未知监控类型")
+        elif operation == "save":
+            if self._monitor_config[scope]["enabled"]:
+                raise HTTPException(status_code=400, detail="请先停止监控，再修改频道或关键词")
+            try:
+                channels = list(dict.fromkeys(normalize_channel(item) for item in change.channels))
+                keywords = [str(item).strip() for item in change.keywords if str(item).strip()]
+                blacklist = [str(item).strip() for item in change.blacklist if str(item).strip()]
+                if len(channels) > 40 or len(keywords) > 100 or len(blacklist) > 100:
+                    raise ValueError("频道或关键词数量超过限制")
+                if any(len(value) > 150 for value in keywords + blacklist):
+                    raise ValueError("关键词过长")
+                for value in keywords + blacklist:
+                    re.compile(value)
+            except (ValueError, re.error) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            self._monitor_config[scope].update(channels=channels, keywords=keywords, blacklist=blacklist)
+            self._persist()
+            return {"ok": True}
+        elif operation in ("start", "stop"):
+            if operation == "start" and not self._enabled:
+                raise HTTPException(status_code=400, detail="请先启用插件")
+            coro = self._monitor.start(scope) if operation == "start" else self._monitor.stop(scope)
+        else:
+            raise HTTPException(status_code=400, detail="未知监控操作")
+        try:
+            return await self._monitor.call(coro)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.warning(f"媒体清理转存工具 Telegram 操作失败: {type(exc).__name__}")
+            raise HTTPException(status_code=400, detail=f"Telegram 操作失败：{type(exc).__name__}；请检查登录信息和网络连接") from exc
 
     async def save_schedule(self, change: ScheduleChange) -> dict:
         section = change.section
@@ -527,4 +640,7 @@ class EmeTools(_PluginBase):
             {"path": "/settings", "endpoint": self.save_settings, "methods": ["POST"], "auth": "bear", "summary": "保存插件连接"},
             {"path": "/schedule", "endpoint": self.save_schedule, "methods": ["POST"], "auth": "bear", "summary": "保存插件任务"},
             {"path": "/action", "endpoint": self.action, "methods": ["POST"], "auth": "bear", "summary": "执行插件工具"},
+            {"path": "/subscriptions", "endpoint": self.subscriptions, "methods": ["GET"], "auth": "bear", "summary": "MoviePilot 我的订阅"},
+            {"path": "/monitor/status", "endpoint": self.monitor_status, "methods": ["GET"], "auth": "bear", "summary": "Telegram 监控状态"},
+            {"path": "/monitor/action", "endpoint": self.monitor_action, "methods": ["POST"], "auth": "bear", "summary": "Telegram 监控操作"},
         ]

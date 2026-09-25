@@ -2,10 +2,14 @@
 
 移植 MediaEnhance 工具页的四项功能到 MoviePilot V3：清理无效数据、清理文件、清空 115 回收站、文件转存。执行逻辑、Cookie、目录规则与定时任务均在插件内部运行和保存，**不请求 EME 服务，也不读取 EME 运行配置**。
 
+左侧新增“订阅监控”：直接展示 MoviePilot「我的订阅」，使用 MP 自身的订阅删除接口取消订阅；订阅频道监控按名称、TMDB ID、年份、媒体类型和季号筛选消息，关键词监控支持正则匹配和黑名单。命中后使用已登录的 Telegram 用户账号把原消息转发到设置中的 Bot。两种监控默认关闭，可分别保存频道并启停；监听的是登录账号可访问的公开频道新消息，不会补扫登录前的旧消息。插件 `requirements.txt` 声明了 Telethon 依赖，安装后若提示缺少依赖请重新安装插件依赖并重启 MP。
+
+在设置页填写从 my.telegram.org 获取的 Telegram API ID / API Hash、转发 Bot Token，保存后通过手机号、验证码、可能需要的二步验证密码登录。Telegram session 和密钥仅保存在本插件的 MP 配置中，不会从 EME 迁移或通过插件状态 API 返回；请妥善保护 MP 配置备份。退出登录将同时停止两种监控。监控不使用 EME 的 Bot 或服务。
+
 首次使用在插件左侧“设置”页面浏览选择 MoviePilot 容器内的 STRM 根目录（默认 `/strm`）；115 Cookie 从同一 MP 中的“115网盘STRM助手”（`P115StrmHelper`）插件配置实时读取，无需也不能在本插件中单独填写；回收站有独立安全密钥时另行填写。Cookie 不写入本插件配置，也不经插件状态接口返回。115 请求不单独配置代理，沿用 MoviePilot 容器的网络环境。插件运行时不依赖 EME。
 
 四项定时任务初次迁移时**全部关闭**。要启用时请先确认 EME 中相同任务已关闭，避免重复执行。手动清理会检查扫描令牌、文件状态或 115 目录列表；回收站清空前需重新查询，确认时再次核对回收站数量。无效资料移入 `/strm/.mp-emetools-trash`（或所选扫描根下的同名目录），各批 `manifest.json` 可用于恢复。115 清理进入 115 回收站；115 回收站清空则不可恢复。
 
 本地无效资料定时任务可选择扫描后自动隔离，或创建 MP 待办、发送 MP 消息并在插件页确认；它不再依赖 EME 的 Telegram Bot。115 清理文件手动执行需要预览、生成确认并再次确认；定时清理和定时清空只有明确启用后才执行。
 
-源码在本目录，`invalid_data.py` 是安全扫描与隔离，`p115.py` 是独立 115 客户端。前端模块联邦暴露 `Page`、`Config`、`AppPage`，插件注册 MP 侧栏入口。修改前端后执行 `npm install && npm run build`，生成 `dist/assets`。不需要运行 EME 容器。
+源码在本目录，`invalid_data.py` 是安全扫描与隔离，`p115.py` 是独立 115 客户端，`subscription_monitor.py` 为独立的 Telegram 监听器。前端模块联邦暴露 `Page`、`Config`、`AppPage`，插件注册 MP 侧栏入口。修改前端后执行 `npm install && npm run build`，生成 `dist/assets`。不需要运行 EME 容器。

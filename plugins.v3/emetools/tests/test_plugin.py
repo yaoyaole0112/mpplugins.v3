@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from emetools import EmeTools, ScheduleChange, ToolAction
 from emetools.invalid_data import InvalidDataCleaner, QUARANTINE
 from emetools.p115 import P115Client
+from emetools.subscription_monitor import matches_subscription, matches_keyword, normalize_channel
 
 
 class InvalidDataTests(unittest.TestCase):
@@ -120,6 +121,38 @@ class PluginTests(unittest.TestCase):
         self.plugin.init_plugin({"eme_url": "http://nonexistent:7077", "strm_root": self.directory.name})
         self.assertNotIn("eme_url", str(self.run_async(self.plugin.status())))
         self.assertEqual(self.plugin.get_service(), [])
+
+    def test_monitor_defaults_off_and_secrets_are_not_exposed(self):
+        self.plugin.init_plugin({"strm_root": self.directory.name, "tg_api_id": "1234",
+                                 "tg_api_hash": "a" * 32, "tg_forward_token": "123:" + "z" * 35,
+                                 "tg_session": "secret-session"})
+        self.plugin.get_config = MagicMock(return_value={})
+        status = self.run_async(self.plugin.status())
+        self.assertEqual(self.plugin._monitor_config["sub"]["enabled"], False)
+        self.assertEqual(self.plugin._monitor_config["kw"]["enabled"], False)
+        for secret in ("a" * 32, "secret-session", "123:" + "z" * 35):
+            self.assertNotIn(secret, str(status))
+
+    def test_monitor_save_and_validation(self):
+        from emetools import MonitorChange
+        self.run_async(self.plugin.monitor_action(MonitorChange(
+            operation="save", scope="kw", channels=["@channelname", "https://t.me/channelname"],
+            keywords=["Movie.*2026"], blacklist=["camrip"])))
+        self.assertEqual(self.plugin._monitor_config["kw"]["channels"], ["channelname"])
+        with self.assertRaises(HTTPException):
+            self.run_async(self.plugin.monitor_action(MonitorChange(
+                operation="save", scope="sub", channels=["https://other.host/bad"])))
+        with self.assertRaises(HTTPException):
+            self.run_async(self.plugin.monitor_action(MonitorChange(
+                operation="save", scope="kw", keywords=["["])))
+
+    def test_credentials_change_requires_logout_and_unknown_settings_rejected(self):
+        self.plugin._tg_session = "logged-in-session"
+        self.plugin._tg_api_id = "1234"
+        with self.assertRaises(HTTPException):
+            self.run_async(self.plugin.save_settings({"tg_api_id": "5678"}))
+        with self.assertRaises(HTTPException):
+            self.run_async(self.plugin.save_settings({"tg_session": "inject"}))
 
     def test_rejects_unknown_schedule_and_root_cleanup(self):
         with self.assertRaises(HTTPException):

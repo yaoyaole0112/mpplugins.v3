@@ -7,13 +7,14 @@ const props = defineProps({
 })
 const emit = defineEmits(['close'])
 const sections = [
+  { key: 'subscription', title: '订阅监控', icon: 'mdi-television-play', detail: 'MoviePilot 订阅与 Telegram 频道监控' },
   { key: 'invalid', title: '清理无效数据', icon: 'mdi-folder-search-outline', detail: '扫描与隔离 STRM 孤立资料' },
   { key: 'cleanup', title: '清理文件', icon: 'mdi-folder-remove-outline', detail: '115 文件夹清理' },
   { key: 'trash', title: '清空 115 回收站', icon: 'mdi-delete-alert-outline', detail: '不可恢复的彻底删除' },
   { key: 'move', title: '文件转存', icon: 'mdi-folder-swap-outline', detail: '115 文件夹监控转存' },
   { key: 'settings', title: '设置', icon: 'mdi-cog-outline', detail: '运行配置设置' },
 ]
-const active = ref('invalid')
+const active = ref('subscription')
 const busy = ref(false)
 const loading = ref(true)
 const error = ref('')
@@ -40,6 +41,15 @@ const base = computed(() => `plugin/${props.pluginId}`)
 const current = computed(() => sections.find(section => section.key === active.value))
 const rules = computed(() => schedule.p115_move.rules || [])
 const cleanupDirs = ref([])
+const subscriptions = ref([])
+const subPage = ref(1)
+const subPages = computed(() => Math.max(1, Math.ceil(subscriptions.value.length / 10)))
+const visibleSubs = computed(() => subscriptions.value.slice((subPage.value - 1) * 10, subPage.value * 10))
+const monitor = reactive({ configured: false, logged_in: false, dependency_ready: false, hits: [],
+  sub: { enabled: false, channels: [], keywords: [], blacklist: [] }, kw: { enabled: false, channels: [], keywords: [], blacklist: [] } })
+const drafts = reactive({ sub: { channels: [], keywords: [], blacklist: [] }, kw: { channels: [], keywords: [], blacklist: [] } })
+const entry = reactive({ sub: { channels: '' }, kw: { channels: '', keywords: '', blacklist: '' } })
+const telegram = reactive({ api_id: '', api_hash: '', forward_token: '', phone: '', code: '', password: '', password_required: false })
 
 function unpack(response) {
   if (response && Object.prototype.hasOwnProperty.call(response, 'success')) {
@@ -64,6 +74,9 @@ async function work(callback) {
 function applyStatus(data) {
   Object.assign(settings, data.settings || {})
   settings.rb_password = ''
+  telegram.api_id = settings.tg_api_id || ''
+  telegram.api_hash = ''
+  telegram.forward_token = ''
   for (const key of Object.keys(schedule)) Object.assign(schedule[key], data.schedule?.[key] || {})
   scanPath.value = schedule.tools.path || '/strm'
   cleanupDirs.value = (schedule.p115_cleanup.dir_ids || []).map((cid, index) => ({
@@ -73,7 +86,7 @@ function applyStatus(data) {
 }
 async function load() {
   loading.value = true
-  try { applyStatus(await get('status')); await getPending() } catch (err) { error.value = err?.message || '加载工具配置失败' }
+  try { applyStatus(await get('status')); await getPending(); await loadSubscription() } catch (err) { error.value = err?.message || '加载工具配置失败' }
   finally { loading.value = false }
 }
 async function getPending() {
@@ -83,11 +96,62 @@ async function getPending() {
 async function saveConnection() {
   await work(async () => {
     const { enabled, show_sidebar_nav, strm_root, rb_password } = settings
-    const result = await post('settings', { enabled, show_sidebar_nav, strm_root, rb_password })
+    const result = await post('settings', { enabled, show_sidebar_nav, strm_root, rb_password,
+      tg_api_id: telegram.api_id, tg_api_hash: telegram.api_hash, tg_forward_token: telegram.forward_token })
     Object.assign(settings, result.settings)
     await load()
     notice.value = '插件设置已保存'
   })
+}
+async function loadSubscription() {
+  const [list, status] = await Promise.all([get('subscriptions'), get('monitor/status')])
+  subscriptions.value = list.items || []
+  subPage.value = Math.min(subPage.value, Math.max(1, Math.ceil(subscriptions.value.length / 10)))
+  Object.assign(monitor, status)
+  for (const scope of ['sub', 'kw']) {
+    drafts[scope].channels = [...(status[scope]?.channels || [])]
+    drafts[scope].keywords = [...(status[scope]?.keywords || [])]
+    drafts[scope].blacklist = [...(status[scope]?.blacklist || [])]
+  }
+}
+async function refreshSubscription() {
+  await work(loadSubscription)
+}
+async function monitorCommand(operation, scope = 'sub', extra = {}) {
+  await work(async () => {
+    const result = await post('monitor/action', { operation, scope, ...extra })
+    if (result.password_required) telegram.password_required = true
+    notice.value = result.message || (operation === 'save' ? '监控设置已保存' : '操作成功')
+    await loadSubscription()
+  })
+}
+function addEntry(scope, field) {
+  const value = (entry[scope][field] || '').trim()
+  if (value && !drafts[scope][field].includes(value)) drafts[scope][field].push(value)
+  entry[scope][field] = ''
+}
+async function saveMonitor(scope) {
+  await monitorCommand('save', scope, { channels: drafts[scope].channels, keywords: drafts[scope].keywords, blacklist: drafts[scope].blacklist })
+}
+async function toggleMonitor(scope) {
+  if (!monitor[scope].enabled && (JSON.stringify(drafts[scope].channels) !== JSON.stringify(monitor[scope].channels) ||
+    JSON.stringify(drafts[scope].keywords) !== JSON.stringify(monitor[scope].keywords) ||
+    JSON.stringify(drafts[scope].blacklist) !== JSON.stringify(monitor[scope].blacklist))) {
+    error.value = '请先保存监控配置，再启动'
+    return
+  }
+  await monitorCommand(monitor[scope].enabled ? 'stop' : 'start', scope)
+}
+async function removeSubscription(item) {
+  if (!window.confirm(`确定取消订阅「${item.name}」？`)) return
+  await work(async () => {
+    unpack(await props.api.delete(`subscribe/${item.id}`))
+    await loadSubscription()
+    notice.value = '订阅已取消'
+  })
+}
+function logoutTelegram() {
+  if (window.confirm('退出 Telegram 并停止两种监控？')) monitorCommand('logout')
 }
 async function saveSchedule(section) {
   await work(async () => {
@@ -280,7 +344,33 @@ onMounted(load)
         </div>
         <div class="eme-settings-fields"><label>STRM 根目录（MoviePilot 容器内）<div class="eme-inline"><input :value="settings.strm_root" readonly /><button class="eme-button secondary" type="button" :disabled="busy" @click="browse('root')">浏览选择</button></div></label><label>115 回收站安全密钥 <input v-model.trim="settings.rb_password" type="password" autocomplete="off" :placeholder="settings.rb_password_configured ? '已配置；留空保持不变' : '默认 000000；留空保持不变'" /></label></div>
         <p class="eme-hint">115 Cookie：{{ settings.cookie_configured ? '已从 115 网盘 STRM 助手读取，更新后自动同步' : '未读取到，请先在 115 网盘 STRM 助手中配置 Cookie' }}。115 连接沿用 MoviePilot 容器的网络环境。</p>
+        <div class="eme-card-heading"><h3>Telegram 账号</h3></div>
+        <p class="eme-hint">使用你自己的 Telegram 账号监听频道。请从 my.telegram.org 的 API development tools 获取 API ID 和 API Hash；此插件不会读取 MediaEnhance 的账号或会话。</p>
+        <div class="eme-settings-fields"><label>API ID<input v-model.trim="telegram.api_id" inputmode="numeric" placeholder="Telegram API ID" /></label>
+          <label>API Hash<input v-model.trim="telegram.api_hash" type="password" autocomplete="new-password" :placeholder="settings.tg_api_hash_configured ? '已配置；留空保持不变' : '32 位字符串'" /></label>
+          <label>转发 Bot Token<input v-model.trim="telegram.forward_token" type="password" autocomplete="new-password" :placeholder="settings.tg_forward_token_configured ? '已配置；留空保持不变' : '命中时将原消息转发给此 Bot'" /></label></div>
+        <p class="eme-hint">{{ monitor.logged_in ? 'Telegram 已登录' : 'Telegram 未登录' }} · {{ monitor.dependency_ready ? '监控依赖已就绪' : '缺少 telethon 依赖' }}</p>
+        <div v-if="!monitor.logged_in" class="eme-fields"><label>手机号（国际格式）<input v-model.trim="telegram.phone" placeholder="+8613800000000" autocomplete="tel" /></label><label>验证码<input v-model.trim="telegram.code" placeholder="Telegram 收到的验证码" autocomplete="one-time-code" /></label><label v-if="telegram.password_required">二步验证密码<input v-model="telegram.password" type="password" autocomplete="off" /></label></div>
+        <div class="eme-actions"><button v-if="!monitor.logged_in" class="eme-button secondary" :disabled="busy || !monitor.dependency_ready" @click="monitorCommand('send_code', 'sub', { phone: telegram.phone })">发送验证码</button>
+          <button v-if="!monitor.logged_in" class="eme-button primary" :disabled="busy || !monitor.dependency_ready" @click="monitorCommand('sign_in', 'sub', { code: telegram.code, password: telegram.password })">登录 Telegram</button>
+          <button v-else class="eme-button danger" :disabled="busy" @click="logoutTelegram">退出登录</button></div>
       </section>
+      <template v-if="active === 'subscription'">
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>MoviePilot 我的订阅</h3><p>来自 MoviePilot 的订阅列表，供频道消息匹配使用。</p></div><button class="eme-button secondary" :disabled="busy" @click="refreshSubscription">同步订阅</button></div>
+          <p class="eme-hint">共 {{ subscriptions.length }} 条订阅 · 剧集 {{ subscriptions.filter(s => s.type === '电视剧' || s.type === '剧集').length }} · 电影 {{ subscriptions.filter(s => s.type === '电影').length }}</p>
+          <div class="eme-sub-grid"><div v-for="item in visibleSubs" :key="item.id" class="eme-sub-item">
+            <img v-if="item.poster" :src="item.poster" alt="" loading="lazy" referrerpolicy="no-referrer" /><div class="eme-sub-meta"><strong>{{ item.name }}{{ item.season != null ? ` S${String(item.season).padStart(2, '0')}` : '' }}</strong><small>{{ item.year || '年份未知' }} · {{ item.type || '类型未知' }} · {{ { N: '新建', R: '订阅中', P: '待定', S: '暂停' }[item.state] || item.state || '未知' }}</small><small v-if="item.total_episode">已获取 {{ Math.max(0, (item.total_episode || 0) - (item.lack_episode || 0)) }}/{{ item.total_episode }} 集</small><button class="eme-button text" :disabled="busy" @click="removeSubscription(item)">取消订阅</button></div>
+          </div><p v-if="!subscriptions.length" class="eme-hint">暂无订阅</p></div><div v-if="subPages > 1" class="eme-sub-pages"><button class="eme-button secondary" :disabled="subPage <= 1" @click="subPage--">上一页</button><span>{{ subPage }} / {{ subPages }}</span><button class="eme-button secondary" :disabled="subPage >= subPages" @click="subPage++">下一页</button></div>
+        </section>
+        <section v-for="scope in ['sub', 'kw']" :key="scope" class="eme-card"><div class="eme-card-heading"><div><h3>{{ scope === 'sub' ? '订阅监控' : '关键词监控' }}</h3><p>{{ scope === 'sub' ? '按订阅名称、TMDB ID、年份、类型和季号校验频道消息。' : '按自定义关键词及黑名单筛选频道消息。' }}命中后原样转发给设置中的 Bot。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || monitor[scope].enabled" @click="saveMonitor(scope)">保存</button><button class="eme-button primary" :disabled="busy || (!monitor.logged_in && !monitor[scope].enabled)" @click="toggleMonitor(scope)">{{ monitor[scope].enabled ? '停止监控' : '启动监控' }}</button></div></div>
+          <p class="eme-hint">状态：{{ monitor[scope].enabled ? '运行中' : '已停止' }} · {{ drafts[scope].channels.length }} 个频道</p>
+          <label>监控频道（公开频道 @用户名或 t.me/链接）<div class="eme-inline"><input v-model.trim="entry[scope].channels" :disabled="monitor[scope].enabled" placeholder="@channelname" @keyup.enter="addEntry(scope, 'channels')" /><button class="eme-button secondary" :disabled="monitor[scope].enabled" @click="addEntry(scope, 'channels')">添加</button></div></label>
+          <div class="eme-chips"><span v-for="(value, index) in drafts[scope].channels" :key="value" class="eme-chip">{{ value }}<button :disabled="monitor[scope].enabled" @click="drafts[scope].channels.splice(index, 1)">×</button></span></div>
+          <template v-if="scope === 'kw'"><div v-for="field in ['keywords', 'blacklist']" :key="field"><label>{{ field === 'keywords' ? '匹配关键词' : '排除关键词（黑名单）' }}（支持正则）<div class="eme-inline"><input v-model.trim="entry.kw[field]" :disabled="monitor.kw.enabled" :placeholder="field === 'keywords' ? '添加匹配关键词' : '添加排除关键词'" @keyup.enter="addEntry('kw', field)" /><button class="eme-button secondary" :disabled="monitor.kw.enabled" @click="addEntry('kw', field)">添加</button></div></label><div class="eme-chips"><span v-for="(value, index) in drafts.kw[field]" :key="value" class="eme-chip">{{ value }}<button :disabled="monitor.kw.enabled" @click="drafts.kw[field].splice(index, 1)">×</button></span></div></div></template>
+          <p v-else class="eme-hint">订阅名称和媒体资料自动从上方 MoviePilot 订阅列表读取，每 5 分钟更新一次。</p>
+        </section>
+        <section v-if="monitor.hits?.length" class="eme-card"><h3>最近命中</h3><div v-for="(hit, index) in monitor.hits" :key="index" class="eme-result">{{ hit.time }} · {{ hit.channel }} · {{ hit.matches?.join('、') }}</div></section>
+      </template>
       <template v-if="active === 'invalid'">
         <section class="eme-card">
           <div class="eme-card-heading"><div><h3>扫描无效数据</h3><p>只扫描 MP 插件设置的 STRM 根目录；清理时复核并移入 .mp-emetools-trash，可通过 manifest.json 恢复。</p></div><button class="eme-button primary" :disabled="busy" @click="startScan">开始扫描</button></div>
@@ -358,5 +448,7 @@ onMounted(load)
 .eme-move-row .eme-folder-choice{max-width:230px}
 .eme-move-label,.eme-move-arrow{flex:none;font-weight:700;color:rgba(var(--v-theme-on-surface),.65)}
 .eme-move-arrow{font-size:18px}
+.eme-sub-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}.eme-sub-item{display:flex;gap:12px;padding:10px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px;min-width:0}.eme-sub-item img{width:56px;height:80px;object-fit:cover;border-radius:5px}.eme-sub-meta{min-width:0;display:flex;flex-direction:column;gap:5px}.eme-sub-meta strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.eme-sub-meta small{opacity:.7}.eme-sub-meta button{align-self:flex-start;padding:4px 0}.eme-sub-pages,.eme-chips{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:12px 0}.eme-chip{padding:5px 8px;border-radius:9px;background:rgba(var(--v-theme-primary),.1);overflow-wrap:anywhere}.eme-chip button{border:0;background:transparent;color:#e45c5c;cursor:pointer;font-size:18px;margin-left:5px}
 @media(max-width:760px){.eme-cleanup-grid{grid-template-columns:1fr}.eme-move-row{flex-wrap:wrap}.eme-move-row .eme-folder-choice{max-width:none;min-width:80px}}
+@media(max-width:760px){.eme-sub-grid{grid-template-columns:1fr}}
 </style>
