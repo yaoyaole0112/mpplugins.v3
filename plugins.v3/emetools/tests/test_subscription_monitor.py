@@ -10,6 +10,24 @@ from emetools.subscription_monitor import SubscriptionMonitor, matches_keyword, 
 
 
 class MatchingTests(unittest.TestCase):
+    def test_status_resolves_stopped_keyword_channel_title_and_caches_it(self):
+        plugin = MagicMock()
+        plugin.get_data.return_value = None
+        plugin._tg_session = ""
+        plugin._tg_api_id = "1"
+        plugin._tg_api_hash = "hash"
+        plugin._monitor_config = {"sub": {"enabled": False, "channels": []},
+                                  "kw": {"enabled": False, "channels": ["samplechannel"]}}
+        monitor = SubscriptionMonitor(plugin)
+        monitor.client = MagicMock()
+        monitor.client.is_connected.return_value = True
+        monitor.client.get_entity = AsyncMock(return_value=SimpleNamespace(title="示例频道"))
+        status = asyncio.run(monitor.status())
+        self.assertEqual(status["channel_titles"]["kw"]["samplechannel"], "示例频道")
+        plugin.save_data.assert_called_with("monitor_channel_titles", monitor.channel_titles)
+        asyncio.run(monitor.status())
+        monitor.client.get_entity.assert_awaited_once()
+
     def test_seen_keys_normalize_channel_ids_and_survive_monitor_restart(self):
         plugin = MagicMock()
         plugin.get_data.return_value = [[12345, 17]]

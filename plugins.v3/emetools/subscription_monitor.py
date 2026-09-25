@@ -85,7 +85,8 @@ class SubscriptionMonitor:
         self.code_hash = None
         self.phone = None
         self.channel_ids = {"sub": set(), "kw": set()}
-        self.channel_titles = {"sub": {}, "kw": {}}
+        saved_titles = self.plugin.get_data("monitor_channel_titles") or {}
+        self.channel_titles = {scope: dict(saved_titles.get(scope) or {}) for scope in ("sub", "kw")} if isinstance(saved_titles, dict) else {"sub": {}, "kw": {}}
         self.hits = deque(maxlen=40)
         # Keep de-duplication across MoviePilot/plugin restarts.  Telegram can
         # deliver the same post once through the live handler and again through
@@ -274,6 +275,7 @@ class SubscriptionMonitor:
         self._save_checkpoints()
         self.channel_ids[scope] = ids
         self.channel_titles[scope] = titles
+        self.plugin.save_data("monitor_channel_titles", self.channel_titles)
         self.plugin._monitor_config[scope]["enabled"] = True
         self.plugin._persist()
         if self._watchdog is None or self._watchdog.done():
@@ -283,7 +285,6 @@ class SubscriptionMonitor:
 
     async def stop(self, scope):
         self.channel_ids[scope].clear()
-        self.channel_titles[scope].clear()
         self.plugin._monitor_config[scope]["enabled"] = False
         self.plugin._persist()
         logger.info("ME工具 Telegram：%s 监控已停止", scope)
@@ -321,6 +322,24 @@ class SubscriptionMonitor:
                 logged = True
             except Exception as exc:
                 self.last_error = f"Telegram 状态检查失败：{type(exc).__name__}"
+        if logged:
+            # Also resolve channels from a stopped scope; both tabs should
+            # show the actual Telegram title without starting monitoring.
+            changed = False
+            for scope in ("sub", "kw"):
+                for channel in self.plugin._monitor_config[scope].get("channels", []):
+                    if channel in self.channel_titles[scope]:
+                        continue
+                    try:
+                        entity = await asyncio.wait_for(self.client.get_entity(channel), timeout=5)
+                        title = getattr(entity, "title", None) or getattr(entity, "username", None)
+                        if title:
+                            self.channel_titles[scope][channel] = str(title)
+                            changed = True
+                    except Exception as exc:
+                        logger.warning("ME工具 Telegram：读取频道名称失败，频道=%s，错误=%s", channel, type(exc).__name__)
+            if changed:
+                self.plugin.save_data("monitor_channel_titles", self.channel_titles)
         return {"configured": bool(self.plugin._tg_api_id and self.plugin._tg_api_hash), "logged_in": logged,
                 "dependency_ready": TelegramClient is not None, "hits": list(self.hits),
                 "last_error": self.last_error, "last_event": self.last_event,

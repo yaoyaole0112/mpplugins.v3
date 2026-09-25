@@ -432,7 +432,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
             <label class="eme-switch-label"><input v-model="missing.config.ignore_season_zero" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>忽略特别篇（S00/SP）</span></label>
             <label class="eme-switch-label"><input v-model="missing.config.ignore_future" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>忽略未上映剧集</span></label>
           </div>
-          <div class="eme-fields"><label>执行周期（cron）<input v-model.trim="missing.config.cron" placeholder="35 3 * * *" /></label><label>缺集处理方式<select v-model="missing.config.missing_action"><option>仅检查记录</option><option>添加到订阅</option><option>标记为存在</option></select></label></div>
+          <div class="eme-fields"><label>执行周期（cron表达式）<input v-model.trim="missing.config.cron" placeholder="35 3 * * *" /></label><label>缺集处理方式<select v-model="missing.config.missing_action"><option>仅检查记录</option><option>添加到订阅</option><option>标记为存在</option></select></label></div>
           <p class="eme-hint">“标记为存在”仅记录处理结果，与原插件一致；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新可选项' }}</button></div>
@@ -489,8 +489,8 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
           </template>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>定时清理</h3><p>需要确认时先生成待办并发送 MoviePilot 通知，不直接清理。</p></div><button class="eme-button primary" :disabled="busy" @click="saveSchedule('tools')">保存任务</button></div>
-          <label class="eme-switch-label"><input v-model="schedule.tools.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时任务</span></label>
-          <label>cron 表达式<input v-model.trim="schedule.tools.cron" placeholder="0 3 * * *" /></label>
+          <label class="eme-switch-label"><input v-model="schedule.tools.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清理</span></label>
+          <label>执行周期（cron表达式）<input v-model.trim="schedule.tools.cron" placeholder="0 3 * * *" /></label>
           <p class="eme-hint">保存后定时扫描目录：{{ savedStrmRoot }}（在“设置”页面更改）</p>
           <p v-if="schedule.tools.path && schedule.tools.path !== savedStrmRoot" class="eme-message eme-error">当前定时任务仍扫描旧目录 {{ schedule.tools.path }}；保存此任务后才会改用设置中的 STRM 根目录。请确认清理范围。</p>
           <div class="eme-options eme-cleanup-settings"><label class="eme-switch-label"><input v-model="schedule.tools.auto_delete" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>自动隔离清理</span></label><label class="eme-confirm-mode"><span>定时清理确认方式</span><div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="toggleConfirmPicker"><span>{{ confirmModeLabel() }}</span><i class="mdi" :class="confirmPicker.open ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="confirmPicker.open" class="eme-picker-menu"><button v-for="item in confirmOptions" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: schedule.tools.confirm_mode === item.value }" @click="selectConfirmMode(item.value)"><i class="mdi" :class="schedule.tools.confirm_mode === item.value ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item.title }}</button></div></div></label></div>
@@ -504,11 +504,11 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
           <div class="eme-actions"><button class="eme-button secondary" :disabled="busy" @click="getPreview">预览待清理内容</button><template v-if="preview"><span>文件 {{ preview.file_count || 0 }} 个 · 文件夹 {{ preview.dir_count || 0 }} 个</span><button class="eme-button danger" :disabled="busy || !!cleanupToken || !(preview.file_count || preview.dir_count)" @click="requestCleanup">生成清理确认</button><button v-if="cleanupToken" class="eme-button danger" :disabled="busy" @click="confirmCleanup">确认清理文件</button></template></div>
           <p class="eme-hint">预览与清理仅针对已保存的目录，确认时将重新检查目录内容。</p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><h3>定时清理文件</h3><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_cleanup')">保存任务</button></div><div class="eme-options"><label class="eme-switch-label"><input v-model="schedule.p115_cleanup.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用</span></label></div><label>cron 表达式<input v-model.trim="schedule.p115_cleanup.cron" placeholder="0 */2 * * *" /></label></section>
+        <section class="eme-card"><div class="eme-card-heading"><h3>定时清理</h3><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_cleanup')">保存任务</button></div><div class="eme-options"><label class="eme-switch-label"><input v-model="schedule.p115_cleanup.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清理</span></label></div><label>执行周期（cron表达式）<input v-model.trim="schedule.p115_cleanup.cron" placeholder="0 */2 * * *" /></label></section>
       </template>
       <template v-if="active === 'trash'">
         <section class="eme-card"><div class="eme-card-heading"><div><h3>115 回收站</h3><p>清空是彻底删除，不能恢复。执行前必须核对当前数量。</p></div><button class="eme-button secondary" :disabled="busy" @click="getTrash">查询状态</button></div><div v-if="trash" class="eme-stat">当前 {{ trash.count || 0 }} 个文件 <button class="eme-button danger" :disabled="busy || !trash.count" @click="clearTrash">立即清空</button></div><p v-else class="eme-hint">请先查询回收站状态。</p></section>
-        <section class="eme-card"><div class="eme-card-heading"><h3>定时清空</h3><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_trash')">保存任务</button></div><label class="eme-switch-label"><input v-model="schedule.p115_trash.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用（将彻底删除，无法恢复）</span></label><label>cron 表达式<input v-model.trim="schedule.p115_trash.cron" placeholder="0 3 * * *" /></label></section>
+        <section class="eme-card"><div class="eme-card-heading"><h3>定时清空</h3><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_trash')">保存任务</button></div><label class="eme-switch-label"><input v-model="schedule.p115_trash.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清空（⚠️彻底删除，无法恢复）</span></label><label>执行周期（cron表达式）<input v-model.trim="schedule.p115_trash.cron" placeholder="0 3 * * *" /></label></section>
       </template>
       <template v-if="active === 'move'">
         <section class="eme-card"><div class="eme-card-heading"><div><h3>文件转存规则</h3><p>每条规则分别将源目录中的文件及子文件夹移动到对应目标目录。</p></div><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_move')">保存规则</button></div>
@@ -516,7 +516,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
           <div class="eme-actions"><button class="eme-button secondary" @click="rules.push({ src_id: '', src_name: '', dst_id: '', dst_name: '' })">添加规则</button><button class="eme-button secondary" :disabled="busy" @click="getMove">查看待转存</button><button class="eme-button secondary" :disabled="busy || !rules.length" @click="runMove">立即执行已保存规则</button></div>
           <p v-if="moveInfo" class="eme-hint">上次执行：{{ moveInfo.last_run || '暂无' }}；<span v-for="(item, key) in moveInfo.pending || {}" :key="key">{{ item.name }}：{{ item.count < 0 ? item.error : `${item.count} 项` }}；</span></p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><h3>实时监控</h3><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_move')">保存监控</button></div><label class="eme-switch-label"><input v-model="schedule.p115_move.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用监控</span></label><label>检查间隔（秒，最少 60）<input v-model.number="schedule.p115_move.check_interval" type="number" min="60" step="60" /></label></section>
+        <section class="eme-card"><div class="eme-card-heading"><h3>实时监控</h3><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_move')">保存监控</button></div><label class="eme-switch-label"><input v-model="schedule.p115_move.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label>检查间隔（秒，最少 60）<input v-model.number="schedule.p115_move.check_interval" type="number" min="60" step="60" /></label></section>
       </template>
     </main>
       <div v-if="folder.open" class="eme-overlay" @click.self="folder.open = false">
@@ -561,6 +561,15 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
 .eme-card label.eme-confirm-mode:not(.eme-check):not(.eme-result){display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap}
 .eme-confirm-mode select{width:auto;min-width:210px;margin-top:0}
 .eme-cleanup-settings{column-gap:36px;row-gap:12px}
+.eme-card-heading{margin-bottom:18px}
+.eme-card-heading p{margin-top:5px;margin-bottom:0}
+.eme-card>.eme-switch-label,.eme-card>.eme-options{margin:0 0 16px}
+.eme-card>.eme-switch-label+label{margin-top:0}
+.eme-card>.eme-options+label{margin-top:0}
+.eme-card>.eme-card-heading+label.eme-switch-label{margin-top:0}
+.eme-confirm-mode .eme-picker{width:clamp(280px,32vw,420px);max-width:100%;margin-top:0;flex:none}
+.eme-confirm-mode .eme-picker-option{white-space:nowrap}
+@media(max-width:760px){.eme-confirm-mode .eme-picker{width:min(420px,100%)}.eme-confirm-mode .eme-picker-option{white-space:normal}}
 .eme-cleanup-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}
 .eme-cleanup-item,.eme-move-row{display:flex;align-items:center;min-width:0;gap:8px;padding:8px 10px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px}
 .eme-folder-choice{min-width:0;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:center;font-weight:600}
@@ -570,6 +579,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
 .eme-move-label,.eme-move-arrow{flex:none;font-weight:700;color:rgba(var(--v-theme-on-surface),.65)}
 .eme-move-arrow{font-size:18px}
 .eme-chips{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:12px 0}.eme-chip{padding:5px 8px;border-radius:9px;background:rgba(var(--v-theme-primary),.1);overflow-wrap:anywhere}.eme-chip button{border:0;background:transparent;color:#e45c5c;cursor:pointer;font-size:18px;margin-left:5px}
+.eme-chip{font-size:14px;line-height:1.5}
 .eme-missing-selects{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.eme-missing-selects>label:last-child{grid-column:1/-1}.eme-picker{position:relative;margin-top:7px}.eme-picker-trigger{box-sizing:border-box;width:100%;min-height:42px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;background:rgb(var(--v-theme-background));color:inherit;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;cursor:pointer;text-align:left}.eme-picker-trigger:hover,.eme-picker-trigger:focus-visible{border-color:rgb(var(--v-theme-primary));outline:none}.eme-picker-menu{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 5px);max-height:300px;overflow:auto;padding:8px;background:rgb(var(--v-theme-surface));border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px;box-shadow:0 12px 28px rgba(0,0,0,.3)}.eme-picker-search{width:100%!important;box-sizing:border-box;margin:0 0 7px!important}.eme-picker-option{width:100%;display:flex;align-items:flex-start;gap:8px;padding:8px;border:0;border-radius:7px;background:transparent;color:inherit;text-align:left;cursor:pointer;line-height:1.35}.eme-picker-option:hover,.eme-picker-option.selected{background:rgba(var(--v-theme-primary),.12);color:rgb(var(--v-theme-primary))}.eme-picker-option i{font-size:18px;flex:none}.eme-picker-empty{padding:10px;margin:0;color:rgba(var(--v-theme-on-surface),.6)}.eme-missing-results{overflow:auto;max-height:360px;margin-top:16px}.eme-missing-results table{border-collapse:collapse;width:100%;min-width:740px;text-align:left}.eme-missing-results th,.eme-missing-results td{padding:10px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));white-space:normal}.eme-missing-results th{font-weight:700;white-space:nowrap}
 @media(max-width:760px){.eme-cleanup-grid{grid-template-columns:1fr}.eme-move-row{flex-wrap:wrap}.eme-move-row .eme-folder-choice{max-width:none;min-width:80px}}
 @media(max-width:760px){.eme-missing-selects{grid-template-columns:1fr}}
