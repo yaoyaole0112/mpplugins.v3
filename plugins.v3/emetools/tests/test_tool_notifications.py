@@ -3,7 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from emetools import EmeTools, ToolAction
@@ -47,7 +47,11 @@ class ScheduledNotificationTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.plugin = object.__new__(EmeTools)
-        self.plugin.init_plugin({"strm_root": directory.name})
+        self.plugin.get_config = MagicMock(return_value={})
+        self.plugin.get_data = MagicMock(return_value=None)
+        self.plugin.save_data = MagicMock()
+        with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()), patch('emetools.missing_episodes.MediaServerHelper', return_value=MagicMock()):
+            self.plugin.init_plugin({"strm_root": directory.name})
         self.plugin.get_config = MagicMock(return_value={"cookies": "test"})
         self.plugin.chain = MagicMock()
 

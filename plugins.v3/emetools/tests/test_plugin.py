@@ -112,13 +112,51 @@ class PluginTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.plugin = object.__new__(EmeTools)
-        self.plugin.init_plugin({"strm_root": self.directory.name})
+        self.plugin.get_config = MagicMock(return_value={})
+        self.plugin.get_data = MagicMock(return_value=None)
+        self.plugin.save_data = MagicMock()
+        with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()), patch('emetools.missing_episodes.MediaServerHelper', return_value=MagicMock()):
+            self.plugin.init_plugin({"strm_root": self.directory.name})
         self.plugin.update_config = MagicMock()
         self.plugin.get_config = MagicMock(return_value={})
         self.plugin.chain = MagicMock()
 
     def run_async(self, coroutine):
         return asyncio.run(coroutine)
+
+    def test_missing_migration_defaults_off_and_copies_legacy_results(self):
+        from emetools.missing_episodes import MissingAction
+        plugin = object.__new__(EmeTools)
+        plugin.get_config = MagicMock(return_value={
+            "enabled": True, "missing_action": MissingAction.ADD_SUBSCRIBE.value,
+            "skip_series_ids": ["123"], "library_names": ["电视剧"]})
+        plugin.get_data = MagicMock(side_effect=lambda key, plugin_id=None:
+                                    [{"SeriesName": "测试剧"}] if plugin_id else None)
+        plugin.save_data = MagicMock()
+        with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()):
+            plugin.init_plugin({"strm_root": self.directory.name})
+        self.assertFalse(plugin._missing_config["enabled"])
+        self.assertEqual(plugin._missing_config["missing_action"], MissingAction.ADD_SUBSCRIBE.value)
+        plugin.save_data.assert_any_call("missing_episodes", [{"SeriesName": "测试剧"}])
+        self.assertEqual(plugin._missing._subscribe_chain._delete_subscription.call_count, 0)
+
+    def test_missing_refuses_duplicate_schedule_and_mutating_scan(self):
+        from emetools.missing_episodes import MissingAction
+        self.plugin.get_config.return_value = {"enabled": True}
+        self.plugin._missing_config.update({"enabled": True, "missing_action": MissingAction.ADD_SUBSCRIBE.value})
+        self.assertFalse(any(job["id"] == "EmeTools_missing" for job in self.plugin.get_service()))
+        with self.assertRaises(HTTPException) as raised:
+            self.run_async(self.plugin.missing_action({"operation": "scan"}))
+        self.assertEqual(raised.exception.status_code, 409)
+        self.plugin._missing.scan_missing_episodes = MagicMock()
+        self.plugin._run_missing_scheduled()
+        self.plugin._missing.scan_missing_episodes.assert_not_called()
+
+    def test_missing_schedule_requires_old_plugin_off(self):
+        self.plugin.get_config.return_value = {"enabled": True}
+        with self.assertRaises(HTTPException) as raised:
+            self.run_async(self.plugin.missing_action({"operation": "save", "config": {"enabled": True}}))
+        self.assertEqual(raised.exception.status_code, 409)
 
     def test_bot_commands_require_explicit_user_and_never_delete_directly(self):
         commands = {item["cmd"]: item for item in self.plugin.get_command()}
@@ -189,14 +227,16 @@ class PluginTests(unittest.TestCase):
         self.assertEqual((Path(__file__).resolve().parents[1] / "icon.jpeg").read_bytes()[:3], b"\xff\xd8\xff")
 
     def test_old_eme_address_is_ignored(self):
-        self.plugin.init_plugin({"eme_url": "http://nonexistent:7077", "strm_root": self.directory.name})
+        with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()):
+            self.plugin.init_plugin({"eme_url": "http://nonexistent:7077", "strm_root": self.directory.name})
         self.assertNotIn("eme_url", str(self.run_async(self.plugin.status())))
         self.assertEqual(self.plugin.get_service(), [])
 
     def test_monitor_defaults_off_and_secrets_are_not_exposed(self):
-        self.plugin.init_plugin({"strm_root": self.directory.name, "tg_api_id": "1234",
-                                 "tg_api_hash": "a" * 32, "tg_forward_token": "123:" + "z" * 35,
-                                 "tg_session": "secret-session"})
+        with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()):
+            self.plugin.init_plugin({"strm_root": self.directory.name, "tg_api_id": "1234",
+                                     "tg_api_hash": "a" * 32, "tg_forward_token": "123:" + "z" * 35,
+                                     "tg_session": "secret-session"})
         self.plugin.get_config = MagicMock(return_value={})
         status = self.run_async(self.plugin.status())
         self.assertEqual(self.plugin._monitor_config["sub"]["enabled"], False)
@@ -269,7 +309,8 @@ class PluginTests(unittest.TestCase):
         self.plugin.get_config.assert_called_with("P115StrmHelper")
 
     def test_cookie_and_proxy_are_not_saved_locally(self):
-        self.plugin.init_plugin({"strm_root": self.directory.name, "cookie": "legacy", "proxy": "http://old"})
+        with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()):
+            self.plugin.init_plugin({"strm_root": self.directory.name, "cookie": "legacy", "proxy": "http://old"})
         migrated = self.plugin.update_config.call_args.args[0]
         self.assertNotIn("cookie", migrated)
         self.assertNotIn("proxy", migrated)
@@ -421,7 +462,11 @@ class PluginTests(unittest.TestCase):
 
     def test_legacy_confirmation_setting_preserves_moviepilot_mode(self):
         legacy = object.__new__(EmeTools)
-        legacy.init_plugin({"strm_root": self.directory.name, "schedule": {"tools": {"confirm_cleanup": True}}})
+        legacy.get_config = MagicMock(return_value={})
+        legacy.get_data = MagicMock(return_value=None)
+        legacy.save_data = MagicMock()
+        with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()), patch('emetools.missing_episodes.MediaServerHelper', return_value=MagicMock()):
+            legacy.init_plugin({"strm_root": self.directory.name, "schedule": {"tools": {"confirm_cleanup": True}}})
         self.assertEqual(legacy._schedule["tools"]["confirm_mode"], "moviepilot")
 
     def test_cleanup_aborts_if_remote_listing_changes(self):

@@ -29,6 +29,7 @@ from app.application.messaging.channel.admin import matches_channel_admin
 from .invalid_data import InvalidDataCleaner
 from .p115 import P115Client
 from .subscription_monitor import SubscriptionMonitor, normalize_channel
+from .missing_episodes import DEFAULT_MISSING, MissingAction, MissingEpisodeDetector
 from . import tool_notifications as notices
 
 ICON_URL = "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg"
@@ -87,9 +88,9 @@ class MonitorChange(BaseModel):
 
 class EmeTools(_PluginBase):
     plugin_name = "ME工具"
-    plugin_desc = "订阅频道监控、无效数据清理、115 文件清理、回收站清空与文件转存。"
+    plugin_desc = "订阅频道监控、缺集检测、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.6.2"
+    plugin_version = "2.7.0"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -114,6 +115,22 @@ class EmeTools(_PluginBase):
             for scope in ("sub", "kw")
         }
         self._monitor = SubscriptionMonitor(self)
+        saved_missing = config.get("missing")
+        if not isinstance(saved_missing, dict):
+            legacy = self.get_config("EpisodeMissingSubscribe") or {}
+            saved_missing = {key: legacy[key] for key in DEFAULT_MISSING if key in legacy}
+            # Do not migrate the old task's enabled state: both plugins may still be active.
+            saved_missing["enabled"] = False
+            if self.get_data("missing_episodes") is None:
+                old_results = self.get_data("missing_episodes", plugin_id="EpisodeMissingSubscribe")
+                if isinstance(old_results, list):
+                    self.save_data("missing_episodes", old_results)
+                    old_time = self.get_data("last_scan_time", plugin_id="EpisodeMissingSubscribe")
+                    if old_time:
+                        self.save_data("last_scan_time", old_time)
+        self._missing_config = copy.deepcopy(DEFAULT_MISSING)
+        self._missing_config.update({key: value for key, value in saved_missing.items() if key in DEFAULT_MISSING})
+        self._missing = MissingEpisodeDetector(self, self._missing_config)
         self._schedule = copy.deepcopy(DEFAULT_SCHEDULE)
         for name, defaults in self._schedule.items():
             saved = (config.get("schedule") or {}).get(name) or {}
@@ -239,7 +256,28 @@ class EmeTools(_PluginBase):
                              "trigger": "interval", "func": self._run_scheduled,
                              "kwargs": {"seconds": max(60, int(move.get("check_interval") or 120))},
                              "func_kwargs": {"section": "p115_move"}})
+        if self._missing_config["enabled"]:
+            if self._legacy_missing_active():
+                logger.warning("ME工具 缺集检测：旧剧集缺集检测订阅插件仍启用，已跳过新定时任务")
+            else:
+                try:
+                    trigger = CronTrigger.from_crontab(self._missing_config["cron"])
+                    services.append({"id": "EmeTools_missing", "name": "ME工具 缺集检测",
+                                     "trigger": trigger, "func": self._run_missing_scheduled,
+                                     "kwargs": {}})
+                except ValueError as error:
+                    logger.error("ME工具 缺集检测定时表达式无效：%s", error)
         return services
+
+    def _legacy_missing_active(self) -> bool:
+        legacy = self.get_config("EpisodeMissingSubscribe") or {}
+        return isinstance(legacy, dict) and bool(legacy.get("enabled"))
+
+    def _run_missing_scheduled(self) -> None:
+        if not self._enabled or not self._missing_config["enabled"] or self._legacy_missing_active():
+            logger.warning("ME工具 缺集检测：插件已关闭或原缺集插件仍启用，跳过本次检测")
+            return
+        self._missing.scan_missing_episodes()
 
     def _settings(self) -> dict:
         return {"enabled": self._enabled, "show_sidebar_nav": self._show_sidebar_nav,
@@ -254,7 +292,8 @@ class EmeTools(_PluginBase):
                             "schedule": copy.deepcopy(self._schedule),
                             "tg_api_id": self._tg_api_id, "tg_api_hash": self._tg_api_hash,
                             "tg_forward_token": self._tg_forward_token, "tg_session": self._tg_session,
-                            "monitor": copy.deepcopy(self._monitor_config)})
+                            "monitor": copy.deepcopy(self._monitor_config),
+                            "missing": copy.deepcopy(self._missing_config)})
 
     def _source_cookie(self) -> str:
         config = self.get_config("P115StrmHelper") or {}
@@ -297,6 +336,76 @@ class EmeTools(_PluginBase):
     async def status(self) -> dict:
         return {"settings": self._settings(), "schedule": copy.deepcopy(self._schedule),
                 "last_run": dict(self._last_run)}
+
+    async def missing_status(self) -> dict:
+        self._missing._load_saved_data() if not self._missing._is_scanning else None
+        return {"config": copy.deepcopy(self._missing_config),
+                "legacy_enabled": self._legacy_missing_active(),
+                "scanning": self._missing._is_scanning,
+                "last_scan_time": self._missing._last_scan_time,
+                "results": copy.deepcopy(self._missing._results)}
+
+    async def missing_options(self) -> dict:
+        servers, libraries, series = await asyncio.to_thread(self._missing._get_form_options)
+        return {"servers": servers, "libraries": libraries, "series": series}
+
+    async def missing_action(self, action: dict) -> dict:
+        operation = action.get("operation")
+        if operation == "save":
+            changes = action.get("config")
+            if not isinstance(changes, dict) or set(changes) - set(DEFAULT_MISSING):
+                raise HTTPException(status_code=400, detail="缺集检测配置格式不正确")
+            updated = {**self._missing_config, **changes}
+            updated["enabled"] = bool(updated["enabled"])
+            for key in ("only_existing_seasons", "ignore_season_zero", "ignore_future"):
+                updated[key] = bool(updated[key])
+            if updated["missing_action"] not in {item.value for item in MissingAction}:
+                raise HTTPException(status_code=400, detail="缺集检测处理方式无效")
+            for key in ("server_names", "library_names", "skip_series_ids"):
+                if not isinstance(updated[key], list) or len(updated[key]) > 1000:
+                    raise HTTPException(status_code=400, detail=f"{key} 应为多选列表")
+                updated[key] = self._missing._parse_names(updated[key])
+            if any(not name.isdecimal() for name in updated["skip_series_ids"]):
+                raise HTTPException(status_code=400, detail="跳过剧集的 TMDB ID 必须是数字")
+            try:
+                CronTrigger.from_crontab(str(updated["cron"]))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"cron 表达式无效：{exc}") from exc
+            if updated["enabled"] and self._legacy_missing_active():
+                raise HTTPException(status_code=409, detail="请先停用原「剧集缺集检测订阅」插件，再启用 ME工具缺集定时检测")
+            if self._missing._is_scanning:
+                raise HTTPException(status_code=409, detail="扫描进行中，请稍后保存配置")
+            newly_skipped = set(updated["skip_series_ids"]) - set(self._missing_config["skip_series_ids"])
+            self._missing_config = updated
+            self._missing.configure(updated)
+            self._persist()
+            Scheduler().update_plugin_job(self.__class__.__name__)
+            if newly_skipped:
+                # The old plugin cancels subscriptions for skipped series on save.
+                # Never do this during automatic migration/initialization.
+                original = self._missing._skip_series_ids
+                try:
+                    self._missing._skip_series_ids = newly_skipped
+                    await asyncio.to_thread(self._missing._cancel_skipped_subscriptions)
+                finally:
+                    self._missing._skip_series_ids = original
+            return {"message": "缺集检测配置已保存"}
+        if operation == "scan":
+            if self._missing._is_scanning:
+                raise HTTPException(status_code=409, detail="缺集检测正在扫描")
+            if self._legacy_missing_active() and self._missing_config["missing_action"] == MissingAction.ADD_SUBSCRIBE.value:
+                raise HTTPException(status_code=409, detail="原缺集插件仍启用；请先停用它，避免两处同时添加订阅")
+            threading.Thread(target=self._missing.scan_missing_episodes, daemon=True).start()
+            return {"message": "已开始扫描，请稍后刷新检测结果"}
+        if operation == "clear":
+            if self._missing._is_scanning:
+                raise HTTPException(status_code=409, detail="缺集检测正在扫描")
+            self._missing._results = []
+            self._missing._last_scan_time = "从未扫描"
+            self.save_data("missing_episodes", [])
+            self.save_data("last_scan_time", "从未扫描")
+            return {"message": "检测记录已清空（原插件记录仍保留）"}
+        raise HTTPException(status_code=400, detail="未知缺集检测操作")
 
     async def save_settings(self, settings: dict) -> dict:
         allowed = {"enabled", "show_sidebar_nav", "strm_root", "rb_password",
@@ -1017,4 +1126,7 @@ class EmeTools(_PluginBase):
             {"path": "/action", "endpoint": self.action, "methods": ["POST"], "auth": "bear", "summary": "执行插件工具"},
             {"path": "/monitor/status", "endpoint": self.monitor_status, "methods": ["GET"], "auth": "bear", "summary": "Telegram 监控状态"},
             {"path": "/monitor/action", "endpoint": self.monitor_action, "methods": ["POST"], "auth": "bear", "summary": "Telegram 监控操作"},
+            {"path": "/missing/status", "endpoint": self.missing_status, "methods": ["GET"], "auth": "bear", "summary": "缺集检测状态"},
+            {"path": "/missing/options", "endpoint": self.missing_options, "methods": ["GET"], "auth": "bear", "summary": "缺集检测可选服务器和媒体库"},
+            {"path": "/missing/action", "endpoint": self.missing_action, "methods": ["POST"], "auth": "bear", "summary": "缺集检测操作"},
         ]

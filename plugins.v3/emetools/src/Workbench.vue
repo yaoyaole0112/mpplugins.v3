@@ -10,6 +10,7 @@ const props = defineProps({
 const emit = defineEmits(['close'])
 const sections = [
   { key: 'subscription', title: '订阅监控', icon: 'mdi-television-play', detail: '订阅与频道监控' },
+  { key: 'missing', title: '缺集检测', icon: 'mdi-television-search', detail: 'Emby 剧集缺集检测与按季订阅' },
   { key: 'invalid', title: '清理数据', icon: 'mdi-folder-search-outline', detail: '扫描与清理 STRM 独立资料' },
   { key: 'cleanup', title: '清理文件', icon: 'mdi-folder-remove-outline', detail: '115 文件夹清理' },
   { key: 'trash', title: '清空回收站', icon: 'mdi-delete-alert-outline', detail: '不可恢复的彻底删除' },
@@ -48,6 +49,12 @@ const monitor = reactive({ configured: false, logged_in: false, dependency_ready
 const drafts = reactive({ sub: { channels: [], keywords: [], blacklist: [] }, kw: { channels: [], keywords: [], blacklist: [] } })
 const entry = reactive({ sub: { channels: '' }, kw: { channels: '', keywords: '', blacklist: '' } })
 const telegram = reactive({ api_id: '', api_hash: '', forward_token: '', phone: '', code: '', password: '', password_required: false })
+const missing = reactive({ config: { enabled: false, cron: '35 3 * * *', only_existing_seasons: true,
+  missing_action: '仅检查记录', ignore_season_zero: true, ignore_future: true,
+  server_names: [], library_names: [], skip_series_ids: [] },
+  results: [], last_scan_time: '从未扫描', scanning: false, legacy_enabled: false })
+const missingOptions = reactive({ servers: [], libraries: [], series: [] })
+const missingOptionsLoading = ref(false)
 
 function unpack(response) {
   if (response && Object.prototype.hasOwnProperty.call(response, 'success')) {
@@ -126,6 +133,41 @@ async function loadMonitor() {
     drafts[scope].keywords = [...(status[scope]?.keywords || [])]
     drafts[scope].blacklist = [...(status[scope]?.blacklist || [])]
   }
+}
+async function loadMissing() {
+  const status = await get('missing/status')
+  Object.assign(missing, status)
+  missing.config = { ...status.config, server_names: [...status.config.server_names],
+    library_names: [...status.config.library_names], skip_series_ids: [...status.config.skip_series_ids] }
+}
+async function loadMissingOptions() {
+  missingOptionsLoading.value = true
+  try { Object.assign(missingOptions, await get('missing/options')) }
+  catch (err) { error.value = err?.message || '读取 Emby 选项失败' }
+  finally { missingOptionsLoading.value = false }
+}
+async function missingCommand(operation) {
+  await work(async () => {
+    const result = await post('missing/action', { operation, ...(operation === 'save' ? { config: missing.config } : {}) })
+    notice.value = result.message
+    await loadMissing()
+  })
+}
+function downloadMissingCsv() {
+  const keys = ['ServerName', 'LibraryName', 'SeriesName', 'SeasonFormatted', 'MissingEpisodes', 'ActionResult']
+  const cells = ['服务器', '媒体库', '剧集名称', '缺失季度', '缺失集号', '处理结果']
+  const quote = value => `"${String(value ?? '').replaceAll('"', '""')}"`
+  const rows = [cells, ...missing.results.map(item => keys.map(key => item[key]))]
+  const blob = new Blob(['\ufeff', rows.map(row => row.map(quote).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `剧集缺集清单_${new Date().toISOString().slice(0, 10)}.csv`
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+function clearMissing() {
+  if (window.confirm('清空 ME工具 的缺集检测记录？原插件记录不受影响。')) missingCommand('clear')
 }
 async function monitorCommand(operation, scope = 'sub', extra = {}) {
   await work(async () => {
@@ -318,8 +360,9 @@ function chooseSection(key) {
   active.value = key
   notice.value = ''
   error.value = ''
+  if (key === 'missing') { loadMissing().catch(err => { error.value = err?.message || '读取缺集结果失败' }); loadMissingOptions() }
 }
-onMounted(load)
+onMounted(() => { load(); loadMissing().catch(() => {}) })
 </script>
 
 <template>
@@ -338,6 +381,30 @@ onMounted(load)
       <div v-if="loading" class="eme-message">正在加载插件配置…</div>
       <div v-if="error" class="eme-message eme-error" role="alert">{{ error }}</div>
       <div v-if="notice" class="eme-message eme-success" role="status">{{ notice }}</div>
+      <template v-if="active === 'missing'">
+        <section class="eme-card">
+          <div class="eme-card-heading"><div><h3>运行配置设置</h3><p>扫描 Emby 电视剧媒体库，对照 TMDB 检测缺集；可记录或按季订阅。</p></div><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('save')">保存配置</button></div>
+          <p v-if="missing.legacy_enabled" class="eme-message eme-error">原「剧集缺集检测订阅」插件仍启用。配置与历史结果已复制到这里；请先停用原插件，再开启此处定时任务或执行自动订阅扫描，避免重复订阅。原插件数据不会被删除。</p>
+          <div class="eme-options eme-settings-switches">
+            <label class="eme-switch-label"><input v-model="missing.config.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时检测</span></label>
+            <label class="eme-switch-label"><input v-model="missing.config.only_existing_seasons" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>仅检查已有季缺失</span></label>
+            <label class="eme-switch-label"><input v-model="missing.config.ignore_season_zero" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>忽略特别篇（S00/SP）</span></label>
+            <label class="eme-switch-label"><input v-model="missing.config.ignore_future" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>忽略未上映剧集</span></label>
+          </div>
+          <div class="eme-fields"><label>执行周期（cron）<input v-model.trim="missing.config.cron" placeholder="35 3 * * *" /></label><label>缺集处理方式<select v-model="missing.config.missing_action"><option>仅检查记录</option><option>添加到订阅</option><option>标记为存在</option></select></label></div>
+          <p class="eme-hint">“标记为存在”仅记录处理结果，与原插件一致；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。</p>
+        </section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新可选项' }}</button></div>
+          <div class="eme-missing-selects"><label>Emby 服务器（可多选）<select v-model="missing.config.server_names" multiple size="4"><option v-for="item in missingOptions.servers" :key="item.value" :value="item.value">{{ item.title }}</option><option v-for="item in missing.config.server_names.filter(name => !missingOptions.servers.some(opt => opt.value === name))" :key="item" :value="item">{{ item }}（已保存）</option></select></label>
+            <label>电视剧媒体库（可多选）<select v-model="missing.config.library_names" multiple size="4"><option v-for="item in missingOptions.libraries" :key="item.value" :value="item.value">{{ item.title }}</option><option v-for="item in missing.config.library_names.filter(name => !missingOptions.libraries.some(opt => opt.value === name))" :key="item" :value="item">{{ item }}（已保存）</option></select></label>
+            <label>跳过检测剧集（按拼音排序，可多选）<select v-model="missing.config.skip_series_ids" multiple size="6"><option v-for="item in missingOptions.series" :key="item.value" :value="item.value">{{ item.title }}</option><option v-for="item in missing.config.skip_series_ids.filter(id => !missingOptions.series.some(opt => opt.value === id))" :key="item" :value="item">TMDB {{ item }}（已保存）</option></select></label>
+          </div><p class="eme-hint">按 Ctrl / ⌘ 键可多选；再次点击已选项可取消。更改检测范围后请先保存配置。</p>
+        </section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>检测结果</h3><p>{{ missing.scanning ? '后台扫描中' : `上次扫描：${missing.last_scan_time}` }} · {{ missing.results.length }} 条缺失季</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy" @click="loadMissing">刷新结果</button><button class="eme-button secondary" :disabled="busy" @click="downloadMissingCsv">导出 CSV</button></div></div>
+          <div class="eme-actions"><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('scan')">立即检测</button><button class="eme-button danger" :disabled="busy || missing.scanning || !missing.results.length" @click="clearMissing">清理检查记录</button></div>
+          <div v-if="missing.results.length" class="eme-missing-results"><table><thead><tr><th>服务器</th><th>媒体库</th><th>剧集名称</th><th>缺失季度</th><th>缺失集号</th><th>处理结果</th></tr></thead><tbody><tr v-for="(item, index) in missing.results" :key="index"><td>{{ item.ServerName }}</td><td>{{ item.LibraryName }}</td><td>{{ item.SeriesName }}</td><td>{{ item.SeasonFormatted }}</td><td>{{ item.MissingEpisodes }}</td><td>{{ item.ActionResult }}</td></tr></tbody></table></div><p v-else class="eme-hint">暂无缺失数据或尚未运行扫描。</p>
+        </section>
+      </template>
       <section v-if="active === 'settings'" class="eme-card">
         <div class="eme-card-heading"><h3>基础设置</h3><button class="eme-button primary" :disabled="busy" @click="saveBasicSettings">保存设置</button></div>
         <div class="eme-options eme-settings-switches">
@@ -461,5 +528,7 @@ onMounted(load)
 .eme-move-label,.eme-move-arrow{flex:none;font-weight:700;color:rgba(var(--v-theme-on-surface),.65)}
 .eme-move-arrow{font-size:18px}
 .eme-chips{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:12px 0}.eme-chip{padding:5px 8px;border-radius:9px;background:rgba(var(--v-theme-primary),.1);overflow-wrap:anywhere}.eme-chip button{border:0;background:transparent;color:#e45c5c;cursor:pointer;font-size:18px;margin-left:5px}
+.eme-missing-selects{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.eme-missing-selects>label:last-child{grid-column:1/-1}.eme-missing-selects select{height:auto;min-height:110px}.eme-missing-results{overflow:auto;max-height:360px;margin-top:16px}.eme-missing-results table{border-collapse:collapse;width:100%;min-width:740px;text-align:left}.eme-missing-results th,.eme-missing-results td{padding:10px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));white-space:normal}.eme-missing-results th{font-weight:700;white-space:nowrap}
 @media(max-width:760px){.eme-cleanup-grid{grid-template-columns:1fr}.eme-move-row{flex-wrap:wrap}.eme-move-row .eme-folder-choice{max-width:none;min-width:80px}}
+@media(max-width:760px){.eme-missing-selects{grid-template-columns:1fr}}
 </style>

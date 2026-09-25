@@ -1,15 +1,28 @@
 {
   "EmeTools": {
     "name": "ME工具",
-    "description": "MoviePilot 独立运行订阅监控、无效数据清理、115 文件清理、回收站清空与文件转存",
+    "description": "MoviePilot 独立运行订阅监控、缺集检测、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.6.2",
+    "version": "2.7.0",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
     "release": false,
     "system_version": ">=3.0.0",
-    "level": 2
+    "level": 2,
+    "history": {
+      "v2.7.0": "新增独立缺集检测：迁移原插件配置与历史结果，支持 Emby/TMDB 扫描、按季订阅、筛选与 CSV 导出；首次迁移默认关闭新定时任务以避免重复运行；补充插件更新说明",
+      "v2.6.2": "优化定时清理确认方式与自动隔离清理选项之间的间距",
+      "v2.6.1": "调整定时清理确认选项位置，统一回收站入口名称并更名为 ME工具",
+      "v2.6.0": "新增清理数据的 MoviePilot 页面与 Telegram 按钮确认方式，修复侧栏页面显示",
+      "v2.5.2": "统一 STRM 扫描根目录与页面导航，优化设置开关",
+      "v2.5.1": "修复 Telegram 转发代理连接和 Bot 命令回复来源",
+      "v2.5.0": "补充各工具详细日志并使用自定义图标",
+      "v2.4.0": "改进订阅频道监控，新增工具 Bot 命令与通知渠道控制",
+      "v2.3.0": "工具通知对齐 MediaEnhance 的触发条件与模板",
+      "v2.2.0": "加入订阅监控和 Telegram 频道功能，并拆分基础设置与 Telegram 账号",
+      "v2.1.0": "首发独立运行的媒体清理与文件转存工具"
+    }
   },
   "NotificationBlocker": {
     "name": "通知消息屏蔽",
