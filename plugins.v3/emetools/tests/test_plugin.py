@@ -162,6 +162,19 @@ class PluginTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             self.run_async(self.plugin.save_settings({"tg_session": "inject"}))
 
+    def test_basic_and_telegram_settings_can_be_saved_independently(self):
+        self.plugin._tg_api_id = "1234"
+        self.plugin._tg_api_hash = "a" * 32
+        self.plugin._tg_forward_token = "123:" + "z" * 35
+        self.run_async(self.plugin.save_settings({"show_sidebar_nav": False}))
+        self.assertEqual(self.plugin._tg_api_id, "1234")
+        self.assertEqual(self.plugin._tg_api_hash, "a" * 32)
+        self.assertEqual(self.plugin._tg_forward_token, "123:" + "z" * 35)
+        self.run_async(self.plugin.save_settings({"tg_forward_token": "321:" + "x" * 35}))
+        self.assertFalse(self.plugin._show_sidebar_nav)
+        self.assertEqual(self.plugin._strm_root, self.directory.name)
+        self.assertEqual(self.plugin._tg_forward_token, "321:" + "x" * 35)
+
     def test_rejects_unknown_schedule_and_root_cleanup(self):
         with self.assertRaises(HTTPException):
             self.run_async(self.plugin.save_schedule(ScheduleChange(

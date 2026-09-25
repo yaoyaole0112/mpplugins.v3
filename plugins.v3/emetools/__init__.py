@@ -68,7 +68,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体清理转存工具"
     plugin_desc = "订阅频道监控、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "2.2.1"
+    plugin_version = "2.2.2"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"

@@ -12,7 +12,7 @@ const sections = [
   { key: 'cleanup', title: '清理文件', icon: 'mdi-folder-remove-outline', detail: '115 文件夹清理' },
   { key: 'trash', title: '清空 115 回收站', icon: 'mdi-delete-alert-outline', detail: '不可恢复的彻底删除' },
   { key: 'move', title: '文件转存', icon: 'mdi-folder-swap-outline', detail: '115 文件夹监控转存' },
-  { key: 'settings', title: '设置', icon: 'mdi-cog-outline', detail: '运行配置设置' },
+  { key: 'settings', title: '设置', icon: 'mdi-cog-outline', detail: '基础设置与 Telegram 账号' },
 ]
 const active = ref('subscription')
 const busy = ref(false)
@@ -89,14 +89,30 @@ async function getPending() {
   const result = await execute('pending')
   pendingJobs.value = result.pending || []
 }
-async function saveConnection() {
+async function saveBasicSettings() {
   await work(async () => {
     const { enabled, show_sidebar_nav, strm_root, rb_password } = settings
-    const result = await post('settings', { enabled, show_sidebar_nav, strm_root, rb_password,
-      tg_api_id: telegram.api_id, tg_api_hash: telegram.api_hash, tg_forward_token: telegram.forward_token })
+    const result = await post('settings', { enabled, show_sidebar_nav, strm_root, rb_password })
     Object.assign(settings, result.settings)
-    await load()
-    notice.value = '插件设置已保存'
+    settings.rb_password = ''
+    const status = await get('status')
+    schedule.tools.path = status.schedule?.tools?.path || strm_root
+    scanPath.value = schedule.tools.path
+    notice.value = '基础设置已保存'
+  })
+}
+async function saveTelegramSettings() {
+  await work(async () => {
+    const result = await post('settings', {
+      tg_api_id: telegram.api_id, tg_api_hash: telegram.api_hash,
+      tg_forward_token: telegram.forward_token,
+    })
+    settings.tg_api_id = result.settings.tg_api_id
+    settings.tg_api_hash_configured = result.settings.tg_api_hash_configured
+    settings.tg_forward_token_configured = result.settings.tg_forward_token_configured
+    telegram.api_hash = ''
+    telegram.forward_token = ''
+    notice.value = 'Telegram 账号设置已保存'
   })
 }
 async function loadMonitor() {
@@ -320,14 +336,16 @@ onMounted(load)
       <div v-if="error" class="eme-message eme-error" role="alert">{{ error }}</div>
       <div v-if="notice" class="eme-message eme-success" role="status">{{ notice }}</div>
       <section v-if="active === 'settings'" class="eme-card">
-        <div class="eme-card-heading"><h3>运行配置设置</h3><button class="eme-button primary" :disabled="busy" @click="saveConnection">保存设置</button></div>
+        <div class="eme-card-heading"><h3>基础设置</h3><button class="eme-button primary" :disabled="busy" @click="saveBasicSettings">保存设置</button></div>
         <div class="eme-options eme-settings-switches">
           <label class="eme-switch-label"><input v-model="settings.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用插件</span></label>
           <label class="eme-switch-label"><input v-model="settings.show_sidebar_nav" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>显示 MP 侧栏入口</span></label>
         </div>
         <div class="eme-settings-fields"><label>STRM 根目录（MoviePilot 容器内）<div class="eme-inline"><input :value="settings.strm_root" readonly /><button class="eme-button secondary" type="button" :disabled="busy" @click="browse('root')">浏览选择</button></div></label><label>115 回收站安全密钥 <input v-model.trim="settings.rb_password" type="password" autocomplete="off" :placeholder="settings.rb_password_configured ? '已配置；留空保持不变' : '默认 000000；留空保持不变'" /></label></div>
         <p class="eme-hint">115 Cookie：{{ settings.cookie_configured ? '已从 115 网盘 STRM 助手读取，更新后自动同步' : '未读取到，请先在 115 网盘 STRM 助手中配置 Cookie' }}。115 连接沿用 MoviePilot 容器的网络环境。</p>
-        <div class="eme-card-heading"><h3>Telegram 账号</h3></div>
+      </section>
+      <section v-if="active === 'settings'" class="eme-card">
+        <div class="eme-card-heading"><h3>Telegram 账号</h3><button class="eme-button primary" :disabled="busy" @click="saveTelegramSettings">保存设置</button></div>
         <p class="eme-hint">使用你自己的 Telegram 账号监听频道。请从 my.telegram.org 的 API development tools 获取 API ID 和 API Hash；此插件不会读取 MediaEnhance 的账号或会话。</p>
         <div class="eme-settings-fields"><label>API ID<input v-model.trim="telegram.api_id" inputmode="numeric" placeholder="Telegram API ID" /></label>
           <label>API Hash<input v-model.trim="telegram.api_hash" type="password" autocomplete="new-password" :placeholder="settings.tg_api_hash_configured ? '已配置；留空保持不变' : '32 位字符串'" /></label>
