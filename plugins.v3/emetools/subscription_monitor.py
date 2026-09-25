@@ -122,13 +122,13 @@ class SubscriptionMonitor:
         if not self.plugin._tg_api_id or not self.plugin._tg_api_hash:
             raise ValueError("请先在设置中保存 Telegram API ID 和 API Hash")
         if self.client is None:
-            logger.info("MediaEnhance工具 Telegram：初始化用户账号监听客户端")
+            logger.info("ME工具 Telegram：初始化用户账号监听客户端")
             self.client = TelegramClient(StringSession(self.plugin._tg_session), int(self.plugin._tg_api_id), self.plugin._tg_api_hash)
             self.client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
         if not self.client.is_connected():
-            logger.info("MediaEnhance工具 Telegram：开始连接 Telegram")
+            logger.info("ME工具 Telegram：开始连接 Telegram")
             await self.client.connect()
-            logger.info("MediaEnhance工具 Telegram：连接成功")
+            logger.info("ME工具 Telegram：连接成功")
         return self.client
 
     async def _authorized(self):
@@ -143,7 +143,7 @@ class SubscriptionMonitor:
         client = await self._connect()
         result = await client.send_code_request(phone)
         self.phone, self.code_hash = phone, result.phone_code_hash
-        logger.info("MediaEnhance工具 Telegram：登录验证码已请求（手机号及验证码不记录）")
+        logger.info("ME工具 Telegram：登录验证码已请求（手机号及验证码不记录）")
         return {"ok": True, "message": "验证码已发送，请在 Telegram 中查看"}
 
     async def sign_in(self, code="", password=""):
@@ -162,7 +162,7 @@ class SubscriptionMonitor:
         self.plugin._tg_session = client.session.save()
         self.plugin._persist()
         self.code_hash = None
-        logger.info("MediaEnhance工具 Telegram：账号登录成功，session 已保存")
+        logger.info("ME工具 Telegram：账号登录成功，session 已保存")
         return {"ok": True, "message": "Telegram 登录成功"}
 
     async def logout(self):
@@ -174,11 +174,11 @@ class SubscriptionMonitor:
             self.client = None
         self.plugin._tg_session = ""
         self.plugin._persist()
-        logger.info("MediaEnhance工具 Telegram：已退出登录并停止监控")
+        logger.info("ME工具 Telegram：已退出登录并停止监控")
         return {"ok": True}
 
     async def start(self, scope):
-        logger.info("MediaEnhance工具 Telegram：准备启动 %s 监控", scope)
+        logger.info("ME工具 Telegram：准备启动 %s 监控", scope)
         client = await self._authorized()
         config = self.plugin._monitor_config[scope]
         if not config["channels"]:
@@ -191,20 +191,20 @@ class SubscriptionMonitor:
         for channel in config["channels"]:
             entity = await client.get_entity(channel)
             ids.add(int(entity.id))
-            logger.info("MediaEnhance工具 Telegram：%s 已解析频道 @%s（ID %d）", scope, channel, entity.id)
+            logger.info("ME工具 Telegram：%s 已解析频道 @%s（ID %d）", scope, channel, entity.id)
         self.channel_ids[scope] = ids
         self.plugin._monitor_config[scope]["enabled"] = True
         self.plugin._persist()
         if self._watchdog is None or self._watchdog.done():
             self._watchdog = asyncio.create_task(self._poll_channels())
-        logger.info("MediaEnhance工具 Telegram：%s 监控已启动，共监听 %d 个频道", scope, len(ids))
+        logger.info("ME工具 Telegram：%s 监控已启动，共监听 %d 个频道", scope, len(ids))
         return {"ok": True}
 
     async def stop(self, scope):
         self.channel_ids[scope].clear()
         self.plugin._monitor_config[scope]["enabled"] = False
         self.plugin._persist()
-        logger.info("MediaEnhance工具 Telegram：%s 监控已停止", scope)
+        logger.info("ME工具 Telegram：%s 监控已停止", scope)
         return {"ok": True}
 
     async def resume(self):
@@ -216,13 +216,13 @@ class SubscriptionMonitor:
                     await self.start(scope)
                 except Exception as exc:
                     self.last_error = f"{scope} 监控恢复失败：{type(exc).__name__}"
-                    logger.warning("MediaEnhance工具 %s 监控恢复失败: %s", scope, type(exc).__name__)
+                    logger.warning("ME工具 %s 监控恢复失败: %s", scope, type(exc).__name__)
         if any(self.plugin._monitor_config[scope]["enabled"] for scope in ("sub", "kw")):
             if self._watchdog is None or self._watchdog.done():
                 self._watchdog = asyncio.create_task(self._poll_channels())
 
     async def shutdown(self):
-        logger.info("MediaEnhance工具 Telegram：停止频道轮询并断开连接")
+        logger.info("ME工具 Telegram：停止频道轮询并断开连接")
         if self._watchdog:
             self._watchdog.cancel()
             self._watchdog = None
@@ -272,13 +272,13 @@ class SubscriptionMonitor:
                         await self._on_message(SimpleNamespace(chat_id=message.chat_id or -int(f"100{peer_id}"),
                                                                id=message.id, raw_text=message.raw_text, message=message))
                 self.last_poll = datetime.now().strftime("%m-%d %H:%M:%S")
-                logger.info("MediaEnhance工具 Telegram：频道补漏完成，频道=%d，最近15分钟消息=%d，订阅=%d，累计命中=%d",
+                logger.info("ME工具 Telegram：频道补漏完成，频道=%d，最近15分钟消息=%d，订阅=%d，累计命中=%d",
                             checked, recent, len(self._subscriptions), len(self.hits))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self.last_error = f"频道补漏失败：{type(exc).__name__}"
-                logger.warning("MediaEnhance工具频道补漏失败: %s", type(exc).__name__)
+                logger.warning("ME工具频道补漏失败: %s", type(exc).__name__)
             await asyncio.sleep(60)
 
     async def _refresh_subscriptions(self):
@@ -286,10 +286,10 @@ class SubscriptionMonitor:
             self._subscriptions = await asyncio.wait_for(
                 asyncio.to_thread(self.plugin._subscription_items), timeout=12)
             self._last_refresh = time.monotonic()
-            logger.info("MediaEnhance工具 Telegram：已同步 MoviePilot 订阅 %d 条", len(self._subscriptions))
+            logger.info("ME工具 Telegram：已同步 MoviePilot 订阅 %d 条", len(self._subscriptions))
         except Exception as exc:
             self.last_error = f"读取 MoviePilot 订阅失败：{type(exc).__name__}"
-            logger.warning("MediaEnhance工具读取订阅失败: %s", type(exc).__name__)
+            logger.warning("ME工具读取订阅失败: %s", type(exc).__name__)
 
     async def _on_message(self, event):
         peer_id = int(str(event.chat_id)[4:]) if str(event.chat_id).startswith("-100") else abs(int(event.chat_id or 0))
@@ -302,7 +302,7 @@ class SubscriptionMonitor:
             return
         text = event.raw_text
         # Never log full posts: they can contain private links, credentials or user data.
-        logger.info("MediaEnhance工具 Telegram：收到频道消息，频道ID=%s，消息ID=%s，监控=%s，正文=%d 字",
+        logger.info("ME工具 Telegram：收到频道消息，频道ID=%s，消息ID=%s，监控=%s，正文=%d 字",
                     event.chat_id, event.id, "/".join(scopes), len(text))
         names = []
         if "sub" in scopes:
@@ -314,11 +314,11 @@ class SubscriptionMonitor:
         if "kw" in scopes and matches_keyword(text, self.plugin._monitor_config["kw"]["keywords"], self.plugin._monitor_config["kw"]["blacklist"]):
             names.append("关键词匹配")
         if not names:
-            logger.info("MediaEnhance工具 Telegram：频道ID=%s 消息ID=%s 未命中（已比较订阅=%d）",
+            logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 未命中（已比较订阅=%d）",
                         event.chat_id, event.id, len(self._subscriptions) if "sub" in scopes else 0)
             self._seen.add(key)
             return
-        logger.info("MediaEnhance工具 Telegram：频道ID=%s 消息ID=%s 命中 %d 项：%s，开始转发",
+        logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 命中 %d 项：%s，开始转发",
                     event.chat_id, event.id, len(names), ", ".join(re.sub(r"[\r\n\x00-\x1f]", " ", str(name))[:55]
                                                              for name in names[:5]))
         try:
@@ -336,16 +336,16 @@ class SubscriptionMonitor:
                     raise ValueError("转发 Bot Token 无效")
                 self._forward_bot_username = str(result["result"]["username"])
                 self._forward_bot_token = token
-                logger.info("MediaEnhance工具 Telegram：已按 MP 网络配置解析转发 Bot（代理=%s）", bool(proxy))
+                logger.info("ME工具 Telegram：已按 MP 网络配置解析转发 Bot（代理=%s）", bool(proxy))
             bot = await self.client.get_entity(self._forward_bot_username)
             await self.client.forward_messages(bot, event.message)
             self._seen.add(key)
             self.hits.appendleft({"time": datetime.now().strftime("%m-%d %H:%M:%S"), "channel": str(event.chat_id), "matches": names})
             self.last_error = ""
-            logger.info("MediaEnhance工具 Telegram：频道ID=%s 消息ID=%s 已转发到指定 Bot", event.chat_id, event.id)
+            logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 已转发到指定 Bot", event.chat_id, event.id)
         except Exception as exc:
             self.last_error = f"转发失败：{type(exc).__name__}"
-            logger.warning("MediaEnhance工具 Telegram：频道ID=%s 消息ID=%s 转发失败：%s（不记录 Bot Token）",
+            logger.warning("ME工具 Telegram：频道ID=%s 消息ID=%s 转发失败：%s（不记录 Bot Token）",
                            event.chat_id, event.id, type(exc).__name__)
         if len(self._seen) > 2000:
             self._seen.clear()

@@ -33,7 +33,7 @@ from . import tool_notifications as notices
 
 ICON_URL = "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg"
 SECTION_NAMES = {"tools": "清理数据", "p115_cleanup": "清理文件",
-                 "p115_trash": "清空 115 回收站", "p115_move": "文件转存"}
+                 "p115_trash": "清空回收站", "p115_move": "文件转存"}
 
 
 def _log_label(value: Any) -> str:
@@ -86,10 +86,10 @@ class MonitorChange(BaseModel):
 
 
 class EmeTools(_PluginBase):
-    plugin_name = "MediaEnhance工具"
+    plugin_name = "ME工具"
     plugin_desc = "订阅频道监控、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.6.0"
+    plugin_version = "2.6.1"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -127,12 +127,12 @@ class EmeTools(_PluginBase):
         self._last_run = {}
         if "cookie" in config or "proxy" in config:
             self._persist()
-        logger.info("MediaEnhance工具：初始化完成，启用=%s，STRM=%s，任务=%s，订阅/关键词监控=%s/%s",
+        logger.info("ME工具：初始化完成，启用=%s，STRM=%s，任务=%s，订阅/关键词监控=%s/%s",
                     self._enabled, _log_label(self._strm_root),
                     ", ".join(SECTION_NAMES[key] for key, value in self._schedule.items() if value["enabled"]) or "无",
                     self._monitor_config["sub"]["enabled"], self._monitor_config["kw"]["enabled"])
         if self._enabled and self._tg_session and any(item["enabled"] for item in self._monitor_config.values()):
-            logger.info("MediaEnhance工具：尝试恢复 Telegram 监控（不会输出账号和登录凭据）")
+            logger.info("ME工具：尝试恢复 Telegram 监控（不会输出账号和登录凭据）")
             self._monitor._ensure_loop()
             asyncio.run_coroutine_threadsafe(self._monitor.resume(), self._monitor.loop)
 
@@ -157,13 +157,13 @@ class EmeTools(_PluginBase):
             return
         # Command replies must have a real destination; never turn them into broadcasts.
         if not data.get("user") or not data.get("channel") or not data.get("source"):
-            logger.warning("MediaEnhance工具 Bot 命令缺少用户、渠道或来源，已拒绝回复以避免广播")
+            logger.warning("ME工具 Bot 命令缺少用户、渠道或来源，已拒绝回复以避免广播")
             return
         threading.Thread(target=self._run_tool_command, args=(action, data.copy()), daemon=True).start()
 
     def _run_tool_command(self, action: str, data: dict) -> None:
         try:
-            logger.info("MediaEnhance工具 Bot 命令开始：%s，来源=%s", action, _log_label(data["source"]))
+            logger.info("ME工具 Bot 命令开始：%s，来源=%s", action, _log_label(data["source"]))
             if action == "emetools_cleanup":
                 result = self._cleaner.start_scan(self._strm_root)
                 text = f"发现 {result['count']} 项无效数据。请在插件「清理无效数据」页面重新扫描并确认隔离。" if result["count"] else "未发现无效数据。"
@@ -173,7 +173,7 @@ class EmeTools(_PluginBase):
                         if result.get("ok") else result.get("message", "预览失败"))
             elif action == "emetools_cleartrash":
                 result = self._trash_info()
-                text = f"回收站有 {result['count']} 项；请在插件「清空 115 回收站」页面重新查询并二次确认。" if result["count"] else "回收站为空。"
+                text = f"回收站有 {result['count']} 项；请在插件「清空回收站」页面重新查询并二次确认。" if result["count"] else "回收站为空。"
             else:
                 result = self._move_run()
                 text = result.get("message") or f"文件转存完成：移动 {result.get('moved', 0)} 项，失败 {len(result.get('errors') or [])} 项。"
@@ -183,21 +183,21 @@ class EmeTools(_PluginBase):
                     # notification to every bot subscribed to the Plugin message type.
                     text = f"{notice[0]}\n{notice[1]}"
             self.chain.post_message(Message(channel=data["channel"], source=data["source"],
-                                            userid=str(data["user"]), title="MediaEnhance工具", text=text))
-            logger.info("MediaEnhance工具 Bot 命令完成：%s", action)
+                                            userid=str(data["user"]), title="ME工具", text=text))
+            logger.info("ME工具 Bot 命令完成：%s", action)
         except Exception as exc:
-            logger.warning("MediaEnhance工具命令 %s 执行失败: %s", action, type(exc).__name__)
+            logger.warning("ME工具命令 %s 执行失败: %s", action, type(exc).__name__)
             self.chain.post_message(Message(channel=data["channel"], source=data["source"], userid=str(data["user"]),
-                                            title="MediaEnhance工具", text=f"命令执行失败：{type(exc).__name__}，请查看插件日志。"))
+                                            title="ME工具", text=f"命令执行失败：{type(exc).__name__}，请查看插件日志。"))
 
     def stop_service(self) -> None:
-        logger.info("MediaEnhance工具：停止插件服务和 Telegram 监控")
+        logger.info("ME工具：停止插件服务和 Telegram 监控")
         monitor = getattr(self, "_monitor", None)
         if monitor and monitor.loop and monitor.thread and monitor.thread.is_alive():
             try:
                 asyncio.run_coroutine_threadsafe(monitor.shutdown(), monitor.loop).result(timeout=8)
             except Exception as exc:
-                logger.warning(f"MediaEnhance工具 Telegram 客户端关闭失败: {type(exc).__name__}")
+                logger.warning(f"ME工具 Telegram 客户端关闭失败: {type(exc).__name__}")
             monitor.loop.call_soon_threadsafe(monitor.loop.stop)
             monitor.thread.join(timeout=3)
 
@@ -208,7 +208,7 @@ class EmeTools(_PluginBase):
     def get_sidebar_nav(self) -> List[dict]:
         if not self._enabled or not self._show_sidebar_nav:
             return []
-        return [{"nav_key": "main", "title": "MediaEnhance工具", "icon": "mdi-tools",
+        return [{"nav_key": "main", "title": "ME工具", "icon": "mdi-tools",
                  "section": "organize", "permission": "manage", "order": 46}]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -228,14 +228,14 @@ class EmeTools(_PluginBase):
                 try:
                     trigger = CronTrigger.from_crontab(config["cron"])
                 except (KeyError, ValueError) as error:
-                    logger.error(f"MediaEnhance工具 {name} 定时表达式无效：{error}")
+                    logger.error(f"ME工具 {name} 定时表达式无效：{error}")
                     continue
-                services.append({"id": f"EmeTools_{name}", "name": f"MediaEnhance工具 {name}",
+                services.append({"id": f"EmeTools_{name}", "name": f"ME工具 {name}",
                                  "trigger": trigger, "func": self._run_scheduled,
                                  "kwargs": {}, "func_kwargs": {"section": name}})
         move = self._schedule["p115_move"]
         if move.get("enabled") and move.get("rules"):
-            services.append({"id": "EmeTools_p115_move", "name": "MediaEnhance工具文件转存",
+            services.append({"id": "EmeTools_p115_move", "name": "ME工具文件转存",
                              "trigger": "interval", "func": self._run_scheduled,
                              "kwargs": {"seconds": max(60, int(move.get("check_interval") or 120))},
                              "func_kwargs": {"section": "p115_move"}})
@@ -365,7 +365,7 @@ class EmeTools(_PluginBase):
 
     async def monitor_action(self, change: MonitorChange) -> dict:
         operation, scope = change.operation, change.scope
-        logger.info("MediaEnhance工具 Telegram：执行%s，监控=%s",
+        logger.info("ME工具 Telegram：执行%s，监控=%s",
                     operation if operation in {"send_code", "sign_in", "logout", "save", "start", "stop"} else "未知操作",
                     scope if scope in ("sub", "kw") else "未知监控")
         if operation == "send_code":
@@ -393,7 +393,7 @@ class EmeTools(_PluginBase):
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             self._monitor_config[scope].update(channels=channels, keywords=keywords, blacklist=blacklist)
             self._persist()
-            logger.info("MediaEnhance工具 Telegram：%s 配置已保存，频道=%d，关键词=%d，黑名单=%d",
+            logger.info("ME工具 Telegram：%s 配置已保存，频道=%d，关键词=%d，黑名单=%d",
                         scope, len(channels), len(keywords), len(blacklist))
             return {"ok": True}
         elif operation in ("start", "stop"):
@@ -404,13 +404,13 @@ class EmeTools(_PluginBase):
             raise HTTPException(status_code=400, detail="未知监控操作")
         try:
             result = await self._monitor.call(coro)
-            logger.info("MediaEnhance工具 Telegram：%s %s，结果=%s", scope, operation,
+            logger.info("ME工具 Telegram：%s %s，结果=%s", scope, operation,
                         "成功" if result.get("ok") else "需要继续验证")
             return result
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
-            logger.warning(f"MediaEnhance工具 Telegram 操作失败: {type(exc).__name__}")
+            logger.warning(f"ME工具 Telegram 操作失败: {type(exc).__name__}")
             raise HTTPException(status_code=400, detail=f"Telegram 操作失败：{type(exc).__name__}；请检查登录信息和网络连接") from exc
 
     async def save_schedule(self, change: ScheduleChange) -> dict:
@@ -471,7 +471,7 @@ class EmeTools(_PluginBase):
         self._schedule[section] = updated
         self._persist()
         Scheduler().update_plugin_job(self.__class__.__name__)
-        logger.info("MediaEnhance工具 %s：运行配置已保存，启用=%s，目录/规则=%d",
+        logger.info("ME工具 %s：运行配置已保存，启用=%s，目录/规则=%d",
                     SECTION_NAMES[section], updated["enabled"],
                     len(updated.get("dir_ids") or updated.get("rules") or []))
         return {"saved": True, "message": "配置已保存，定时任务由 MoviePilot 执行"}
@@ -481,10 +481,10 @@ class EmeTools(_PluginBase):
             return {"ok": True, "cid": cid, "dirs": client.directories(cid)}
 
     def _trash_info(self):
-        logger.info("MediaEnhance工具 清空115回收站：查询当前回收站")
+        logger.info("ME工具 清空115回收站：查询当前回收站")
         with self._client() as client:
             info = client.rb_list()
-        logger.info("MediaEnhance工具 清空115回收站：查询完成，文件=%d，大小=%d 字节",
+        logger.info("ME工具 清空115回收站：查询完成，文件=%d，大小=%d 字节",
                     info["count"], sum(int(item.get("file_size") or 0) for item in info["items"]))
         token = self._remember("trash", {"count": info["count"]})
         return {"ok": True, "count": info["count"],
@@ -493,23 +493,23 @@ class EmeTools(_PluginBase):
 
     def _trash_clear(self, token: str):
         expected = self._consume(token, "trash")
-        logger.info("MediaEnhance工具 清空115回收站：开始二次核验，预计文件=%d", expected["count"])
+        logger.info("ME工具 清空115回收站：开始二次核验，预计文件=%d", expected["count"])
 
         def clear():
             with self._client() as client:
                 current = client.rb_list()
                 if current["count"] != expected["count"]:
-                    logger.warning("MediaEnhance工具 清空115回收站：内容已变化，原=%d，现=%d，取消清空",
+                    logger.warning("ME工具 清空115回收站：内容已变化，原=%d，现=%d，取消清空",
                                    expected["count"], current["count"])
                     return {"ok": False, "message": "回收站内容已变化，请重新查询"}
                 if not current["count"]:
-                    logger.info("MediaEnhance工具 清空115回收站：回收站为空，跳过")
+                    logger.info("ME工具 清空115回收站：回收站为空，跳过")
                     return {"ok": True, "message": "回收站为空"}
                 result = client.clear_recyclebin(self._rb_password)
                 if not result.get("state"):
-                    logger.warning("MediaEnhance工具 清空115回收站：请求失败，已保留文件（服务端错误未记录以保护凭据）")
+                    logger.warning("ME工具 清空115回收站：请求失败，已保留文件（服务端错误未记录以保护凭据）")
                     return {"ok": False, "message": str(result.get("error") or result.get("msg") or "清空失败")}
-                logger.info("MediaEnhance工具 清空115回收站：成功清空 %d 个文件", current["count"])
+                logger.info("ME工具 清空115回收站：成功清空 %d 个文件", current["count"])
                 return {"ok": True, "count": current["count"],
                         "size_bytes": sum(int(item.get("file_size") or 0) for item in current["items"]),
                         "message": f"已彻底清空 {current['count']} 个文件"}
@@ -520,9 +520,9 @@ class EmeTools(_PluginBase):
         configured = self._schedule["p115_cleanup"]
         identifiers = configured.get("dir_ids") or []
         if not identifiers:
-            logger.info("MediaEnhance工具 清理文件：没有配置目录，跳过预览")
+            logger.info("ME工具 清理文件：没有配置目录，跳过预览")
             return {"ok": False, "message": "请先保存 115 清理目录"}
-        logger.info("MediaEnhance工具 清理文件：开始预览 %d 个目录", len(identifiers))
+        logger.info("ME工具 清理文件：开始预览 %d 个目录", len(identifiers))
         folders, snapshots = [], {}
         with self._client() as client:
             for index, cid in enumerate(identifiers):
@@ -535,13 +535,13 @@ class EmeTools(_PluginBase):
                                       "dirs": sorted(item["cid"] for item in children), "name": name}
                     folders.append({"cid": cid, "name": name, "files": len(files), "dirs": len(children),
                                     "size": sum(file["size"] for file in files), "error": ""})
-                    logger.info("MediaEnhance工具 清理文件：目录 %s（CID %s），文件=%d，子目录=%d",
+                    logger.info("ME工具 清理文件：目录 %s（CID %s），文件=%d，子目录=%d",
                                 _log_label(name), cid, len(files), len(children))
                 except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
                     folders.append({"cid": cid, "name": name, "files": 0, "dirs": 0, "size": 0, "error": str(error)})
-                    logger.warning("MediaEnhance工具 清理文件：目录 %s（CID %s）预览失败：%s",
+                    logger.warning("ME工具 清理文件：目录 %s（CID %s）预览失败：%s",
                                    _log_label(name), cid, type(error).__name__)
-        logger.info("MediaEnhance工具 清理文件：预览完成，文件=%d，子目录=%d，失败目录=%d",
+        logger.info("ME工具 清理文件：预览完成，文件=%d，子目录=%d，失败目录=%d",
                     sum(item["files"] for item in folders), sum(item["dirs"] for item in folders),
                     sum(bool(item["error"]) for item in folders))
         return {"ok": True, "folders": folders, "file_count": sum(item["files"] for item in folders),
@@ -553,14 +553,14 @@ class EmeTools(_PluginBase):
         if not preview.get("ok"):
             return preview
         if len(preview["snapshots"]) != len(self._schedule["p115_cleanup"]["dir_ids"]):
-            logger.warning("MediaEnhance工具 清理文件：部分目录预览失败，停止确认流程")
+            logger.warning("ME工具 清理文件：部分目录预览失败，停止确认流程")
             return {"ok": False, "message": "部分目录读取失败，已停止清理"}
         if not preview["file_count"] and not preview["dir_count"]:
-            logger.info("MediaEnhance工具 清理文件：目录均为空，无需确认")
+            logger.info("ME工具 清理文件：目录均为空，无需确认")
             return {"ok": True, "empty": True, "message": "清理目录均为空"}
         snapshot = preview.pop("snapshots")
         token = self._remember("cleanup", snapshot)
-        logger.info("MediaEnhance工具 清理文件：已生成二次确认，文件=%d，子目录=%d",
+        logger.info("ME工具 清理文件：已生成二次确认，文件=%d，子目录=%d",
                     preview["file_count"], preview["dir_count"])
         self._send_tool_notice(*notices.file_cleanup_confirmation(preview))
         return {"ok": True, "pending": True, "token": token,
@@ -568,11 +568,11 @@ class EmeTools(_PluginBase):
 
     def _cleanup_confirm(self, token: str):
         snapshot = self._consume(token, "cleanup")
-        logger.info("MediaEnhance工具 清理文件：开始复核并清理 %d 个目录", len(snapshot))
+        logger.info("ME工具 清理文件：开始复核并清理 %d 个目录", len(snapshot))
 
         def clean():
             if set(snapshot) != set(self._schedule["p115_cleanup"]["dir_ids"]):
-                logger.warning("MediaEnhance工具 清理文件：目录配置已变化，终止清理")
+                logger.warning("ME工具 清理文件：目录配置已变化，终止清理")
                 return {"ok": False, "message": "清理目录配置已变化，请重新预览"}
             deleted, deleted_dirs, errors, folders = 0, 0, [], []
             with self._client() as client:
@@ -588,7 +588,7 @@ class EmeTools(_PluginBase):
                                 sorted(item["cid"] for item in children) != expected["dirs"]):
                             detail["error"] = "内容已变化，跳过"
                             errors.append(f"目录 {cid} {detail['error']}")
-                            logger.warning("MediaEnhance工具 清理文件：目录 %s 内容变化，跳过", _log_label(detail["name"]))
+                            logger.warning("ME工具 清理文件：目录 %s 内容变化，跳过", _log_label(detail["name"]))
                             continue
                         identifiers = [item["fid"] for item in files]
                         directories = [item["cid"] for item in children]
@@ -616,10 +616,10 @@ class EmeTools(_PluginBase):
                     except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
                         detail["error"] = f"失败：{error}"
                         errors.append(f"目录 {cid} {detail['error']}")
-                    logger.info("MediaEnhance工具 清理文件：目录 %s 完成，文件=%d，子目录=%d，结果=%s",
+                    logger.info("ME工具 清理文件：目录 %s 完成，文件=%d，子目录=%d，结果=%s",
                                 _log_label(detail["name"]), detail["files"], detail["dirs"],
                                 "失败" if detail["error"] else "成功")
-            logger.info("MediaEnhance工具 清理文件：执行完毕，文件=%d，子目录=%d，失败=%d",
+            logger.info("ME工具 清理文件：执行完毕，文件=%d，子目录=%d，失败=%d",
                         deleted, deleted_dirs, len(errors))
             return {"ok": not errors, "deleted": deleted, "dir_count": deleted_dirs,
                     "errors": errors, "folders": folders,
@@ -640,7 +640,7 @@ class EmeTools(_PluginBase):
                     except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
                         pending[rule["src_id"]] = {"name": rule["src_name"] or rule["src_id"],
                                                     "count": -1, "error": str(error)}
-        logger.info("MediaEnhance工具 文件转存：待转存查询完成，规则=%d，待转存=%d，查询失败=%d",
+        logger.info("ME工具 文件转存：待转存查询完成，规则=%d，待转存=%d，查询失败=%d",
                     len(rules), sum(max(0, item["count"]) for item in pending.values()),
                     sum(item["count"] < 0 for item in pending.values()))
         return {"ok": True, "pending": pending, "rules": rules, "last_run": self._last_run.get("p115_move", "")}
@@ -648,9 +648,9 @@ class EmeTools(_PluginBase):
     def _move_run(self):
         rules = self._schedule["p115_move"]["rules"]
         if not rules:
-            logger.info("MediaEnhance工具 文件转存：未配置规则，跳过")
+            logger.info("ME工具 文件转存：未配置规则，跳过")
             return {"ok": False, "message": "请先保存转存规则"}
-        logger.info("MediaEnhance工具 文件转存：开始检查 %d 条转存规则", len(rules))
+        logger.info("ME工具 文件转存：开始检查 %d 条转存规则", len(rules))
 
         def move():
             moved, errors, details = 0, [], []
@@ -664,11 +664,11 @@ class EmeTools(_PluginBase):
                     try:
                         files, directories = client.list_children(source)
                         identifiers = [item["fid"] for item in files] + [item["cid"] for item in directories]
-                        logger.info("MediaEnhance工具 文件转存：%s → %s，源文件=%d，源目录=%d",
+                        logger.info("ME工具 文件转存：%s → %s，源文件=%d，源目录=%d",
                                     _log_label(detail["src_name"] or source),
                                     _log_label(detail["dst_name"] or destination), len(files), len(directories))
                         if not identifiers:
-                            logger.info("MediaEnhance工具 文件转存：%s 源目录为空，跳过",
+                            logger.info("ME工具 文件转存：%s 源目录为空，跳过",
                                         _log_label(detail["src_name"] or source))
                             continue
                         moved_ids = set()
@@ -681,7 +681,7 @@ class EmeTools(_PluginBase):
                             else:
                                 errors.append(f"{source} → {destination}：{result.get('error') or result.get('msg')}")
                                 detail["status"] = "failed"
-                                logger.warning("MediaEnhance工具 文件转存：%s → %s 移动失败，批次=%d",
+                                logger.warning("ME工具 文件转存：%s → %s 移动失败，批次=%d",
                                                _log_label(detail["src_name"] or source),
                                                _log_label(detail["dst_name"] or destination), len(batch))
                                 break
@@ -692,18 +692,18 @@ class EmeTools(_PluginBase):
                             detail["file_count"] = len(moved_files) + count
                             detail["total_bytes"] = sum(int(item.get("size") or 0) for item in moved_files) + size
                             detail["status"] = "success"
-                            logger.info("MediaEnhance工具 文件转存：%s → %s 已移动 %d 项（包含 %d 个文件），大小=%d 字节",
+                            logger.info("ME工具 文件转存：%s → %s 已移动 %d 项（包含 %d 个文件），大小=%d 字节",
                                         _log_label(detail["src_name"] or source),
                                         _log_label(detail["dst_name"] or destination), len(moved_ids),
                                         detail["file_count"], detail["total_bytes"])
                     except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
                         errors.append(f"{source} → {destination}：{error}")
                         detail["status"] = "failed"
-                        logger.warning("MediaEnhance工具 文件转存：%s → %s 查询或转存异常：%s",
+                        logger.warning("ME工具 文件转存：%s → %s 查询或转存异常：%s",
                                        _log_label(detail["src_name"] or source),
                                        _log_label(detail["dst_name"] or destination), type(error).__name__)
             self._last_run["p115_move"] = datetime.now().isoformat()
-            logger.info("MediaEnhance工具 文件转存：本次完成，已移动=%d，失败=%d，空目录=%d",
+            logger.info("ME工具 文件转存：本次完成，已移动=%d，失败=%d，空目录=%d",
                         moved, len(errors), sum(item["status"] == "empty" for item in details))
             return {"ok": not errors, "moved": moved, "errors": errors, "details": details,
                     "message": f"转存完成：移动 {moved} 项，失败 {len(errors)} 条"}
@@ -729,7 +729,7 @@ class EmeTools(_PluginBase):
                 count += nested_count
                 size += nested_size
             except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
-                logger.warning(f"MediaEnhance工具统计目录 {cid} 大小失败：{error}")
+                logger.warning(f"ME工具统计目录 {cid} 大小失败：{error}")
                 size += known_size
         return count, size
 
@@ -738,7 +738,7 @@ class EmeTools(_PluginBase):
         # Telegram notification contains only its configured title and body.
         self.chain.post_message(Message(channel=NotificationChannel.Telegram, mtype=MessageType.Plugin,
                                         title=title or None, text=text, link=None))
-        logger.info("MediaEnhance工具：已提交 MP 插件类型通知，标题=%s（由通知渠道决定实际接收 Bot）",
+        logger.info("ME工具：已提交 MP 插件类型通知，标题=%s（由通知渠道决定实际接收 Bot）",
                     _log_label(title or "无标题"))
 
     @staticmethod
@@ -759,7 +759,7 @@ class EmeTools(_PluginBase):
         self.chain.post_message(Message(channel=NotificationChannel.Telegram, mtype=MessageType.Plugin,
                                         title=title, text=f"{text}\n{preview}",
                                         buttons=buttons, parse_mode="plain"))
-        logger.info("MediaEnhance工具 清理数据：已提交 Telegram 按钮确认，候选=%d", len(snapshot["items"]))
+        logger.info("ME工具 清理数据：已提交 Telegram 按钮确认，候选=%d", len(snapshot["items"]))
 
     @eventmanager.register(EventType.MessageAction)
     def scheduled_confirmation_action(self, event: Event) -> None:
@@ -781,7 +781,7 @@ class EmeTools(_PluginBase):
         # cannot authorize cleanup, even if it carries the original callback token.
         if str(data.get("original_chat_id") or "") != user or not matches_channel_admin(
                 NotificationChannel.Telegram, self._telegram_confirmation_sources().get(source), user):
-            logger.warning("MediaEnhance工具 清理数据：Telegram 确认被拒绝（非该 Bot 管理员私聊）")
+            logger.warning("ME工具 清理数据：Telegram 确认被拒绝（非该 Bot 管理员私聊）")
             return
         if self._schedule["tools"].get("confirm_mode") != "telegram":
             return
@@ -792,41 +792,41 @@ class EmeTools(_PluginBase):
             else:
                 self._consume(token, "scheduled_tools")
                 text = "已取消本次清理。"
-            logger.info("MediaEnhance工具 清理数据：Telegram %s完成", "确认" if approve else "取消")
+            logger.info("ME工具 清理数据：Telegram %s完成", "确认" if approve else "取消")
         except Exception as exc:
-            logger.warning("MediaEnhance工具 清理数据：Telegram 确认失败：%s", type(exc).__name__)
+            logger.warning("ME工具 清理数据：Telegram 确认失败：%s", type(exc).__name__)
             text = "确认已过期、已处理或执行失败，请在插件页面重新扫描并查看日志。"
         self.chain.post_message(Message(channel=NotificationChannel.Telegram, source=source,
-                                        userid=user, title="MediaEnhance工具", text=text))
+                                        userid=user, title="ME工具", text=text))
 
     @staticmethod
     def _log_scan(snapshot: dict) -> None:
         items = snapshot.get("items") or []
-        logger.info("MediaEnhance工具 清理无效数据：扫描完成，目录=%s，检查目录=%d，候选=%d，读取错误=%d",
+        logger.info("ME工具 清理无效数据：扫描完成，目录=%s，检查目录=%d，候选=%d，读取错误=%d",
                     _log_label(snapshot.get("root")), snapshot.get("total", 0), len(items),
                     len(snapshot.get("errors") or []))
         for item in items[:50]:
-            logger.info("MediaEnhance工具 清理无效数据：候选 %s，类型=%s，包含文件=%d，原因=%s",
+            logger.info("ME工具 清理无效数据：候选 %s，类型=%s，包含文件=%d，原因=%s",
                         _log_label(item.get("path") or item.get("name")),
                         _log_label(item.get("kind")), item.get("files", 0), _log_label(item.get("reason")))
         if len(items) > 50:
-            logger.info("MediaEnhance工具 清理无效数据：另有 %d 个候选未逐条显示", len(items) - 50)
+            logger.info("ME工具 清理无效数据：另有 %d 个候选未逐条显示", len(items) - 50)
 
     @staticmethod
     def _log_quarantine(result: dict) -> None:
-        logger.info("MediaEnhance工具 清理无效数据：隔离结果，成功=%d，失败=%d，状态=%s",
+        logger.info("ME工具 清理无效数据：隔离结果，成功=%d，失败=%d，状态=%s",
                     len(result.get("deleted") or []), len(result.get("failed") or []), result.get("ok"))
         for item in (result.get("deleted") or [])[:50]:
-            logger.info("MediaEnhance工具 清理无效数据：已隔离 %s", _log_label(item.get("path")))
+            logger.info("ME工具 清理无效数据：已隔离 %s", _log_label(item.get("path")))
         for item in (result.get("failed") or [])[:50]:
-            logger.warning("MediaEnhance工具 清理无效数据：未清理 %s，原因=%s",
+            logger.warning("ME工具 清理无效数据：未清理 %s，原因=%s",
                            _log_label(item.get("path")), _log_label(item.get("message")))
 
     def _run_scheduled(self, section: str) -> None:
         if not self._enabled or not self._schedule.get(section, {}).get("enabled"):
             return
         label = SECTION_NAMES.get(section, section)
-        logger.info("MediaEnhance工具 %s：定时任务开始", label)
+        logger.info("ME工具 %s：定时任务开始", label)
         try:
             notification = None
             if section == "tools":
@@ -844,27 +844,27 @@ class EmeTools(_PluginBase):
                     token = self._remember("scheduled_tools", snapshot)
                     if mode == "telegram":
                         if not self._telegram_confirmation_sources():
-                            logger.warning("MediaEnhance工具 清理数据：Telegram 确认渠道已失效，保留待办并改发 MoviePilot 页面确认通知")
+                            logger.warning("ME工具 清理数据：Telegram 确认渠道已失效，保留待办并改发 MoviePilot 页面确认通知")
                             notification = notices.invalid_confirmation(snapshot)
                         else:
                             try:
                                 self._send_scheduled_telegram_confirmation(token, snapshot)
                             except Exception as exc:
-                                logger.warning("MediaEnhance工具 清理数据：Telegram 确认发送失败：%s，保留页面待办", type(exc).__name__)
+                                logger.warning("ME工具 清理数据：Telegram 确认发送失败：%s，保留页面待办", type(exc).__name__)
                                 notification = notices.invalid_confirmation(snapshot)
                     else:
-                        logger.info("MediaEnhance工具 清理数据：%d 项等待插件页面二次确认", count)
+                        logger.info("ME工具 清理数据：%d 项等待插件页面二次确认", count)
                         notification = notices.invalid_confirmation(snapshot)
                 else:
-                    logger.info("MediaEnhance工具 清理无效数据：无项目或自动清理已关闭，未执行隔离")
+                    logger.info("ME工具 清理无效数据：无项目或自动清理已关闭，未执行隔离")
             elif section == "p115_cleanup":
                 if not self._source_cookie():
-                    logger.warning("MediaEnhance工具 清理文件：跳过，未配置 115 Cookie")
+                    logger.warning("ME工具 清理文件：跳过，未配置 115 Cookie")
                     notification = ("", "⏰ 115 定时清理跳过：未配置 115 Cookie")
                 else:
                     preview = self._cleanup_preview()
                     if not preview.get("ok"):
-                        logger.warning("MediaEnhance工具 清理文件：预览未通过，取消清理")
+                        logger.warning("ME工具 清理文件：预览未通过，取消清理")
                     elif preview.get("file_count") or preview.get("dir_count"):
                         result = self._cleanup_confirm(self._remember("cleanup", preview["snapshots"]))
                         if "deleted" in result:
@@ -872,10 +872,10 @@ class EmeTools(_PluginBase):
                     elif any(item.get("error") for item in preview.get("folders") or []):
                         notification = notices.file_cleanup({}, preview)
                     else:
-                        logger.info("MediaEnhance工具 清理文件：所有目录为空，本次不清理")
+                        logger.info("ME工具 清理文件：所有目录为空，本次不清理")
             elif section == "p115_trash":
                 if not self._source_cookie():
-                    logger.warning("MediaEnhance工具 清空115回收站：跳过，未配置 115 Cookie")
+                    logger.warning("ME工具 清空115回收站：跳过，未配置 115 Cookie")
                     notification = ("", "⏰ 115 回收站清空跳过：未配置 115 Cookie")
                 else:
                     info = self._trash_info()
@@ -884,16 +884,16 @@ class EmeTools(_PluginBase):
                         if result.get("ok"):
                             notification = notices.empty_trash(info)
                         else:
-                            logger.warning("MediaEnhance工具 清空115回收站：清空失败")
+                            logger.warning("ME工具 清空115回收站：清空失败")
                             notification = ("", f"⏰ 115 回收站定时清空失败：{result.get('message') or '未知错误'}")
                     else:
-                        logger.info("MediaEnhance工具 清空115回收站：回收站为空，本次不执行")
+                        logger.info("ME工具 清空115回收站：回收站为空，本次不执行")
             else:
                 if not self._source_cookie():
-                    logger.warning("MediaEnhance工具 文件转存：跳过，未配置 115 Cookie")
+                    logger.warning("ME工具 文件转存：跳过，未配置 115 Cookie")
                     notification = ("", "⏰ 115 监控转存跳过：未配置 115 Cookie")
                 elif not self._schedule[section].get("rules"):
-                    logger.warning("MediaEnhance工具 文件转存：跳过，未配置转存规则")
+                    logger.warning("ME工具 文件转存：跳过，未配置转存规则")
                     notification = ("", "⏰ 115 监控转存跳过：未配置源/目标文件夹")
                 else:
                     result = self._move_run()
@@ -902,9 +902,9 @@ class EmeTools(_PluginBase):
             self._last_run[section] = datetime.now().isoformat()
             if notification:
                 self._send_tool_notice(*notification)
-            logger.info("MediaEnhance工具 %s：定时任务结束，通知=%s", label, bool(notification))
+            logger.info("ME工具 %s：定时任务结束，通知=%s", label, bool(notification))
         except Exception as error:
-            logger.error("MediaEnhance工具 %s：定时任务异常：%s（敏感详情未记录）", label, type(error).__name__)
+            logger.error("ME工具 %s：定时任务异常：%s（敏感详情未记录）", label, type(error).__name__)
 
     def _pending_info(self):
         with self._pending_lock:
@@ -915,7 +915,7 @@ class EmeTools(_PluginBase):
 
     def _confirm_scheduled_tools(self, token: str, notify: bool = True):
         snapshot = self._consume(token, "scheduled_tools")
-        logger.info("MediaEnhance工具 清理无效数据：确认定时任务待办，候选=%d", len(snapshot["items"]))
+        logger.info("ME工具 清理无效数据：确认定时任务待办，候选=%d", len(snapshot["items"]))
         result = self._locked("tools", lambda: self._cleaner.quarantine(snapshot, [item["path"] for item in snapshot["items"]]))
         self._log_quarantine(result)
         if notify and result.get("ok") and (result.get("deleted") or result.get("failed")):
@@ -926,7 +926,7 @@ class EmeTools(_PluginBase):
     async def action(self, action: ToolAction) -> dict:
         operation = action.operation
         if operation not in {"dirs", "root_dirs", "p115_dirs", "pending", "move_info"}:
-            logger.info("MediaEnhance工具：页面操作 %s 开始", _log_label(operation))
+            logger.info("ME工具：页面操作 %s 开始", _log_label(operation))
         try:
             if operation == "scan":
                 result = await asyncio.to_thread(self._cleaner.start_scan, action.path)
@@ -946,7 +946,7 @@ class EmeTools(_PluginBase):
                 root = self._cleaner.resolve(action.path or self._strm_root)
                 token = self._remember("manual_tools", {"scan_token": action.scan_token, "paths": action.paths,
                                                         "root": root})
-                logger.info("MediaEnhance工具 清理无效数据：手动申请隔离，待确认=%d 项，目录=%s",
+                logger.info("ME工具 清理无效数据：手动申请隔离，待确认=%d 项，目录=%s",
                             len(action.paths), _log_label(root))
                 self._send_tool_notice(*notices.invalid_confirmation(
                     {"root": root, "items": [{"path": item} for item in action.paths]}))
@@ -1005,7 +1005,7 @@ class EmeTools(_PluginBase):
                 return await asyncio.to_thread(self._move_run)
             raise HTTPException(status_code=400, detail="未知的工具操作")
         except (OSError, RuntimeError, ValueError, httpx.HTTPError) as error:
-            logger.warning("MediaEnhance工具：页面操作 %s 失败：%s（敏感详情未记录）",
+            logger.warning("ME工具：页面操作 %s 失败：%s（敏感详情未记录）",
                            _log_label(operation), type(error).__name__)
             return {"ok": False, "message": str(error)}
 
