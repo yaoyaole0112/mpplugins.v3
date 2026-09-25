@@ -1,4 +1,16 @@
 {
+  "EmeTools": {
+    "name": "媒体清理转存工具",
+    "description": "MoviePilot 独立运行无效数据清理、115 文件清理、回收站清空与文件转存",
+    "labels": "工具,115网盘",
+    "version": "2.1.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
+    "author": "helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": false,
+    "system_version": ">=3.0.0",
+    "level": 2
+  },
   "NotificationBlocker": {
     "name": "通知消息屏蔽",
     "description": "按正则关键词屏蔽消息通知，标题或正文命中时不推送，但保留历史记录。",
