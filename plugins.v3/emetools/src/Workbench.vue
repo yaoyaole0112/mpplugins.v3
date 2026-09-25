@@ -13,9 +13,9 @@ const sections = [
   { key: 'missing', title: '缺集检测', icon: 'mdi-television-search', detail: 'Emby 剧集缺集检测与按季订阅' },
   { key: 'invalid', title: '清理数据', icon: 'mdi-folder-search-outline', detail: '扫描与清理 STRM 独立资料' },
   { key: 'cleanup', title: '清理文件', icon: 'mdi-folder-remove-outline', detail: '115 文件夹清理' },
-  { key: 'trash', title: '清空回收站', icon: 'mdi-delete-alert-outline', detail: '不可恢复的彻底删除' },
   { key: 'move', title: '文件转存', icon: 'mdi-folder-swap-outline', detail: '115 文件夹监控转存' },
-  { key: 'settings', title: '设置', icon: 'mdi-cog-outline', detail: '一些相关设置' },
+  { key: 'trash', title: '清空回收站', icon: 'mdi-delete-alert-outline', detail: '不可恢复的彻底删除' },
+  { key: 'settings', title: '通用设置', icon: 'mdi-cog-outline', detail: '一些相关设置' },
 ]
 const active = ref('subscription')
 const busy = ref(false)
@@ -44,7 +44,7 @@ const base = computed(() => `plugin/${props.pluginId}`)
 const current = computed(() => sections.find(section => section.key === active.value))
 const rules = computed(() => schedule.p115_move.rules || [])
 const cleanupDirs = ref([])
-const monitor = reactive({ configured: false, logged_in: false, dependency_ready: false, hits: [], last_error: '', last_event: '', listening_channels: {}, subscription_count: 0,
+const monitor = reactive({ configured: false, logged_in: false, dependency_ready: false, hits: [], last_error: '', last_event: '', listening_channels: {}, channel_titles: {}, subscription_count: 0,
   sub: { enabled: false, channels: [], keywords: [], blacklist: [] }, kw: { enabled: false, channels: [], keywords: [], blacklist: [] } })
 const drafts = reactive({ sub: { channels: [], keywords: [], blacklist: [] }, kw: { channels: [], keywords: [], blacklist: [] } })
 const entry = reactive({ sub: { channels: '' }, kw: { channels: '', keywords: '', blacklist: '' } })
@@ -395,7 +395,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
 <template>
   <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''">
     <aside class="eme-sidebar">
-      <div class="eme-brand"><img class="eme-brand-icon" :src="pluginIcon" alt="ME工具图标" /><strong>ME工具</strong></div>
+      <div class="eme-brand"><img class="eme-brand-icon" :src="pluginIcon" alt="增强工具图标" /><strong>增强工具</strong></div>
       <div class="eme-nav-label">工具</div>
       <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" @click="chooseSection(section.key)">
         <i :class="`mdi ${section.icon}`" /><span><strong>{{ section.title }}</strong><small>{{ section.detail }}</small></span><i class="mdi mdi-chevron-right eme-chevron" />
@@ -410,7 +410,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
       <div v-if="notice" class="eme-message eme-success" role="status">{{ notice }}</div>
       <template v-if="active === 'missing'">
         <section class="eme-card">
-          <div class="eme-card-heading"><div><h3>运行配置设置</h3><p>扫描 Emby 电视剧媒体库，对照 TMDB 检测缺集；可记录或按季订阅。</p></div><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('save')">保存配置</button></div>
+          <div class="eme-card-heading"><div><h3>运行配置</h3><p>扫描 Emby 电视剧媒体库，对照 TMDB 检测缺集；可记录或按季订阅。</p></div><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('save')">保存配置</button></div>
           <p v-if="missing.legacy_enabled" class="eme-message eme-error">原「剧集缺集检测订阅」插件仍启用。配置与历史结果已复制到这里；请先停用原插件，再开启此处定时任务或执行自动订阅扫描，避免重复订阅。原插件数据不会被删除。</p>
           <div class="eme-options eme-settings-switches">
             <label class="eme-switch-label"><input v-model="missing.config.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时检测</span></label>
@@ -459,7 +459,7 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
           <p class="eme-hint">状态：{{ monitor[scope].enabled ? (monitor.logged_in && monitor.listening_channels?.[scope] ? '运行中' : '等待连接') : '已停止' }} · 已监听 {{ monitor.listening_channels?.[scope] || 0 }} / {{ drafts[scope].channels.length }} 个频道<span v-if="scope === 'sub'"> · 已读取 {{ monitor.subscription_count || 0 }} 条 MoviePilot 订阅</span><span v-if="monitor.last_poll"> · 最近检查频道 {{ monitor.last_poll }}</span><span v-if="monitor.last_event"> · 最近收到消息 {{ monitor.last_event }}</span></p>
           <p v-if="monitor.last_error" class="eme-message eme-error">{{ monitor.last_error }}</p>
           <label>监控频道（公开频道 @用户名或 t.me/链接）<div class="eme-inline"><input v-model.trim="entry[scope].channels" :disabled="monitor[scope].enabled" placeholder="@channelname" @keyup.enter="addEntry(scope, 'channels')" /><button class="eme-button secondary" :disabled="monitor[scope].enabled" @click="addEntry(scope, 'channels')">添加</button></div></label>
-          <div class="eme-chips"><span v-for="(value, index) in drafts[scope].channels" :key="value" class="eme-chip">{{ value }}<button :disabled="monitor[scope].enabled" @click="drafts[scope].channels.splice(index, 1)">×</button></span></div>
+          <div class="eme-chips"><span v-for="(value, index) in drafts[scope].channels" :key="value" class="eme-chip">{{ monitor.channel_titles?.[scope]?.[value] || value }}<button :disabled="monitor[scope].enabled" @click="drafts[scope].channels.splice(index, 1)">×</button></span></div>
           <template v-if="scope === 'kw'"><div v-for="field in ['keywords', 'blacklist']" :key="field"><label>{{ field === 'keywords' ? '匹配关键词' : '排除关键词（黑名单）' }}（支持正则）<div class="eme-inline"><input v-model.trim="entry.kw[field]" :disabled="monitor.kw.enabled" :placeholder="field === 'keywords' ? '添加匹配关键词' : '添加排除关键词'" @keyup.enter="addEntry('kw', field)" /><button class="eme-button secondary" :disabled="monitor.kw.enabled" @click="addEntry('kw', field)">添加</button></div></label><div class="eme-chips"><span v-for="(value, index) in drafts.kw[field]" :key="value" class="eme-chip">{{ value }}<button :disabled="monitor.kw.enabled" @click="drafts.kw[field].splice(index, 1)">×</button></span></div></div></template>
           <p v-else class="eme-hint">订阅名称和媒体资料自动从 MoviePilot「我的订阅」读取，每 5 分钟更新一次；订阅列表请在 MoviePilot 中查看。</p>
         </section>

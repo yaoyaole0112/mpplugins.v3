@@ -85,6 +85,7 @@ class SubscriptionMonitor:
         self.code_hash = None
         self.phone = None
         self.channel_ids = {"sub": set(), "kw": set()}
+        self.channel_titles = {"sub": {}, "kw": {}}
         self.hits = deque(maxlen=40)
         # Keep de-duplication across MoviePilot/plugin restarts.  Telegram can
         # deliver the same post once through the live handler and again through
@@ -256,10 +257,12 @@ class SubscriptionMonitor:
         if not self.plugin._tg_forward_token:
             raise ValueError("请先在设置中配置转发 Bot Token")
         ids = set()
+        titles = {}
         for channel in config["channels"]:
             entity = await client.get_entity(channel)
             peer_id = int(entity.id)
             ids.add(peer_id)
+            titles[str(channel)] = str(getattr(entity, "title", None) or getattr(entity, "username", None) or channel)
             checkpoint_key = str(peer_id)
             if checkpoint_key not in self._last_msg_ids:
                 latest = await client.get_messages(entity, limit=1)
@@ -270,6 +273,7 @@ class SubscriptionMonitor:
             logger.info("ME工具 Telegram：%s 已解析频道 @%s（ID %d）", scope, channel, entity.id)
         self._save_checkpoints()
         self.channel_ids[scope] = ids
+        self.channel_titles[scope] = titles
         self.plugin._monitor_config[scope]["enabled"] = True
         self.plugin._persist()
         if self._watchdog is None or self._watchdog.done():
@@ -279,6 +283,7 @@ class SubscriptionMonitor:
 
     async def stop(self, scope):
         self.channel_ids[scope].clear()
+        self.channel_titles[scope].clear()
         self.plugin._monitor_config[scope]["enabled"] = False
         self.plugin._persist()
         logger.info("ME工具 Telegram：%s 监控已停止", scope)
@@ -321,6 +326,7 @@ class SubscriptionMonitor:
                 "last_error": self.last_error, "last_event": self.last_event,
                 "last_poll": self.last_poll,
                 "listening_channels": {scope: len(self.channel_ids[scope]) for scope in ("sub", "kw")},
+                "channel_titles": {scope: dict(self.channel_titles[scope]) for scope in ("sub", "kw")},
                 "subscription_count": len(self._subscriptions),
                 "sub": dict(self.plugin._monitor_config["sub"]), "kw": dict(self.plugin._monitor_config["kw"])}
 

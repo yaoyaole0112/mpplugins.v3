@@ -87,10 +87,10 @@ class MonitorChange(BaseModel):
 
 
 class EmeTools(_PluginBase):
-    plugin_name = "ME工具"
+    plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.7.2"
+    plugin_version = "2.7.3"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -225,7 +225,7 @@ class EmeTools(_PluginBase):
     def get_sidebar_nav(self) -> List[dict]:
         if not self._enabled or not self._show_sidebar_nav:
             return []
-        return [{"nav_key": "main", "title": "ME工具", "icon": "mdi-tools",
+        return [{"nav_key": "main", "title": "增强工具", "icon": "mdi-tools",
                  "section": "organize", "permission": "manage", "order": 46}]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
