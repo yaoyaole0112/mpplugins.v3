@@ -85,6 +85,8 @@ class SubscriptionMonitor:
         self.code_hash = None
         self.phone = None
         self.channel_ids = {"sub": set(), "kw": set()}
+        self._channel_entities = {}
+        self._poll_failures = {}
         saved_titles = self.plugin.get_data("monitor_channel_titles") or {}
         self.channel_titles = {scope: dict(saved_titles.get(scope) or {}) for scope in ("sub", "kw")} if isinstance(saved_titles, dict) else {"sub": {}, "kw": {}}
         self.hits = deque(maxlen=40)
@@ -263,6 +265,7 @@ class SubscriptionMonitor:
             entity = await client.get_entity(channel)
             peer_id = int(entity.id)
             ids.add(peer_id)
+            self._channel_entities[peer_id] = entity
             titles[str(channel)] = str(getattr(entity, "title", None) or getattr(entity, "username", None) or channel)
             checkpoint_key = str(peer_id)
             if checkpoint_key not in self._last_msg_ids:
@@ -313,6 +316,7 @@ class SubscriptionMonitor:
             await self.client.disconnect()
             self.client = None
         self.channel_ids = {"sub": set(), "kw": set()}
+        self._channel_entities.clear()
 
     async def status(self):
         logged = bool(self.client and self.client.is_connected())
@@ -352,35 +356,60 @@ class SubscriptionMonitor:
     async def _poll_channels(self):
         """Backfill recent channel posts, including messages missed during a disconnect."""
         while any(self.plugin._monitor_config[scope]["enabled"] for scope in ("sub", "kw")):
+            stage = "连接 Telegram"
             try:
                 if self.plugin._monitor_config["sub"]["enabled"] and time.monotonic() - self._last_refresh > 300:
                     await self._refresh_subscriptions()
                 for scope in ("sub", "kw"):
                     if self.plugin._monitor_config[scope]["enabled"] and not self.channel_ids[scope]:
+                        stage = f"恢复 {scope} 监控"
                         await self.start(scope)
+                stage = "连接 Telegram"
                 client = await asyncio.wait_for(self._authorized(), timeout=12)
                 checked = 0
                 recent = 0
-                for peer_id in self.channel_ids["sub"] | self.channel_ids["kw"]:
-                    min_id = self._last_msg_ids.get(str(peer_id), 0)
-                    messages = await asyncio.wait_for(
-                        client.get_messages(peer_id, min_id=min_id, limit=50, reverse=True), timeout=12)
-                    checked += 1
-                    for message in messages:
-                        if not message.raw_text:
-                            continue
-                        recent += 1
-                        await self._on_message(SimpleNamespace(chat_id=message.chat_id or -int(f"100{peer_id}"),
-                                                               id=message.id, raw_text=message.raw_text, message=message))
-                        self._advance_checkpoint(peer_id, message.id)
+                failures = 0
+                for peer_id in sorted(self.channel_ids["sub"] | self.channel_ids["kw"]):
+                    try:
+                        # Use the entity resolved at startup; resolving a bare
+                        # numeric ID on every call can fail after reconnects.
+                        entity = self._channel_entities.get(peer_id, peer_id)
+                        min_id = self._last_msg_ids.get(str(peer_id), 0)
+                        messages = await asyncio.wait_for(
+                            client.get_messages(entity, min_id=min_id, limit=50, reverse=True), timeout=20)
+                        checked += 1
+                        for message in messages:
+                            if message.id <= min_id:
+                                continue
+                            if message.raw_text:
+                                await self._on_message(SimpleNamespace(chat_id=message.chat_id or -int(f"100{peer_id}"),
+                                                                       id=message.id, raw_text=message.raw_text, message=message))
+                                recent += 1
+                            self._advance_checkpoint(peer_id, message.id)
+                        if peer_id in self._poll_failures:
+                            logger.info("ME工具 Telegram：频道ID=%s 补漏恢复", peer_id)
+                            del self._poll_failures[peer_id]
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        failures += 1
+                        self.last_error = f"频道 {peer_id} 补漏失败：{type(exc).__name__}（下轮重试）"
+                        now = time.monotonic()
+                        last_warning = self._poll_failures.get(peer_id, 0)
+                        if not last_warning or now - last_warning >= 300:
+                            logger.warning("ME工具 Telegram：频道ID=%s 读取新消息失败：%s；其他频道继续，下轮重试",
+                                           peer_id, type(exc).__name__)
+                            self._poll_failures[peer_id] = now
                 self.last_poll = datetime.now().strftime("%m-%d %H:%M:%S")
-                logger.info("ME工具 Telegram：频道补漏完成，频道=%d，新消息=%d，订阅=%d，累计命中=%d",
-                            checked, recent, len(self._subscriptions), len(self.hits))
+                if not failures and self.last_error.startswith("频道 ") and "补漏失败" in self.last_error:
+                    self.last_error = ""
+                logger.info("ME工具 Telegram：频道补漏完成，成功频道=%d，失败频道=%d，新消息=%d，订阅=%d，累计命中=%d",
+                            checked, failures, recent, len(self._subscriptions), len(self.hits))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.last_error = f"频道补漏失败：{type(exc).__name__}"
-                logger.warning("ME工具频道补漏失败: %s", type(exc).__name__)
+                self.last_error = f"频道补漏 {stage} 失败：{type(exc).__name__}"
+                logger.warning("ME工具 Telegram：频道补漏 %s 失败：%s", stage, type(exc).__name__)
             await asyncio.sleep(60)
 
     async def _refresh_subscriptions(self):

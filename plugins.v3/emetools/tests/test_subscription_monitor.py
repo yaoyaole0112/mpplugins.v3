@@ -10,6 +10,36 @@ from emetools.subscription_monitor import SubscriptionMonitor, matches_keyword, 
 
 
 class MatchingTests(unittest.TestCase):
+    def test_poll_timeout_on_one_channel_does_not_block_others_or_advance_cursor(self):
+        plugin = MagicMock()
+        plugin.get_data.return_value = None
+        plugin._monitor_config = {"sub": {"enabled": True, "channels": []},
+                                  "kw": {"enabled": False, "channels": []}}
+        monitor = SubscriptionMonitor(plugin)
+        monitor.channel_ids["sub"] = {12345, 67890}
+        monitor._last_refresh = float("inf")
+        monitor._last_msg_ids = {"12345": 10, "67890": 20}
+        client = MagicMock()
+
+        async def get_messages(entity, **kwargs):
+            if entity == 12345:
+                raise TimeoutError()
+            return [SimpleNamespace(id=21, raw_text="新消息", chat_id=-10067890)]
+
+        client.get_messages = AsyncMock(side_effect=get_messages)
+        monitor._authorized = AsyncMock(return_value=client)
+        monitor._on_message = AsyncMock()
+
+        async def stop_after_poll(_seconds):
+            plugin._monitor_config["sub"]["enabled"] = False
+
+        with patch("emetools.subscription_monitor.asyncio.sleep", side_effect=stop_after_poll):
+            asyncio.run(monitor._poll_channels())
+        self.assertEqual(monitor._last_msg_ids["12345"], 10)
+        self.assertEqual(monitor._last_msg_ids["67890"], 21)
+        self.assertEqual(monitor._on_message.await_count, 1)
+        self.assertIn("频道 12345 补漏失败", monitor.last_error)
+
     def test_status_resolves_stopped_keyword_channel_title_and_caches_it(self):
         plugin = MagicMock()
         plugin.get_data.return_value = None
