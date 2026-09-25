@@ -1,6 +1,7 @@
 from filecmp import cmp as files_equal
 from shutil import move as shutil_move, rmtree
 from collections import defaultdict
+from json import dumps
 from threading import Timer, Event, Thread
 from time import sleep, strftime, localtime, time
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -2198,15 +2199,57 @@ class MonitorLife:
         start_time = int(from_time) if from_time and float(from_time) > 0 else end_time - 120
         if start_time >= end_time:
             start_time = end_time - 2
+        page_size = 1000
         payload = {
             "show_type": 0,
-            "limit": 1000,
+            "limit": page_size,
             "start_time": start_time,
             "end_time": end_time,
         }
-        resp = self._client.life_list(payload)
-        check_response(resp)
-        return self._flatten_life_list(resp.get("data") or {}, from_time, from_id)
+        events = []
+        seen_ids = set()
+        offset = 0
+        previous_cursor = None
+        while True:
+            resp = self._client.life_list(payload)
+            check_response(resp)
+            data = resp.get("data") or {}
+            page = self._flatten_life_list(data, 0, 0)
+            if not page:
+                break
+            new_ids = {int(event["id"]) for event in page} - seen_ids
+            if not new_ids:
+                raise RuntimeError("【监控生活事件】生活事件分页未推进，保留原游标以便重试")
+            seen_ids.update(new_ids)
+            events.extend(
+                event
+                for event in self._flatten_life_list(data, from_time, from_id)
+                if int(event["id"]) in new_ids
+            )
+
+            oldest = page[-1]
+            if int(oldest["update_time"]) < start_time or (
+                from_id and int(oldest["id"]) <= int(from_id)
+            ):
+                break
+
+            offset += len(page)
+            cursor = data.get("last_data") or resp.get("last_data")
+            if cursor:
+                cursor = dumps(cursor) if isinstance(cursor, dict) else cursor
+                if cursor == previous_cursor:
+                    raise RuntimeError("【监控生活事件】生活事件分页游标未推进，保留原游标以便重试")
+                previous_cursor = cursor
+                payload.pop("start", None)
+                payload["last_data"] = cursor
+            elif len(page) >= page_size:
+                payload.pop("last_data", None)
+                payload["start"] = offset
+            else:
+                break
+
+        events.sort(key=lambda event: (int(event["update_time"]), int(event["id"])), reverse=True)
+        return events
 
     def _pull_life_events(
         self,
