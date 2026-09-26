@@ -1,6 +1,7 @@
 """Safety regressions for the MoviePilot-owned media-version cleanup."""
 
 import copy
+import json
 import os
 import tempfile
 import unittest
@@ -37,6 +38,35 @@ class MediaCleanupTests(unittest.TestCase):
     def test_tie_never_deletes(self):
         self.config["rules"] = [{**item, "enabled": False} for item in self.config["rules"]]
         self.assertEqual(self.engine.scan()["total_inferior"], 0)
+
+    def test_mediainfo_keeper_video_parameters_and_dovi_base_layer(self):
+        sidecar = self.folder / "Movie.2160p-mediainfo.json"
+        sidecar.write_text(json.dumps([{"MediaSourceInfo": {
+            "Size": 2684354560, "Bitrate": 9000000, "MediaStreams": [{
+                "Type": "Video", "Codec": "hevc", "Width": 1606, "Height": 3840,
+                "VideoRange": "HDR10", "RealFrameRate": 25,
+            }],
+        }}]), encoding="utf-8")
+        metadata = self.engine._metadata(str(self.folder), "Movie.2160p")
+        self.assertEqual(metadata["resolution"], "4k")
+        self.assertEqual(metadata["codec"], "hevc")
+        self.assertEqual(metadata["fps"], "25")
+        self.assertEqual(metadata["bitrate"], 9000000)
+        self.assertEqual(metadata["size"], 2684354560)
+        self.good.rename(self.folder / "Movie.2160p.DoVi.strm")
+        (self.folder / "Movie.2160p.DoVi-mediainfo.json").write_text(sidecar.read_text(encoding="utf-8"), encoding="utf-8")
+        result = self.engine.scan()
+        self.assertEqual(result["results"][0]["versions"][0]["effect"], "dovi")
+
+    def test_mediainfo_keeper_ffprobe_style(self):
+        sidecar = self.folder / "Movie.720p-mediainfo.json"
+        sidecar.write_text(json.dumps({"streams": [{"codec_type": "video", "codec_name": "h264",
+            "width": 1280, "height": 720, "avg_frame_rate": "24000/1001"}],
+            "format": {"size": "104857600", "bit_rate": "1500000"}}), encoding="utf-8")
+        metadata = self.engine._metadata(str(self.folder), "Movie.720p")
+        self.assertEqual(metadata["fps"], "24")
+        self.assertEqual(metadata["codec"], "h264")
+        self.assertEqual(metadata["size"], 104857600)
 
     def test_changed_best_file_prevents_deletion(self):
         self.engine.scan()

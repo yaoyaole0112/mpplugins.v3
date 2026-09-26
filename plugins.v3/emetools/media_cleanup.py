@@ -77,6 +77,36 @@ def parse_name(name):
     }
 
 
+def _media_value(key, raw):
+    """Normalize sidecar values into the same ranks used by MediaEnhance."""
+    text = str(raw or "").lower().strip()
+    if not text:
+        return ""
+    if key == "resolution":
+        match = re.search(r"(\d{3,5})\s*[x×]\s*(\d{3,5})", text)
+        if match:
+            width = max(int(match.group(1)), int(match.group(2)))
+            return "4k" if width >= 3200 else "1080p" if width >= 1800 else "720p" if width >= 1200 else "480p"
+        return parse_name(text)[key]
+    if key == "fps":
+        try:
+            rate = text.split("/")
+            fps = float(rate[0]) / float(rate[1]) if len(rate) == 2 else float(text)
+        except (ValueError, ZeroDivisionError):
+            return ""
+        return "60" if fps >= 55 else "50" if fps >= 45 else "30" if fps >= 27 else "25" if fps >= 24.5 else "24" if fps >= 20 else ""
+    if key == "effect":
+        if re.search(r"dovi|dolby.?vision|\bdv\b", text):
+            return "dovi"
+        if re.search(r"hdr10\+|hdr10plus", text):
+            return "hdr10+"
+        if re.search(r"hdr|hlg|smpte2084|arib-std-b67|\bpq\b", text):
+            return "hdr"
+        return "sdr" if re.search(r"sdr|bt709|bt601|bt470", text) else ""
+    value = parse_name(text).get(key, "")
+    return "" if value == "unknown" else value
+
+
 def compare_versions(first, second, rules):
     """Use the same first-decisive-rule comparison as MediaEnhance."""
     for rule in rules:
@@ -179,18 +209,46 @@ class MediaCleanup:
                     continue
                 with open(path, encoding="utf-8") as stream:
                     data = json.load(stream)
+                # Emby MediaInfoKeeper exports [{MediaSourceInfo:{MediaStreams:[]}}].
+                if isinstance(data, list):
+                    first = data[0] if data and isinstance(data[0], dict) else {}
+                    data = first.get("MediaSourceInfo") or {}
                 if not isinstance(data, dict):
                     continue
-                for key in ("size", "bitrate"):
-                    raw = data.get(key) or data.get(key.capitalize()) or 0
+                streams = data.get("MediaStreams") or data.get("streams") or data.get("videoStreams") or []
+                video = next((item for item in streams if isinstance(item, dict) and
+                              str(item.get("Type") or item.get("codec_type") or "video").lower() == "video"), {})
+                if not video and isinstance(data.get("video"), dict):
+                    video = data["video"]
+                fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
+                numbers = {
+                    "size": data.get("Size") or data.get("size") or fmt.get("size"),
+                    "bitrate": data.get("Bitrate") or data.get("BitRate") or data.get("bitrate") or
+                               fmt.get("bit_rate") or video.get("BitRate") or video.get("bit_rate"),
+                }
+                for key, raw in numbers.items():
                     try:
-                        version[key] = max(0, int(raw))
-                    except (ValueError, TypeError):
-                        pass
-                for key in ("resolution", "effect", "quality", "codec", "fps"):
-                    if isinstance(data.get(key), str) and data[key]:
-                        version[key] = data[key].lower()
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                        number = int(float(raw or 0))
+                        if number > 0:
+                            version[key] = number
+                    except (ValueError, TypeError, OverflowError):
+                        continue
+                dimensions = (video.get("Width") or video.get("width"), video.get("Height") or video.get("height"))
+                raw_values = {
+                    "resolution": data.get("resolution") or
+                                  (f"{dimensions[0]}x{dimensions[1]}" if all(dimensions) else ""),
+                    "effect": data.get("effect") or video.get("VideoRange") or video.get("ColorTransfer") or
+                              video.get("hdr_format") or video.get("color_transfer"),
+                    "codec": data.get("codec") or video.get("Codec") or video.get("codec_name"),
+                    "quality": data.get("quality"),
+                    "fps": data.get("fps") or video.get("RealFrameRate") or video.get("VideoFrameRate") or
+                           video.get("avg_frame_rate"),
+                }
+                for key, raw in raw_values.items():
+                    normalized = _media_value(key, raw)
+                    if normalized:
+                        version[key] = normalized
+            except (OSError, ValueError, TypeError):
                 continue
         return version
 
@@ -229,7 +287,12 @@ class MediaCleanup:
                         if not key:
                             continue
                         info = parse_name(name)
-                        info.update(self._metadata(folder, name[:-5]))
+                        extra = self._metadata(folder, name[:-5])
+                        # File name explicitly marked DoVi must not be downgraded
+                        # by its HDR10-compatible base layer in a sidecar.
+                        if info["effect"] == "dovi" and extra.get("effect") != "dovi":
+                            extra.pop("effect", None)
+                        info.update(extra)
                         stat = os.stat(path, follow_symlinks=False)
                         grouped.setdefault((folder, key), []).append({"file_path": path, "file_name": name,
                             "size": 0, "bitrate": 0, "item_id": "", **info,

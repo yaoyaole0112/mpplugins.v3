@@ -21,7 +21,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.8.1",
+    "version": "2.8.2",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -29,6 +29,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.8.2": "媒体清理改用可搜索的媒体库多选框；清理规则支持序号标签拖拽、大写标签、箭头排序与精简方向选项；读取 MediaInfoKeeper 视频参数并隐藏未知片源，修正侧栏页面双重滚动和空白错位",
       "v2.8.1": "修复媒体清理扫描：从 Emby 虚拟媒体库读取真实目录路径，不再依赖用户视图中可能缺失的 Path；扫描失败时显示具体可排查的原因",
       "v2.8.0": "新增媒体清理页面：按 Emby 媒体库扫描重复 STRM、配置质量规则和定时清理、预览并二次确认删除 115 云端及本地低质版本；定时清理默认关闭",
       "v2.7.10": "MoviePilot 侧栏入口改用无蓝色背景的三星轮廓图标，保留插件页面原图标",
