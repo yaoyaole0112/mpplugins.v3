@@ -802,7 +802,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-media-rule-dialog .eme-media-tag{font-size:11px;padding:2px 5px;gap:3px;min-height:21px;letter-spacing:0}
 .eme-media-rule-dialog .eme-media-tag-rank{height:16px;min-width:16px;font-size:9px}
 .eme-media-rule-dialog .eme-media-options{gap:4px}
-.eme-media-rule-dialog .eme-media-rule-head>strong{font-size:12px;line-height:1.4}
+.eme-media-rule-dialog .eme-media-rule-head>strong{font-size:15px;line-height:1.4}
 .eme-media-keep{display:inline-flex;align-items:center;gap:8px}.eme-media-keep-check{display:inline-flex;align-items:center;justify-content:center;flex:none;width:18px;height:18px;color:#38b86c;font-size:21px;font-weight:700;line-height:1}
 .eme-sidebar{box-sizing:border-box;width:286px;flex:none;min-height:0;padding:28px 0 24px 26px;border-right:0;overflow:visible;gap:0}
 .eme-shell--app .eme-sidebar{padding:28px 0 24px 26px;gap:0;overflow:visible}
