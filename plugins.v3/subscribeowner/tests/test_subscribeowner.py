@@ -10,14 +10,21 @@ class SubscribeOwnerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         class SubscribeOper:
-            subscription = None
+            subscriptions = []
             updates = []
 
             def get(self, subscribe_id):
-                return self.subscription
+                return next(
+                    (item for item in self.subscriptions if item.id == subscribe_id),
+                    None,
+                )
+
+            def list(self):
+                return self.subscriptions
 
             def update(self, subscribe_id, payload):
                 self.updates.append((subscribe_id, payload))
+                return self.get(subscribe_id)
 
         class UserOper:
             users = []
@@ -28,8 +35,18 @@ class SubscribeOwnerTests(unittest.TestCase):
         class EventType:
             SubscribeAdded = "subscribe.added"
 
+        class CronTrigger:
+            @staticmethod
+            def from_crontab(value):
+                if value == "invalid":
+                    raise ValueError("invalid cron")
+                return value
+
         packages = {}
-        for name in ("app", "app.db", "app.db.oper", "app.schemas", "app.sdk"):
+        for name in (
+            "app", "app.db", "app.db.oper", "app.schemas", "app.sdk",
+            "apscheduler", "apscheduler.triggers",
+        ):
             package = types.ModuleType(name)
             package.__path__ = []
             packages[name] = package
@@ -41,6 +58,7 @@ class SubscribeOwnerTests(unittest.TestCase):
             "app.schemas.types": types.ModuleType("app.schemas.types"),
             "app.sdk.events": types.ModuleType("app.sdk.events"),
             "app.sdk.logging": types.ModuleType("app.sdk.logging"),
+            "apscheduler.triggers.cron": types.ModuleType("apscheduler.triggers.cron"),
         }
         modules["app.db.oper.subscribe"].SubscribeOper = SubscribeOper
         modules["app.db.oper.user"].UserOper = UserOper
@@ -51,6 +69,7 @@ class SubscribeOwnerTests(unittest.TestCase):
             register=lambda event_type: lambda handler: handler
         )
         modules["app.sdk.logging"].logger = Mock()
+        modules["apscheduler.triggers.cron"].CronTrigger = CronTrigger
         plugin_path = Path(__file__).resolve().parents[1] / "__init__.py"
         spec = importlib.util.spec_from_file_location("test_subscribeowner_plugin", plugin_path)
         plugin_module = importlib.util.module_from_spec(spec)
@@ -61,9 +80,11 @@ class SubscribeOwnerTests(unittest.TestCase):
         cls.user_oper = UserOper
 
     def setUp(self):
-        self.subscribe_oper.subscription = types.SimpleNamespace(
-            id=12, name="测试剧集", type="电视剧", username="猫眼订阅"
-        )
+        self.subscribe_oper.subscriptions = [
+            types.SimpleNamespace(
+                id=12, name="测试剧集", type="电视剧", username="猫眼订阅"
+            )
+        ]
         self.subscribe_oper.updates = []
         self.user_oper.users = [
             types.SimpleNamespace(name="admin", is_active=True)
@@ -76,17 +97,32 @@ class SubscribeOwnerTests(unittest.TestCase):
             types.SimpleNamespace(event_data={"subscribe_id": subscribe_id})
         )
 
-    def test_reassigns_plugin_owned_tv_subscription(self):
+    def test_reassigns_new_subscription(self):
         self.send_event()
         self.assertEqual(self.subscribe_oper.updates, [(12, {"username": "admin"})])
 
-    def test_preserves_real_user_and_non_tv_subscriptions(self):
-        self.subscribe_oper.subscription.username = "admin"
-        self.send_event()
-        self.subscribe_oper.subscription.username = "猫眼订阅"
-        self.subscribe_oper.subscription.type = "电影"
+    def test_skips_already_owned_subscription(self):
+        self.subscribe_oper.subscriptions[0].username = "admin"
         self.send_event()
         self.assertEqual(self.subscribe_oper.updates, [])
+
+    def test_periodic_sweep_updates_all_types_and_real_users(self):
+        self.subscribe_oper.subscriptions.extend([
+            types.SimpleNamespace(id=13, name="测试电影", type="电影", username="viewer"),
+            types.SimpleNamespace(id=14, name="测试音乐", type="音乐", username="admin"),
+        ])
+        self.plugin.sync_subscriptions()
+        self.assertEqual(self.subscribe_oper.updates, [
+            (12, {"username": "admin"}),
+            (13, {"username": "admin"}),
+        ])
+
+    def test_schedules_cron_when_enabled(self):
+        service = self.plugin.get_service()
+        self.assertEqual(service[0]["trigger"], "*/30 * * * *")
+        self.assertEqual(service[0]["func"], self.plugin.sync_subscriptions)
+        self.plugin.init_plugin({"enabled": True, "cron": "invalid"})
+        self.assertEqual(self.plugin.get_service(), [])
 
     def test_requires_explicit_target_with_multiple_active_users(self):
         self.user_oper.users.append(
@@ -98,18 +134,20 @@ class SubscribeOwnerTests(unittest.TestCase):
         self.send_event()
         self.assertEqual(self.subscribe_oper.updates, [(12, {"username": "viewer"})])
 
-    def test_does_not_override_another_real_user(self):
+    def test_reassigns_new_subscription_from_another_real_user(self):
         self.user_oper.users.append(
             types.SimpleNamespace(name="viewer", is_active=True)
         )
         self.plugin.init_plugin({"enabled": True, "target_username": "admin"})
-        self.subscribe_oper.subscription.username = "viewer"
+        self.subscribe_oper.subscriptions[0].username = "viewer"
         self.send_event()
-        self.assertEqual(self.subscribe_oper.updates, [])
+        self.assertEqual(self.subscribe_oper.updates, [(12, {"username": "admin"})])
 
     def test_disabled_or_invalid_event_does_not_write(self):
         self.plugin.init_plugin({"enabled": False})
         self.send_event()
+        self.plugin.sync_subscriptions()
+        self.assertEqual(self.plugin.get_service(), [])
         self.plugin.init_plugin({"enabled": True})
         self.send_event("not-an-id")
         self.assertEqual(self.subscribe_oper.updates, [])
