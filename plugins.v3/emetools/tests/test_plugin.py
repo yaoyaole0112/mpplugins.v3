@@ -127,6 +127,25 @@ class PluginTests(unittest.TestCase):
     def run_async(self, coroutine):
         return asyncio.run(coroutine)
 
+    def test_media_scan_libraries_are_independent_of_scheduled_libraries(self):
+        self.plugin._media_config["library_ids"] = ["scheduled::1"]
+        self.plugin._media_scan_library_ids = []
+        initial = self.run_async(self.plugin.media_status())
+        self.assertEqual(initial["scan_library_ids"], [])
+        self.assertEqual(initial["config"]["library_ids"], ["scheduled::1"])
+        with patch("emetools.threading.Thread") as thread:
+            self.run_async(self.plugin.media_action({"operation": "scan", "library_ids": ["manual::2"]}))
+            thread.return_value.start.assert_called_once()
+        self.assertEqual(self.plugin._media_scan_library_ids, ["manual::2"])
+        self.assertEqual(self.plugin._media_config["library_ids"], ["scheduled::1"])
+        self.assertEqual(self.plugin.update_config.call_args.args[0]["media_scan_library_ids"], ["manual::2"])
+        self.assertEqual(self.plugin.update_config.call_args.args[0]["media_cleanup"]["library_ids"], ["scheduled::1"])
+        self.plugin._media.running = False
+        with patch("emetools.Scheduler"):
+            self.run_async(self.plugin.media_action({"operation": "save", "config": {"library_ids": ["scheduled::3"]}}))
+        self.assertEqual(self.plugin._media_scan_library_ids, ["manual::2"])
+        self.assertEqual(self.run_async(self.plugin.media_status())["config"]["library_ids"], ["scheduled::3"])
+
     def test_missing_migration_defaults_off_and_copies_legacy_results(self):
         from emetools.missing_episodes import MissingAction
         plugin = object.__new__(EmeTools)

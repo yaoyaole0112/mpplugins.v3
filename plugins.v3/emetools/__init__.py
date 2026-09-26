@@ -91,7 +91,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.8.6"
+    plugin_version = "2.8.7"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -138,6 +138,11 @@ class EmeTools(_PluginBase):
             for key in self._media_config:
                 if key in saved_media:
                     self._media_config[key] = copy.deepcopy(saved_media[key])
+        # Manual scan scope is stored separately from scheduled-cleanup scope.
+        saved_scan_ids = config.get("media_scan_library_ids", [])
+        self._media_scan_library_ids = (list(saved_scan_ids) if isinstance(saved_scan_ids, list)
+                                        and len(saved_scan_ids) <= 200
+                                        and all(isinstance(value, str) for value in saved_scan_ids) else [])
         try:
             self._media_config["rules"] = validate_rules(self._media_config["rules"])
         except ValueError:
@@ -416,10 +421,12 @@ class EmeTools(_PluginBase):
                             "tg_forward_token": self._tg_forward_token, "tg_session": self._tg_session,
                             "monitor": copy.deepcopy(self._monitor_config),
                             "missing": copy.deepcopy(self._missing_config),
-                            "media_cleanup": copy.deepcopy(self._media_config)})
+                            "media_cleanup": copy.deepcopy(self._media_config),
+                            "media_scan_library_ids": list(self._media_scan_library_ids)})
 
     async def media_status(self) -> dict:
-        return {"config": copy.deepcopy(self._media_config), "running": self._media.running,
+        return {"config": copy.deepcopy(self._media_config),
+                "scan_library_ids": list(self._media_scan_library_ids), "running": self._media.running,
                 "progress": self._media.progress, "last_scan": self._media.last_scan,
                 "last_error": self._media.last_error,
                 "result": copy.deepcopy(self._media.result)}
@@ -457,9 +464,11 @@ class EmeTools(_PluginBase):
         if operation == "scan":
             if self._media.running or self._media.lock.locked():
                 raise HTTPException(status_code=409, detail="媒体清理正在执行")
-            selected = action.get("library_ids", self._media_config["library_ids"])
+            selected = action.get("library_ids", self._media_scan_library_ids)
             if not isinstance(selected, list) or len(selected) > 200 or any(not isinstance(v, str) for v in selected):
                 raise HTTPException(status_code=400, detail="媒体库选择不合法")
+            self._media_scan_library_ids = list(selected)
+            self._persist()
             def background_scan():
                 try:
                     self._media.scan(selected)

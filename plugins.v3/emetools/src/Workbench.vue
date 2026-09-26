@@ -119,11 +119,11 @@ function dropMediaOption(rule, rank) {
   rule.order.splice(rank, 0, entry)
 }
 function applyMediaStatus(status) {
-  const { config, ...state } = status
+  const { config, scan_library_ids, ...state } = status
   Object.assign(media, state)
   if (!mediaLoaded) {
     media.config = config
-    mediaScanLibraryIds.value = [...(config.library_ids || [])]
+    mediaScanLibraryIds.value = [...(scan_library_ids || [])]
     mediaLoaded = true
   }
   // The scan may finish between the POST and the first status GET. Keep
