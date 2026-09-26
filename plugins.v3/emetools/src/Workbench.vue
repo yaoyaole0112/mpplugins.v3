@@ -1,6 +1,5 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import pluginIcon from '../icon.jpeg'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -71,6 +70,8 @@ const missingOptionsLoading = ref(false)
 const missingPicker = reactive({ open: '', query: '' })
 const missingActionPicker = ref(false)
 const missingActionOptions = ['仅检查记录', '添加到订阅', '标记为存在']
+let missingScanPendingId = 0
+let missingPollTimer = null
 const media = reactive({ config: { enabled: false, cron: '0 3 * * *', library_ids: [], rules: [] }, libraries: [], result: null, running: false, progress: '', last_scan: '', last_error: '' })
 const mediaSelection = ref([])
 const mediaInferiorPaths = computed(() => (media.result?.results || []).flatMap(group =>
@@ -288,9 +289,27 @@ async function loadMonitor() {
 }
 async function loadMissing() {
   const status = await get('missing/status')
-  Object.assign(missing, status)
-  missing.config = { ...status.config, server_names: [...status.config.server_names],
-    library_names: [...status.config.library_names], skip_series_ids: [...status.config.skip_series_ids] }
+  applyMissingStatus(status, true)
+}
+function applyMissingStatus(status, updateConfig = false) {
+  const { config, ...state } = status
+  Object.assign(missing, state)
+  if (updateConfig) missing.config = { ...config, server_names: [...config.server_names],
+    library_names: [...config.library_names], skip_series_ids: [...config.skip_series_ids] }
+  if (missingScanPendingId && (status.finished_scan_id || 0) >= missingScanPendingId) missingScanPendingId = 0
+  missing.scanning = Boolean(status.scanning || missingScanPendingId)
+  if (active.value === 'missing' && missing.scanning) scheduleMissingPoll()
+}
+function scheduleMissingPoll() {
+  clearTimeout(missingPollTimer)
+  missingPollTimer = setTimeout(async () => {
+    if (active.value !== 'missing') return
+    try { applyMissingStatus(await get('missing/status')) }
+    catch (err) {
+      error.value = err?.message || '刷新缺集检测结果失败'
+      scheduleMissingPoll()
+    }
+  }, 1200)
 }
 async function loadMissingOptions() {
   missingOptionsLoading.value = true
@@ -340,6 +359,7 @@ function confirmModeLabel() {
 async function missingCommand(operation) {
   await work(async () => {
     const result = await post('missing/action', { operation, ...(operation === 'save' ? { config: missing.config } : {}) })
+    if (operation === 'scan') missingScanPendingId = result.scan_id
     notice.value = result.message
     await loadMissing()
   })
@@ -549,6 +569,7 @@ function selectFolder() {
 }
 function chooseSection(key) {
   active.value = key
+  if (key !== 'missing') clearTimeout(missingPollTimer)
   toast.visible = false
   notice.value = ''
   error.value = ''
@@ -556,13 +577,16 @@ function chooseSection(key) {
   if (key === 'media') loadMedia().catch(err => { error.value = err?.message || '读取媒体清理配置失败' })
 }
 onMounted(() => { load(); loadMissing().catch(() => {}) })
-onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(toastTimer) })
+onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer); clearTimeout(toastTimer) })
 </script>
 
 <template>
   <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''; missingActionPicker = false; mediaPicker.open = false; mediaSchedulePicker.open = false; confirmPicker.open = false">
     <aside class="eme-sidebar">
-      <div class="eme-brand"><img class="eme-brand-icon" :src="pluginIcon" alt="增强工具图标" /><strong>增强工具</strong></div>
+      <div class="eme-brand">
+        <span class="eme-brand-icon" aria-hidden="true" />
+        <strong>增强工具</strong>
+      </div>
       <nav class="eme-sidebar-card" aria-label="增强工具页面">
         <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" :aria-current="active === section.key ? 'page' : undefined" @click="chooseSection(section.key)">
           <i :class="`mdi ${section.icon}`" /><span><strong>{{ section.title }}</strong><small>{{ section.detail }}</small></span><i class="mdi mdi-chevron-right eme-chevron" />
@@ -589,15 +613,14 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(toastTimer) })
           <div class="eme-fields"><label>执行周期（cron表达式）<input v-model.trim="missing.config.cron" placeholder="35 3 * * *" /></label><label>缺集处理方式<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" aria-label="缺集处理方式" :aria-expanded="missingActionPicker" @click="missingPicker.open = ''; missingActionPicker = !missingActionPicker"><span>{{ missing.config.missing_action }}</span><i class="mdi" :class="missingActionPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingActionPicker" class="eme-picker-menu" role="listbox" aria-label="缺集处理方式"><button v-for="item in missingActionOptions" :key="item" type="button" role="option" :aria-selected="missing.config.missing_action === item" class="eme-picker-option" :class="{ selected: missing.config.missing_action === item }" @click="selectMissingAction(item)"><i class="mdi" :class="missing.config.missing_action === item ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item }}</button></div></div></label></div>
           <p class="eme-hint">“标记为存在”仅记录处理结果，与原插件一致；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。</p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新可选项' }}</button></div>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><div class="eme-inline"><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('scan')">立即检测</button><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新可选项' }}</button></div></div>
           <div class="eme-missing-selects">
             <label>Emby 服务器（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('servers')"><span>{{ missingPickerLabel('servers') }}</span><i class="mdi" :class="missingPicker.open === 'servers' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'servers'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索服务器" @click.stop /><button v-for="item in missingOptionItems('servers')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.server_names.includes(item.value) }" @click="toggleMissingOption('servers', item.value)"><i class="mdi" :class="missing.config.server_names.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('servers').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
             <label>电视剧媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('libraries')"><span>{{ missingPickerLabel('libraries') }}</span><i class="mdi" :class="missingPicker.open === 'libraries' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'libraries'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索媒体库" @click.stop /><button v-for="item in missingOptionItems('libraries')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.library_names.includes(item.value) }" @click="toggleMissingOption('libraries', item.value)"><i class="mdi" :class="missing.config.library_names.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('libraries').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
             <label>跳过检测剧集（按拼音排序，可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('series')"><span>{{ missingPickerLabel('series') }}</span><i class="mdi" :class="missingPicker.open === 'series' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'series'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索剧集名称或 TMDB ID" @click.stop /><button v-for="item in missingOptionItems('series')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.skip_series_ids.includes(item.value) }" @click="toggleMissingOption('series', item.value)"><i class="mdi" :class="missing.config.skip_series_ids.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('series').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
           </div><p class="eme-hint">点击选择框即可展开，支持搜索和多选；再次点击已选项可取消。更改检测范围后请先保存配置。</p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>检测结果</h3><p>{{ missing.scanning ? '后台扫描中' : `上次扫描：${missing.last_scan_time}` }} · {{ missing.results.length }} 条缺失季</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy" @click="loadMissing">刷新结果</button><button class="eme-button secondary" :disabled="busy" @click="downloadMissingCsv">导出 CSV</button></div></div>
-          <div class="eme-actions"><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('scan')">立即检测</button><button class="eme-button danger" :disabled="busy || missing.scanning || !missing.results.length" @click="clearMissing">清理检查记录</button></div>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>检测结果</h3><p>{{ missing.scanning ? '后台扫描中' : `上次扫描：${missing.last_scan_time}` }} · {{ missing.results.length }} 条缺失季</p></div><div class="eme-inline"><button class="eme-button danger" :disabled="busy || missing.scanning || !missing.results.length" @click="clearMissing">清理检查记录</button><button class="eme-button secondary" :disabled="busy" @click="loadMissing">刷新结果</button><button class="eme-button secondary" :disabled="busy" @click="downloadMissingCsv">导出 CSV</button></div></div>
           <div v-if="missing.results.length" class="eme-missing-results"><table><thead><tr><th>服务器</th><th>媒体库</th><th>剧集名称</th><th>缺失季度</th><th>缺失集号</th><th>处理结果</th></tr></thead><tbody><tr v-for="(item, index) in missing.results" :key="index"><td>{{ item.ServerName }}</td><td>{{ item.LibraryName }}</td><td>{{ item.SeriesName }}</td><td>{{ item.SeasonFormatted }}</td><td>{{ item.MissingEpisodes }}</td><td>{{ item.ActionResult }}</td></tr></tbody></table></div><p v-else class="eme-hint">暂无缺失数据或尚未运行扫描。</p>
         </section>
       </template>
@@ -784,7 +807,9 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(toastTimer) })
 .eme-sidebar{box-sizing:border-box;width:286px;flex:none;min-height:0;padding:28px 0 24px 26px;border-right:0;overflow:visible;gap:0}
 .eme-shell--app .eme-sidebar{padding:28px 0 24px 26px;gap:0;overflow:visible}
 .eme-brand,.eme-shell--app .eme-brand{box-sizing:border-box;flex:none;gap:12px;min-height:52px;margin-bottom:22px;padding:0 6px}
-.eme-brand-icon{width:46px;height:46px;flex:none;border-radius:12px;object-fit:cover}
+.eme-brand-icon{width:46px;height:46px;flex:none;border-radius:0;background:rgb(var(--v-theme-primary));mask:url('./brand-stars.svg') center/contain no-repeat}
+.eme-brand-icon{display:block}
+:global(.layout-vertical-nav .nav-link a[href*="emetools" i] .nav-item-icon::before){content:"";display:block;width:1em;height:1em;background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
 .eme-brand strong{font-size:25px;line-height:1.25;font-weight:700}
 .eme-sidebar-card{box-sizing:border-box;display:flex;flex-direction:column;gap:3px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:12px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:16px;background:rgb(var(--v-theme-surface))}
 .eme-sidebar-card .eme-nav{flex:none;padding:11px 10px;border:1px solid transparent}

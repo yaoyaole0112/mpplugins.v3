@@ -109,7 +109,18 @@ class P115ParseTests(unittest.TestCase):
 
 class PluginTests(unittest.TestCase):
     def test_sidebar_uses_background_free_sparkles_icon(self):
-        self.assertEqual(self.plugin.get_sidebar_nav()[0]["icon"], "mdi-creation-outline")
+        self.assertEqual(self.plugin.get_sidebar_nav()[0]["icon"], "mdi-shimmer")
+
+    def test_manual_missing_scan_reports_completion_for_result_polling(self):
+        self.plugin._missing.scan_missing_episodes = MagicMock()
+        with patch("emetools.threading.Thread") as thread:
+            result = self.run_async(self.plugin.missing_action({"operation": "scan"}))
+            thread.return_value.start.assert_called_once()
+            self.assertEqual(result["scan_id"], 1)
+            self.assertEqual(self.run_async(self.plugin.missing_status())["finished_scan_id"], 0)
+            thread.call_args.kwargs["target"]()
+        self.plugin._missing.scan_missing_episodes.assert_called_once()
+        self.assertEqual(self.run_async(self.plugin.missing_status())["finished_scan_id"], 1)
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
