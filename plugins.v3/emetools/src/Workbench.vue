@@ -611,7 +611,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
             <label class="eme-switch-label"><input v-model="missing.config.ignore_future" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>忽略未上映剧集</span></label>
           </div>
           <div class="eme-fields"><label>执行周期（cron表达式）<input v-model.trim="missing.config.cron" placeholder="35 3 * * *" /></label><label>缺集处理方式<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" aria-label="缺集处理方式" :aria-expanded="missingActionPicker" @click="missingPicker.open = ''; missingActionPicker = !missingActionPicker"><span>{{ missing.config.missing_action }}</span><i class="mdi" :class="missingActionPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingActionPicker" class="eme-picker-menu" role="listbox" aria-label="缺集处理方式"><button v-for="item in missingActionOptions" :key="item" type="button" role="option" :aria-selected="missing.config.missing_action === item" class="eme-picker-option" :class="{ selected: missing.config.missing_action === item }" @click="selectMissingAction(item)"><i class="mdi" :class="missing.config.missing_action === item ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item }}</button></div></div></label></div>
-          <p class="eme-hint">“标记为存在”仅记录处理结果，与原插件一致；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。</p>
+          <p class="eme-hint">“标记为存在”仅记录处理结果；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><div class="eme-inline"><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('scan')">立即检测</button><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新可选项' }}</button></div></div>
           <div class="eme-missing-selects">
@@ -804,6 +804,12 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-media-rule-dialog .eme-media-options{gap:4px}
 .eme-media-rule-dialog .eme-media-rule-head>strong{font-size:15px;line-height:1.4}
 .eme-media-keep{display:inline-flex;align-items:center;gap:8px}.eme-media-keep-check{display:inline-flex;align-items:center;justify-content:center;flex:none;width:18px;height:18px;color:#38b86c;font-size:21px;font-weight:700;line-height:1}
+.eme-media-version .eme-media-choice,.eme-media-version .eme-media-keep{display:grid!important;grid-template-columns:18px minmax(0,1fr);align-items:center;column-gap:8px;flex:1;min-width:0}
+.eme-media-version .eme-media-choice input{width:18px!important;height:18px;margin:0!important;justify-self:center}
+.eme-media-version .eme-media-file-name{font-size:14px;line-height:1.5;font-weight:400}
+.eme-media-version .eme-media-keep .eme-media-file-name{color:rgb(var(--v-theme-on-surface))}
+.eme-media-version .eme-media-choice .eme-media-file-name{color:rgba(var(--v-theme-on-surface),.6)}
+.eme-cleanup-grid{max-width:610px}
 .eme-sidebar{box-sizing:border-box;width:286px;flex:none;min-height:0;padding:28px 0 24px 26px;border-right:0;overflow:visible;gap:0}
 .eme-shell--app .eme-sidebar{padding:28px 0 24px 26px;gap:0;overflow:visible}
 .eme-brand,.eme-shell--app .eme-brand{box-sizing:border-box;flex:none;gap:12px;min-height:52px;margin-bottom:22px;padding:0 6px}
