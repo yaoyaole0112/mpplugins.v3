@@ -35,9 +35,12 @@ class MediaCleanupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine.delete([str(self.good)])
 
-    def test_tie_never_deletes(self):
+    def test_disabled_legacy_rules_are_compared_and_normalized(self):
         self.config["rules"] = [{**item, "enabled": False} for item in self.config["rules"]]
-        self.assertEqual(self.engine.scan()["total_inferior"], 0)
+        self.assertTrue(all(rule["enabled"] for rule in validate_rules(self.config["rules"])))
+        self.engine._scope_paths(str(self.root), ["emby::1"])
+        self.assertIn("正在扫描 STRM 目录（", self.engine.progress)
+        self.assertEqual(self.engine.scan()["total_inferior"], 1)
 
     def test_mediainfo_keeper_video_parameters_and_dovi_base_layer(self):
         sidecar = self.folder / "Movie.2160p-mediainfo.json"

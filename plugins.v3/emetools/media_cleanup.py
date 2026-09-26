@@ -43,7 +43,9 @@ def validate_rules(rules):
     for item in rules:
         original = known[item["id"]]
         rule = copy.deepcopy(original)
-        rule["enabled"] = bool(item.get("enabled", True))
+        # Rule switches are no longer exposed. Normalize previously disabled
+        # rules so saved configurations and scheduled scans compare every rule.
+        rule["enabled"] = True
         if original["type"] == "list":
             order = item.get("order")
             if not isinstance(order, list) or len(order) != len(original["order"]) or set(order) != set(original["order"]):
@@ -110,8 +112,6 @@ def _media_value(key, raw):
 def compare_versions(first, second, rules):
     """Use the same first-decisive-rule comparison as MediaEnhance."""
     for rule in rules:
-        if not rule["enabled"]:
-            continue
         key = rule["id"]
         if rule["type"] == "list":
             order = rule["order"]
@@ -197,8 +197,8 @@ class MediaCleanup:
             raise ValueError("所选 Emby 媒体库路径不在 MoviePilot 的 STRM 根目录下；请核对两端挂载路径，未执行扫描")
         names = [lib.get("name") or os.path.basename(str(lib["paths"][0]).rstrip(os.sep)) or lib["id"]
                  for lib in libraries if not selected or lib["id"] in selected]
-        label = "、".join(names[:3]) + (f"等 {len(names)} 个" if len(names) > 3 else "")
-        self.progress = f"正在扫描 STRM 目录：{label}媒体库"
+        label = "、".join(names[:3]) + (f"等 {len(names)} 个媒体库" if len(names) > 3 else "")
+        self.progress = f"正在扫描 STRM 目录（{label}）"
         return sorted(set(paths))
 
     @staticmethod
