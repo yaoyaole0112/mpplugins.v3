@@ -67,6 +67,16 @@ class MediaCleanupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_rules(self.config["rules"][:-1])
 
+    def test_emby_virtual_folders_supply_scan_paths_when_user_views_have_no_path(self):
+        del self.engine.libraries  # Exercise the real library discovery method.
+        fake = SimpleNamespace(config=SimpleNamespace(name="Emby"), instance=SimpleNamespace(
+            get_librarys=lambda **kwargs: [SimpleNamespace(id="1", name="影视", path=None)],
+            get_emby_virtual_folders=lambda: [{"Id": "1", "Name": "影视", "Path": [str(self.root)]}]))
+        with patch("emetools.media_cleanup.MediaServerHelper") as helper:
+            helper.return_value.get_services.return_value = {"emby": fake}
+            self.assertEqual(self.engine.libraries()[0]["paths"], [str(self.root)])
+            self.assertEqual(self.engine.scan(["Emby::1"])["total_inferior"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -135,17 +135,22 @@ class MediaCleanup:
         values = services.values() if isinstance(services, dict) else services
         result = []
         for service in values:
-            server = str(service.config.name)
-            for library in service.instance.get_librarys(hidden=False) or []:
-                paths = library.path if isinstance(library.path, list) else [library.path]
-                result.append({"id": f"{server}::{library.id}", "name": str(library.name),
+            server = str(service.config.name or "")
+            # get_librarys() reads Emby Users/{user}/Views; its Path is often
+            # empty. VirtualFolders/Query returns the actual LibraryOptions
+            # PathInfos needed to constrain a filesystem scan.
+            for library in service.instance.get_emby_virtual_folders() or []:
+                paths = library.get("Path") or []
+                if isinstance(paths, str):
+                    paths = [paths]
+                result.append({"id": f"{server}::{library['Id']}", "name": str(library["Name"]),
                                "server": server, "paths": [str(p) for p in paths if p]})
         return result
 
     def _scope_paths(self, root, selected):
         libraries = self.libraries()
         if not libraries:
-            raise ValueError("未找到可用的 Emby 媒体库")
+            raise ValueError("未获取到 Emby 媒体库路径，请检查 Emby 连接及媒体库配置")
         selected = set(selected or [])
         known = {lib["id"] for lib in libraries}
         if selected - known:
@@ -159,7 +164,7 @@ class MediaCleanup:
                 if os.path.commonpath([root, normalized]) == root and os.path.isdir(normalized):
                     paths.append(normalized)
         if not paths:
-            raise ValueError("所选媒体库路径未挂载到 STRM 根目录，未执行扫描")
+            raise ValueError("所选 Emby 媒体库路径不在 MoviePilot 的 STRM 根目录下；请核对两端挂载路径，未执行扫描")
         return sorted(set(paths))
 
     @staticmethod
