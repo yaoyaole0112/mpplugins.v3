@@ -14,6 +14,7 @@ from datetime import datetime
 
 from app.sdk.logging import logger
 from app.sdk.services import MediaServerHelper
+from pypinyin import lazy_pinyin
 
 from .p115 import P115Client
 
@@ -142,6 +143,16 @@ def _group_key(root, folder, name):
         return f"{os.path.basename(folder)} S{int(episode.group(1)):02}E{int(episode.group(2)):02}"
     # EME groups movie versions by their enclosing directory, not filename.
     return name if os.path.realpath(folder) == os.path.realpath(root) else os.path.basename(folder)
+
+
+def _result_sort_key(group):
+    """Sort series by pinyin title, then by numeric season and episode."""
+    name = str(group.get("name") or "")
+    match = re.search(r"\s+[Ss](\d+)[Ee](\d+)\s*$", name)
+    title = name[:match.start()].strip() if match else name.strip()
+    title_key = "".join(lazy_pinyin(title)).casefold()
+    return (title_key, int(match.group(1)) if match else -1,
+            int(match.group(2)) if match else -1, name.casefold())
 
 
 class MediaCleanup:
@@ -316,7 +327,7 @@ class MediaCleanup:
                 results.append({"name": name, "versions": [{k: v for k, v in item.items() if k != "signature"}
                                   for item in ordered], "inferior_count": len(ordered) - 1,
                                 "total_space_savings": sum(v["size"] for v in ordered[1:])})
-            results.sort(key=lambda item: item["total_space_savings"], reverse=True)
+            results.sort(key=_result_sort_key)
             self._snapshot = snapshot
             self._scan_inventory = {folder: {item["file_name"]: item["signature"] for versions in grouped.values()
                                              for item in versions if os.path.dirname(item["file_path"]) == folder}

@@ -35,6 +35,21 @@ class MediaCleanupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine.delete([str(self.good)])
 
+    def test_scan_sorts_chinese_series_by_pinyin_then_numeric_season_episode(self):
+        episodes = [("云雀 (2026)", 1, 19), ("云雀 (2026)", 2, 1),
+                    ("阿尔法 (2026)", 1, 10), ("云雀 (2026)", 1, 2),
+                    ("阿尔法 (2026)", 1, 2)]
+        for title, season, episode in episodes:
+            folder = self.root / title
+            folder.mkdir(exist_ok=True)
+            for resolution in ("2160p", "720p"):
+                (folder / f"{title} S{season:02}E{episode:02}.{resolution}.strm").write_text(
+                    "https://example.com/redirect115/111", encoding="utf-8")
+        result = self.engine.scan(["emby::1"])
+        names = [item["name"] for item in result["results"] if " S" in item["name"]]
+        self.assertEqual(names, ["阿尔法 (2026) S01E02", "阿尔法 (2026) S01E10",
+                                 "云雀 (2026) S01E02", "云雀 (2026) S01E19", "云雀 (2026) S02E01"])
+
     def test_disabled_legacy_rules_are_compared_and_normalized(self):
         self.config["rules"] = [{**item, "enabled": False} for item in self.config["rules"]]
         self.assertTrue(all(rule["enabled"] for rule in validate_rules(self.config["rules"])))
