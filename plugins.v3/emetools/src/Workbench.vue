@@ -563,9 +563,11 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(toastTimer) })
   <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''; missingActionPicker = false; mediaPicker.open = false; mediaSchedulePicker.open = false; confirmPicker.open = false">
     <aside class="eme-sidebar">
       <div class="eme-brand"><img class="eme-brand-icon" :src="pluginIcon" alt="增强工具图标" /><strong>增强工具</strong></div>
-      <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" @click="chooseSection(section.key)">
-        <i :class="`mdi ${section.icon}`" /><span><strong>{{ section.title }}</strong><small>{{ section.detail }}</small></span><i class="mdi mdi-chevron-right eme-chevron" />
-      </button>
+      <nav class="eme-sidebar-card" aria-label="增强工具页面">
+        <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" :aria-current="active === section.key ? 'page' : undefined" @click="chooseSection(section.key)">
+          <i :class="`mdi ${section.icon}`" /><span><strong>{{ section.title }}</strong><small>{{ section.detail }}</small></span><i class="mdi mdi-chevron-right eme-chevron" />
+        </button>
+      </nav>
     </aside>
     <main class="eme-main">
       <header class="eme-header">
@@ -777,6 +779,16 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(toastTimer) })
 .eme-media-rule-dialog .eme-media-options{gap:4px}
 .eme-media-rule-dialog .eme-media-rule-head>strong{font-size:12px;line-height:1.4}
 .eme-media-keep{display:inline-flex;align-items:center;gap:8px}.eme-media-keep-check{display:inline-flex;align-items:center;justify-content:center;flex:none;width:18px;height:18px;color:#38b86c;font-size:21px;font-weight:700;line-height:1}
+.eme-sidebar{box-sizing:border-box;width:286px;flex:none;min-height:0;padding:28px 0 24px 26px;border-right:0;overflow:visible;gap:0}
+.eme-shell--app .eme-sidebar{padding:28px 0 24px 26px;gap:0;overflow:visible}
+.eme-brand,.eme-shell--app .eme-brand{box-sizing:border-box;flex:none;gap:12px;min-height:52px;margin-bottom:22px;padding:0 6px}
+.eme-brand-icon{width:46px;height:46px;flex:none;border-radius:12px;object-fit:cover}
+.eme-brand strong{font-size:25px;line-height:1.25;font-weight:700}
+.eme-sidebar-card{box-sizing:border-box;display:flex;flex-direction:column;gap:3px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:12px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:16px;background:rgb(var(--v-theme-surface))}
+.eme-sidebar-card .eme-nav{flex:none;padding:11px 10px;border:1px solid transparent}
+.eme-sidebar-card .eme-nav.selected{border-color:rgba(var(--v-theme-primary),.22);background:rgba(var(--v-theme-primary),.09)}
+.eme-sidebar-card .eme-nav:focus-visible{outline:2px solid rgb(var(--v-theme-primary));outline-offset:-2px}
 @media(max-width:760px){.eme-media-version{align-items:flex-start;flex-direction:column;gap:4px}.eme-media-version small{max-width:100%;text-align:left}.eme-shell--app .eme-sidebar{overflow-x:auto}.eme-shell--app .eme-sidebar .eme-nav{padding-block:8px}}
 @media(max-height:690px) and (min-width:761px){.eme-shell--app .eme-sidebar{overflow-y:auto}}
+@media(max-width:760px){.eme-sidebar,.eme-shell--app .eme-sidebar{display:flex;flex-direction:column;width:100%;padding:16px 18px 0;overflow:visible;border:0}.eme-brand,.eme-shell--app .eme-brand{display:flex;margin-bottom:12px}.eme-sidebar-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));max-height:220px;padding:8px}.eme-sidebar-card .eme-nav{min-width:0}.eme-main{min-height:0}}
 </style>
