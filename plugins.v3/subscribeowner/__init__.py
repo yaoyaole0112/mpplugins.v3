@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from apscheduler.triggers.cron import CronTrigger
@@ -16,7 +17,7 @@ class SubscribeOwner(_PluginBase):
     plugin_name = "订阅用户修正"
     plugin_desc = "定时检查全部订阅，并在新建订阅时修正归属用户"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "subscribeowner_"
@@ -58,12 +59,14 @@ class SubscribeOwner(_PluginBase):
         subscribe_id = event.event_data.get("subscribe_id")
         if isinstance(subscribe_id, bool) or not str(subscribe_id).isdigit():
             return
+        logger.info("订阅用户修正：收到新增订阅 ID %s", subscribe_id)
         try:
             target_username = self._resolve_target()
             if target_username is None:
                 return
             subscription = SubscribeOper().get(int(subscribe_id))
             if not subscription:
+                logger.warning("订阅用户修正：未找到新增订阅 ID %s", subscribe_id)
                 return
             previous_username = subscription.username
             if self._update_owner(subscription, target_username):
@@ -74,12 +77,18 @@ class SubscribeOwner(_PluginBase):
                     previous_username,
                     target_username,
                 )
+            else:
+                logger.info(
+                    "订阅用户修正：新增订阅 ID %s 已归属 %s，无需修改",
+                    subscribe_id, target_username,
+                )
         except Exception as error:
             logger.error("订阅用户修正：处理订阅 ID %s 失败：%s", subscribe_id, error)
 
     def sync_subscriptions(self, manual: bool = False) -> Dict[str, Any]:
         if not self._enabled and not manual:
             return {"success": False, "message": "插件未启用"}
+        logger.info("订阅用户修正：开始%s检查全部订阅", "手动" if manual else "定时")
         try:
             target_username = self._resolve_target()
             if target_username is None:
@@ -101,11 +110,20 @@ class SubscribeOwner(_PluginBase):
             "订阅用户修正：检查 %s 条，修正 %s 条，失败 %s 条，目标用户 %s",
             len(subscriptions), updated, failed, target_username,
         )
-        return {
+        result = {
             "success": failed == 0,
             "message": f"检查 {len(subscriptions)} 条，修正 {updated} 条，失败 {failed} 条",
             "data": {"total": len(subscriptions), "updated": updated, "failed": failed},
         }
+        try:
+            self.save_data("last_result", {
+                "time": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+                "mode": "手动" if manual else "定时",
+                "message": result["message"],
+            })
+        except Exception as error:
+            logger.warning("订阅用户修正：保存执行摘要失败：%s", error)
+        return result
 
     def run_now(self) -> Dict[str, Any]:
         return self.sync_subscriptions(manual=True)
@@ -176,19 +194,12 @@ class SubscribeOwner(_PluginBase):
                         },
                     },
                     {
-                        "component": "VBtn",
+                        "component": "VAlert",
                         "props": {
-                            "color": "primary",
+                            "type": "info",
                             "variant": "tonal",
-                            "prepend-icon": "mdi-play",
                             "class": "mt-4",
-                        },
-                        "text": "立即运行",
-                        "events": {
-                            "click": {
-                                "api": "plugin/SubscribeOwner/run",
-                                "method": "post",
-                            },
+                            "text": "立即运行请点击下方“查看数据”，在插件页面使用按钮；执行记录可在插件日志查看。",
                         },
                     },
                 ],
@@ -196,7 +207,47 @@ class SubscribeOwner(_PluginBase):
         ], {"enabled": False, "target_username": "", "cron": "*/30 * * * *"}
 
     def get_page(self) -> List[dict]:
-        return []
+        last_result = self.get_data("last_result") or {}
+        status = (
+            f"上次{last_result.get('mode', '')}执行：{last_result.get('time', '')}，"
+            f"{last_result.get('message', '')}"
+            if isinstance(last_result, dict) and last_result.get("time")
+            else "尚无执行记录"
+        )
+        return [
+            {
+                "component": "VCard",
+                "props": {"variant": "outlined"},
+                "content": [
+                    {
+                        "component": "VCardText",
+                        "props": {"class": "pa-6"},
+                        "content": [
+                            {
+                                "component": "VBtn",
+                                "props": {
+                                    "color": "primary",
+                                    "variant": "tonal",
+                                    "prepend-icon": "mdi-play",
+                                },
+                                "text": "立即运行",
+                                "events": {
+                                    "click": {
+                                        "api": "plugin/SubscribeOwner/run",
+                                        "method": "post",
+                                    },
+                                },
+                            },
+                            {
+                                "component": "div",
+                                "props": {"class": "text-body-2 mt-4"},
+                                "text": status,
+                            },
+                        ],
+                    },
+                ],
+            },
+        ]
 
     def stop_service(self) -> None:
         return None

@@ -66,13 +66,24 @@ class SubscribeOwnerTests(unittest.TestCase):
         modules["app.db.oper.subscribe"].SubscribeOper = SubscribeOper
         modules["app.db.oper.user"].UserOper = UserOper
         modules["app.api.dependencies.auth"].get_current_active_superuser = Mock()
-        modules["app.plugins"]._PluginBase = type("PluginBase", (), {})
+        class PluginBase:
+            def __init__(self):
+                self.data = {}
+
+            def save_data(self, key, value):
+                self.data[key] = value
+
+            def get_data(self, key):
+                return self.data.get(key)
+
+        modules["app.plugins"]._PluginBase = PluginBase
         modules["app.schemas.types"].EventType = EventType
         modules["app.sdk.events"].Event = object
         modules["app.sdk.events"].eventmanager = types.SimpleNamespace(
             register=lambda event_type: lambda handler: handler
         )
         modules["app.sdk.logging"].logger = Mock()
+        cls.logger = modules["app.sdk.logging"].logger
         modules["apscheduler.triggers.cron"].CronTrigger = CronTrigger
         modules["fastapi"].Depends = lambda dependency: dependency
         plugin_path = Path(__file__).resolve().parents[1] / "__init__.py"
@@ -85,6 +96,7 @@ class SubscribeOwnerTests(unittest.TestCase):
         cls.user_oper = UserOper
 
     def setUp(self):
+        self.logger.reset_mock()
         self.subscribe_oper.subscriptions = [
             types.SimpleNamespace(
                 id=12, name="测试剧集", type="电视剧", username="猫眼订阅"
@@ -110,6 +122,10 @@ class SubscribeOwnerTests(unittest.TestCase):
         self.subscribe_oper.subscriptions[0].username = "admin"
         self.send_event()
         self.assertEqual(self.subscribe_oper.updates, [])
+        self.logger.info.assert_any_call(
+            "订阅用户修正：新增订阅 ID %s 已归属 %s，无需修改",
+            12, "admin",
+        )
 
     def test_periodic_sweep_updates_all_types_and_real_users(self):
         self.subscribe_oper.subscriptions.extend([
@@ -163,6 +179,7 @@ class SubscribeOwnerTests(unittest.TestCase):
         result = self.plugin.run_now()
         self.assertTrue(result["success"])
         self.assertEqual(result["data"], {"total": 1, "updated": 1, "failed": 0})
+        self.assertIn("上次手动执行", str(self.plugin.get_page()))
         self.assertEqual(self.plugin.get_service(), [])
         api = self.plugin.get_api()[0]
         self.assertEqual((api["path"], api["methods"], api["auth"]), (
@@ -170,11 +187,12 @@ class SubscribeOwnerTests(unittest.TestCase):
         ))
         self.assertTrue(api["dependencies"])
 
-    def test_form_has_run_button_and_field_spacing(self):
+    def test_form_links_to_page_and_page_has_run_button(self):
         fields = self.plugin.get_form()[0][0]["content"]
         self.assertEqual(fields[1]["props"]["class"], "mb-6")
         self.assertEqual(fields[2]["props"]["class"], "mt-2 mb-4")
-        button = fields[3]
+        self.assertIn("查看数据", fields[3]["props"]["text"])
+        button = self.plugin.get_page()[0]["content"][0]["content"][0]
         self.assertEqual(button["text"], "立即运行")
         self.assertEqual(button["events"]["click"], {
             "api": "plugin/SubscribeOwner/run", "method": "post"
