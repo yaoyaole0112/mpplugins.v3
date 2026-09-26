@@ -44,7 +44,8 @@ class SubscribeOwnerTests(unittest.TestCase):
 
         packages = {}
         for name in (
-            "app", "app.db", "app.db.oper", "app.schemas", "app.sdk",
+            "app", "app.api", "app.api.dependencies", "app.db", "app.db.oper",
+            "app.schemas", "app.sdk",
             "apscheduler", "apscheduler.triggers",
         ):
             package = types.ModuleType(name)
@@ -54,14 +55,17 @@ class SubscribeOwnerTests(unittest.TestCase):
             **packages,
             "app.db.oper.subscribe": types.ModuleType("app.db.oper.subscribe"),
             "app.db.oper.user": types.ModuleType("app.db.oper.user"),
+            "app.api.dependencies.auth": types.ModuleType("app.api.dependencies.auth"),
             "app.plugins": types.ModuleType("app.plugins"),
             "app.schemas.types": types.ModuleType("app.schemas.types"),
             "app.sdk.events": types.ModuleType("app.sdk.events"),
             "app.sdk.logging": types.ModuleType("app.sdk.logging"),
             "apscheduler.triggers.cron": types.ModuleType("apscheduler.triggers.cron"),
+            "fastapi": types.ModuleType("fastapi"),
         }
         modules["app.db.oper.subscribe"].SubscribeOper = SubscribeOper
         modules["app.db.oper.user"].UserOper = UserOper
+        modules["app.api.dependencies.auth"].get_current_active_superuser = Mock()
         modules["app.plugins"]._PluginBase = type("PluginBase", (), {})
         modules["app.schemas.types"].EventType = EventType
         modules["app.sdk.events"].Event = object
@@ -70,6 +74,7 @@ class SubscribeOwnerTests(unittest.TestCase):
         )
         modules["app.sdk.logging"].logger = Mock()
         modules["apscheduler.triggers.cron"].CronTrigger = CronTrigger
+        modules["fastapi"].Depends = lambda dependency: dependency
         plugin_path = Path(__file__).resolve().parents[1] / "__init__.py"
         spec = importlib.util.spec_from_file_location("test_subscribeowner_plugin", plugin_path)
         plugin_module = importlib.util.module_from_spec(spec)
@@ -111,7 +116,8 @@ class SubscribeOwnerTests(unittest.TestCase):
             types.SimpleNamespace(id=13, name="测试电影", type="电影", username="viewer"),
             types.SimpleNamespace(id=14, name="测试音乐", type="音乐", username="admin"),
         ])
-        self.plugin.sync_subscriptions()
+        result = self.plugin.sync_subscriptions()
+        self.assertEqual(result["data"], {"total": 3, "updated": 2, "failed": 0})
         self.assertEqual(self.subscribe_oper.updates, [
             (12, {"username": "admin"}),
             (13, {"username": "admin"}),
@@ -151,6 +157,28 @@ class SubscribeOwnerTests(unittest.TestCase):
         self.plugin.init_plugin({"enabled": True})
         self.send_event("not-an-id")
         self.assertEqual(self.subscribe_oper.updates, [])
+
+    def test_run_button_works_while_periodic_job_disabled(self):
+        self.plugin.init_plugin({"enabled": False, "target_username": "admin"})
+        result = self.plugin.run_now()
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"], {"total": 1, "updated": 1, "failed": 0})
+        self.assertEqual(self.plugin.get_service(), [])
+        api = self.plugin.get_api()[0]
+        self.assertEqual((api["path"], api["methods"], api["auth"]), (
+            "/run", ["POST"], "bear"
+        ))
+        self.assertTrue(api["dependencies"])
+
+    def test_form_has_run_button_and_field_spacing(self):
+        fields = self.plugin.get_form()[0][0]["content"]
+        self.assertEqual(fields[1]["props"]["class"], "mb-6")
+        self.assertEqual(fields[2]["props"]["class"], "mt-2 mb-4")
+        button = fields[3]
+        self.assertEqual(button["text"], "立即运行")
+        self.assertEqual(button["events"]["click"], {
+            "api": "plugin/SubscribeOwner/run", "method": "post"
+        })
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 from typing import Any, Dict, List, Optional, Tuple
 
 from apscheduler.triggers.cron import CronTrigger
+from fastapi import Depends
 
+from app.api.dependencies.auth import get_current_active_superuser
 from app.db.oper.subscribe import SubscribeOper
 from app.db.oper.user import UserOper
 from app.plugins import _PluginBase
@@ -14,7 +16,7 @@ class SubscribeOwner(_PluginBase):
     plugin_name = "订阅用户修正"
     plugin_desc = "定时检查全部订阅，并在新建订阅时修正归属用户"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "subscribeowner_"
@@ -75,17 +77,17 @@ class SubscribeOwner(_PluginBase):
         except Exception as error:
             logger.error("订阅用户修正：处理订阅 ID %s 失败：%s", subscribe_id, error)
 
-    def sync_subscriptions(self) -> None:
-        if not self._enabled:
-            return
+    def sync_subscriptions(self, manual: bool = False) -> Dict[str, Any]:
+        if not self._enabled and not manual:
+            return {"success": False, "message": "插件未启用"}
         try:
             target_username = self._resolve_target()
             if target_username is None:
-                return
+                return {"success": False, "message": "请配置有效的目标用户"}
             subscriptions = SubscribeOper().list()
         except Exception as error:
             logger.error("订阅用户修正：读取订阅失败：%s", error)
-            return
+            return {"success": False, "message": "读取订阅失败，请查看插件日志"}
 
         updated = 0
         failed = 0
@@ -99,6 +101,14 @@ class SubscribeOwner(_PluginBase):
             "订阅用户修正：检查 %s 条，修正 %s 条，失败 %s 条，目标用户 %s",
             len(subscriptions), updated, failed, target_username,
         )
+        return {
+            "success": failed == 0,
+            "message": f"检查 {len(subscriptions)} 条，修正 {updated} 条，失败 {failed} 条",
+            "data": {"total": len(subscriptions), "updated": updated, "failed": failed},
+        }
+
+    def run_now(self) -> Dict[str, Any]:
+        return self.sync_subscriptions(manual=True)
 
     def get_state(self) -> bool:
         return self._enabled
@@ -108,7 +118,14 @@ class SubscribeOwner(_PluginBase):
         return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        return []
+        return [{
+            "path": "/run",
+            "endpoint": self.run_now,
+            "methods": ["POST"],
+            "auth": "bear",
+            "dependencies": [Depends(get_current_active_superuser)],
+            "summary": "立即修正全部订阅用户",
+        }]
 
     def get_service(self) -> List[Dict[str, Any]]:
         if not self._enabled:
@@ -133,7 +150,10 @@ class SubscribeOwner(_PluginBase):
                 "content": [
                     {
                         "component": "VSwitch",
-                        "props": {"model": "enabled", "label": "自动修正全部订阅"},
+                        "props": {
+                            "model": "enabled", "label": "自动修正全部订阅",
+                            "class": "mb-4",
+                        },
                     },
                     {
                         "component": "VTextField",
@@ -142,6 +162,7 @@ class SubscribeOwner(_PluginBase):
                             "label": "目标 MoviePilot 用户名",
                             "hint": "留空时仅在系统恰好只有一个启用用户时自动选择",
                             "persistent-hint": True,
+                            "class": "mb-6",
                         },
                     },
                     {
@@ -151,6 +172,23 @@ class SubscribeOwner(_PluginBase):
                             "label": "定时执行周期（Cron）",
                             "hint": "默认每 30 分钟检查全部已有订阅",
                             "persistent-hint": True,
+                            "class": "mt-2 mb-4",
+                        },
+                    },
+                    {
+                        "component": "VBtn",
+                        "props": {
+                            "color": "primary",
+                            "variant": "tonal",
+                            "prepend-icon": "mdi-play",
+                            "class": "mt-4",
+                        },
+                        "text": "立即运行",
+                        "events": {
+                            "click": {
+                                "api": "plugin/SubscribeOwner/run",
+                                "method": "post",
+                            },
                         },
                     },
                 ],
