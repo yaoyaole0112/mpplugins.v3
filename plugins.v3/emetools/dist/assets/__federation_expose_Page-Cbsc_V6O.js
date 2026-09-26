@@ -1,0 +1,1 @@
+import{importShared as a}from"./__federation_fn_import-E6wRZccp.js";import{W as t}from"./Workbench-B5MmfVBt.js";const{openBlock:o,createBlock:r}=await a("vue"),l={__name:"Page",props:{api:{type:Object,default:()=>({})}},setup(e){return(c,p)=>(o(),r(t,{api:e.api},null,8,["api"]))}};export{l as default};

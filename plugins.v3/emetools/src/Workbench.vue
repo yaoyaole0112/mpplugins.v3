@@ -570,9 +570,11 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(toastTimer) })
       </nav>
     </aside>
     <main class="eme-main">
+      <!-- 页面标题与说明暂不显示，保留以便日后恢复。
       <header class="eme-header">
         <div><h2>{{ current.title }}</h2><p>{{ current.detail }}</p></div>
       </header>
+      -->
       <div v-if="loading" class="eme-message">正在加载插件配置…</div>
       <template v-if="active === 'missing'">
         <section class="eme-card">
@@ -788,7 +790,8 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(toastTimer) })
 .eme-sidebar-card .eme-nav{flex:none;padding:11px 10px;border:1px solid transparent}
 .eme-sidebar-card .eme-nav.selected{border-color:rgba(var(--v-theme-primary),.22);background:rgba(var(--v-theme-primary),.09)}
 .eme-sidebar-card .eme-nav:focus-visible{outline:2px solid rgb(var(--v-theme-primary));outline-offset:-2px}
+.eme-main{padding-top:102px}
 @media(max-width:760px){.eme-media-version{align-items:flex-start;flex-direction:column;gap:4px}.eme-media-version small{max-width:100%;text-align:left}.eme-shell--app .eme-sidebar{overflow-x:auto}.eme-shell--app .eme-sidebar .eme-nav{padding-block:8px}}
 @media(max-height:690px) and (min-width:761px){.eme-shell--app .eme-sidebar{overflow-y:auto}}
-@media(max-width:760px){.eme-sidebar,.eme-shell--app .eme-sidebar{display:flex;flex-direction:column;width:100%;padding:16px 18px 0;overflow:visible;border:0}.eme-brand,.eme-shell--app .eme-brand{display:flex;margin-bottom:12px}.eme-sidebar-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));max-height:220px;padding:8px}.eme-sidebar-card .eme-nav{min-width:0}.eme-main{min-height:0}}
+@media(max-width:760px){.eme-sidebar,.eme-shell--app .eme-sidebar{display:flex;flex-direction:column;width:100%;padding:16px 18px 0;overflow:visible;border:0}.eme-brand,.eme-shell--app .eme-brand{display:flex;margin-bottom:12px}.eme-sidebar-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));max-height:220px;padding:8px}.eme-sidebar-card .eme-nav{min-width:0}.eme-main{min-height:0;padding-top:18px}}
 </style>
