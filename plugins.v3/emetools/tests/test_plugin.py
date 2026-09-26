@@ -163,7 +163,7 @@ class PluginTests(unittest.TestCase):
 
     def test_bot_commands_require_explicit_user_and_never_delete_directly(self):
         commands = {item["cmd"]: item for item in self.plugin.get_command()}
-        self.assertEqual(set(commands), {"/cleanup", "/cleanfiles", "/cleartrash", "/ememove"})
+        self.assertEqual(set(commands), {"/cleanup", "/cleanfiles", "/cleartrash", "/ememove", "/cleandupes"})
         self.assertTrue(all(item["event"] == EventType.PluginAction for item in commands.values()))
         self.plugin._trash_clear = MagicMock()
         self.plugin._cleanup_confirm = MagicMock()
@@ -171,6 +171,34 @@ class PluginTests(unittest.TestCase):
         self.plugin._trash_clear.assert_not_called()
         self.plugin._cleanup_confirm.assert_not_called()
         self.plugin.chain.post_message.assert_not_called()
+
+    def test_media_bot_confirmation_is_scoped_to_origin_and_single_use(self):
+        from emetools import DEFAULT_MEDIA_CLEANUP
+        self.plugin._media.scan = MagicMock(return_value={"results": [{"versions": [
+            {"is_best": False, "file_path": "/strm/low.strm", "size": 42}]}]})
+        self.plugin._media.last_scan = "original-scan"
+        self.plugin._media.delete = MagicMock(return_value={"deleted": [{"file_path": "/strm/low.strm", "size": 42}], "failures": []})
+        self.plugin._media.refresh_emby = MagicMock()
+        self.plugin._media_config = {**DEFAULT_MEDIA_CLEANUP, "library_ids": ["emby::1"]}
+        admin = {"origin": {"TELEGRAM_ADMINS": "123"}, "other": {"TELEGRAM_ADMINS": "123"}}
+        with patch.object(self.plugin, "_telegram_command_sources", return_value=admin), \
+             patch("emetools.matches_channel_admin", side_effect=lambda _, cfg, uid: bool(cfg) and cfg.get("TELEGRAM_ADMINS") == uid):
+            self.plugin._request_media_bot_cleanup({"source": "origin", "user": "123", "channel": NotificationChannel.Telegram})
+            self.plugin._media.scan.assert_called_once_with(["emby::1"])
+            confirmation = self.plugin.chain.post_message.call_args.args[0]
+            self.assertEqual((confirmation.source, confirmation.userid), ("origin", "123"))
+            callback = confirmation.buttons[0][0]["callback_data"]
+            token = callback.split("|")[1].split(":")[1]
+            other = {"channel": NotificationChannel.Telegram, "source": "other", "userid": "123", "original_chat_id": "123"}
+            self.plugin._handle_media_bot_confirmation(token, True, other)
+            self.plugin._media.delete.assert_not_called()
+            self.plugin._handle_media_bot_confirmation(token, True, {**other, "source": "origin", "original_chat_id": "456"})
+            self.plugin._media.delete.assert_not_called()
+            self.plugin._handle_media_bot_confirmation(token, True, {**other, "source": "origin"})
+            self.plugin._media.delete.assert_called_once_with(["/strm/low.strm"])
+            self.assertEqual(self.plugin.chain.post_message.call_args.args[0].source, "origin")
+            self.plugin._handle_media_bot_confirmation(token, True, {**other, "source": "origin"})
+            self.plugin._media.delete.assert_called_once()
 
     def test_command_reply_uses_only_originating_bot_source(self):
         from app.schemas.types import NotificationChannel

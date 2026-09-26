@@ -195,6 +195,10 @@ class MediaCleanup:
                     paths.append(normalized)
         if not paths:
             raise ValueError("所选 Emby 媒体库路径不在 MoviePilot 的 STRM 根目录下；请核对两端挂载路径，未执行扫描")
+        names = [lib.get("name") or os.path.basename(str(lib["paths"][0]).rstrip(os.sep)) or lib["id"]
+                 for lib in libraries if not selected or lib["id"] in selected]
+        label = "、".join(names[:3]) + (f"等 {len(names)} 个" if len(names) > 3 else "")
+        self.progress = f"正在扫描 STRM 目录：{label}媒体库"
         return sorted(set(paths))
 
     @staticmethod
@@ -266,7 +270,6 @@ class MediaCleanup:
             if not os.path.isdir(root):
                 raise ValueError("STRM 根目录不存在")
             paths = self._scope_paths(root, library_ids)
-            self.progress = "正在扫描 STRM 目录"
             grouped = {}
             seen_folders = set()
             for scope in paths:

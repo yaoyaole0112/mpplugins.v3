@@ -28,7 +28,7 @@
 
 四项工具的通知按 EME 的触发条件与固定标题、正文格式发送，类型是 MoviePilot 的「插件」，渠道限定 Telegram；在 MP 设置 → 通知渠道中，仅给需要接收工具通知的 TG Bot 勾选「插件」通知类型，取消其他 TG Bot 的这一类型即可。此类型由 MP 的所有插件共用，并非本插件独享：其他插件的「插件」通知也会发给选中的 Bot。定时转存源目录为空且没有错误时不通知，只有实际移动或失败才发送；定时清理目录、回收站为空时不通知；无效数据仅扫描或无清理项目时不发完成通知。手动清理的确认提示与完成摘要也使用对应 EME 模板，但在 MP 插件页面确认。无效数据通知中的隔离目录使用本插件的真实路径 `.mp-emetools-trash`。这些通知不会自动附加插件详情链接。
 
-MP Bot 支持 EME 同名的 `/cleanup`、`/cleanfiles`、`/cleartrash`，以及 `/ememove`（执行已保存的文件转存规则）。前三条只进行扫描或预览，彻底删除、隔离和清理必须在插件页面再次查询、预览和确认，Bot 命令不会直接清理。EME 的 `/stats`、`/list`、`/search`、`/seasons`、`/episodes`、`/missing`、`/checkall`、`/cleandupes` 属于其独立 Emby/TMDB 和媒体去重服务，当前插件未接管这些服务，因此不注册不能工作的命令。
+MP Bot 支持 EME 同名的 `/cleanup`、`/cleanfiles`、`/cleartrash`、`/cleandupes`，以及 `/ememove`（执行已保存的文件转存规则）。前三条只进行扫描或预览，彻底删除、隔离和清理必须在插件页面再次查询、预览和确认。`/cleandupes` 按已保存的定时媒体库范围扫描低质版本，仅向发起命令的 Telegram Bot 管理员私聊发确认按钮；确认 30 分钟内有效，核对当前扫描结果后才清理，完成摘要仅回复原 Bot。定时清理的完成通知使用 MoviePilot「插件」类型与 MediaEnhance 的触发条件和模板。手动扫描媒体库与定时清理范围独立；规则可在检测扫描的清理规则弹窗设置。EME 的 `/stats`、`/list`、`/search`、`/seasons`、`/episodes`、`/missing`、`/checkall` 属于其独立 Emby/TMDB 服务，当前插件未接管这些服务，因此不注册不能工作的命令。
 
 命令回复严格使用 MP 命令事件携带的 Telegram 渠道来源（Bot 配置名称）；来源缺失时拒绝发送，避免向所有 TG Bot 广播。Bot 命令触发的文件转存仅回复发起命令的 Bot，不额外发送全局工具通知。订阅监控解析转发 Bot 时，Bot API 的 `getMe` 请求沿用 MP Telegram 通知渠道的 HTTPS 代理配置；Telethon 用户账号连接仍由自身客户端负责。Bot 用户名解析结果在当前监控会话内缓存，Token 更新后重新解析，不记录 Token 内容。
 

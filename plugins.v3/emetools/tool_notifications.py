@@ -3,9 +3,55 @@
 import os
 
 from .invalid_data import QUARANTINE
+from .media_cleanup import parse_name
 
 
 DIVIDER = "━━━━━━━━━━━━━━━"
+
+
+def _media_description(path):
+    name = os.path.basename(path or "")
+    if not name:
+        return ""
+    info = parse_name(name)
+    tags = []
+    for key in ("resolution", "effect", "codec", "quality"):
+        value = info.get(key, "")
+        if value and value != "unknown" and not (key == "effect" and value == "sdr"):
+            tags.append({"hevc": "H265", "h264": "H264"}.get(value, value.upper()))
+    return name + (f"（{' · '.join(tags)}）" if tags else "")
+
+
+def _media_lines(paths):
+    descriptions = [_media_description(path) for path in paths]
+    lines = ["• " + item for item in descriptions[:8] if item]
+    if len(descriptions) > 8:
+        lines.append(f"…等共 {len(descriptions)} 个")
+    return lines
+
+
+def media_confirmation(versions):
+    """MediaEnhance's bot confirmation copy, scoped to the requesting Bot."""
+    freed = sum(int(version.get("size") or 0) for version in versions)
+    size = f"（{freed / 2**30:.2f} GB）" if freed > 0 else ""
+    lines = [f"待删除：{len(versions)} 个版本{size}", "确认后会删除低质版本（115 文件进回收站）。",
+             "确认有效期：30 分钟；服务重启后失效。", "", *(_media_lines([v["file_path"] for v in versions]))]
+    return "⚠️【清理低质版本媒体】待确认", "\n".join(lines)
+
+
+def media_cleanup(result):
+    """Notify only after attempting actual deletion, matching EME schedule copy."""
+    deleted, failures = result.get("deleted") or [], result.get("failures") or []
+    if not deleted and not failures:
+        return None
+    summary = f"✅ 已删除 {len(deleted)} 个版本"
+    if failures:
+        summary += f"，{len(failures)} 个失败"
+    freed = sum(int(item.get("size") or 0) for item in deleted)
+    if freed > 0:
+        summary += f" · 已释放 {freed / 2**30:.2f} GB"
+    lines = _media_lines([item["file_path"] for item in deleted]) or ["• 未发现需删除的低质版本"]
+    return "📑 清理低质版本媒体", "\n".join([DIVIDER, summary, *lines])
 
 
 def format_bytes(value):

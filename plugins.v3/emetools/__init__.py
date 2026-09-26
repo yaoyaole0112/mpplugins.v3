@@ -91,7 +91,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.8.2"
+    plugin_version = "2.8.3"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -176,13 +176,14 @@ class EmeTools(_PluginBase):
                     ("/cleanup", "cleanup", "扫描无效数据（在插件页面确认清理）"),
                     ("/cleanfiles", "cleanfiles", "预览 115 清理目录（在插件页面确认）"),
                     ("/cleartrash", "cleartrash", "查看 115 回收站（在插件页面确认清空）"),
+                    ("/cleandupes", "cleandupes", "扫描并确认清理低质版本"),
                     ("/ememove", "move", "执行已保存的 115 文件转存规则"))]
 
     @eventmanager.register(EventType.PluginAction)
     def tool_command(self, event: Event) -> None:
         data = event.event_data if event else None
         action = (data or {}).get("action", "")
-        if not self._enabled or action not in {"emetools_cleanup", "emetools_cleanfiles", "emetools_cleartrash", "emetools_move"}:
+        if not self._enabled or action not in {"emetools_cleanup", "emetools_cleanfiles", "emetools_cleartrash", "emetools_move", "emetools_cleandupes"}:
             return
         # Command replies must have a real destination; never turn them into broadcasts.
         if not data.get("user") or not data.get("channel") or not data.get("source"):
@@ -203,6 +204,9 @@ class EmeTools(_PluginBase):
             elif action == "emetools_cleartrash":
                 result = self._trash_info()
                 text = f"回收站有 {result['count']} 项；请在插件「清空回收站」页面重新查询并二次确认。" if result["count"] else "回收站为空。"
+            elif action == "emetools_cleandupes":
+                self._request_media_bot_cleanup(data)
+                return
             else:
                 result = self._move_run()
                 text = result.get("message") or f"文件转存完成：移动 {result.get('moved', 0)} 项，失败 {len(result.get('errors') or [])} 项。"
@@ -218,6 +222,79 @@ class EmeTools(_PluginBase):
             logger.warning("ME工具命令 %s 执行失败: %s", action, type(exc).__name__)
             self.chain.post_message(Message(channel=data["channel"], source=data["source"], userid=str(data["user"]),
                                             title="ME工具", text=f"命令执行失败：{type(exc).__name__}，请查看插件日志。"))
+
+    @staticmethod
+    def _telegram_command_sources() -> dict:
+        """Resolve only the originating enabled Telegram Bot; never broadcast a command."""
+        return {conf.name: conf.config for conf in get_service_configs(SystemConfigKey.Notifications, NotificationConf)
+                if conf.enabled and str(conf.type).lower() == "telegram" and conf.name and conf.config}
+
+    def _media_bot_reply(self, source: str, user: str, title: str, text: str, buttons=None) -> None:
+        self.chain.post_message(Message(channel=NotificationChannel.Telegram, source=source, userid=user,
+                                        title=title, text=text, buttons=buttons, parse_mode="plain"))
+
+    def _request_media_bot_cleanup(self, data: dict) -> None:
+        source, user = str(data["source"]), str(data["user"])
+        if data["channel"] not in {NotificationChannel.Telegram, NotificationChannel.Telegram.value}:
+            return
+        config = self._telegram_command_sources().get(source)
+        if not config or not matches_channel_admin(NotificationChannel.Telegram, config, user):
+            self._media_bot_reply(source, user, "ME工具", "❌ 当前 Telegram 用户没有清理权限。")
+            return
+        self._media_bot_reply(source, user, "ME工具", "🔄 正在扫描低质版本，可能需要几分钟…")
+        try:
+            result = self._media.scan(self._media_config["library_ids"])
+            versions = [version for group in result["results"] for version in group["versions"]
+                        if not version["is_best"]]
+            if not versions:
+                self._media_bot_reply(source, user, "ME工具", "✅ 未发现需删除的低质版本。")
+                return
+            if len(versions) > 1000:
+                self._media_bot_reply(source, user, "ME工具", "❌ 待删除版本超过 1000 个，请在插件页面缩小媒体库范围后再执行。")
+                return
+            token = self._remember("media_bot", {"source": source, "user": user,
+                                                  "paths": [v["file_path"] for v in versions],
+                                                  "scan": self._media.last_scan})
+            title, text = notices.media_confirmation(versions)
+            buttons = [[{"text": "✅ 确认清理", "callback_data": f"[PLUGIN]EmeTools|media:{token}:y"},
+                        {"text": "取消", "callback_data": f"[PLUGIN]EmeTools|media:{token}:n"}]]
+            self._media_bot_reply(source, user, title, text, buttons)
+            logger.info("增强工具 媒体清理命令：已向发起 Bot 的管理员提交 %d 个候选确认", len(versions))
+        except Exception as error:
+            logger.warning("增强工具 媒体清理命令扫描失败：%s", type(error).__name__)
+            self._media_bot_reply(source, user, "ME工具", f"❌ 扫描或发送确认失败：{_log_label(error)}")
+
+    def _handle_media_bot_confirmation(self, token: str, approve: bool, data: dict) -> None:
+        source, user = str(data.get("source") or ""), str(data.get("userid") or "")
+        if (data.get("channel") not in {NotificationChannel.Telegram, NotificationChannel.Telegram.value}
+                or not source or not user or str(data.get("original_chat_id") or "") != user
+                or not matches_channel_admin(NotificationChannel.Telegram,
+                                             self._telegram_command_sources().get(source), user)):
+            logger.warning("增强工具 媒体清理：Telegram 确认被拒绝（需要原 Bot 管理员私聊）")
+            return
+        try:
+            # Validate ownership before consuming: another administrator must not
+            # invalidate the originating bot's confirmation by pressing its button.
+            with self._pending_lock:
+                pending = self._pending.get(token)
+                if (not pending or pending[1] != "media_bot" or time.monotonic() - pending[0] >= 1800
+                        or pending[2]["source"] != source or pending[2]["user"] != user):
+                    raise ValueError("确认已过期或发起的 Bot、用户不匹配")
+                record = self._pending.pop(token)[2]
+            if not approve:
+                text = "已取消本次清理。"
+            else:
+                if record["scan"] != self._media.last_scan:
+                    raise ValueError("扫描结果已更新，请重新发送命令")
+                result = self._media.delete(record["paths"])
+                if result["deleted"]:
+                    self._media.refresh_emby()
+                notice = notices.media_cleanup(result)
+                text = f"{notice[0]}\n{notice[1]}" if notice else "✅ 未发现需删除的低质版本。"
+            self._media_bot_reply(source, user, "ME工具", text)
+        except Exception as error:
+            logger.warning("增强工具 媒体清理：Telegram 确认失败：%s", type(error).__name__)
+            self._media_bot_reply(source, user, "ME工具", f"❌ 确认已过期、已处理或执行失败：{_log_label(error)}")
 
     def stop_service(self) -> None:
         logger.info("ME工具：停止插件服务和 Telegram 监控")
@@ -297,19 +374,22 @@ class EmeTools(_PluginBase):
                      for version in group["versions"] if not version["is_best"]]
             logger.info("增强工具 媒体清理定时扫描：重复组=%d，待清理=%d", result["duplicate_groups"], len(paths))
             if paths:
-                outcome = self._media.delete(paths[:1000])
+                outcome = {"deleted": [], "failures": []}
+                for start in range(0, len(paths), 1000):
+                    batch = self._media.delete(paths[start:start + 1000])
+                    outcome["deleted"].extend(batch["deleted"])
+                    outcome["failures"].extend(batch["failures"])
                 if outcome["deleted"]:
                     self._media.refresh_emby()
-                lines = [f"✅ 已删除 {len(outcome['deleted'])} 个版本" +
-                         (f"，{len(outcome['failures'])} 个失败" if outcome["failures"] else "")]
-                lines += ["• " + _log_label(item["file_path"].rsplit("/", 1)[-1]) for item in outcome["deleted"][:8]]
-                if len(outcome["deleted"]) > 8:
-                    lines.append(f"…等共 {len(outcome['deleted'])} 个")
-                self._send_tool_notice("📑 清理低质版本媒体", "━━━━━━━━━━━━━━━\n" + "\n".join(lines))
+                notice = notices.media_cleanup(outcome)
+                if notice:
+                    self._send_tool_notice(*notice)
                 logger.info("增强工具 媒体清理定时任务：已清理=%d，失败=%d",
                             len(outcome["deleted"]), len(outcome["failures"]))
         except Exception as error:
-            logger.warning("增强工具 媒体清理定时任务失败：%s", type(error).__name__)
+            logger.warning("增强工具 媒体清理定时任务失败：%s：%s", type(error).__name__, _log_label(error))
+            if "STRM 根目录不存在" not in str(error):
+                self._send_tool_notice("", f"⏰ 定时去重执行失败：{_log_label(error)}")
 
     def _legacy_missing_active(self) -> bool:
         legacy = self.get_config("EpisodeMissingSubscribe") or {}
@@ -404,6 +484,9 @@ class EmeTools(_PluginBase):
             result = await asyncio.to_thread(self._media.delete, record["paths"])
             if result["deleted"]:
                 await asyncio.to_thread(self._media.refresh_emby)
+            notice = notices.media_cleanup(result)
+            if notice:
+                self._send_tool_notice(*notice)
             return result
         if operation == "reset_rules":
             return {"rules": copy.deepcopy(DEFAULT_RULES)}
@@ -988,6 +1071,11 @@ class EmeTools(_PluginBase):
     def scheduled_confirmation_action(self, event: Event) -> None:
         data = event.event_data if event else None
         if not data or str(data.get("plugin_id") or "").lower() != "emetools":
+            return
+        media_match = re.fullmatch(r"media:([a-f0-9]{32}):([yn])", str(data.get("text") or ""))
+        if media_match:
+            threading.Thread(target=self._handle_media_bot_confirmation,
+                             args=(media_match.group(1), media_match.group(2) == "y", data.copy()), daemon=True).start()
             return
         match = re.fullmatch(r"data:([a-f0-9]{32}):([yn])", str(data.get("text") or ""))
         if not match:
