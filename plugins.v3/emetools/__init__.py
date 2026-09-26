@@ -30,6 +30,7 @@ from .invalid_data import InvalidDataCleaner
 from .p115 import P115Client
 from .subscription_monitor import SubscriptionMonitor, normalize_channel
 from .missing_episodes import DEFAULT_MISSING, MissingAction, MissingEpisodeDetector
+from .media_cleanup import MediaCleanup, DEFAULT_CONFIG as DEFAULT_MEDIA_CLEANUP, DEFAULT_RULES, validate_rules
 from . import tool_notifications as notices
 
 ICON_URL = "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg"
@@ -88,9 +89,9 @@ class MonitorChange(BaseModel):
 
 class EmeTools(_PluginBase):
     plugin_name = "增强工具"
-    plugin_desc = "订阅频道监控、缺集检测、无效数据清理、115 文件清理、回收站清空与文件转存。"
+    plugin_desc = "订阅频道监控、缺集检测、媒体清理、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.7.10"
+    plugin_version = "2.8.0"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -131,6 +132,17 @@ class EmeTools(_PluginBase):
         self._missing_config = copy.deepcopy(DEFAULT_MISSING)
         self._missing_config.update({key: value for key, value in saved_missing.items() if key in DEFAULT_MISSING})
         self._missing = MissingEpisodeDetector(self, self._missing_config)
+        saved_media = config.get("media_cleanup") or {}
+        self._media_config = copy.deepcopy(DEFAULT_MEDIA_CLEANUP)
+        if isinstance(saved_media, dict):
+            for key in self._media_config:
+                if key in saved_media:
+                    self._media_config[key] = copy.deepcopy(saved_media[key])
+        try:
+            self._media_config["rules"] = validate_rules(self._media_config["rules"])
+        except ValueError:
+            self._media_config["rules"] = copy.deepcopy(DEFAULT_RULES)
+        self._media = MediaCleanup(self, self._media_config)
         self._schedule = copy.deepcopy(DEFAULT_SCHEDULE)
         for name, defaults in self._schedule.items():
             saved = (config.get("schedule") or {}).get(name) or {}
@@ -267,7 +279,37 @@ class EmeTools(_PluginBase):
                                      "kwargs": {}})
                 except ValueError as error:
                     logger.error("ME工具 缺集检测定时表达式无效：%s", error)
+        if self._media_config["enabled"]:
+            try:
+                trigger = CronTrigger.from_crontab(self._media_config["cron"])
+                services.append({"id": "EmeTools_media_cleanup", "name": "增强工具 媒体清理",
+                                 "trigger": trigger, "func": self._run_media_scheduled, "kwargs": {}})
+            except ValueError as error:
+                logger.error("增强工具 媒体清理周期无效：%s", error)
         return services
+
+    def _run_media_scheduled(self) -> None:
+        if not self._enabled or not self._media_config["enabled"]:
+            return
+        try:
+            result = self._media.scan(self._media_config["library_ids"])
+            paths = [version["file_path"] for group in result["results"]
+                     for version in group["versions"] if not version["is_best"]]
+            logger.info("增强工具 媒体清理定时扫描：重复组=%d，待清理=%d", result["duplicate_groups"], len(paths))
+            if paths:
+                outcome = self._media.delete(paths[:1000])
+                if outcome["deleted"]:
+                    self._media.refresh_emby()
+                lines = [f"✅ 已删除 {len(outcome['deleted'])} 个版本" +
+                         (f"，{len(outcome['failures'])} 个失败" if outcome["failures"] else "")]
+                lines += ["• " + _log_label(item["file_path"].rsplit("/", 1)[-1]) for item in outcome["deleted"][:8]]
+                if len(outcome["deleted"]) > 8:
+                    lines.append(f"…等共 {len(outcome['deleted'])} 个")
+                self._send_tool_notice("📑 清理低质版本媒体", "━━━━━━━━━━━━━━━\n" + "\n".join(lines))
+                logger.info("增强工具 媒体清理定时任务：已清理=%d，失败=%d",
+                            len(outcome["deleted"]), len(outcome["failures"]))
+        except Exception as error:
+            logger.warning("增强工具 媒体清理定时任务失败：%s", type(error).__name__)
 
     def _legacy_missing_active(self) -> bool:
         legacy = self.get_config("EpisodeMissingSubscribe") or {}
@@ -293,7 +335,78 @@ class EmeTools(_PluginBase):
                             "tg_api_id": self._tg_api_id, "tg_api_hash": self._tg_api_hash,
                             "tg_forward_token": self._tg_forward_token, "tg_session": self._tg_session,
                             "monitor": copy.deepcopy(self._monitor_config),
-                            "missing": copy.deepcopy(self._missing_config)})
+                            "missing": copy.deepcopy(self._missing_config),
+                            "media_cleanup": copy.deepcopy(self._media_config)})
+
+    async def media_status(self) -> dict:
+        return {"config": copy.deepcopy(self._media_config), "running": self._media.running,
+                "progress": self._media.progress, "last_scan": self._media.last_scan,
+                "last_error": self._media.last_error,
+                "result": copy.deepcopy(self._media.result)}
+
+    async def media_libraries(self) -> dict:
+        return {"libraries": await asyncio.to_thread(self._media.libraries)}
+
+    async def media_action(self, action: dict) -> dict:
+        operation = action.get("operation")
+        if operation == "save":
+            if self._media.running or self._media.lock.locked():
+                raise HTTPException(status_code=409, detail="清理任务进行中，请稍后保存")
+            changes = action.get("config")
+            if not isinstance(changes, dict) or set(changes) - set(DEFAULT_MEDIA_CLEANUP):
+                raise HTTPException(status_code=400, detail="媒体清理配置不合法")
+            updated = {**self._media_config, **changes}
+            if not isinstance(updated["library_ids"], list) or len(updated["library_ids"]) > 200 or any(
+                    not isinstance(value, str) for value in updated["library_ids"]):
+                raise HTTPException(status_code=400, detail="媒体库选择不合法")
+            try:
+                updated["rules"] = validate_rules(updated["rules"])
+                CronTrigger.from_crontab(str(updated["cron"]))
+            except (ValueError, TypeError) as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            if updated["enabled"] and not self._enabled:
+                raise HTTPException(status_code=409, detail="请先启用插件，再启用定时清理")
+            updated["enabled"] = bool(updated["enabled"])
+            self._media_config = updated
+            self._media.config = updated
+            self._media.result = None
+            self._media._snapshot = {}
+            self._persist()
+            Scheduler().update_plugin_job(self.__class__.__name__)
+            return {"message": "媒体清理配置已保存；定时删除仅在启用时运行"}
+        if operation == "scan":
+            if self._media.running or self._media.lock.locked():
+                raise HTTPException(status_code=409, detail="媒体清理正在执行")
+            selected = action.get("library_ids", self._media_config["library_ids"])
+            if not isinstance(selected, list) or len(selected) > 200 or any(not isinstance(v, str) for v in selected):
+                raise HTTPException(status_code=400, detail="媒体库选择不合法")
+            def background_scan():
+                try:
+                    self._media.scan(selected)
+                except Exception as error:
+                    logger.warning("增强工具 媒体清理扫描失败：%s", type(error).__name__)
+                    self._media.last_error = str(error)[:160]
+            self._media.running = True
+            threading.Thread(target=background_scan, daemon=True).start()
+            return {"message": "已开始扫描，请刷新结果查看进度"}
+        if operation == "preview_delete":
+            selected = action.get("paths")
+            if not isinstance(selected, list) or not selected or len(selected) > 1000 or any(not isinstance(path, str) for path in selected) or len(set(selected)) != len(selected) or any(
+                    path not in self._media._snapshot or self._media._snapshot[path]["is_best"] for path in selected):
+                raise HTTPException(status_code=400, detail="仅可选择本次扫描的低质版本")
+            token = self._remember("media_delete", {"paths": selected, "scan": self._media.last_scan})
+            return {"token": token, "count": len(selected)}
+        if operation == "confirm_delete":
+            record = self._consume(action.get("token", ""), "media_delete")
+            if record["scan"] != self._media.last_scan:
+                raise HTTPException(status_code=409, detail="扫描结果已更新，请重新确认")
+            result = await asyncio.to_thread(self._media.delete, record["paths"])
+            if result["deleted"]:
+                await asyncio.to_thread(self._media.refresh_emby)
+            return result
+        if operation == "reset_rules":
+            return {"rules": copy.deepcopy(DEFAULT_RULES)}
+        raise HTTPException(status_code=400, detail="未知媒体清理操作")
 
     def _source_cookie(self) -> str:
         config = self.get_config("P115StrmHelper") or {}
@@ -1129,4 +1242,7 @@ class EmeTools(_PluginBase):
             {"path": "/missing/status", "endpoint": self.missing_status, "methods": ["GET"], "auth": "bear", "summary": "缺集检测状态"},
             {"path": "/missing/options", "endpoint": self.missing_options, "methods": ["GET"], "auth": "bear", "summary": "缺集检测可选服务器和媒体库"},
             {"path": "/missing/action", "endpoint": self.missing_action, "methods": ["POST"], "auth": "bear", "summary": "缺集检测操作"},
+            {"path": "/media-cleanup/status", "endpoint": self.media_status, "methods": ["GET"], "auth": "bear", "summary": "媒体清理状态"},
+            {"path": "/media-cleanup/libraries", "endpoint": self.media_libraries, "methods": ["GET"], "auth": "bear", "summary": "媒体清理媒体库"},
+            {"path": "/media-cleanup/action", "endpoint": self.media_action, "methods": ["POST"], "auth": "bear", "summary": "媒体清理操作"},
         ]

@@ -11,6 +11,7 @@ const emit = defineEmits(['close'])
 const sections = [
   { key: 'subscription', title: '订阅监控', icon: 'mdi-television-play', detail: '订阅与频道监控' },
   { key: 'missing', title: '缺集检测', icon: 'mdi-television-search', detail: 'Emby 剧集缺集检测与按季订阅' },
+  { key: 'media', title: '媒体清理', icon: 'mdi-movie-remove-outline', detail: '扫描并清理重复媒体的低质版本' },
   { key: 'invalid', title: '清理数据', icon: 'mdi-folder-search-outline', detail: '扫描与清理 STRM 独立资料' },
   { key: 'cleanup', title: '清理文件', icon: 'mdi-folder-remove-outline', detail: '115 文件夹清理' },
   { key: 'move', title: '文件转存', icon: 'mdi-folder-swap-outline', detail: '115 文件夹监控转存' },
@@ -58,6 +59,39 @@ const missingOptionsLoading = ref(false)
 const missingPicker = reactive({ open: '', query: '' })
 const missingActionPicker = ref(false)
 const missingActionOptions = ['仅检查记录', '添加到订阅', '标记为存在']
+const media = reactive({ config: { enabled: false, cron: '0 3 * * *', library_ids: [], rules: [] }, libraries: [], result: null, running: false, progress: '', last_scan: '', last_error: '' })
+const mediaSelection = ref([])
+async function loadMedia() {
+  const [status, options] = await Promise.all([get('media-cleanup/status'), get('media-cleanup/libraries')])
+  Object.assign(media, status)
+  media.libraries = options.libraries || []
+}
+async function mediaCommand(operation, extra = {}) {
+  await work(async () => {
+    const response = await post('media-cleanup/action', { operation, ...extra })
+    if (response?.ok === false) throw new Error(response.failures?.map(item => item.error).join('；') || '清理未完成')
+    notice.value = response.message || (operation === 'confirm_delete' ? `已清理 ${response.deleted.length} 个低质版本` : '操作成功')
+    if (operation === 'reset_rules') media.config.rules = response.rules
+    if (operation === 'confirm_delete') mediaSelection.value = []
+    if (operation !== 'preview_delete') await loadMedia()
+  })
+}
+async function deleteMedia() {
+  await work(async () => {
+    const paths = [...mediaSelection.value]
+    const preview = await post('media-cleanup/action', { operation: 'preview_delete', paths })
+    if (!window.confirm(`确定永久删除 ${preview.count} 个低质版本及其 115 云端文件和本地 STRM/配套文件？此操作不可恢复。`)) return
+    const response = await post('media-cleanup/action', { operation: 'confirm_delete', token: preview.token })
+    notice.value = `已清理 ${response.deleted.length} 个版本；失败 ${response.failures.length} 个${response.failures.length ? '：' + response.failures.map(item => item.error).join('；') : ''}`
+    mediaSelection.value = []
+    await loadMedia()
+  })
+}
+function shiftMediaRule(index, direction, field = 'rules') {
+  const values = field === 'rules' ? media.config.rules : media.config.rules.find(item => item.id === field)?.order
+  if (!values || index + direction < 0 || index + direction >= values.length) return
+  ;[values[index], values[index + direction]] = [values[index + direction], values[index]]
+}
 const confirmPicker = reactive({ open: false })
 const confirmOptions = [
   { value: 'none', title: '无需确认（自动隔离）' },
@@ -409,6 +443,7 @@ function chooseSection(key) {
   notice.value = ''
   error.value = ''
   if (key === 'missing') { loadMissing().catch(err => { error.value = err?.message || '读取缺集结果失败' }); loadMissingOptions() }
+  if (key === 'media') loadMedia().catch(err => { error.value = err?.message || '读取媒体清理配置失败' })
 }
 onMounted(() => { load(); loadMissing().catch(() => {}) })
 </script>
@@ -451,6 +486,19 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测结果</h3><p>{{ missing.scanning ? '后台扫描中' : `上次扫描：${missing.last_scan_time}` }} · {{ missing.results.length }} 条缺失季</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy" @click="loadMissing">刷新结果</button><button class="eme-button secondary" :disabled="busy" @click="downloadMissingCsv">导出 CSV</button></div></div>
           <div class="eme-actions"><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('scan')">立即检测</button><button class="eme-button danger" :disabled="busy || missing.scanning || !missing.results.length" @click="clearMissing">清理检查记录</button></div>
           <div v-if="missing.results.length" class="eme-missing-results"><table><thead><tr><th>服务器</th><th>媒体库</th><th>剧集名称</th><th>缺失季度</th><th>缺失集号</th><th>处理结果</th></tr></thead><tbody><tr v-for="(item, index) in missing.results" :key="index"><td>{{ item.ServerName }}</td><td>{{ item.LibraryName }}</td><td>{{ item.SeriesName }}</td><td>{{ item.SeasonFormatted }}</td><td>{{ item.MissingEpisodes }}</td><td>{{ item.ActionResult }}</td></tr></tbody></table></div><p v-else class="eme-hint">暂无缺失数据或尚未运行扫描。</p>
+        </section>
+      </template>
+      <template v-if="active === 'media'">
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>检测扫描</h3><p>扫描所选 Emby 媒体库对应的本地 STRM；空选表示扫描所有可用库。</p></div><button class="eme-button secondary" :disabled="busy || media.running" @click="loadMedia">刷新结果</button></div>
+          <div class="eme-missing-selects"><label>Emby 媒体库<div class="eme-picker" @click.stop><div class="eme-picker-menu eme-media-libraries" role="group"><label v-for="library in media.libraries" :key="library.id" class="eme-media-choice"><input v-model="media.config.library_ids" type="checkbox" :value="library.id" />{{ library.server }} · {{ library.name }}</label><p v-if="!media.libraries.length" class="eme-hint">暂无可用 Emby 媒体库</p></div></div></label></div>
+          <div class="eme-actions"><button class="eme-button primary" :disabled="busy || media.running" @click="mediaCommand('scan', { library_ids: media.config.library_ids })">开始扫描</button><span class="eme-hint">{{ media.running ? '扫描中：' + media.progress : '上次扫描：' + (media.last_scan || '从未扫描') }}</span></div><p v-if="media.last_error" class="eme-message eme-error">扫描失败：{{ media.last_error }}</p>
+        </section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>清理规则</h3><p>从上到下比较，第一条可区分版本的规则决定保留版本；列表从左到右优先级递减。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || media.running" @click="mediaCommand('reset_rules')">恢复默认</button><button class="eme-button primary" :disabled="busy || media.running" @click="mediaCommand('save', { config: media.config })">保存配置</button></div></div>
+          <div v-for="(rule, index) in media.config.rules" :key="rule.id" class="eme-move-rule"><div class="eme-inline"><label class="eme-switch-label"><input v-model="rule.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><strong>{{ rule.name }}</strong></label><button class="eme-button secondary" :disabled="index === 0" @click="shiftMediaRule(index, -1)">上移</button><button class="eme-button secondary" :disabled="index === media.config.rules.length - 1" @click="shiftMediaRule(index, 1)">下移</button></div><div v-if="rule.type === 'list'" class="eme-chips"><span v-for="(entry, rank) in rule.order" :key="entry" class="eme-chip">{{ entry }} <button :disabled="rank === 0" title="提高优先级" @click="shiftMediaRule(rank, -1, rule.id)">↑</button><button :disabled="rank === rule.order.length - 1" title="降低优先级" @click="shiftMediaRule(rank, 1, rule.id)">↓</button></span></div><div v-else class="eme-fields"><label>容差<input v-model.number="rule.tolerance" type="number" min="0" /></label><label>排序方向<div class="eme-inline"><button class="eme-button" :class="rule.direction === 'desc' ? 'primary' : 'secondary'" @click="rule.direction = 'desc'">优先较大</button><button class="eme-button" :class="rule.direction === 'asc' ? 'primary' : 'secondary'" @click="rule.direction = 'asc'">优先较小</button></div></label></div></div>
+        </section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>定时清理</h3><p>默认关闭；启用后将按保存的媒体库和规则自动永久删除低质版本。请先停用 MediaEnhance 对应任务。</p></div></div><label class="eme-switch-label"><input v-model="media.config.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清理</span></label><div class="eme-fields"><label>执行周期（cron表达式）<input v-model.trim="media.config.cron" placeholder="0 3 * * *" /></label></div><div class="eme-actions"><button class="eme-button primary" :disabled="busy || media.running" @click="mediaCommand('save', { config: media.config })">保存配置</button></div></section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>扫描结果</h3><p>{{ media.result?.duplicate_groups || 0 }} 组重复媒体，{{ media.result?.total_inferior || 0 }} 个可清理版本；仅显示可判定优劣的版本。</p></div><button class="eme-button danger" :disabled="busy || media.running || !mediaSelection.length" @click="deleteMedia">删除所选（{{ mediaSelection.length }}）</button></div><p class="eme-hint">删除将同时操作 115 云端文件及本地 STRM；无法解析文件 ID 或缺少 Cookie 时不会删除。所有删除不可恢复。</p>
+          <div v-for="(group, index) in media.result?.results || []" :key="index" class="eme-move-rule"><strong>{{ group.name }}</strong><div v-for="version in group.versions" :key="version.file_path" class="eme-media-version"><label v-if="!version.is_best" class="eme-media-choice"><input v-model="mediaSelection" type="checkbox" :value="version.file_path" />{{ version.file_name }}</label><span v-else>★ 保留 · {{ version.file_name }}</span><small>{{ version.resolution }} · {{ version.effect }} · {{ version.quality }}</small></div></div><p v-if="!media.result?.results?.length" class="eme-hint">暂无扫描结果。</p>
         </section>
       </template>
       <section v-if="active === 'settings'" class="eme-card">
@@ -592,4 +640,5 @@ onMounted(() => { load(); loadMissing().catch(() => {}) })
 .eme-missing-selects{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.eme-missing-selects>label:last-child{grid-column:1/-1}.eme-picker{position:relative;margin-top:7px}.eme-picker-trigger{box-sizing:border-box;width:100%;min-height:42px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;background:rgb(var(--v-theme-background));color:inherit;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;cursor:pointer;text-align:left}.eme-picker-trigger:hover,.eme-picker-trigger:focus-visible{border-color:rgb(var(--v-theme-primary));outline:none}.eme-picker-menu{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 5px);max-height:300px;overflow:auto;padding:8px;background:rgb(var(--v-theme-surface));border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px;box-shadow:0 12px 28px rgba(0,0,0,.3)}.eme-picker-search{width:100%!important;box-sizing:border-box;margin:0 0 7px!important}.eme-picker-option{width:100%;display:flex;align-items:flex-start;gap:8px;padding:8px;border:0;border-radius:7px;background:transparent;color:inherit;text-align:left;cursor:pointer;line-height:1.35}.eme-picker-option:hover,.eme-picker-option.selected{background:rgba(var(--v-theme-primary),.12);color:rgb(var(--v-theme-primary))}.eme-picker-option i{font-size:18px;flex:none}.eme-picker-empty{padding:10px;margin:0;color:rgba(var(--v-theme-on-surface),.6)}.eme-missing-results{overflow:auto;max-height:360px;margin-top:16px}.eme-missing-results table{border-collapse:collapse;width:100%;min-width:740px;text-align:left}.eme-missing-results th,.eme-missing-results td{padding:10px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));white-space:normal}.eme-missing-results th{font-weight:700;white-space:nowrap}
 @media(max-width:760px){.eme-cleanup-grid{grid-template-columns:1fr}.eme-move-row{flex-wrap:wrap}.eme-move-row .eme-folder-choice{max-width:none;min-width:80px}}
 @media(max-width:760px){.eme-missing-selects{grid-template-columns:1fr}}
+.eme-media-libraries{position:static;box-shadow:none;max-height:210px;margin-top:8px}.eme-media-choice{display:flex!important;align-items:center;gap:8px;padding:7px;cursor:pointer}.eme-media-choice input{width:auto!important;margin:0!important;flex:none}.eme-media-version{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:7px 4px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));overflow-wrap:anywhere}.eme-media-version small{white-space:nowrap;opacity:.7}.eme-media-version>span{font-weight:600}
 </style>
