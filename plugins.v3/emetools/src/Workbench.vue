@@ -65,6 +65,7 @@ const mediaPicker = reactive({ open: false, query: '' })
 const mediaSchedulePicker = reactive({ open: false, query: '' })
 const mediaScanLibraryIds = ref([])
 const mediaRulesOpen = ref(false)
+const mediaScanPending = ref(false)
 let mediaLoaded = false
 let mediaPollTimer = null
 const draggedMediaRank = ref(null)
@@ -118,33 +119,50 @@ function applyMediaStatus(status) {
     mediaScanLibraryIds.value = [...(config.library_ids || [])]
     mediaLoaded = true
   }
-  if (active.value === 'media' && media.running) scheduleMediaPoll()
+  // The scan may finish between the POST and the first status GET. Keep
+  // polling a requested scan until its result (including an empty result) or
+  // error is visible, even if the first GET misses the `running` phase.
+  if (mediaScanPending.value && !media.running && (media.result !== null || media.last_error)) {
+    mediaScanPending.value = false
+  }
+  if (active.value === 'media' && (media.running || mediaScanPending.value)) scheduleMediaPoll()
 }
 function scheduleMediaPoll() {
   clearTimeout(mediaPollTimer)
   mediaPollTimer = setTimeout(async () => {
     if (active.value !== 'media') return
     try { applyMediaStatus(await get('media-cleanup/status')) }
-    catch (err) { error.value = err?.message || '刷新扫描状态失败' }
+    catch (err) {
+      error.value = err?.message || '刷新扫描状态失败'
+      if (mediaScanPending.value || media.running) scheduleMediaPoll()
+    }
   }, 1200)
 }
 async function loadMedia() {
-  const [status, options] = await Promise.all([get('media-cleanup/status'), get('media-cleanup/libraries')])
-  applyMediaStatus(status)
+  applyMediaStatus(await get('media-cleanup/status'))
+  const options = await get('media-cleanup/libraries')
   media.libraries = options.libraries || []
 }
 async function startMediaScan() {
   media.progress = `正在扫描 STRM 目录：${mediaScanScopeLabel()}`
+  media.result = null
+  mediaSelection.value = []
   await mediaCommand('scan', { library_ids: [...mediaScanLibraryIds.value] })
 }
 async function mediaCommand(operation, extra = {}) {
   await work(async () => {
     const response = await post('media-cleanup/action', { operation, ...extra })
     if (response?.ok === false) throw new Error(response.failures?.map(item => item.error).join('；') || '清理未完成')
+    if (operation === 'scan') {
+      mediaScanPending.value = true
+      // Status polling must not depend on the slower Emby library-options API.
+      scheduleMediaPoll()
+    }
     notice.value = response.message || (operation === 'confirm_delete' ? `已清理 ${response.deleted.length} 个低质版本` : '操作成功')
     if (operation === 'reset_rules') { media.config.rules = response.rules; notice.value = '已恢复默认规则，请点击保存配置'; return }
     if (operation === 'confirm_delete') mediaSelection.value = []
-    if (operation !== 'preview_delete') await loadMedia()
+    if (operation === 'scan') applyMediaStatus(await get('media-cleanup/status'))
+    else if (operation !== 'preview_delete') await loadMedia()
   })
 }
 async function deleteMedia() {
@@ -563,7 +581,7 @@ onUnmounted(() => clearTimeout(mediaPollTimer))
       <template v-if="active === 'media'">
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测扫描</h3><p>扫描所选 Emby 媒体库对应的本地 STRM；空选表示扫描所有可用库。</p></div><button class="eme-button secondary" type="button" @click="mediaRulesOpen = true">清理规则</button></div>
           <div class="eme-media-library-field"><label>Emby 媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" :aria-expanded="mediaPicker.open" @click="mediaPicker.open = !mediaPicker.open; mediaPicker.query = ''"><span>{{ mediaPickerLabel() }}</span><i class="mdi" :class="mediaPicker.open ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="mediaPicker.open" class="eme-picker-menu"><input v-model="mediaPicker.query" class="eme-picker-search" placeholder="搜索服务器或媒体库" @click.stop /><button v-for="library in mediaLibraryOptions()" :key="library.id" type="button" class="eme-picker-option" :class="{ selected: mediaScanLibraryIds.includes(library.id) }" @click="toggleMediaLibrary(library.id)"><i class="mdi" :class="mediaScanLibraryIds.includes(library.id) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ library.title }}</button><p v-if="!mediaLibraryOptions().length" class="eme-picker-empty">没有匹配项</p></div></div></label></div>
-          <div class="eme-actions eme-media-scan-actions"><button class="eme-button primary" :disabled="busy || media.running" @click="startMediaScan">开始扫描</button><span class="eme-hint eme-media-scan-status">{{ media.running ? '扫描中：' + (media.progress || `正在扫描 STRM 目录：${mediaScanScopeLabel()}`) : '上次扫描：' + (media.last_scan || '从未扫描') }}</span></div><p v-if="media.last_error" class="eme-message eme-error">扫描失败：{{ media.last_error }}</p>
+          <div class="eme-actions eme-media-scan-actions"><button class="eme-button primary" :disabled="busy || media.running || mediaScanPending" @click="startMediaScan">开始扫描</button><span class="eme-hint eme-media-scan-status">{{ media.running || mediaScanPending ? '扫描中：' + (media.progress || `正在扫描 STRM 目录：${mediaScanScopeLabel()}`) : '上次扫描：' + (media.last_scan || '从未扫描') }}</span></div><p v-if="media.last_error" class="eme-message eme-error">扫描失败：{{ media.last_error }}</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>定时清理</h3><p>默认关闭；启用后将按保存的媒体库和规则自动清理低质版本。请先停用 MediaEnhance 对应任务。</p></div></div><label class="eme-switch-label"><input v-model="media.config.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清理</span></label>
           <div class="eme-media-library-field"><label>定时清理媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" :aria-expanded="mediaSchedulePicker.open" @click="mediaSchedulePicker.open = !mediaSchedulePicker.open; mediaSchedulePicker.query = ''"><span>{{ mediaPickerLabel('schedule') }}</span><i class="mdi" :class="mediaSchedulePicker.open ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="mediaSchedulePicker.open" class="eme-picker-menu"><input v-model="mediaSchedulePicker.query" class="eme-picker-search" placeholder="搜索服务器或媒体库" @click.stop /><button v-for="library in mediaLibraryOptions('schedule')" :key="library.id" type="button" class="eme-picker-option" :class="{ selected: media.config.library_ids.includes(library.id) }" @click="toggleMediaLibrary(library.id, 'schedule')"><i class="mdi" :class="media.config.library_ids.includes(library.id) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ library.title }}</button><p v-if="!mediaLibraryOptions('schedule').length" class="eme-picker-empty">没有匹配项</p></div></div></label></div>
