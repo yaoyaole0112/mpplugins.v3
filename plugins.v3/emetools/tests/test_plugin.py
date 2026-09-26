@@ -108,6 +108,9 @@ class P115ParseTests(unittest.TestCase):
 
 
 class PluginTests(unittest.TestCase):
+    def test_sidebar_uses_background_free_sparkles_icon(self):
+        self.assertEqual(self.plugin.get_sidebar_nav()[0]["icon"], "mdi-creation-outline")
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

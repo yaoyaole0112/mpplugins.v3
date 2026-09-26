@@ -21,7 +21,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.7.9",
+    "version": "2.7.10",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -29,6 +29,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.7.10": "MoviePilot 侧栏入口改用无蓝色背景的三星轮廓图标，保留插件页面原图标",
       "v2.7.9": "减轻目录选择窗口的背景遮罩并增加柔和模糊与边框，适配浅色和深色主题",
       "v2.7.8": "缺集处理方式改为与检测范围一致的自定义单选展开框，替换系统原生下拉框",
       "v2.7.7": "修复 Telegram 频道补漏单频道超时中断整轮监控；逐频道容错、定位失败频道并保留游标自动重试",
