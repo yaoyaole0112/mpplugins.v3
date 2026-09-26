@@ -11,6 +11,7 @@ const sections = [
   { key: 'subscription', title: '订阅监控', icon: 'mdi-television-play', detail: '订阅与频道监控' },
   { key: 'missing', title: '缺集检测', icon: 'mdi-television-search', detail: 'Emby 剧集缺集检测与按季订阅' },
   { key: 'media', title: '媒体清理', icon: 'mdi-movie-remove-outline', detail: '扫描并清理重复媒体的低质版本' },
+  { key: 'enrichment', title: '数据补全', icon: 'mdi-database-plus-outline', detail: '剧集资料、媒体信息与分集预览图' },
   { key: 'invalid', title: '清理数据', icon: 'mdi-folder-search-outline', detail: '扫描与清理 STRM 独立资料' },
   { key: 'cleanup', title: '清理文件', icon: 'mdi-folder-remove-outline', detail: '115 文件夹清理' },
   { key: 'move', title: '文件转存', icon: 'mdi-folder-swap-outline', detail: '115 文件夹监控转存' },
@@ -70,6 +71,64 @@ const missingOptionsLoading = ref(false)
 const missingPicker = reactive({ open: '', query: '' })
 const missingActionPicker = ref(false)
 const missingActionOptions = ['仅检查记录', '添加到订阅', '标记为存在']
+const enrich = reactive({ query: '', items: [], selected: null, searching: false,
+  previewQuery: '', previewItems: [], previewSelected: null, previewEpisodes: [],
+  previewChecked: [], force: false,
+  status: { running: false, task: '', done: false, error: '', log: [], mediainfo: null, preview_result: null } })
+let enrichmentPollTimer = null
+
+async function searchEnrichment(kind) {
+  const preview = kind === 'preview'
+  const keyword = (preview ? enrich.previewQuery : enrich.query).trim()
+  if (keyword.length < 2) { error.value = '请输入至少两个字搜索剧集'; return }
+  enrich.searching = true
+  try {
+    const result = await post('enrichment/action', { operation: 'search', keyword })
+    if (preview) enrich.previewItems = result.items || []
+    else enrich.items = result.items || []
+  } catch (err) { error.value = err?.message || '搜索剧集失败' }
+  finally { enrich.searching = false }
+}
+
+async function refreshEnrichment() {
+  const status = await get('enrichment/status')
+  Object.assign(enrich.status, status)
+  if (active.value === 'enrichment' && status.running) scheduleEnrichmentPoll()
+  if (active.value === 'enrichment' && !status.running && status.done && status.task === '分集预览图修复' && enrich.previewSelected) {
+    enrich.previewEpisodes = status.preview || enrich.previewEpisodes
+  }
+}
+
+function scheduleEnrichmentPoll() {
+  clearTimeout(enrichmentPollTimer)
+  enrichmentPollTimer = setTimeout(async () => {
+    if (active.value !== 'enrichment') return
+    try { await refreshEnrichment() }
+    catch (err) { error.value = err?.message || '刷新数据补全进度失败'; scheduleEnrichmentPoll() }
+  }, 1500)
+}
+
+async function enrichmentAction(operation, extra = {}) {
+  await work(async () => {
+    if (operation === 'mediainfo_fill' && !window.confirm('即将探测文件信息，并在 Emby 空闲时备份数据库、短暂停止 Emby 写入后重启。播放或 Emby 任务进行中会拒绝执行。确认开始？')) return
+    const result = await post('enrichment/action', { operation, ...extra })
+    if (operation === 'preview_scan') {
+      enrich.previewEpisodes = result.episodes || []
+      enrich.previewChecked = enrich.previewEpisodes.filter(item => ['missing', 'candidate'].includes(item.status)).map(item => item.id)
+    } else {
+      notice.value = result.message || '操作已完成'
+      await refreshEnrichment()
+      if (result.started) scheduleEnrichmentPoll()
+    }
+  })
+}
+
+function togglePreviewEpisode(id) {
+  const index = enrich.previewChecked.indexOf(id)
+  if (index < 0) enrich.previewChecked.push(id)
+  else enrich.previewChecked.splice(index, 1)
+}
+
 let missingScanPendingId = 0
 let missingPollTimer = null
 const media = reactive({ config: { enabled: false, cron: '0 3 * * *', library_ids: [], rules: [] }, libraries: [], result: null, running: false, progress: '', last_scan: '', last_error: '' })
@@ -570,14 +629,16 @@ function selectFolder() {
 function chooseSection(key) {
   active.value = key
   if (key !== 'missing') clearTimeout(missingPollTimer)
+  if (key !== 'enrichment') clearTimeout(enrichmentPollTimer)
   toast.visible = false
   notice.value = ''
   error.value = ''
   if (key === 'missing') { loadMissing().catch(err => { error.value = err?.message || '读取缺集结果失败' }); loadMissingOptions() }
   if (key === 'media') loadMedia().catch(err => { error.value = err?.message || '读取媒体清理配置失败' })
+  if (key === 'enrichment') refreshEnrichment().catch(err => { error.value = err?.message || '读取数据补全状态失败' })
 }
 onMounted(() => { load(); loadMissing().catch(() => {}) })
-onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer); clearTimeout(toastTimer) })
+onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer); clearTimeout(enrichmentPollTimer); clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -635,6 +696,30 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         <section class="eme-card"><div class="eme-card-heading"><div><h3>扫描结果</h3><p>已扫描 {{ media.result?.total_scanned || 0 }} 项 · 重复 {{ media.result?.duplicate_groups || 0 }} 组 · 低质版本 {{ media.result?.total_inferior || 0 }} 个</p></div><div class="eme-inline"><span v-if="mediaSelection.length" class="eme-hint">已选 {{ mediaSelection.length }} 个</span><button class="eme-button secondary" type="button" :disabled="busy || media.running || !mediaInferiorPaths.length" @click="toggleAllInferior">{{ mediaAllInferiorSelected ? '取消全选' : '全选低质' }}</button><button class="eme-button danger" :disabled="busy || media.running || !mediaSelection.length" @click="deleteMedia">删除所选（{{ mediaSelection.length }}）</button></div></div><p class="eme-hint">删除将同时操作 115 云端文件及本地 STRM；无法解析文件 ID 或缺少 Cookie 时不会删除。所有删除不可恢复。</p>
           <div v-for="(group, index) in media.result?.results || []" :key="index" class="eme-media-group"><strong>{{ group.name }}</strong><div v-for="version in group.versions" :key="version.file_path" class="eme-media-version"><label v-if="!version.is_best" class="eme-media-choice"><input v-model="mediaSelection" type="checkbox" :value="version.file_path" /><span class="eme-media-file-name">{{ version.file_name }}</span></label><span v-else class="eme-media-keep"><span class="eme-media-keep-check" role="img" aria-label="保留的最佳版本" title="保留的最佳版本">✓</span><span class="eme-media-file-name">{{ version.file_name }}</span></span><small :title="mediaVersionDetails(version)">{{ mediaVersionDetails(version) }}</small></div></div><p v-if="!media.result?.results?.length" class="eme-hint">暂无扫描结果。</p>
         </section>
+      </template>
+      <template v-if="active === 'enrichment'">
+        <section class="eme-card">
+          <div class="eme-card-heading"><div><h3>搜索剧集</h3><p>搜索 MoviePilot 已连接的 Emby 剧集，从 TMDB 匹配资料并补全剧集及分集信息。</p></div></div>
+          <div class="eme-enrich-search"><input v-model.trim="enrich.query" placeholder="输入剧集名称（至少两个字）" @keyup.enter="searchEnrichment('series')" /><button class="eme-button secondary" :disabled="enrich.searching" @click="searchEnrichment('series')">搜索剧集</button></div>
+          <div v-if="enrich.items.length" class="eme-enrich-results"><button v-for="item in enrich.items" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.selected?.id === item.id }" @click="enrich.selected = item">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.server }}</button></div>
+          <p v-if="enrich.selected" class="eme-hint">已选：{{ enrich.selected.name }} · {{ enrich.selected.server }}</p>
+          <div class="eme-inline eme-enrich-buttons"><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'all' })">一键补全</button><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'metadata' })">补全剧集资料</button><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'credits' })">补全演职人员</button><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'episodes' })">补全分集信息</button></div>
+          <p class="eme-hint">使用 MoviePilot 的 TMDB API Key 与 Emby 连接；不读取 MediaEnhance 的配置。请核对剧集匹配后再补全。</p>
+        </section>
+        <section class="eme-card">
+          <div class="eme-card-heading"><div><h3>媒体信息补全</h3><p>扫描 Emby 电影与分集的文件大小和时长；探测缺失信息后，在 Emby 空闲时备份数据库、停机写入并重启。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || enrich.status.running" @click="enrichmentAction('mediainfo_check')">开始检查</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.status.mediainfo?.incomplete_count" @click="enrichmentAction('mediainfo_fill')">开始补全</button></div></div>
+          <p v-if="enrich.status.mediainfo" class="eme-hint">已检查 {{ enrich.status.mediainfo.total }} 项，需要补全 {{ enrich.status.mediainfo.incomplete_count }} 项。</p>
+          <p class="eme-hint">开始补全会暂时停止 Emby；正在播放或有运行中的 Emby 任务时不会停机。数据库备份与源库保存在同一目录。</p>
+        </section>
+        <section class="eme-card">
+          <div class="eme-card-heading"><div><h3>分集预览图修复</h3><p>扫描 DoVi 分集，通过独立截帧容器转成 SDR，裁掉底部字幕后写入 STRM 同目录并刷新 Emby。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !enrich.previewSelected" @click="enrichmentAction('preview_scan', { series_id: enrich.previewSelected.id })">扫描分集</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.previewChecked.length" @click="enrichmentAction('preview_repair', { series_id: enrich.previewSelected.id, episode_ids: [...enrich.previewChecked], force: enrich.force })">重截选中预览图</button></div></div>
+          <div class="eme-enrich-search"><input v-model.trim="enrich.previewQuery" placeholder="输入要修复的剧集名称" @keyup.enter="searchEnrichment('preview')" /><button class="eme-button secondary" :disabled="enrich.searching" @click="searchEnrichment('preview')">搜索剧集</button></div>
+          <div v-if="enrich.previewItems.length" class="eme-enrich-results"><button v-for="item in enrich.previewItems" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.previewSelected?.id === item.id }" @click="enrich.previewSelected = item; enrich.previewEpisodes = []; enrich.previewChecked = []">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.server }}</button></div>
+          <label class="eme-switch-label"><input v-model="enrich.force" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>强制覆盖已有预览图</span></label>
+          <div v-if="enrich.previewEpisodes.length" class="eme-enrich-episodes"><label v-for="episode in enrich.previewEpisodes" :key="episode.id" class="eme-enrich-episode"><input type="checkbox" :checked="enrich.previewChecked.includes(episode.id)" @change="togglePreviewEpisode(episode.id)" /><span>S{{ String(episode.season).padStart(2, '0') }}E{{ String(episode.episode).padStart(2, '0') }} · {{ episode.name || '未命名' }}</span><small>{{ episode.dovi ? 'DoVi · ' : '' }}{{ { missing: '缺失预览图', candidate: '疑似偏色', fixed: '已修复', keep: '保持' }[episode.status] || '保持' }}</small></label></div>
+          <p v-if="enrich.status.preview_result" class="eme-hint">上次修复：成功 {{ enrich.status.preview_result.ok }} 集，失败 {{ enrich.status.preview_result.fail }} 集。</p>
+        </section>
+        <section v-if="enrich.status.running || enrich.status.log?.length || enrich.status.error" class="eme-card"><div class="eme-card-heading"><h3>运行进度</h3><span class="eme-hint">{{ enrich.status.running ? `${enrich.status.task}进行中…` : '已结束' }}</span></div><p v-if="enrich.status.error" class="eme-message eme-error">{{ enrich.status.error }}</p><div class="eme-enrich-log"><div v-for="(line, index) in enrich.status.log" :key="index">{{ line }}</div></div></section>
       </template>
       <section v-if="active === 'settings'" class="eme-card">
         <div class="eme-card-heading"><h3>基础设置</h3><button class="eme-button primary" :disabled="busy" @click="saveBasicSettings">保存设置</button></div>
@@ -810,6 +895,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-media-version .eme-media-keep .eme-media-file-name{color:rgb(var(--v-theme-on-surface))}
 .eme-media-version .eme-media-choice .eme-media-file-name{color:rgba(var(--v-theme-on-surface),.6)}
 .eme-cleanup-grid{max-width:610px}
+.eme-enrich-search{display:flex;align-items:center;gap:10px;margin:12px 0}.eme-enrich-search input{box-sizing:border-box;flex:1;min-width:0;padding:10px 12px;border-radius:9px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));background:rgb(var(--v-theme-background));color:inherit}.eme-enrich-results{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0;max-height:190px;overflow:auto}.eme-enrich-result{border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:8px;padding:8px 10px;background:transparent;color:inherit;cursor:pointer}.eme-enrich-result.selected,.eme-enrich-result:hover{border-color:rgb(var(--v-theme-primary));background:rgba(var(--v-theme-primary),.12)}.eme-enrich-buttons{margin:14px 0 8px}.eme-enrich-episodes{max-height:260px;overflow:auto;margin:10px 0;display:grid;gap:6px}.eme-enrich-episode{display:flex!important;align-items:center;gap:8px;min-width:0;padding:7px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));cursor:pointer}.eme-enrich-episode>span{flex:1;min-width:0;overflow-wrap:anywhere}.eme-enrich-episode small{color:rgba(var(--v-theme-on-surface),.62)}.eme-enrich-log{max-height:230px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.65}
 .eme-sidebar{box-sizing:border-box;width:286px;flex:none;min-height:0;padding:28px 0 24px 26px;border-right:0;overflow:visible;gap:0}
 .eme-shell--app .eme-sidebar{padding:28px 0 24px 26px;gap:0;overflow:visible}
 .eme-brand,.eme-shell--app .eme-brand{box-sizing:border-box;flex:none;gap:12px;min-height:52px;margin-bottom:22px;padding:0 6px}

@@ -19,9 +19,9 @@
   },
   "EmeTools": {
     "name": "增强工具",
-    "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、无效数据清理、115 文件清理、回收站清空与文件转存",
+    "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.8.17",
+    "version": "2.8.18",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -29,6 +29,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.8.18": "新增媒体清理下方的数据补全页面：搜索 Emby 剧集并用 TMDB 补全剧集、演职人员与分集资料；检查并补全媒体大小/时长，在核对本机 Emby 身份与空闲状态后备份数据库、短暂停机写入并重启；扫描缺失/偏色预览图，使用独立容器截帧、裁剪并刷新 Emby。所有任务独立执行，不调用 MediaEnhance 服务",
       "v2.8.17": "媒体清理高低质文件名统一字号与左对齐，保留文件名清晰、低质文件名浅灰；精简缺集检测说明；限制清理文件目录标签在宽屏下的宽度",
       "v2.8.16": "加大媒体清理规则弹窗中特效、分辨率、质量、帧率等规则标题的字号，保持标签和操作按钮原有尺寸",
       "v2.8.15": "修复 MoviePilot 侧栏 SVG 图标未被插件样式覆盖的问题，让侧栏小图标与页面左上角三星轮廓一致",

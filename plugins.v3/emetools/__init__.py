@@ -31,6 +31,7 @@ from .p115 import P115Client
 from .subscription_monitor import SubscriptionMonitor, normalize_channel
 from .missing_episodes import DEFAULT_MISSING, MissingAction, MissingEpisodeDetector
 from .media_cleanup import MediaCleanup, DEFAULT_CONFIG as DEFAULT_MEDIA_CLEANUP, DEFAULT_RULES, validate_rules
+from .data_enrichment import DataEnrichment
 from . import tool_notifications as notices
 
 ICON_URL = "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg"
@@ -87,11 +88,20 @@ class MonitorChange(BaseModel):
     password: str = ""
 
 
+class EnrichmentAction(BaseModel):
+    operation: str
+    keyword: str = ""
+    series_id: str = ""
+    mode: str = "all"
+    episode_ids: List[str] = Field(default_factory=list)
+    force: bool = False
+
+
 class EmeTools(_PluginBase):
     plugin_name = "增强工具"
-    plugin_desc = "订阅频道监控、缺集检测、媒体清理、无效数据清理、115 文件清理、回收站清空与文件转存。"
+    plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.8.17"
+    plugin_version = "2.8.18"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -150,6 +160,7 @@ class EmeTools(_PluginBase):
         except ValueError:
             self._media_config["rules"] = copy.deepcopy(DEFAULT_RULES)
         self._media = MediaCleanup(self, self._media_config)
+        self._enrichment = DataEnrichment(self)
         self._schedule = copy.deepcopy(DEFAULT_SCHEDULE)
         for name, defaults in self._schedule.items():
             saved = (config.get("schedule") or {}).get(name) or {}
@@ -1342,6 +1353,30 @@ class EmeTools(_PluginBase):
                            _log_label(operation), type(error).__name__)
             return {"ok": False, "message": str(error)}
 
+    async def enrichment_status(self) -> dict:
+        return self._enrichment.status()
+
+    async def enrichment_action(self, action: EnrichmentAction) -> dict:
+        if not self._enabled:
+            raise HTTPException(status_code=409, detail="请先启用插件")
+        try:
+            if action.operation == "search":
+                return {"items": await self._enrichment.search(action.keyword)}
+            if action.operation == "enrich":
+                return self._enrichment.start_enrich(action.series_id, action.mode)
+            if action.operation == "mediainfo_check":
+                return self._enrichment.start_mediainfo_check()
+            if action.operation == "mediainfo_fill":
+                return self._enrichment.start_mediainfo_fill()
+            if action.operation == "preview_scan":
+                return {"episodes": await self._enrichment.scan_preview(action.series_id)}
+            if action.operation == "preview_repair":
+                return self._enrichment.start_preview_repair(
+                    action.series_id, action.episode_ids, action.force)
+            raise HTTPException(status_code=400, detail="未知的数据补全操作")
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
     def get_api(self) -> List[dict]:
         return [
             {"path": "/status", "endpoint": self.status, "methods": ["GET"], "auth": "bear", "summary": "MP 工具配置"},
@@ -1356,4 +1391,6 @@ class EmeTools(_PluginBase):
             {"path": "/media-cleanup/status", "endpoint": self.media_status, "methods": ["GET"], "auth": "bear", "summary": "媒体清理状态"},
             {"path": "/media-cleanup/libraries", "endpoint": self.media_libraries, "methods": ["GET"], "auth": "bear", "summary": "媒体清理媒体库"},
             {"path": "/media-cleanup/action", "endpoint": self.media_action, "methods": ["POST"], "auth": "bear", "summary": "媒体清理操作"},
+            {"path": "/enrichment/status", "endpoint": self.enrichment_status, "methods": ["GET"], "auth": "bear", "summary": "数据补全任务状态"},
+            {"path": "/enrichment/action", "endpoint": self.enrichment_action, "methods": ["POST"], "auth": "bear", "summary": "数据补全操作"},
         ]
