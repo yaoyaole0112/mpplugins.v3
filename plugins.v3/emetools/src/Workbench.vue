@@ -809,7 +809,9 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-brand,.eme-shell--app .eme-brand{box-sizing:border-box;flex:none;gap:12px;min-height:52px;margin-bottom:22px;padding:0 6px}
 .eme-brand-icon{width:46px;height:46px;flex:none;border-radius:0;background:rgb(var(--v-theme-primary));mask:url('./brand-stars.svg') center/contain no-repeat}
 .eme-brand-icon{display:block}
-:global(.layout-vertical-nav .nav-link a[href*="emetools" i] .nav-item-icon::before){content:"";display:block;width:1em;height:1em;background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
+:global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg){background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
+:global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg > *){display:none}
+:global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon::before){content:"";display:block;width:1em;height:1em;background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
 .eme-brand strong{font-size:25px;line-height:1.25;font-weight:700}
 .eme-sidebar-card{box-sizing:border-box;display:flex;flex-direction:column;gap:3px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:12px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:16px;background:rgb(var(--v-theme-surface))}
 .eme-sidebar-card .eme-nav{flex:none;padding:11px 10px;border:1px solid transparent}
