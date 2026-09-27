@@ -560,6 +560,34 @@ class DataEnrichment:
             raise ValueError("所选 Emby 服务器不可用")
         return self._begin("剧集补全", self._enrich, name, identifier, mode, self.options())
 
+    async def _sync_episode_people(self, emby, user, series_id, people):
+        """Propagate the freshly saved series cast without changing episode metadata."""
+        if not people:
+            self.log("剧集没有可写入的演职人员，跳过分集同步")
+            return
+        offset, changed = 0, 0
+        while True:
+            data = await self._json(emby, f"Users/{user}/Items", {
+                "ParentId": series_id, "Recursive": "true",
+                "IncludeItemTypes": "Episode", "StartIndex": offset, "Limit": 500})
+            page = data.get("Items") or []
+            for episode in page:
+                episode_id = episode.get("Id")
+                if not episode_id:
+                    continue
+                full = await self._item(emby, user, episode_id)
+                full["People"] = people
+                response = await emby.post(f"Items/{episode_id}", json={
+                    key: value for key, value in full.items() if value is not None})
+                response.raise_for_status()
+                changed += 1
+                if changed % 20 == 0:
+                    self.log(f"已同步 {changed} 集演职人员")
+            offset += len(page)
+            if not page or offset >= int(data.get("TotalRecordCount", offset)):
+                break
+        self.log(f"分集演职人员同步完成：{changed} 集")
+
     async def _enrich(self, name, identifier, mode, options=None):
         options = validate_enrich_config(options or self.options())
         api_key = str(getattr(settings, "TMDB_API_KEY", "") or "")
@@ -674,6 +702,8 @@ class DataEnrichment:
                 response.raise_for_status()
                 self.log({"all": "剧集元数据及演职人员已更新", "metadata": "剧集资料已更新",
                           "credits": "剧集演职人员已更新"}[mode])
+                if mode == "credits" and options["episode_cast"]:
+                    await self._sync_episode_people(emby, user, identifier, people)
             if mode in ("all", "episodes"):
                 episodes = await self._json(emby, f"Users/{user}/Items", {"ParentId": identifier,
                     "Recursive": "true", "IncludeItemTypes": "Episode", "Limit": 5000})

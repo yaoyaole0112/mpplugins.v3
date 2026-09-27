@@ -256,6 +256,77 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(saved[0]['People'][0]['Role'], '饰 主角')
         self.assertIn('Cast', saved[0]['LockedFields'])
 
+    def test_credits_action_syncs_episode_people_when_enabled(self):
+        saved, queried = {}, []
+
+        def emby_handler(request):
+            if request.method == 'POST':
+                saved[request.url.path] = json.loads(request.content)
+                return httpx.Response(204)
+            if request.url.path == '/emby/Users/user123/Items/73025':
+                return httpx.Response(200, json={'Id': '73025', 'Type': 'Series', 'Name': '一瓯春',
+                                                 'ProviderIds': {'Tmdb': '12345'}})
+            if request.url.path == '/emby/Users/user123/Items':
+                queried.append(request.url.params.get('StartIndex'))
+                offset = int(request.url.params['StartIndex'])
+                pages = {0: [{'Id': 'ep1'}], 1: [{'Id': 'ep2'}]}
+                return httpx.Response(200, json={'Items': pages.get(offset, []),
+                                                 'TotalRecordCount': 2})
+            if request.url.path.startswith('/emby/Users/user123/Items/ep'):
+                return httpx.Response(200, json={'Id': request.url.path.rsplit('/', 1)[-1],
+                                                 'Name': '原有标题', 'Overview': '原有简介',
+                                                 'People': [{'Name': '旧演员'}]})
+            return httpx.Response(404)
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/',
+                                 transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/',
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={
+                'aggregate_credits': {'cast': [{'name': '许凯', 'profile_path': '/pic.jpg',
+                                                'roles': [{'character': '谢府公子'}]}]}})))
+        with patch.object(self.enrichment, '_services', return_value={
+                 'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'credits',
+                {**DEFAULT_ENRICH_CONFIG, 'episode_cast': True}))
+        self.assertEqual(queried, ['0', '1'])
+        self.assertEqual(len(saved), 3)
+        for episode_id in ('ep1', 'ep2'):
+            episode = saved[f'/emby/Items/{episode_id}']
+            self.assertEqual(episode['People'], saved['/emby/Items/73025']['People'])
+            self.assertEqual(episode['Name'], '原有标题')
+            self.assertEqual(episode['Overview'], '原有简介')
+        self.assertIn('分集演职人员同步完成：2 集', self.enrichment.status()['log'])
+
+    def test_credits_action_does_not_sync_episodes_when_disabled(self):
+        paths = []
+
+        def emby_handler(request):
+            paths.append((request.method, request.url.path))
+            if request.method == 'POST':
+                return httpx.Response(204)
+            if request.url.path.endswith('/Items/73025'):
+                return httpx.Response(200, json={'Id': '73025', 'Type': 'Series', 'Name': '一瓯春',
+                                                 'ProviderIds': {'Tmdb': '12345'}})
+            return httpx.Response(500)
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/',
+                                 transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/',
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={
+                'aggregate_credits': {'cast': [{'name': '许凯', 'profile_path': '/pic.jpg'}]}})))
+        with patch.object(self.enrichment, '_services', return_value={
+                 'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'credits',
+                                                {**DEFAULT_ENRICH_CONFIG, 'episode_cast': False}))
+        self.assertEqual([path for method, path in paths if method == 'POST'],
+                         ['/emby/Items/73025'])
+
     def test_douban_preferred_fields_and_tmdb_fallback_reach_emby(self):
         saved = []
 
