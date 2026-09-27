@@ -156,6 +156,25 @@ class DataEnrichment:
         response.raise_for_status()
         return response.json()
 
+    async def _user_id(self, name, client):
+        """Use the same user-scoped item API as the Emby search/list client."""
+        instance = self._services().get(name)
+        if instance is None:
+            raise ValueError("所选 Emby 服务器不可用，请重新搜索")
+        user = str(instance.get_user() or "") if hasattr(instance, "get_user") else ""
+        if not user:
+            users = await self._json(client, "Users")
+            user = str((users[0] if users else {}).get("Id") or "")
+        if not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", user):
+            raise ValueError("未获取到有效的 Emby 用户 ID")
+        return user
+
+    async def _item(self, client, user, item_id):
+        if not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", str(item_id)):
+            raise ValueError("Emby 条目 ID 无效")
+        return await self._json(client, f"Users/{user}/Items/{item_id}",
+                                {"Fields": "MediaSources,MediaStreams,Path,Size,ProviderIds"})
+
     @staticmethod
     def _split(item_id):
         if "::" not in item_id:
@@ -173,9 +192,8 @@ class DataEnrichment:
         for name, instance in self._services().items():
             try:
                 async with self._server(name) as client:
-                    user = str(instance.get_user() or "") if hasattr(instance, "get_user") else ""
-                    path = f"Users/{user}/Items" if user else "Items"
-                    data = await self._json(client, path, {"IncludeItemTypes": "Series",
+                    user = await self._user_id(name, client)
+                    data = await self._json(client, f"Users/{user}/Items", {"IncludeItemTypes": "Series",
                         "SearchTerm": keyword, "Recursive": "true", "Limit": 20})
                 results.extend({"id": f"{name}::{item['Id']}", "name": item.get("Name", ""),
                     "year": item.get("ProductionYear") or "", "server": name}
@@ -260,7 +278,8 @@ class DataEnrichment:
     async def scan_preview(self, series_id):
         name, identifier = self._split(series_id)
         async with self._server(name) as client:
-            data = await self._json(client, "Items", {"ParentId": identifier,
+            user = await self._user_id(name, client)
+            data = await self._json(client, f"Users/{user}/Items", {"ParentId": identifier,
                 "IncludeItemTypes": "Episode", "Recursive": "true", "Fields": "Path",
                 "Limit": 5000})
         results, selected = [], {}
@@ -320,7 +339,8 @@ class DataEnrichment:
             raise ValueError("请先在 MoviePilot 配置 TMDB API Key")
         async with self._server(name) as emby, httpx.AsyncClient(
                 base_url="https://api.themoviedb.org/3/", timeout=30) as tmdb:
-            item = await self._json(emby, f"Items/{identifier}")
+            user = await self._user_id(name, emby)
+            item = await self._item(emby, user, identifier)
             if item.get("Type") != "Series":
                 raise ValueError("选中项目不是 Emby 剧集")
             provider = item.get("ProviderIds") or {}
@@ -354,11 +374,11 @@ class DataEnrichment:
                     people = [{"Name": p["name"], "Type": "Actor", "Role": (p.get("roles") or [{}])[0].get("character", "")}
                               for p in cast[:50] if p.get("name")]
                     if people: update["People"] = people
-                response = await emby.post(f"Items/{identifier}", json=update)
+                response = await emby.post(f"Items/{identifier}", json={k: v for k, v in update.items() if v is not None})
                 response.raise_for_status()
                 self.log("剧集元数据及演职人员已更新" if mode == "all" else "剧集资料已更新")
             if mode in ("all", "episodes"):
-                episodes = await self._json(emby, "Items", {"ParentId": identifier,
+                episodes = await self._json(emby, f"Users/{user}/Items", {"ParentId": identifier,
                     "Recursive": "true", "IncludeItemTypes": "Episode", "Limit": 5000})
                 seasons = {}
                 changed = 0
@@ -371,10 +391,10 @@ class DataEnrichment:
                         seasons[season] = {ep.get("episode_number"): ep for ep in data.get("episodes", [])}
                     tmdb_episode = seasons[season].get(number) or {}
                     if not tmdb_episode.get("name") and not tmdb_episode.get("overview"): continue
-                    full = await self._json(emby, f"Items/{episode['Id']}")
+                    full = await self._item(emby, user, episode["Id"])
                     if tmdb_episode.get("name"): full["Name"] = tmdb_episode["name"]
                     if tmdb_episode.get("overview"): full["Overview"] = tmdb_episode["overview"]
-                    response = await emby.post(f"Items/{episode['Id']}", json=full)
+                    response = await emby.post(f"Items/{episode['Id']}", json={k: v for k, v in full.items() if v is not None})
                     response.raise_for_status()
                     changed += 1
                     if changed % 20 == 0: self.log(f"已补全 {changed} 集")

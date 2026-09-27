@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -66,6 +67,75 @@ class EnrichmentTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 _docker_job('test-image', {})
             self.assertEqual(docker.call_args.args, ('DELETE', '/containers/abc'))
+
+    def test_enrich_reads_user_item_and_writes_admin_item(self):
+        """Emby GET /Items/{id} gives 404; the detail GET must include UserId."""
+        seen = []
+
+        def emby_handler(request):
+            seen.append((request.method, request.url.path))
+            if request.url.path == '/emby/Users/user123/Items/73025':
+                return httpx.Response(200, json={'Id': '73025', 'Type': 'Series', 'Name': '云雀叫天录',
+                                                  'ProviderIds': {'Tmdb': '12345'}, 'People': []})
+            if request.method == 'POST' and request.url.path == '/emby/Items/73025':
+                return httpx.Response(204)
+            return httpx.Response(404)
+
+        def tmdb_handler(request):
+            seen.append((request.method, request.url.path))
+            if request.url.path == '/3/tv/12345':
+                return httpx.Response(200, json={'name': '云雀叫天录', 'overview': '剧情介绍',
+                                                  'aggregate_credits': {'cast': []}})
+            return httpx.Response(404)
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.themoviedb.org/3/',
+                                 transport=httpx.MockTransport(tmdb_handler))
+        server = SimpleNamespace(get_user=lambda: 'user123')
+        with patch.object(self.enrichment, '_services', return_value={'Q4': server}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'), \
+             patch('emetools.data_enrichment.httpx.AsyncClient', return_value=tmdb):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'metadata'))
+        self.assertIn(('GET', '/emby/Users/user123/Items/73025'), seen)
+        self.assertIn(('POST', '/emby/Items/73025'), seen)
+        self.assertNotIn(('GET', '/emby/Items/73025'), seen)
+
+    def test_episode_enrichment_uses_user_scoped_details(self):
+        seen = []
+
+        def emby_handler(request):
+            seen.append((request.method, request.url.path))
+            if request.url.path == '/emby/Users/user123/Items/73025':
+                return httpx.Response(200, json={'Id': '73025', 'Type': 'Series', 'Name': '测试剧集',
+                                                  'ProviderIds': {'Tmdb': '12345'}})
+            if request.url.path == '/emby/Users/user123/Items':
+                return httpx.Response(200, json={'Items': [{'Id': '9', 'ParentIndexNumber': 1,
+                                                              'IndexNumber': 2}]})
+            if request.url.path == '/emby/Users/user123/Items/9':
+                return httpx.Response(200, json={'Id': '9', 'Name': '旧集名'})
+            if request.method == 'POST' and request.url.path == '/emby/Items/9':
+                return httpx.Response(204)
+            return httpx.Response(404)
+
+        def tmdb_handler(request):
+            if request.url.path == '/3/tv/12345':
+                return httpx.Response(200, json={'name': '测试剧集'})
+            if request.url.path == '/3/tv/12345/season/1':
+                return httpx.Response(200, json={'episodes': [{'episode_number': 2, 'name': '新集名'}]})
+            return httpx.Response(404)
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.themoviedb.org/3/',
+                                 transport=httpx.MockTransport(tmdb_handler))
+        with patch.object(self.enrichment, '_services', return_value={'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'), \
+             patch('emetools.data_enrichment.httpx.AsyncClient', return_value=tmdb):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'episodes'))
+        self.assertIn(('GET', '/emby/Users/user123/Items/9'), seen)
+        self.assertIn(('POST', '/emby/Items/9'), seen)
+        self.assertNotIn(('GET', '/emby/Items/9'), seen)
 
 
 if __name__ == '__main__':
