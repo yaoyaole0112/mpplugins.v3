@@ -454,6 +454,35 @@ class EnrichmentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.enrichment._safe_strm('/etc/passwd')
 
+    def test_mediainfo_check_excludes_iso_with_only_missing_runtime(self):
+        root = Path(self.temp.name)
+        iso = root / 'movie.iso.strm'
+        iso.write_text('https://example.org/movie.iso\n', encoding='utf8')
+        missing_iso_size = root / 'missing.iso.strm'
+        missing_iso_size.write_text('https://example.org/missing.iso\n', encoding='utf8')
+        items = [
+            {'Id': 'iso', 'Path': str(iso), 'Size': 100, 'RunTimeTicks': 0},
+            {'Id': 'source-iso', 'MediaSources': [{'Path': str(iso), 'Size': 100}],
+             'RunTimeTicks': 0},
+            {'Id': 'iso-no-size', 'Path': str(missing_iso_size), 'Size': 0,
+             'RunTimeTicks': 0},
+            {'Id': 'episode', 'Path': str(self.strm), 'Size': 100, 'RunTimeTicks': 0},
+            {'Id': 'complete', 'Path': str(self.strm), 'Size': 100, 'RunTimeTicks': 100},
+        ]
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={
+                'Items': items, 'TotalRecordCount': len(items)})))
+        with patch.object(self.enrichment, '_services', return_value={'Q4': object()}), \
+             patch.object(self.enrichment, '_server', return_value=emby):
+            asyncio.run(self.enrichment._check_mediainfo())
+        result = self.enrichment.status()['mediainfo']
+        self.assertEqual(result['total'], 3)
+        self.assertEqual(result['incomplete_count'], 2)
+        self.assertEqual([item['id'] for item in self.enrichment._mi_selection],
+                         ['iso-no-size', 'episode'])
+        self.assertTrue(self.enrichment._skip_iso_runtime('/films/movie.ISO.STRM', 100, 0))
+        self.assertFalse(self.enrichment._skip_iso_runtime('/films/movie.ISO.STRM', 0, 0))
+
     def test_database_script_writes_only_selected_fields_and_keeps_backup(self):
         db = Path(self.temp.name) / 'library.db'
         with sqlite3.connect(db) as connection:

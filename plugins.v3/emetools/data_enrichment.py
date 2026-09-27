@@ -888,8 +888,14 @@ class DataEnrichment:
     def start_mediainfo_check(self):
         return self._begin("媒体信息检查", self._check_mediainfo)
 
+    @staticmethod
+    def _skip_iso_runtime(path, size, runtime):
+        """Don't repeatedly flag ISO STRMs that only lack probeable runtime."""
+        return (bool(size) and not runtime and
+                str(path or "").lower().endswith(".iso.strm"))
+
     async def _check_mediainfo(self):
-        results, total = [], 0
+        results, total, skipped = [], 0, 0
         for name in self._services():
             async with self._server(name) as emby:
                 offset = 0
@@ -899,12 +905,16 @@ class DataEnrichment:
                         "StartIndex": offset, "Limit": 500})
                     page = data.get("Items") or []
                     for item in page:
-                        total += 1
                         source = (item.get("MediaSources") or [{}])[0]
                         size = item.get("Size") or source.get("Size") or 0
                         runtime = item.get("RunTimeTicks") or source.get("RunTimeTicks") or 0
+                        path = item.get("Path") or source.get("Path")
+                        if self._skip_iso_runtime(path, size, runtime):
+                            skipped += 1
+                            continue
+                        total += 1
                         if not size or not runtime:
-                            try: path = self._safe_strm(item.get("Path") or source.get("Path"))
+                            try: path = self._safe_strm(path)
                             except ValueError: continue
                             results.append({"id": item["Id"], "server": name,
                                 "name": item.get("Name", ""), "path": path,
@@ -917,7 +927,7 @@ class DataEnrichment:
             self.state["mediainfo"] = {"total": total, "incomplete_count": len(results),
                 "items": [{k: item[k] for k in ("id", "server", "name", "missing_size", "missing_runtime")}
                           for item in results[:100]]}
-        self.log(f"检查完成：共 {total} 项，需要补全 {len(results)} 项")
+        self.log(f"检查完成：共 {total} 项，需要补全 {len(results)} 项；跳过 {skipped} 项已知大小但缺时长的 ISO STRM")
 
     def start_mediainfo_fill(self):
         with self.lock:
