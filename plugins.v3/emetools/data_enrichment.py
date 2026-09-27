@@ -11,6 +11,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 from urllib.parse import quote
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,7 @@ SHENYI_EXTRACT = "f84e5d989aa8a8b6ab1a3a8c0848faab"
 SHENYI_PERSIST = "f98bb72fe87c19265e4550abc2cad64f"
 DEFAULT_ENRICH_CONFIG = {
     "metadata_source": "tmdb",
+    "auto_on_import": True,
     "ai_enabled": False, "no_avatar": True, "episode_cast": False,
     "role_prefix": True, "ai_title": True, "ai_credits": True,
     "ai_overview": False, "resolve_role": True,
@@ -57,6 +59,14 @@ def validate_enrich_config(values):
             raise ValueError("补全设置开关必须为布尔值")
         result[key] = value
     return result
+
+
+def _log_series(series_id):
+    """Log only a validated, bounded Emby identifier, never an item path."""
+    return str(series_id or "")[:90] if re.fullmatch(r"[\w-]{1,64}::[a-zA-Z0-9-]{1,64}",
+                                                   str(series_id or "")) else "[剧集标识已隐藏]"
+
+
 DB_SCRIPT = '''
 import datetime
 import json
@@ -165,9 +175,93 @@ class DataEnrichment:
         self.owner = owner
         self.lock = threading.Lock()
         self.state = {"running": False, "task": "", "done": False, "error": "", "log": [],
-                      "mediainfo": None, "preview": [], "preview_result": None}
+                      "mediainfo": None, "preview": [], "preview_result": None,
+                      "batch_result": None}
         self._preview_selection = {}
         self._mi_selection = []
+        self._import_timers = {}
+        self._import_pending = {}
+        self._closed = False
+
+    def resume_imports(self):
+        pending = self.owner.get_data("enrichment_import_pending") or {}
+        if not isinstance(pending, dict):
+            return
+        before = set(pending)
+        for series_id, deadline in list(pending.items())[:200]:
+            try:
+                self._split(series_id)
+                deadline = float(deadline)
+                if 0 < deadline - time.time() < 24 * 3600:
+                    self._queue_import(series_id, deadline)
+            except (ValueError, TypeError, OSError):
+                continue
+        if before != set(self._import_pending):
+            self.owner.save_data("enrichment_import_pending", dict(self._import_pending))
+
+    def close(self):
+        with self.lock:
+            self._closed = True
+            for timer in self._import_timers.values():
+                timer.cancel()
+            self._import_timers.clear()
+
+    def _queue_import(self, series_id, deadline, expected=None):
+        with self.lock:
+            if self._closed or (expected is not None and
+                                self._import_pending.get(series_id) != expected):
+                return
+            old = self._import_timers.pop(series_id, None)
+            if old:
+                old.cancel()
+            self._import_pending[series_id] = deadline
+            timer = threading.Timer(max(0.1, deadline - time.time()),
+                                    self._run_import, (series_id, deadline))
+            timer.daemon = True
+            self._import_timers[series_id] = timer
+            self.owner.save_data("enrichment_import_pending", dict(self._import_pending))
+            timer.start()
+
+    def queue_import(self, series_id):
+        name, _ = self._split(series_id)
+        if name not in self._services():
+            return
+        self._queue_import(series_id, time.time() + 300)
+        logger.info("增强工具 数据补全：%s 新分集入库，5 分钟后合并补全", _log_series(series_id))
+
+    def _run_import(self, series_id, deadline):
+        with self.lock:
+            if self._closed or self._import_pending.get(series_id) != deadline:
+                return
+            if not self.owner._enabled or not self.options()["auto_on_import"]:
+                self._import_timers.pop(series_id, None)
+                self._import_pending.pop(series_id, None)
+                self.owner.save_data("enrichment_import_pending", dict(self._import_pending))
+                return
+            if self.state["running"]:
+                retry = True
+            else:
+                retry = False
+        if retry:
+            self._queue_import(series_id, time.time() + 30, expected=deadline)
+            return
+        try:
+            self.start_enrich(series_id, "all")
+            with self.lock:
+                if self._import_pending.get(series_id) == deadline:
+                    self._import_timers.pop(series_id, None)
+                    self._import_pending.pop(series_id, None)
+                    self.owner.save_data("enrichment_import_pending", dict(self._import_pending))
+        except ValueError as exc:
+            if "正在运行" in str(exc):
+                self._queue_import(series_id, time.time() + 30, expected=deadline)
+            else:
+                logger.warning("增强工具 数据补全：入库自动补全未启动：%s", type(exc).__name__)
+                with self.lock:
+                    if self._import_pending.get(series_id) == deadline:
+                        self._import_timers.pop(series_id, None)
+                        self._import_pending.pop(series_id, None)
+                        self.owner.save_data("enrichment_import_pending", dict(self._import_pending))
 
     def status(self):
         with self.lock:
@@ -548,6 +642,53 @@ class DataEnrichment:
                 logger.warning("增强工具 数据补全：搜索服务器 %s 失败：%s", name, type(error).__name__)
         return results[:40]
 
+    async def list_series(self):
+        """Bounded read-only catalog; the user must explicitly select batch targets."""
+        results = []
+        for name in self._services():
+            async with self._server(name) as client:
+                user = await self._user_id(name, client)
+                offset = 0
+                while offset < 2000:
+                    data = await self._json(client, f"Users/{user}/Items", {
+                        "IncludeItemTypes": "Series", "Recursive": "true",
+                        "StartIndex": offset, "Limit": 500})
+                    page = data.get("Items") or []
+                    results.extend({"id": f"{name}::{item['Id']}",
+                                    "name": item.get("Name") or "未命名",
+                                    "year": item.get("ProductionYear") or "", "server": name}
+                                   for item in page if item.get("Id"))
+                    offset += len(page)
+                    if not page or offset >= int(data.get("TotalRecordCount", offset)):
+                        break
+        return results
+
+    def start_batch_enrich(self, series_ids):
+        if not isinstance(series_ids, list) or not 1 <= len(series_ids) <= 50:
+            raise ValueError("每次请选择 1 至 50 部剧集补全")
+        if len(set(series_ids)) != len(series_ids):
+            raise ValueError("批量剧集不能重复")
+        for series_id in series_ids:
+            name, _ = self._split(series_id)
+            if name not in self._services():
+                raise ValueError("所选 Emby 服务器不可用，请刷新剧集列表")
+        return self._begin("批量补全剧集数据", self._batch_enrich, list(series_ids), self.options())
+
+    async def _batch_enrich(self, series_ids, options):
+        ok = failed = 0
+        for index, series_id in enumerate(series_ids, 1):
+            name, identifier = self._split(series_id)
+            self.log(f"[{index}/{len(series_ids)}] 开始补全 {_log_series(series_id)}")
+            try:
+                await self._enrich(name, identifier, "all", options)
+                ok += 1
+            except Exception as exc:
+                failed += 1
+                self.log(f"[{index}/{len(series_ids)}] 补全失败：{type(exc).__name__}（可单独重试）")
+        with self.lock:
+            self.state["batch_result"] = {"ok": ok, "fail": failed}
+        self.log(f"批量补全结束：成功 {ok} 部，失败 {failed} 部")
+
     def _safe_strm(self, path):
         root = os.path.realpath(self.owner._strm_root)
         actual = os.path.realpath(str(path or ""))
@@ -709,6 +850,11 @@ class DataEnrichment:
 
     async def _enrich(self, name, identifier, mode, options=None):
         options = validate_enrich_config(options or self.options())
+        if mode == "all":
+            # The single "补全剧集数据" action always includes episode cast
+            # and, when an AI provider is enabled, every translation scope.
+            options.update(episode_cast=True, ai_title=True, ai_credits=True,
+                           ai_overview=True)
         api_key = str(getattr(settings, "TMDB_API_KEY", "") or "")
         if not api_key:
             raise ValueError("请先在 MoviePilot 配置 TMDB API Key")
@@ -734,7 +880,7 @@ class DataEnrichment:
             if not tmdb_id:
                 raise ValueError("未找到对应的 TMDB 剧集，不写入 Emby")
             detail = await self._tmdb_json(tmdb, f"tv/{tmdb_id}", {"api_key": api_key,
-                "language": "zh-CN", "append_to_response": "aggregate_credits"})
+                "language": "zh-CN", "append_to_response": "aggregate_credits,external_ids"})
             self.log(f"已匹配 {item.get('Name')} · TMDB {tmdb_id}")
             douban_detail = (await self._douban_data(item, include_cast=mode != "metadata")
                              if options["metadata_source"] == "douban"
@@ -748,13 +894,30 @@ class DataEnrichment:
                         update["Overview"] = douban_detail.get("overview") or detail["overview"]
                     if detail.get("vote_average"): update["CommunityRating"] = detail["vote_average"]
                     if detail.get("genres"): update["Genres"] = [g["name"] for g in detail["genres"]]
+                    studios = [entry.get("name") for entry in
+                               (detail.get("networks") or []) + (detail.get("production_companies") or [])
+                               if isinstance(entry, dict) and entry.get("name")]
+                    if studios:
+                        update["Studios"] = list(dict.fromkeys(studios))[:30]
+                    providers = dict(item.get("ProviderIds") or {})
+                    providers["Tmdb"] = str(tmdb_id)
+                    external = detail.get("external_ids") or {}
+                    if external.get("imdb_id"):
+                        providers["Imdb"] = external["imdb_id"]
+                    if external.get("tvdb_id"):
+                        providers["Tvdb"] = str(external["tvdb_id"])
+                    update["ProviderIds"] = providers
                     if options["ai_enabled"]:
                         translations = {}
-                        if options["ai_title"] and self._needs_translation(update.get("Name")):
+                        if options["ai_title"] and re.search(r"[A-Za-z]", str(update.get("Name") or "")):
                             translations["Name"] = update["Name"][:180]
-                        if options["ai_overview"] and self._needs_translation(update.get("Overview")):
+                        if options["ai_overview"] and re.search(r"[A-Za-z]", str(update.get("Overview") or "")):
                             translations["Overview"] = update["Overview"][:900]
-                        update.update(await self._ai_map(translations, "剧集标题和剧情简介") if translations else {})
+                        if translations:
+                            translated = await self._ai_map(translations, "剧集标题和剧情简介；将英文及中英混写内容译为简体中文，保留原有事实")
+                            update.update({key: value for key, value in translated.items()
+                                           if re.search(r"[\u3400-\u9fff]", value)
+                                           and not re.search(r"[A-Za-z]", value)})
                 if mode != "metadata":
                     tmdb_cast = (detail.get("aggregate_credits") or {}).get("cast") or []
                     cast = [{"name": p["name"], "original_name": p.get("original_name"),
@@ -859,7 +1022,7 @@ class DataEnrichment:
                 changed = 0
                 for episode in episodes.get("Items", []):
                     season, number = episode.get("ParentIndexNumber"), episode.get("IndexNumber")
-                    if not season or number is None: continue
+                    if season is None or number is None: continue
                     if season not in seasons:
                         data = await self._tmdb_json(tmdb, f"tv/{tmdb_id}/season/{season}",
                             {"api_key": api_key, "language": "zh-CN"})
@@ -877,15 +1040,17 @@ class DataEnrichment:
                             for number_key, entry in seasons[season].items():
                                 if number_key not in emby_numbers or not isinstance(number_key, int):
                                     continue
-                                if options["ai_title"] and self._needs_translation(entry.get("name")):
+                                if options["ai_title"] and re.search(r"[A-Za-z]", str(entry.get("name") or "")):
                                     values[f"n{number_key}"] = str(entry["name"])[:160]
-                                if options["ai_overview"] and self._needs_translation(entry.get("overview")):
+                                if options["ai_overview"] and re.search(r"[A-Za-z]", str(entry.get("overview") or "")):
                                     values[f"o{number_key}"] = str(entry["overview"])[:700]
                             translated_seasons[season] = {}
                             pairs = list(values.items())
                             for offset in range(0, len(pairs), 16):
-                                translated_seasons[season].update(await self._ai_map(
-                                    dict(pairs[offset:offset + 16]), f"剧集：{str(item.get('Name') or '')[:70]}；第 {season} 季分集标题及简介"))
+                                proposals = await self._ai_map(
+                                    dict(pairs[offset:offset + 16]), f"剧集：{str(item.get('Name') or '')[:70]}；第 {season} 季分集标题及简介")
+                                translated_seasons[season].update({key: value for key, value in proposals.items()
+                                    if re.search(r"[\u3400-\u9fff]", value) and not re.search(r"[A-Za-z]", value)})
                     tmdb_episode = seasons[season].get(number) or {}
                     if not tmdb_episode.get("name") and not tmdb_episode.get("overview") and not (options["episode_cast"] and series_people):
                         continue
@@ -1099,6 +1264,50 @@ class DataEnrichment:
         if len(targets) != len(episode_ids) or len(set(episode_ids)) != len(episode_ids):
             raise ValueError("所选分集已失效，请重新扫描")
         return self._begin("分集图片修复", self._repair_preview, series_id, targets, force)
+
+    def start_batch_preview(self, series_ids):
+        if not isinstance(series_ids, list) or not 1 <= len(series_ids) <= 20:
+            raise ValueError("每次请选择 1 至 20 部剧集批量修复图片")
+        if len(set(series_ids)) != len(series_ids):
+            raise ValueError("批量剧集不能重复")
+        for series_id in series_ids:
+            name, _ = self._split(series_id)
+            if name not in self._services():
+                raise ValueError("所选 Emby 服务器不可用，请刷新剧集列表")
+        return self._begin("批量扫描与修复分集图片", self._batch_preview, list(series_ids))
+
+    async def _batch_preview(self, series_ids):
+        scanned = ok = failed = 0
+        for index, series_id in enumerate(series_ids, 1):
+            self.log(f"[{index}/{len(series_ids)}] 扫描分集图片 {_log_series(series_id)}")
+            try:
+                episodes = await self.scan_preview(series_id)
+                scanned += len(episodes)
+                targets = [(entry["id"], self._preview_selection[entry["id"]])
+                           for entry in episodes if entry["status"] in ("missing", "candidate")]
+                self.log(f"[{index}/{len(series_ids)}] 共 {len(episodes)} 集，待修复 {len(targets)} 集")
+                # Prevent a large library from silently launching hundreds of
+                # network FFmpeg jobs; the user can rerun a narrower selection.
+                if len(targets) > 300:
+                    raise ValueError("该剧待修复超过 300 集，请单独选择分集")
+                if targets:
+                    with self.lock:
+                        self.state["preview_result"] = None
+                    try:
+                        await self._repair_preview(series_id, targets, False)
+                    except Exception as exc:
+                        self.log(f"[{index}/{len(series_ids)}] 部分分集修复失败：{type(exc).__name__}")
+                    finally:
+                        summary = self.state.get("preview_result") or {}
+                        ok += summary.get("ok", 0)
+                        failed += summary.get("fail", 0) or (0 if summary else 1)
+            except Exception as exc:
+                failed += 1
+                self.log(f"[{index}/{len(series_ids)}] 扫描或修复失败：{type(exc).__name__}（可单独重试）")
+        with self.lock:
+            self.state["batch_result"] = {"scanned": scanned, "ok": ok, "fail": failed}
+            self.state["preview_result"] = {"ok": ok, "fail": failed}
+        self.log(f"批量图片处理结束：扫描 {scanned} 集，修复 {ok} 集，失败 {failed} 项")
 
     async def _repair_preview(self, series_id, targets, force):
         name, _ = self._split(series_id)

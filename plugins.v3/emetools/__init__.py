@@ -95,6 +95,7 @@ class EnrichmentAction(BaseModel):
     series_id: str = ""
     mode: str = "all"
     episode_ids: List[str] = Field(default_factory=list)
+    series_ids: List[str] = Field(default_factory=list)
     force: bool = False
 
 
@@ -102,7 +103,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.8.31"
+    plugin_version = "2.9.0"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -187,6 +188,35 @@ class EmeTools(_PluginBase):
             logger.info("ME工具：尝试恢复 Telegram 监控（不会输出账号和登录凭据）")
             self._monitor._ensure_loop()
             asyncio.run_coroutine_threadsafe(self._monitor.resume(), self._monitor.loop)
+        if self._enabled and self._enrichment_config["auto_on_import"]:
+            self._enrichment.resume_imports()
+
+    @eventmanager.register(EventType.WebhookMessage)
+    def on_series_import(self, event: Event):
+        """Debounce only actual Emby Episode library additions by series ID."""
+        if not getattr(self, "_enabled", False) or not self._enrichment_config["auto_on_import"]:
+            return
+        data = getattr(event, "event_data", None)
+        if (getattr(data, "event", None) not in ("library.new", "ItemAdded") or
+                str(getattr(data, "channel", "")).lower() != "emby" or
+                getattr(data, "media_type", None) != "Episode"):
+            return
+        raw = getattr(data, "json_object", None) or {}
+        source = raw.get("Server") if isinstance(raw, dict) else None
+        server = str(getattr(data, "server_name", "") or
+                     (source.get("Name") if isinstance(source, dict) else "") or "")
+        if not server:
+            servers = list(self._enrichment._services())
+            if len(servers) == 1:
+                server = servers[0]
+        identifier = str(getattr(data, "item_id", "") or
+                         ((raw.get("Item") or {}).get("SeriesId") if isinstance(raw, dict) else "") or "")
+        if not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", identifier) or not server:
+            return
+        try:
+            self._enrichment.queue_import(f"{server}::{identifier}")
+        except (ValueError, OSError, RuntimeError) as exc:
+            logger.warning("增强工具 数据补全：忽略不完整的 Emby 入库事件：%s", type(exc).__name__)
 
     def get_state(self) -> bool:
         return self._enabled
@@ -321,6 +351,9 @@ class EmeTools(_PluginBase):
 
     def stop_service(self) -> None:
         logger.info("ME工具：停止插件服务和 Telegram 监控")
+        enrichment = getattr(self, "_enrichment", None)
+        if enrichment:
+            enrichment.close()
         monitor = getattr(self, "_monitor", None)
         if monitor and monitor.loop and monitor.thread and monitor.thread.is_alive():
             try:
@@ -1394,17 +1427,25 @@ class EmeTools(_PluginBase):
         try:
             if action.operation == "search":
                 return {"items": await self._enrichment.search(action.keyword)}
+            if action.operation == "series_list":
+                return {"items": await self._enrichment.list_series()}
             if action.operation == "enrich":
                 return self._enrichment.start_enrich(action.series_id, action.mode)
+            if action.operation == "batch_enrich":
+                return self._enrichment.start_batch_enrich(action.series_ids)
             if action.operation == "mediainfo_check":
                 return self._enrichment.start_mediainfo_check()
             if action.operation == "mediainfo_fill":
                 return self._enrichment.start_mediainfo_fill()
             if action.operation == "preview_scan":
+                if self._enrichment.status()["running"]:
+                    raise ValueError("请等待当前补全任务结束后再扫描分集")
                 return {"episodes": await self._enrichment.scan_preview(action.series_id)}
             if action.operation == "preview_repair":
                 return self._enrichment.start_preview_repair(
                     action.series_id, action.episode_ids, action.force)
+            if action.operation == "batch_preview":
+                return self._enrichment.start_batch_preview(action.series_ids)
             raise HTTPException(status_code=400, detail="未知的数据补全操作")
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error

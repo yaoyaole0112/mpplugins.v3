@@ -41,10 +41,136 @@ class EnrichmentTests(unittest.TestCase):
 
     def test_metadata_source_validation_and_legacy_default(self):
         self.assertEqual(validate_enrich_config({})['metadata_source'], 'tmdb')
+        self.assertTrue(validate_enrich_config({})['auto_on_import'])
         self.assertEqual(validate_enrich_config({'metadata_source': 'douban'})['metadata_source'], 'douban')
         for value in ('both', 'TMDB', None, True):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate_enrich_config({'metadata_source': value})
+
+    def test_import_debounce_latest_event_wins_and_retries_busy_worker(self):
+        self.enrichment.owner._enabled = True
+        self.enrichment.owner._enrichment_config = dict(DEFAULT_ENRICH_CONFIG)
+        timers = []
+
+        class FakeTimer:
+            def __init__(self, seconds, function, args):
+                self.seconds, self.function, self.args = seconds, function, args
+                self.cancelled = False
+                timers.append(self)
+            def start(self): pass
+            def cancel(self): self.cancelled = True
+
+        with patch.object(self.enrichment, '_services', return_value={'Q4': object()}), \
+             patch('emetools.data_enrichment.threading.Timer', FakeTimer), \
+             patch('emetools.data_enrichment.time.time', side_effect=[100, 100, 105, 105, 110, 110, 110, 111, 111]), \
+             patch.object(self.enrichment, 'start_enrich') as start:
+            self.enrichment.queue_import('Q4::123')
+            self.enrichment.queue_import('Q4::123')
+            self.assertTrue(timers[0].cancelled)
+            self.assertEqual(timers[1].seconds, 300)
+            self.assertEqual(self.storage['enrichment_import_pending']['Q4::123'], 405)
+            timers[0].function(*timers[0].args)
+            start.assert_not_called()
+            self.enrichment.state['running'] = True
+            timers[1].function(*timers[1].args)
+            self.assertEqual(len(timers), 3)
+            self.enrichment.state['running'] = False
+            timers[2].function(*timers[2].args)
+            start.assert_called_once_with('Q4::123', 'all')
+            self.assertFalse(self.storage['enrichment_import_pending'])
+
+    def test_import_retries_if_another_task_starts_after_busy_check(self):
+        self.enrichment.owner._enabled = True
+        self.enrichment.owner._enrichment_config = dict(DEFAULT_ENRICH_CONFIG)
+        with patch('emetools.data_enrichment.threading.Timer') as timer, \
+             patch('emetools.data_enrichment.time.time', return_value=100), \
+             patch.object(self.enrichment, 'start_enrich', side_effect=ValueError(
+                 '已有数据补全任务正在运行，请等待完成')):
+            self.enrichment._queue_import('Q4::123', 400)
+            self.enrichment._run_import('Q4::123', 400)
+        self.assertEqual(self.storage['enrichment_import_pending'], {'Q4::123': 130})
+        self.assertEqual(timer.call_count, 2)
+
+    def test_batch_enrich_continues_after_failure(self):
+        async def enrich(name, identifier, mode, options):
+            if identifier == '2':
+                raise ValueError('series failure')
+        with patch.object(self.enrichment, '_enrich', side_effect=enrich):
+            asyncio.run(self.enrichment._batch_enrich(['Q4::1', 'Q4::2', 'Q4::3'],
+                                                     DEFAULT_ENRICH_CONFIG))
+        self.assertEqual(self.enrichment.status()['batch_result'], {'ok': 2, 'fail': 1})
+
+    def test_batch_preview_only_repairs_missing_or_suspected_images(self):
+        async def scan(series_id):
+            self.enrichment._preview_selection = {
+                f'{series_id}::ep1': {'path': str(self.strm)},
+                f'{series_id}::ep2': {'path': str(self.strm)}}
+            return [{'id': f'{series_id}::ep1', 'status': 'missing'},
+                    {'id': f'{series_id}::ep2', 'status': 'keep'}]
+
+        async def repair(series_id, targets, force):
+            self.assertEqual([key for key, _ in targets], [f'{series_id}::ep1'])
+            self.assertFalse(force)
+            self.enrichment.state['preview_result'] = {'ok': 1, 'fail': 0}
+
+        with patch.object(self.enrichment, 'scan_preview', side_effect=scan), \
+             patch.object(self.enrichment, '_repair_preview', side_effect=repair):
+            asyncio.run(self.enrichment._batch_preview(['Q4::1', 'Q4::2']))
+        self.assertEqual(self.enrichment.status()['batch_result'],
+                         {'scanned': 4, 'ok': 2, 'fail': 0})
+
+    def test_all_mode_writes_series_ids_studios_and_episode_people(self):
+        written = {}
+
+        def emby_handler(request):
+            if request.method == 'POST':
+                written[request.url.path] = json.loads(request.content)
+                return httpx.Response(204)
+            if request.url.path.endswith('/Items/73025'):
+                return httpx.Response(200, json={'Id': '73025', 'Type': 'Series',
+                    'Name': '旧剧名', 'ProviderIds': {'Tmdb': '12345', 'Douban': '88'}})
+            if request.url.path.endswith('/Items/ep1'):
+                return httpx.Response(200, json={'Id': 'ep1', 'Name': '旧分集'})
+            if request.url.path.endswith('/Items'):
+                return httpx.Response(200, json={'Items': [{'Id': 'ep1', 'IndexNumber': 1,
+                    'ParentIndexNumber': 1}]})
+            return httpx.Response(404)
+
+        def tmdb_handler(request):
+            if '/season/' in request.url.path:
+                return httpx.Response(200, json={'episodes': [{'episode_number': 1,
+                    'name': '第一集', 'overview': '剧情简介'}]})
+            return httpx.Response(200, json={'name': '新剧名', 'overview': '整剧简介',
+                'vote_average': 8.2, 'genres': [{'name': '剧情'}],
+                'networks': [{'name': '电视台'}],
+                'production_companies': [{'name': '制作公司'}, {'name': '电视台'}],
+                'external_ids': {'imdb_id': 'tt12345', 'tvdb_id': 987},
+                'aggregate_credits': {'cast': [{'name': '演员甲', 'profile_path': '/a.jpg',
+                    'roles': [{'character': '角色甲'}]}]}})
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/',
+                                 transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/',
+                                 transport=httpx.MockTransport(tmdb_handler))
+        with patch.object(self.enrichment, '_services', return_value={
+                 'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_douban_data', return_value={}), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'all', DEFAULT_ENRICH_CONFIG))
+        series = written['/emby/Items/73025']
+        episode = written['/emby/Items/ep1']
+        self.assertEqual(series['Name'], '新剧名')
+        self.assertEqual(series['Overview'], '整剧简介')
+        self.assertEqual(series['CommunityRating'], 8.2)
+        self.assertEqual(series['Genres'], ['剧情'])
+        self.assertEqual(series['Studios'], ['电视台', '制作公司'])
+        self.assertEqual(series['ProviderIds'], {
+            'Tmdb': '12345', 'Douban': '88', 'Imdb': 'tt12345', 'Tvdb': '987'})
+        self.assertEqual(episode['People'], series['People'])
+        self.assertEqual(episode['Name'], '第一集')
+        self.assertEqual(episode['Overview'], '剧情简介')
 
     def test_douban_match_requires_unambiguous_title_season_and_year(self):
         candidate = {'id': '123', 'title': '庆余年 第二季', 'year': '2024'}

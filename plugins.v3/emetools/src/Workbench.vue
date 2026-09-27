@@ -72,15 +72,35 @@ const missingPicker = reactive({ open: '', query: '' })
 const missingActionPicker = ref(false)
 const missingActionOptions = ['仅检查记录', '添加到订阅', '标记为存在']
 const enrich = reactive({ query: '', items: [], selected: null, searching: false,
+  catalog: [], catalogQuery: '', catalogLoading: false, batchIds: [], previewBatchIds: [],
   previewQuery: '', previewItems: [], previewSelected: null, previewEpisodes: [],
   previewChecked: [], force: false,
-  status: { running: false, task: '', done: false, error: '', log: [], mediainfo: null, preview_result: null } })
+  status: { running: false, task: '', done: false, error: '', log: [], mediainfo: null, preview_result: null, batch_result: null } })
 const enrichSettings = reactive({ open: false, ai_available: false, ai_model: '', draft: {
   metadata_source: 'tmdb',
+  auto_on_import: true,
   ai_enabled: false, no_avatar: true, episode_cast: false, role_prefix: true,
   ai_title: true, ai_credits: true, ai_overview: false, resolve_role: true,
   max_actors: 30, cast_lock_min: 10,
 } })
+const enrichCatalogMatches = computed(() => enrich.catalog.filter(item =>
+  !enrich.catalogQuery || `${item.name} ${item.server} ${item.year}`.toLowerCase().includes(enrich.catalogQuery.toLowerCase())).slice(0, 100))
+async function loadEnrichCatalog() {
+  enrich.catalogLoading = true
+  try {
+    const result = await post('enrichment/action', { operation: 'series_list' })
+    enrich.catalog = result.items || []
+    notice.value = `已读取 ${enrich.catalog.length} 部剧集，请勾选要处理的剧集`
+  } catch (err) { error.value = err?.message || '读取剧集列表失败' }
+  finally { enrich.catalogLoading = false }
+}
+function selectEnrichVisible(kind) {
+  const selected = kind === 'preview' ? enrich.previewBatchIds : enrich.batchIds
+  const limit = kind === 'preview' ? 20 : 50
+  const ids = [...new Set([...selected, ...enrichCatalogMatches.value.map(item => item.id)])].slice(0, limit)
+  if (kind === 'preview') enrich.previewBatchIds = ids
+  else enrich.batchIds = ids
+}
 let enrichmentPollTimer = null
 
 async function openEnrichSettings() {
@@ -125,7 +145,7 @@ async function refreshEnrichment() {
   const status = await get('enrichment/status')
   Object.assign(enrich.status, status)
   if (active.value === 'enrichment' && status.running) scheduleEnrichmentPoll()
-  if (active.value === 'enrichment' && !status.running && status.done && status.task === '分集预览图修复' && enrich.previewSelected) {
+  if (active.value === 'enrichment' && !status.running && status.done && status.task === '分集图片修复' && enrich.previewSelected) {
     enrich.previewEpisodes = status.preview || enrich.previewEpisodes
   }
 }
@@ -142,6 +162,8 @@ function scheduleEnrichmentPoll() {
 async function enrichmentAction(operation, extra = {}) {
   await work(async () => {
     if (operation === 'mediainfo_fill' && !window.confirm('即将探测文件信息，并在 Emby 空闲时备份数据库、短暂停止 Emby 写入后重启。播放或 Emby 任务进行中会拒绝执行。确认开始？')) return
+    if (operation === 'batch_enrich' && !window.confirm(`将逐部补全选中的 ${extra.series_ids?.length || 0} 部剧集及其分集资料，可能调用 MoviePilot AI。确定开始？`)) return
+    if (operation === 'batch_preview' && !window.confirm(`将扫描选中的 ${extra.series_ids?.length || 0} 部剧集，并自动修复缺失或疑似偏色的分集图片，不覆盖已修复图片。确定开始？`)) return
     const result = await post('enrichment/action', { operation, ...extra })
     if (operation === 'preview_scan') {
       enrich.previewEpisodes = result.episodes || []
@@ -734,8 +756,12 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div class="eme-enrich-search"><input v-model.trim="enrich.query" placeholder="输入剧集名称（至少两个字）" @keyup.enter="searchEnrichment('series')" /><button class="eme-button secondary" :disabled="enrich.searching" @click="searchEnrichment('series')">搜索剧集</button></div>
           <div v-if="enrich.items.length" class="eme-enrich-results"><button v-for="item in enrich.items" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.selected?.id === item.id }" @click="enrich.selected = item">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.server }}</button></div>
           <p v-if="enrich.selected" class="eme-hint">已选：{{ enrich.selected.name }} · {{ enrich.selected.server }}</p>
-          <div class="eme-inline eme-enrich-buttons"><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'all' })">一键补全</button><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'metadata' })">补全剧集资料</button><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'credits' })">补全演职人员</button><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'episodes' })">补全分集信息</button></div>
+          <div class="eme-inline eme-enrich-buttons"><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'all' })">补全剧集数据</button></div>
           <p class="eme-hint">使用 MoviePilot 的 TMDB API Key 与 Emby 连接。请核对剧集匹配后再补全。</p>
+        </section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>批量补全数据</h3><p>选择剧集后逐部补全标题、简介、评分、类型、工作室、元数据 ID、演职人员与所有分集。</p></div><button class="eme-button secondary" :disabled="busy || enrich.catalogLoading || enrich.status.running" @click="loadEnrichCatalog">{{ enrich.catalogLoading ? '读取中…' : '读取剧集' }}</button></div>
+          <div v-if="enrich.catalog.length" class="eme-enrich-batch"><div class="eme-inline"><input v-model.trim="enrich.catalogQuery" placeholder="筛选剧名、年份或服务器" /><button class="eme-button secondary" type="button" @click="selectEnrichVisible('data')">选择筛选结果</button><button class="eme-button text" type="button" @click="enrich.batchIds = []">清空</button></div><div class="eme-enrich-batch-list"><label v-for="item in enrichCatalogMatches" :key="item.id" class="eme-enrich-batch-item"><input v-model="enrich.batchIds" type="checkbox" :value="item.id" :disabled="!enrich.batchIds.includes(item.id) && enrich.batchIds.length >= 50" /><span>{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.server }}</span></label></div></div>
+          <div class="eme-inline eme-enrich-buttons"><span class="eme-hint">已选 {{ enrich.batchIds.length }} 部（最多 50 部／次）</span><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.batchIds.length" @click="enrichmentAction('batch_enrich', { series_ids: [...enrich.batchIds] })">批量补全数据</button></div>
         </section>
         <section class="eme-card">
           <div class="eme-card-heading"><div><h3>媒体信息补全</h3><p>扫描 Emby 电影与分集的文件大小和时长；探测缺失信息后，在 Emby 空闲时备份数据库、停机写入并重启。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || enrich.status.running" @click="enrichmentAction('mediainfo_check')">开始检查</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.status.mediainfo?.incomplete_count" @click="enrichmentAction('mediainfo_fill')">开始补全</button></div></div>
@@ -750,6 +776,11 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div v-if="enrich.previewEpisodes.length" class="eme-enrich-episodes"><label v-for="episode in enrich.previewEpisodes" :key="episode.id" class="eme-enrich-episode"><input type="checkbox" :checked="enrich.previewChecked.includes(episode.id)" @change="togglePreviewEpisode(episode.id)" /><span>S{{ String(episode.season).padStart(2, '0') }}E{{ String(episode.episode).padStart(2, '0') }} · {{ episode.name || '未命名' }}</span><small>{{ episode.dovi ? 'DoVi · ' : '' }}{{ { missing: '缺失预览图', candidate: '疑似偏色', fixed: '已修复', keep: '保持' }[episode.status] || '保持' }}</small></label></div>
           <p v-if="enrich.status.preview_result" class="eme-hint">上次修复：成功 {{ enrich.status.preview_result.ok }} 集，失败 {{ enrich.status.preview_result.fail }} 集。</p>
         </section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>批量扫描与修复分集图片</h3><p>选择剧集后逐部扫描，仅修复缺失或疑似偏色的分集图片，已修复图片不覆盖。</p></div><button class="eme-button secondary" :disabled="busy || enrich.catalogLoading || enrich.status.running" @click="loadEnrichCatalog">{{ enrich.catalogLoading ? '读取中…' : '读取剧集' }}</button></div>
+          <div v-if="enrich.catalog.length" class="eme-enrich-batch"><div class="eme-inline"><input v-model.trim="enrich.catalogQuery" placeholder="筛选剧名、年份或服务器" /><button class="eme-button secondary" type="button" @click="selectEnrichVisible('preview')">选择筛选结果</button><button class="eme-button text" type="button" @click="enrich.previewBatchIds = []">清空</button></div><div class="eme-enrich-batch-list"><label v-for="item in enrichCatalogMatches" :key="item.id" class="eme-enrich-batch-item"><input v-model="enrich.previewBatchIds" type="checkbox" :value="item.id" :disabled="!enrich.previewBatchIds.includes(item.id) && enrich.previewBatchIds.length >= 20" /><span>{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.server }}</span></label></div></div>
+          <div class="eme-inline eme-enrich-buttons"><span class="eme-hint">已选 {{ enrich.previewBatchIds.length }} 部（最多 20 部／次）</span><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.previewBatchIds.length" @click="enrichmentAction('batch_preview', { series_ids: [...enrich.previewBatchIds] })">批量扫描并修复</button></div>
+        </section>
+        <p v-if="enrich.status.batch_result" class="eme-hint">上次批量任务：{{ enrich.status.batch_result.scanned != null ? `扫描 ${enrich.status.batch_result.scanned} 集，` : '' }}成功 {{ enrich.status.batch_result.ok }}，失败 {{ enrich.status.batch_result.fail }}。</p>
         <section v-if="enrich.status.running || enrich.status.log?.length || enrich.status.error" class="eme-card"><div class="eme-card-heading"><h3>运行进度</h3><span class="eme-hint">{{ enrich.status.running ? `${enrich.status.task}进行中…` : '已结束' }}</span></div><p v-if="enrich.status.error" class="eme-message eme-error">{{ enrich.status.error }}</p><div class="eme-enrich-log"><div v-for="(line, index) in enrich.status.log" :key="index">{{ line }}</div></div></section>
       </template>
       <section v-if="active === 'settings'" class="eme-card">
@@ -828,6 +859,8 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         <div class="eme-dialog eme-enrich-settings-dialog" role="dialog" aria-modal="true" aria-label="补全设置">
           <div class="eme-card-heading"><h3>补全设置</h3><button class="eme-button text" type="button" @click="enrichSettings.open = false">关闭</button></div>
           <div class="eme-enrich-settings-body">
+            <label class="eme-switch-label"><input v-model="enrichSettings.draft.auto_on_import" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>Emby 分集入库后自动补全整剧</span></label>
+            <p class="eme-hint">同一部剧最后一集入库后静默 5 分钟再执行一次；需将 Emby 新入库事件接入 MoviePilot Webhook。启用 AI 后一并翻译演职员、标题和简介。</p>
             <div class="eme-enrich-source"><strong>元数据来源</strong><div class="eme-enrich-source-options"><label v-for="source in [{ value: 'tmdb', label: 'TMDB' }, { value: 'douban', label: '豆瓣优先' }]" :key="source.value"><input v-model="enrichSettings.draft.metadata_source" type="radio" name="enrich-metadata-source" :value="source.value" />{{ source.label }}</label></div></div>
             <p class="eme-hint">演职人员中文资料不足时，依次尝试豆瓣、电视猫演员表；仅使用能确认属于该剧的中文姓名及角色。仍缺少中文角色名时，可启用 AI 智能补齐及演职人员汉化。</p>
             <label class="eme-switch-label"><input v-model="enrichSettings.draft.ai_enabled" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.ai_available" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 AI 智能补齐</span></label>
@@ -974,6 +1007,13 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-enrich-settings-numbers label{display:block;font-size:13px}
 .eme-enrich-settings-numbers input{box-sizing:border-box;display:block;width:100%;max-width:180px;padding:8px 10px;margin-top:6px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;background:rgb(var(--v-theme-background));color:inherit}
 .eme-enrich-settings-footer{display:flex;justify-content:flex-end;gap:10px;flex:none;border-top:1px solid rgba(var(--v-border-color),var(--v-border-opacity));padding-top:12px}
+.eme-enrich-batch>.eme-inline{display:flex;gap:8px;align-items:center}
+.eme-enrich-batch>.eme-inline input{flex:1;min-width:0;box-sizing:border-box;padding:8px 11px;border-radius:9px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));background:rgb(var(--v-theme-background));color:inherit}
+.eme-enrich-batch-list{max-height:210px;overflow-y:auto;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin:10px 0}
+.eme-enrich-batch-item{display:flex!important;align-items:center;gap:9px;padding:7px 10px;border-radius:8px;background:rgba(var(--v-theme-primary),.05);cursor:pointer}
+.eme-enrich-batch-item input{flex:none;accent-color:rgb(var(--v-theme-primary))}
+.eme-enrich-batch-item span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:760px){.eme-enrich-batch-list{grid-template-columns:1fr}.eme-enrich-batch>.eme-inline{flex-wrap:wrap}}
 @media(min-height:780px){.eme-enrich-settings-group{gap:6px;margin-top:10px;padding:10px 14px}.eme-enrich-settings-numbers{margin:11px 0 6px}}
 @media(max-width:540px){.eme-enrich-settings-numbers{grid-template-columns:1fr}}
 @media(max-width:760px){.eme-media-version{align-items:flex-start;flex-direction:column;gap:4px}.eme-media-version small{max-width:100%;text-align:left}.eme-shell--app .eme-sidebar{overflow-x:auto}.eme-shell--app .eme-sidebar .eme-nav{padding-block:8px}}
