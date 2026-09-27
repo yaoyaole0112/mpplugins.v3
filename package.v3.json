@@ -21,7 +21,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.8.20",
+    "version": "2.8.21",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -29,6 +29,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.8.21": "修复数据补全分集信息的 TMDB ConnectError：改用 MoviePilot 配置的 TMDB 域名与 HTTPS 代理；连接失败、超时及接口错误提供明确提示并避免在错误信息中暴露 API Key",
       "v2.8.20": "修复发送 Telegram 登录验证码后误显示已登录：仅在账号授权验证通过后标记登录，等待验证码期间保留输入框；失效会话不再误判为有效，补充对应回归测试",
       "v2.8.19": "修复数据补全选中剧集后 Emby 返回 404：剧集和分集详情统一使用用户作用域接口读取，仍通过管理员接口写入；分集预览扫描和剧集搜索也统一使用相同用户上下文",
       "v2.8.18": "新增媒体清理下方的数据补全页面：搜索 Emby 剧集并用 TMDB 补全剧集、演职人员与分集资料；检查并补全媒体大小/时长，在核对本机 Emby 身份与空闲状态后备份数据库、短暂停机写入并重启；扫描缺失/偏色预览图，使用独立容器截帧、裁剪并刷新 Emby。所有任务独立执行，不调用 MediaEnhance 服务",

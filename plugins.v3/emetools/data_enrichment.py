@@ -22,6 +22,7 @@ from PIL import Image
 from app.sdk.config import settings
 from app.sdk.logging import logger
 from app.sdk.services import MediaServerHelper
+from app.runtime.settings import get_runtime_setting
 
 
 FRAME_FILTER = "libplacebo=tonemapping=bt.2390:color_primaries=bt709:color_trc=bt709:colorspace=bt709:format=yuv420p"
@@ -174,6 +175,28 @@ class DataEnrichment:
             raise ValueError("Emby 条目 ID 无效")
         return await self._json(client, f"Users/{user}/Items/{item_id}",
                                 {"Fields": "MediaSources,MediaStreams,Path,Size,ProviderIds"})
+
+    @staticmethod
+    def _tmdb_client():
+        # Use MoviePilot's configured mirror and proxy, not a hard-coded TMDB
+        # hostname that may be unreachable from the MoviePilot container.
+        domain = str(getattr(settings, "TMDB_API_DOMAIN", "api.themoviedb.org")
+                     or "api.themoviedb.org").strip().removeprefix("https://").removeprefix("http://").strip("/")
+        proxies = get_runtime_setting("PROXY", None)
+        proxy = proxies.get("https") if isinstance(proxies, dict) else proxies
+        return httpx.AsyncClient(base_url=f"https://{domain}/3/", proxy=proxy,
+                                 timeout=30, trust_env=False)
+
+    async def _tmdb_json(self, client, path, params):
+        try:
+            return await self._json(client, path, params)
+        except httpx.ConnectError:
+            raise ValueError("TMDB 连接失败：请检查 MoviePilot 的 TMDB 域名和代理设置") from None
+        except httpx.TimeoutException:
+            raise ValueError("TMDB 请求超时：请检查 MoviePilot 的 TMDB 域名和代理设置") from None
+        except httpx.HTTPStatusError as error:
+            # Never include the request URL: the API key is in its query string.
+            raise ValueError(f"TMDB 接口返回 HTTP {error.response.status_code}，请检查 MoviePilot 的 TMDB 配置") from None
 
     @staticmethod
     def _split(item_id):
@@ -337,8 +360,7 @@ class DataEnrichment:
         api_key = str(getattr(settings, "TMDB_API_KEY", "") or "")
         if not api_key:
             raise ValueError("请先在 MoviePilot 配置 TMDB API Key")
-        async with self._server(name) as emby, httpx.AsyncClient(
-                base_url="https://api.themoviedb.org/3/", timeout=30) as tmdb:
+        async with self._server(name) as emby, self._tmdb_client() as tmdb:
             user = await self._user_id(name, emby)
             item = await self._item(emby, user, identifier)
             if item.get("Type") != "Series":
@@ -346,7 +368,7 @@ class DataEnrichment:
             provider = item.get("ProviderIds") or {}
             tmdb_id = provider.get("Tmdb") or provider.get("TMDB")
             if not tmdb_id:
-                search = await self._json(tmdb, "search/tv", {"api_key": api_key,
+                search = await self._tmdb_json(tmdb, "search/tv", {"api_key": api_key,
                     "query": item.get("Name", ""), "language": "zh-CN", "page": 1})
                 candidates = search.get("results") or []
                 year = str(item.get("ProductionYear") or "")
@@ -359,7 +381,7 @@ class DataEnrichment:
                 tmdb_id = (matched or candidates[0] if candidates else {}).get("id")
             if not tmdb_id:
                 raise ValueError("未找到对应的 TMDB 剧集，不写入 Emby")
-            detail = await self._json(tmdb, f"tv/{tmdb_id}", {"api_key": api_key,
+            detail = await self._tmdb_json(tmdb, f"tv/{tmdb_id}", {"api_key": api_key,
                 "language": "zh-CN", "append_to_response": "aggregate_credits"})
             self.log(f"已匹配 {item.get('Name')} · TMDB {tmdb_id}")
             if mode in ("all", "metadata", "credits"):
@@ -386,7 +408,7 @@ class DataEnrichment:
                     season, number = episode.get("ParentIndexNumber"), episode.get("IndexNumber")
                     if not season or number is None: continue
                     if season not in seasons:
-                        data = await self._json(tmdb, f"tv/{tmdb_id}/season/{season}",
+                        data = await self._tmdb_json(tmdb, f"tv/{tmdb_id}/season/{season}",
                             {"api_key": api_key, "language": "zh-CN"})
                         seasons[season] = {ep.get("episode_number"): ep for ep in data.get("episodes", [])}
                     tmdb_episode = seasons[season].get(number) or {}

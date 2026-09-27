@@ -28,6 +28,29 @@ class EnrichmentTests(unittest.TestCase):
                                 save_data=lambda key, value: self.storage.__setitem__(key, value))
         self.enrichment = DataEnrichment(owner)
 
+    def test_tmdb_client_uses_moviepilot_domain_and_https_proxy(self):
+        with patch('emetools.data_enrichment.settings.TMDB_API_DOMAIN', 'api.tmdb.org'), \
+             patch('emetools.data_enrichment.get_runtime_setting', return_value={
+                 'http': 'http://proxy.example:1080', 'https': 'http://proxy.example:1080'}), \
+             patch('emetools.data_enrichment.httpx.AsyncClient') as client:
+            self.enrichment._tmdb_client()
+        self.assertEqual(client.call_args.kwargs['base_url'], 'https://api.tmdb.org/3/')
+        self.assertEqual(client.call_args.kwargs['proxy'], 'http://proxy.example:1080')
+        self.assertFalse(client.call_args.kwargs['trust_env'])
+
+    def test_tmdb_connection_failure_is_actionable_and_hides_key(self):
+        async def request():
+            def fail(_request):
+                raise httpx.ConnectError('no route to host')
+
+            async with httpx.AsyncClient(base_url='https://api.tmdb.org/3/',
+                                         transport=httpx.MockTransport(fail)) as client:
+                with self.assertRaisesRegex(ValueError, 'TMDB 连接失败') as error:
+                    await self.enrichment._tmdb_json(client, 'tv/12345', {'api_key': 'secret-key'})
+                self.assertNotIn('secret-key', str(error.exception))
+
+        asyncio.run(request())
+
     def test_preview_classification_and_cached_repair(self):
         key = 'Emby::123'
         thumb = str(self.strm)[:-5] + '-thumb.jpg'
