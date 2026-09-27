@@ -249,6 +249,47 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(ai_inputs, [{'r0': '饰 Shen Run'}])
         self.assertEqual(saved[0]['People'][0]['Role'], '饰 沈润')
 
+    def test_ai_retries_mixed_english_cast_and_preserves_untranslated_values(self):
+        saved, requests = [], []
+
+        def emby_handler(request):
+            if request.method == 'POST':
+                saved.append(json.loads(request.content))
+                return httpx.Response(204)
+            return httpx.Response(200, json={'Id': '73025', 'Type': 'Series',
+                                               'Name': '测试美剧', 'ProviderIds': {'Tmdb': '12345'}})
+
+        async def ai_map(mapping, context):
+            requests.append(dict(mapping))
+            self.assertIn('不得保留英文字母', context)
+            if len(requests) == 1:
+                return {'n0': '中文名 / English Name', 'r0': '中文角色 / English Role',
+                        'n1': '约翰', 'r1': '主角'}
+            return {'n0': '中文名', 'r0': '中文角色'}
+
+        cast = [{'name': '中文名 / English Name', 'profile_path': '/one.jpg', 'order': 0,
+                 'roles': [{'character': '饰 English Role'}]},
+                {'name': 'John', 'profile_path': '/two.jpg', 'order': 1,
+                 'roles': [{'character': 'English Role'}]}]
+        emby = httpx.AsyncClient(base_url='http://emby/emby/',
+                                 transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={'aggregate_credits': {'cast': cast}})))
+        with patch.object(self.enrichment, '_services', return_value={
+                 'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_douban_data', return_value={}), \
+             patch.object(self.enrichment, '_tvmao_cast', return_value=[]), \
+             patch.object(self.enrichment, '_ai_map', side_effect=ai_map), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'credits',
+                                                {**DEFAULT_ENRICH_CONFIG, 'ai_enabled': True}))
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[1], {'n0': '中文名 / English Name', 'r0': '饰 English Role'})
+        self.assertEqual([person['Name'] for person in saved[0]['People']], ['中文名', '约翰'])
+        self.assertEqual([person['Role'] for person in saved[0]['People']], ['饰 中文角色', '饰 主角'])
+
     def test_tmdb_connection_failure_is_actionable_and_hides_key(self):
         async def request():
             def fail(_request):
