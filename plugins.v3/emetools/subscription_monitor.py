@@ -215,6 +215,7 @@ class SubscriptionMonitor:
         client = await self._connect()
         result = await client.send_code_request(phone)
         self.phone, self.code_hash = phone, result.phone_code_hash
+        self.last_error = ""
         logger.info("ME工具 Telegram：登录验证码已请求（手机号及验证码不记录）")
         return {"ok": True, "message": "验证码已发送，请在 Telegram 中查看"}
 
@@ -234,6 +235,7 @@ class SubscriptionMonitor:
         self.plugin._tg_session = client.session.save()
         self.plugin._persist()
         self.code_hash = None
+        self.last_error = ""
         logger.info("ME工具 Telegram：账号登录成功，session 已保存")
         return {"ok": True, "message": "Telegram 登录成功"}
 
@@ -319,11 +321,16 @@ class SubscriptionMonitor:
         self._channel_entities.clear()
 
     async def status(self):
-        logged = bool(self.client and self.client.is_connected())
-        if not logged and self.plugin._tg_session and self.plugin._tg_api_id:
+        # A connected MTProto transport can be waiting for a login code (or
+        # hold a revoked auth key). Only authorization proves login succeeded.
+        logged = False
+        if (self.client and self.client.is_connected()) or (self.plugin._tg_session and self.plugin._tg_api_id):
             try:
                 await asyncio.wait_for(self._authorized(), timeout=8)
                 logged = True
+            except ValueError as exc:
+                if not self.code_hash:
+                    self.last_error = str(exc)
             except Exception as exc:
                 self.last_error = f"Telegram 状态检查失败：{type(exc).__name__}"
         if logged:

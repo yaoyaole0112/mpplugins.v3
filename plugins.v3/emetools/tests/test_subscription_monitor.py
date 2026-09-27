@@ -51,12 +51,46 @@ class MatchingTests(unittest.TestCase):
         monitor = SubscriptionMonitor(plugin)
         monitor.client = MagicMock()
         monitor.client.is_connected.return_value = True
+        monitor.client.is_user_authorized = AsyncMock(return_value=True)
         monitor.client.get_entity = AsyncMock(return_value=SimpleNamespace(title="示例频道"))
         status = asyncio.run(monitor.status())
         self.assertEqual(status["channel_titles"]["kw"]["samplechannel"], "示例频道")
         plugin.save_data.assert_called_with("monitor_channel_titles", monitor.channel_titles)
         asyncio.run(monitor.status())
         monitor.client.get_entity.assert_awaited_once()
+
+    def test_connected_after_code_request_is_not_logged_in(self):
+        plugin = MagicMock()
+        plugin.get_data.return_value = None
+        plugin._tg_session = ""
+        plugin._tg_api_id = "1"
+        plugin._tg_api_hash = "hash"
+        plugin._monitor_config = {"sub": {"enabled": False, "channels": []},
+                                  "kw": {"enabled": False, "channels": []}}
+        monitor = SubscriptionMonitor(plugin)
+        monitor.client = MagicMock()
+        monitor.client.is_connected.return_value = True
+        monitor.client.is_user_authorized = AsyncMock(return_value=False)
+        monitor.code_hash = "pending-code-hash"
+        self.assertFalse(asyncio.run(monitor.status())["logged_in"])
+        self.assertFalse(monitor.last_error)
+        monitor.client.is_user_authorized = AsyncMock(return_value=True)
+        self.assertTrue(asyncio.run(monitor.status())["logged_in"])
+
+    def test_revoked_session_does_not_count_as_login(self):
+        plugin = MagicMock()
+        plugin.get_data.return_value = None
+        plugin._tg_session = "saved-session"
+        plugin._tg_api_id = "1"
+        plugin._tg_api_hash = "hash"
+        plugin._monitor_config = {"sub": {"enabled": False, "channels": []},
+                                  "kw": {"enabled": False, "channels": []}}
+        monitor = SubscriptionMonitor(plugin)
+        monitor.client = MagicMock()
+        monitor.client.is_connected.return_value = True
+        monitor.client.is_user_authorized = AsyncMock(return_value=False)
+        self.assertFalse(asyncio.run(monitor.status())["logged_in"])
+        self.assertIn("请先登录", monitor.last_error)
 
     def test_seen_keys_normalize_channel_ids_and_survive_monitor_restart(self):
         plugin = MagicMock()
