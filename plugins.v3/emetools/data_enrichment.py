@@ -5,11 +5,11 @@ service, credentials, containers or runtime modules are used by this plugin.
 """
 
 import asyncio
-import io
 import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 from urllib.parse import quote
 from datetime import datetime
@@ -124,7 +124,20 @@ def _docker_job(image, config, *, timeout=240, binary=False):
             offset = end
         stdout = b"".join(chunks) if offset == len(output) else output
         if status.get("StatusCode") != 0:
-            raise ValueError("独立容器执行失败，退出码：%s" % status.get("StatusCode"))
+            # FFmpeg stderr may contain signed STRM URLs. Classify the error
+            # without displaying raw logs, cookies or query-string tokens.
+            stderr = _docker("GET", f"/containers/{container_id}/logs",
+                             params={"stdout": "0", "stderr": "1", "tail": "20"}, timeout=20).content
+            diagnostics = stderr.decode("utf-8", errors="replace")
+            if "VK_ERROR" in diagnostics or "Vulkan device" in diagnostics:
+                hint = "Vulkan 不可用，请检查宿主机 /dev/dri 设备映射"
+            elif re.search(r"(?:HTTP|Server returned).*?(?:401|403)", diagnostics, re.I):
+                hint = "远程视频链接拒绝访问（HTTP 401/403）"
+            elif "No such filter" in diagnostics:
+                hint = "截帧镜像缺少所需 FFmpeg 滤镜"
+            else:
+                hint = "请检查视频链接、设备及截帧容器日志"
+            raise ValueError(f"独立截帧容器退出码 {status.get('StatusCode')}：{hint}")
         return stdout if binary else stdout.decode("utf-8").strip()
     finally:
         if container_id:
@@ -132,6 +145,19 @@ def _docker_job(image, config, *, timeout=240, binary=False):
                 _docker("DELETE", f"/containers/{container_id}", params={"force": "1"})
             except httpx.HTTPError:
                 logger.warning("增强工具 数据补全：临时容器清理失败")
+
+
+def _frame_host_root():
+    """Resolve MoviePilot's /config bind for a short-lived FFmpeg output dir."""
+    hostname = os.environ.get("HOSTNAME", "")
+    if not re.fullmatch(r"[a-f0-9]{12,64}", hostname):
+        raise ValueError("无法确认 MoviePilot 容器标识，已取消截帧")
+    data = _docker("GET", f"/containers/{hostname}/json").json()
+    mount = next((entry for entry in data.get("Mounts", [])
+                  if entry.get("Destination") == "/config" and entry.get("Type") == "bind"), None)
+    if not mount or not os.path.isabs(str(mount.get("Source") or "")):
+        raise ValueError("MoviePilot 的 /config 未绑定宿主目录，无法安全读取截帧图片")
+    return mount["Source"]
 
 
 class DataEnrichment:
@@ -1046,10 +1072,11 @@ class DataEnrichment:
                        if key.startswith(name + "::") and key in self._preview_selection]
         if len(targets) != len(episode_ids) or len(set(episode_ids)) != len(episode_ids):
             raise ValueError("所选分集已失效，请重新扫描")
-        return self._begin("分集预览图修复", self._repair_preview, series_id, targets, force)
+        return self._begin("分集图片修复", self._repair_preview, series_id, targets, force)
 
     async def _repair_preview(self, series_id, targets, force):
         name, _ = self._split(series_id)
+        host_root = await asyncio.to_thread(_frame_host_root)
         try:
             await asyncio.to_thread(_docker, "GET", "/images/%s/json" % quote(FRAME_IMAGE, safe=""))
         except httpx.HTTPStatusError as error:
@@ -1067,20 +1094,29 @@ class DataEnrichment:
                 continue
             try:
                 url = self._video_url(path)
-                command = ["-v", "error", "-ss", "00:05:00", "-i", url,
-                    "-frames:v", "1", "-vf", FRAME_FILTER, "-f", "image2pipe", "-vcodec", "png", "pipe:1"]
-                config = {"Entrypoint": [FRAME_EXECUTABLE], "Cmd": command,
-                          "HostConfig": {"NetworkMode": "bridge", "Memory": 536870912}}
-                png = await asyncio.to_thread(_docker_job, FRAME_IMAGE, config, timeout=240, binary=True)
-                with Image.open(io.BytesIO(png)) as image:
-                    rgb = image.convert("RGB")
-                    rgb = rgb.crop((0, 0, rgb.width, max(1, int(rgb.height * .8))))
-                    temporary = thumb + ".emetools-tmp"
-                    try:
-                        rgb.save(temporary, format="JPEG", quality=92)
-                        os.replace(temporary, thumb)
-                    finally:
-                        if os.path.exists(temporary): os.unlink(temporary)
+                with tempfile.TemporaryDirectory(prefix="emetools-frame-", dir="/config") as frame_dir:
+                    command = ["-v", "error", "-ss", "00:05:00", "-i", url,
+                        "-frames:v", "1", "-vf", FRAME_FILTER, "-f", "image2", "-update", "1",
+                        "-y", "/out/frame.png"]
+                    config = {"Entrypoint": [FRAME_EXECUTABLE], "Cmd": command,
+                              "HostConfig": {"NetworkMode": "bridge", "Memory": 536870912,
+                                             "Binds": [f"{host_root}/{Path(frame_dir).name}:/out:rw"],
+                                             "Devices": [{"PathOnHost": "/dev/dri",
+                                                          "PathInContainer": "/dev/dri",
+                                                          "CgroupPermissions": "rwm"}]}}
+                    await asyncio.to_thread(_docker_job, FRAME_IMAGE, config, timeout=240)
+                    frame = Path(frame_dir) / "frame.png"
+                    if not frame.is_file() or frame.stat().st_size > 32 * 1024 * 1024:
+                        raise ValueError("独立截帧容器未生成有效图片")
+                    with Image.open(frame) as image:
+                        rgb = image.convert("RGB")
+                        rgb = rgb.crop((0, 0, rgb.width, max(1, int(rgb.height * .8))))
+                        temporary = thumb + ".emetools-tmp"
+                        try:
+                            rgb.save(temporary, format="JPEG", quality=92)
+                            os.replace(temporary, thumb)
+                        finally:
+                            if os.path.exists(temporary): os.unlink(temporary)
                 async with self._server(name) as emby:
                     response = await emby.post(f"Items/{key.split('::', 1)[1]}/Refresh",
                                                params={"replaceAllMetadata": "false"})

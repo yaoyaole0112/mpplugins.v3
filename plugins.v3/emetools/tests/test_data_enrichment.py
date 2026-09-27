@@ -8,12 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from emetools.data_enrichment import DB_SCRIPT, DEFAULT_ENRICH_CONFIG, DataEnrichment, _docker_job, validate_enrich_config
+from emetools.data_enrichment import (DB_SCRIPT, DEFAULT_ENRICH_CONFIG, DataEnrichment,
+                                      _docker_job, _frame_host_root, validate_enrich_config)
 
 
 class EnrichmentTests(unittest.TestCase):
@@ -476,6 +477,57 @@ class EnrichmentTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 _docker_job('test-image', {})
             self.assertEqual(docker.call_args.args, ('DELETE', '/containers/abc'))
+
+    def test_frame_mount_resolves_only_config_bind(self):
+        details = {'Mounts': [{'Destination': '/config', 'Source': '/host/moviepilot-config',
+                               'Type': 'bind'}]}
+        with patch.dict(os.environ, {'HOSTNAME': 'a' * 12}), \
+             patch('emetools.data_enrichment._docker', return_value=SimpleNamespace(json=lambda: details)):
+            self.assertEqual(_frame_host_root(), '/host/moviepilot-config')
+            details['Mounts'][0]['Destination'] = '/media'
+            with self.assertRaisesRegex(ValueError, '/config'):
+                _frame_host_root()
+
+    def test_frame_failure_classifies_vulkan_without_leaking_strm_url(self):
+        responses = [SimpleNamespace(json=lambda: {'Id': 'cid'}), SimpleNamespace(),
+                     SimpleNamespace(json=lambda: {'StatusCode': 187}),
+                     SimpleNamespace(content=b''),
+                     SimpleNamespace(content=b'Failed creating Vulkan device https://video.example/?token=secret'),
+                     SimpleNamespace()]
+        with patch('emetools.data_enrichment._docker', side_effect=responses) as docker:
+            with self.assertRaisesRegex(ValueError, 'Vulkan 不可用') as error:
+                _docker_job('image', {})
+        self.assertNotIn('secret', str(error.exception))
+        self.assertEqual(docker.call_args.args, ('DELETE', '/containers/cid'))
+
+    def test_preview_repair_maps_gpu_and_reads_png_file_not_docker_logs(self):
+        from PIL import Image
+        real_tempdir = tempfile.TemporaryDirectory
+        temporary = self.strm.with_name(self.strm.stem + '-thumb.jpg')
+        saved = []
+
+        def fake_job(_image, config, **_kwargs):
+            saved.append(config)
+            self.assertEqual(config['HostConfig']['Devices'][0]['PathOnHost'], '/dev/dri')
+            self.assertEqual(config['HostConfig']['Binds'][0].split(':')[1], '/out')
+            Image.new('RGB', (200, 120), (50, 60, 70)).save(
+                Path(self.temp.name) / config['HostConfig']['Binds'][0].split(':')[0].rsplit('/', 1)[-1] / 'frame.png')
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(
+            lambda request: httpx.Response(204) if request.method == 'POST' else httpx.Response(404)))
+        with patch('emetools.data_enrichment._frame_host_root', return_value=self.temp.name), \
+             patch('emetools.data_enrichment._docker', return_value=SimpleNamespace()), \
+             patch('emetools.data_enrichment._docker_job', side_effect=fake_job), \
+             patch('emetools.data_enrichment.tempfile.TemporaryDirectory',
+                   side_effect=lambda **kw: real_tempdir(prefix=kw['prefix'], dir=self.temp.name)), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, 'scan_preview', new_callable=AsyncMock), \
+             patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock):
+            asyncio.run(self.enrichment._repair_preview('Q4::series', [
+                ('Q4::ep1', {'path': str(self.strm)})], force=True))
+        self.assertTrue(saved)
+        with Image.open(temporary) as image:
+            self.assertEqual(image.size, (200, 96))
 
     def test_enrich_reads_user_item_and_writes_admin_item(self):
         """Emby GET /Items/{id} gives 404; the detail GET must include UserId."""
