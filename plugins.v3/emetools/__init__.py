@@ -19,6 +19,7 @@ from app.plugins import _PluginBase
 from app.sdk.events import eventmanager, Event
 from app.scheduler import Scheduler
 from app.sdk.logging import logger
+from app.sdk.config import settings as mp_settings
 from app.schemas.message import Message
 from app.schemas.types import EventType, MessageType, NotificationChannel
 from app.schemas.types import SystemConfigKey
@@ -31,7 +32,7 @@ from .p115 import P115Client
 from .subscription_monitor import SubscriptionMonitor, normalize_channel
 from .missing_episodes import DEFAULT_MISSING, MissingAction, MissingEpisodeDetector
 from .media_cleanup import MediaCleanup, DEFAULT_CONFIG as DEFAULT_MEDIA_CLEANUP, DEFAULT_RULES, validate_rules
-from .data_enrichment import DataEnrichment
+from .data_enrichment import DataEnrichment, DEFAULT_ENRICH_CONFIG, validate_enrich_config
 from . import tool_notifications as notices
 
 ICON_URL = "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg"
@@ -101,7 +102,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.8.21"
+    plugin_version = "2.8.22"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -160,6 +161,10 @@ class EmeTools(_PluginBase):
         except ValueError:
             self._media_config["rules"] = copy.deepcopy(DEFAULT_RULES)
         self._media = MediaCleanup(self, self._media_config)
+        try:
+            self._enrichment_config = validate_enrich_config(config.get("enrichment") or {})
+        except ValueError:
+            self._enrichment_config = dict(DEFAULT_ENRICH_CONFIG)
         self._enrichment = DataEnrichment(self)
         self._schedule = copy.deepcopy(DEFAULT_SCHEDULE)
         for name, defaults in self._schedule.items():
@@ -435,6 +440,7 @@ class EmeTools(_PluginBase):
                             "monitor": copy.deepcopy(self._monitor_config),
                             "missing": copy.deepcopy(self._missing_config),
                             "media_cleanup": copy.deepcopy(self._media_config),
+                            "enrichment": copy.deepcopy(self._enrichment_config),
                             "media_scan_library_ids": list(self._media_scan_library_ids)})
 
     async def media_status(self) -> dict:
@@ -1356,6 +1362,31 @@ class EmeTools(_PluginBase):
     async def enrichment_status(self) -> dict:
         return self._enrichment.status()
 
+    async def enrichment_config(self) -> dict:
+        return {"config": copy.deepcopy(self._enrichment_config),
+                "ai_available": bool(getattr(mp_settings, "LLM_API_KEY", "") and
+                                     getattr(mp_settings, "LLM_BASE_URL", "") and
+                                     getattr(mp_settings, "LLM_MODEL", "") and
+                                     str(getattr(mp_settings, "LLM_API_PROTOCOL", "auto") or "auto").lower() != "anthropic")}
+
+    async def save_enrichment_config(self, values: dict) -> dict:
+        if not self._enabled:
+            raise HTTPException(status_code=409, detail="请先启用插件")
+        if self._enrichment.status()["running"]:
+            raise HTTPException(status_code=409, detail="数据补全运行中，请完成后再保存设置")
+        try:
+            config = validate_enrich_config(values)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if config["ai_enabled"] and not (getattr(mp_settings, "LLM_API_KEY", "") and
+                                        getattr(mp_settings, "LLM_BASE_URL", "") and
+                                        getattr(mp_settings, "LLM_MODEL", "") and
+                                        str(getattr(mp_settings, "LLM_API_PROTOCOL", "auto") or "auto").lower() != "anthropic"):
+            raise HTTPException(status_code=400, detail="请先在 MoviePilot 配置兼容 OpenAI 接口的 LLM 服务")
+        self._enrichment_config = config
+        self._persist()
+        return {"config": copy.deepcopy(config)}
+
     async def enrichment_action(self, action: EnrichmentAction) -> dict:
         if not self._enabled:
             raise HTTPException(status_code=409, detail="请先启用插件")
@@ -1392,5 +1423,7 @@ class EmeTools(_PluginBase):
             {"path": "/media-cleanup/libraries", "endpoint": self.media_libraries, "methods": ["GET"], "auth": "bear", "summary": "媒体清理媒体库"},
             {"path": "/media-cleanup/action", "endpoint": self.media_action, "methods": ["POST"], "auth": "bear", "summary": "媒体清理操作"},
             {"path": "/enrichment/status", "endpoint": self.enrichment_status, "methods": ["GET"], "auth": "bear", "summary": "数据补全任务状态"},
+            {"path": "/enrichment/config", "endpoint": self.enrichment_config, "methods": ["GET"], "auth": "bear", "summary": "补全设置"},
+            {"path": "/enrichment/config", "endpoint": self.save_enrichment_config, "methods": ["POST"], "auth": "bear", "summary": "保存补全设置"},
             {"path": "/enrichment/action", "endpoint": self.enrichment_action, "methods": ["POST"], "auth": "bear", "summary": "数据补全操作"},
         ]

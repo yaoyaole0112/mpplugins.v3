@@ -1,6 +1,8 @@
 # ME工具（MoviePilot 独立版）
 
-“数据补全”页面位于“媒体清理”下：按名称搜索 Emby 剧集，使用 MoviePilot 的 TMDB 密钥补全剧集、演职人员及分集资料；检查 Emby 媒体大小、时长等信息并在确认本机 Emby 身份且服务空闲时，先备份数据库，再短暂停机写入，最后启动 Emby、触发可用的神医任务并复查。停机写库目前只支持单台 Emby，且 Docker 容器名须为 `emby`，MoviePilot 需挂载 Docker Socket。分集预览图从 STRM 中提取视频地址，以 `jellyfin/jellyfin:latest` 独立容器截帧，标记缺图或疑似偏绿偏紫分集，支持手动选择、强制覆盖，修复状态缓存保存在插件数据中。此页面不调用 MediaEnhance 服务；剧集资料源目前为 TMDB，不包含 MediaEnhance 的豆瓣／AI 补全选项，也不自动启动定时补全任务。首次截帧需拉取容器镜像；务必在 Emby 空闲且已做好备份的前提下进行媒体信息补全。
+“数据补全”页面位于“媒体清理”下：按名称搜索 Emby 剧集，使用 MoviePilot 的 TMDB 密钥补全剧集、演职人员及分集资料；检查 Emby 媒体大小、时长等信息并在确认本机 Emby 身份且服务空闲时，先备份数据库，再短暂停机写入，最后启动 Emby、触发可用的神医任务并复查。停机写库目前只支持单台 Emby，且 Docker 容器名须为 `emby`，MoviePilot 需挂载 Docker Socket。分集预览图从 STRM 中提取视频地址，以 `jellyfin/jellyfin:latest` 独立容器截帧，标记缺图或疑似偏绿偏紫分集，支持手动选择、强制覆盖，修复状态缓存保存在插件数据中。此页面不调用 MediaEnhance 服务；剧集资料源目前为 TMDB，不包含 MediaEnhance 的豆瓣数据源，也不自动启动定时补全任务。首次截帧需拉取容器镜像；务必在 Emby 空闲且已做好备份的前提下进行媒体信息补全。
+
+搜索剧集卡片右上角的“补全设置”参考 MediaEnhance 的同名弹窗，设置保存在增强工具插件配置中：过滤无头像演员、分集演职员、角色名前缀、演员数上限和锁定最低演员数；AI 翻译标题、演职人员姓名与角色、剧集及分集简介、补全角色名。AI 默认关闭，仅当 MoviePilot 已配置兼容 OpenAI 接口的 LLM 并在弹窗手动开启后才会调用；启用前请留意所用 LLM 的计费和数据处理政策。豆瓣数据源未移植，补全仍使用 MoviePilot TMDB 设置，插件不读取 MediaEnhance 服务。补全任务启动时会冻结一份设置，运行中不可修改。
 
 更新版本时同时更新 `__init__.py` 的 `plugin_version`、`package.json` 的版本号、`package.v3.json` 的 `version` 和 `history` 中对应的 `v版本号` 更新说明；MoviePilot 插件“历史版本”从市场清单的 `history` 读取说明，不能省略。v2.7.0 起已补录仓库可核实的历史说明。
 

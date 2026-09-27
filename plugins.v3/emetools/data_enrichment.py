@@ -31,6 +31,26 @@ FRAME_EXECUTABLE = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
 DOCKER_SOCKET = "/var/run/docker.sock"
 SHENYI_EXTRACT = "f84e5d989aa8a8b6ab1a3a8c0848faab"
 SHENYI_PERSIST = "f98bb72fe87c19265e4550abc2cad64f"
+DEFAULT_ENRICH_CONFIG = {
+    "ai_enabled": False, "no_avatar": True, "episode_cast": False,
+    "role_prefix": True, "ai_title": True, "ai_credits": True,
+    "ai_overview": False, "resolve_role": True,
+    "max_actors": 30, "cast_lock_min": 10,
+}
+
+
+def validate_enrich_config(values):
+    if not isinstance(values, dict) or set(values) - DEFAULT_ENRICH_CONFIG.keys():
+        raise ValueError("补全设置包含不支持的选项")
+    result = dict(DEFAULT_ENRICH_CONFIG)
+    for key, value in values.items():
+        if key in ("max_actors", "cast_lock_min"):
+            if type(value) is not int or not 1 <= value <= 200:
+                raise ValueError("演员人数和锁定阈值必须是 1–200 的整数")
+        elif type(value) is not bool:
+            raise ValueError("补全设置开关必须为布尔值")
+        result[key] = value
+    return result
 DB_SCRIPT = '''
 import datetime
 import json
@@ -121,6 +141,47 @@ class DataEnrichment:
         with self.lock:
             return {**self.state, "log": list(self.state["log"]),
                     "preview": list(self.state["preview"])}
+
+    def options(self):
+        return validate_enrich_config(getattr(self.owner, "_enrichment_config", {}) or {})
+
+    @staticmethod
+    def _needs_translation(text):
+        return bool(text and not re.search(r"[\u3400-\u9fff]", str(text)))
+
+    async def _ai_map(self, mapping, context):
+        """Translate a bounded batch via MoviePilot's configured OpenAI-compatible LLM."""
+        if not mapping:
+            return {}
+        key = str(getattr(settings, "LLM_API_KEY", "") or "")
+        base = str(getattr(settings, "LLM_BASE_URL", "") or "").rstrip("/")
+        model = str(getattr(settings, "LLM_MODEL", "") or "")
+        if not (key and base and model):
+            raise ValueError("AI 补齐已启用，请先在 MoviePilot 配置 LLM 服务")
+        if str(getattr(settings, "LLM_API_PROTOCOL", "auto") or "auto").lower() == "anthropic":
+            raise ValueError("AI 补齐需要 MoviePilot 中支持 OpenAI 兼容接口的 LLM 服务")
+        proxies = get_runtime_setting("PROXY", None) if getattr(settings, "LLM_USE_PROXY", False) else None
+        proxy = proxies.get("https") if isinstance(proxies, dict) else proxies
+        url = base if base.endswith("/chat/completions") else base + "/chat/completions"
+        payload = {"model": model, "messages": [
+            {"role": "system", "content": "你是影视元数据翻译助手。只翻译为简体中文，保留姓名和剧情事实；仅返回 JSON 对象，键必须与输入一致，值必须是字符串。"},
+            {"role": "user", "content": context[:150] + "\n" + json.dumps(mapping, ensure_ascii=False)}],
+                   "temperature": 0.1, "max_tokens": 2200}
+        try:
+            async with httpx.AsyncClient(proxy=proxy, timeout=90, trust_env=False) as client:
+                response = await client.post(url, headers={"Authorization": f"Bearer {key}"}, json=payload)
+                response.raise_for_status()
+                content = response.json()["choices"][0]["message"]["content"].strip()
+            if content.startswith("```"):
+                content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.I)
+            result = json.loads(content)
+            if not isinstance(result, dict):
+                raise ValueError("AI 未返回 JSON 对象")
+            return {k: v.strip()[:1000] for k, v in result.items()
+                    if k in mapping and isinstance(v, str) and v.strip()}
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+            # Never log the LLM URL or headers: provider URLs may contain secrets.
+            raise ValueError(f"MoviePilot LLM 请求或响应失败：{type(exc).__name__}") from None
 
     def log(self, message):
         text = str(message).replace("\n", " ")[:250]
@@ -354,9 +415,10 @@ class DataEnrichment:
         name, identifier = self._split(series_id)
         if name not in self._services():
             raise ValueError("所选 Emby 服务器不可用")
-        return self._begin("剧集补全", self._enrich, name, identifier, mode)
+        return self._begin("剧集补全", self._enrich, name, identifier, mode, self.options())
 
-    async def _enrich(self, name, identifier, mode):
+    async def _enrich(self, name, identifier, mode, options=None):
+        options = validate_enrich_config(options or self.options())
         api_key = str(getattr(settings, "TMDB_API_KEY", "") or "")
         if not api_key:
             raise ValueError("请先在 MoviePilot 配置 TMDB API Key")
@@ -391,11 +453,51 @@ class DataEnrichment:
                     if detail.get("overview"): update["Overview"] = detail["overview"]
                     if detail.get("vote_average"): update["CommunityRating"] = detail["vote_average"]
                     if detail.get("genres"): update["Genres"] = [g["name"] for g in detail["genres"]]
+                    if options["ai_enabled"]:
+                        translations = {}
+                        if options["ai_title"] and self._needs_translation(update.get("Name")):
+                            translations["Name"] = update["Name"][:180]
+                        if options["ai_overview"] and self._needs_translation(update.get("Overview")):
+                            translations["Overview"] = update["Overview"][:900]
+                        update.update(await self._ai_map(translations, "剧集标题和剧情简介") if translations else {})
                 if mode != "metadata":
                     cast = (detail.get("aggregate_credits") or {}).get("cast") or []
-                    people = [{"Name": p["name"], "Type": "Actor", "Role": (p.get("roles") or [{}])[0].get("character", "")}
-                              for p in cast[:50] if p.get("name")]
-                    if people: update["People"] = people
+                    cast = sorted((p for p in cast if p.get("name") and
+                                   (not options["no_avatar"] or p.get("profile_path"))),
+                                  key=lambda p: p.get("order") if p.get("order") is not None else 999)
+                    people = [{"Name": p["name"], "Type": "Actor",
+                               "Role": (p.get("roles") or [{}])[0].get("character", "") or ""}
+                              for p in cast[:options["max_actors"]]]
+                    if people and options["ai_enabled"] and options["ai_credits"]:
+                        translations = {}
+                        for index, person in enumerate(people):
+                            if self._needs_translation(person["Name"]):
+                                translations[f"n{index}"] = person["Name"][:130]
+                            if self._needs_translation(person["Role"]):
+                                translations[f"r{index}"] = person["Role"][:130]
+                            elif not person["Role"] and options["resolve_role"]:
+                                translations[f"r{index}"] = f"{person['Name']} 的角色名（若无法确定保持空字符串）"
+                        for index in range(0, len(translations), 25):
+                            chunk = dict(list(translations.items())[index:index + 25])
+                            translated = await self._ai_map(chunk, f"剧集：{str(item.get('Name') or '')[:70]}。仅翻译明确可知的信息；不可编造角色名。")
+                            for key_name, value in translated.items():
+                                if value and value != chunk[key_name]:
+                                    person = people[int(key_name[1:])]
+                                    person["Name" if key_name.startswith("n") else "Role"] = value
+                    if people:
+                        if options["role_prefix"]:
+                            for person in people:
+                                if person["Role"] and not person["Role"].startswith(("饰", "配")):
+                                    prefix = "配 " if re.search(r"配音|voice", person["Role"], re.I) else "饰 "
+                                    person["Role"] = prefix + person["Role"]
+                        update["People"] = people
+                        locked = [field for field in update.get("LockedFields") or [] if field != "Cast"]
+                        if (len(people) >= options["cast_lock_min"] and
+                                all(not self._needs_translation(person["Name"]) for person in people) and
+                                (not options["role_prefix"] or all(
+                                    person["Role"].startswith(("饰", "配")) for person in people))):
+                            locked.append("Cast")
+                        update["LockedFields"] = locked
                 response = await emby.post(f"Items/{identifier}", json={k: v for k, v in update.items() if v is not None})
                 response.raise_for_status()
                 self.log("剧集元数据及演职人员已更新" if mode == "all" else "剧集资料已更新")
@@ -403,6 +505,8 @@ class DataEnrichment:
                 episodes = await self._json(emby, f"Users/{user}/Items", {"ParentId": identifier,
                     "Recursive": "true", "IncludeItemTypes": "Episode", "Limit": 5000})
                 seasons = {}
+                translated_seasons = {}
+                series_people = (update.get("People") if mode == "all" else item.get("People")) or []
                 changed = 0
                 for episode in episodes.get("Items", []):
                     season, number = episode.get("ParentIndexNumber"), episode.get("IndexNumber")
@@ -411,11 +515,31 @@ class DataEnrichment:
                         data = await self._tmdb_json(tmdb, f"tv/{tmdb_id}/season/{season}",
                             {"api_key": api_key, "language": "zh-CN"})
                         seasons[season] = {ep.get("episode_number"): ep for ep in data.get("episodes", [])}
+                        if options["ai_enabled"] and (options["ai_title"] or options["ai_overview"]):
+                            values = {}
+                            emby_numbers = {entry.get("IndexNumber") for entry in episodes.get("Items", [])
+                                            if entry.get("ParentIndexNumber") == season}
+                            for number_key, entry in seasons[season].items():
+                                if number_key not in emby_numbers or not isinstance(number_key, int):
+                                    continue
+                                if options["ai_title"] and self._needs_translation(entry.get("name")):
+                                    values[f"n{number_key}"] = str(entry["name"])[:160]
+                                if options["ai_overview"] and self._needs_translation(entry.get("overview")):
+                                    values[f"o{number_key}"] = str(entry["overview"])[:700]
+                            translated_seasons[season] = {}
+                            pairs = list(values.items())
+                            for offset in range(0, len(pairs), 16):
+                                translated_seasons[season].update(await self._ai_map(
+                                    dict(pairs[offset:offset + 16]), f"剧集：{str(item.get('Name') or '')[:70]}；第 {season} 季分集标题及简介"))
                     tmdb_episode = seasons[season].get(number) or {}
-                    if not tmdb_episode.get("name") and not tmdb_episode.get("overview"): continue
+                    if not tmdb_episode.get("name") and not tmdb_episode.get("overview") and not (options["episode_cast"] and series_people):
+                        continue
                     full = await self._item(emby, user, episode["Id"])
-                    if tmdb_episode.get("name"): full["Name"] = tmdb_episode["name"]
-                    if tmdb_episode.get("overview"): full["Overview"] = tmdb_episode["overview"]
+                    translated = translated_seasons.get(season, {})
+                    if tmdb_episode.get("name"): full["Name"] = translated.get(f"n{number}", tmdb_episode["name"])
+                    if tmdb_episode.get("overview"): full["Overview"] = translated.get(f"o{number}", tmdb_episode["overview"])
+                    if options["episode_cast"] and series_people:
+                        full["People"] = series_people
                     response = await emby.post(f"Items/{episode['Id']}", json={k: v for k, v in full.items() if v is not None})
                     response.raise_for_status()
                     changed += 1

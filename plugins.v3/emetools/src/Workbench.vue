@@ -75,7 +75,36 @@ const enrich = reactive({ query: '', items: [], selected: null, searching: false
   previewQuery: '', previewItems: [], previewSelected: null, previewEpisodes: [],
   previewChecked: [], force: false,
   status: { running: false, task: '', done: false, error: '', log: [], mediainfo: null, preview_result: null } })
+const enrichSettings = reactive({ open: false, ai_available: false, draft: {
+  ai_enabled: false, no_avatar: true, episode_cast: false, role_prefix: true,
+  ai_title: true, ai_credits: true, ai_overview: false, resolve_role: true,
+  max_actors: 30, cast_lock_min: 10,
+} })
 let enrichmentPollTimer = null
+
+async function openEnrichSettings() {
+  await work(async () => {
+    const result = await get('enrichment/config')
+    Object.assign(enrichSettings.draft, result.config || {})
+    enrichSettings.ai_available = !!result.ai_available
+    enrichSettings.open = true
+  })
+}
+
+async function saveEnrichSettings() {
+  await work(async () => {
+    const values = { ...enrichSettings.draft,
+      max_actors: Number(enrichSettings.draft.max_actors),
+      cast_lock_min: Number(enrichSettings.draft.cast_lock_min) }
+    if (![values.max_actors, values.cast_lock_min].every(value => Number.isInteger(value) && value >= 1 && value <= 200)) {
+      throw new Error('演员人数和锁定阈值必须是 1–200 的整数')
+    }
+    const result = await post('enrichment/config', values)
+    Object.assign(enrichSettings.draft, result.config)
+    enrichSettings.open = false
+    notice.value = '补全设置已保存'
+  })
+}
 
 async function searchEnrichment(kind) {
   const preview = kind === 'preview'
@@ -699,7 +728,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
       </template>
       <template v-if="active === 'enrichment'">
         <section class="eme-card">
-          <div class="eme-card-heading"><div><h3>搜索剧集</h3><p>搜索 MoviePilot 已连接的 Emby 剧集，从 TMDB 匹配资料并补全剧集及分集信息。</p></div></div>
+          <div class="eme-card-heading"><div><h3>搜索剧集</h3><p>搜索 MoviePilot 已连接的 Emby 剧集，从 TMDB 匹配资料并补全剧集及分集信息。</p></div><button class="eme-button secondary" type="button" :disabled="busy" @click="openEnrichSettings"><i class="mdi mdi-cog-outline" aria-hidden="true" /> 补全设置</button></div>
           <div class="eme-enrich-search"><input v-model.trim="enrich.query" placeholder="输入剧集名称（至少两个字）" @keyup.enter="searchEnrichment('series')" /><button class="eme-button secondary" :disabled="enrich.searching" @click="searchEnrichment('series')">搜索剧集</button></div>
           <div v-if="enrich.items.length" class="eme-enrich-results"><button v-for="item in enrich.items" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.selected?.id === item.id }" @click="enrich.selected = item">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.server }}</button></div>
           <p v-if="enrich.selected" class="eme-hint">已选：{{ enrich.selected.name }} · {{ enrich.selected.server }}</p>
@@ -793,6 +822,21 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         <section class="eme-card"><div class="eme-card-heading"><h3>实时监控</h3><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_move')">保存监控</button></div><label class="eme-switch-label"><input v-model="schedule.p115_move.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label>检查间隔（秒，最少 60）<input v-model.number="schedule.p115_move.check_interval" type="number" min="60" step="60" /></label></section>
       </template>
     </main>
+      <div v-if="enrichSettings.open" class="eme-overlay" @click.self="enrichSettings.open = false">
+        <div class="eme-dialog eme-enrich-settings-dialog" role="dialog" aria-modal="true" aria-label="补全设置">
+          <div class="eme-card-heading"><h3>补全设置</h3><button class="eme-button text" type="button" @click="enrichSettings.open = false">关闭</button></div>
+          <div class="eme-enrich-settings-body">
+            <p class="eme-hint">参考 MediaEnhance 的补全选项。元数据来源为 TMDB；启用 AI 后使用 MoviePilot 的 LLM 服务翻译缺少中文的内容，不读取 MediaEnhance 的配置。</p>
+            <label class="eme-switch-label"><input v-model="enrichSettings.draft.ai_enabled" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.ai_available" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 AI 智能补齐</span></label>
+            <p v-if="!enrichSettings.ai_available" class="eme-hint">请先在 MoviePilot 中配置 LLM API Key、地址和模型，再启用 AI。</p>
+            <div class="eme-enrich-settings-group"><strong>AI 翻译范围</strong><label v-for="option in [{ key: 'ai_title', label: '标题汉化' }, { key: 'ai_credits', label: '演职人员姓名和角色汉化' }, { key: 'ai_overview', label: '分集／剧集简介汉化' }, { key: 'resolve_role', label: '补全占位角色名' }]" :key="option.key" class="eme-switch-label"><input v-model="enrichSettings.draft[option.key]" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.draft.ai_enabled" /><span class="eme-switch-track" aria-hidden="true" /><span>{{ option.label }}</span></label></div>
+            <div class="eme-enrich-settings-group"><strong>演职人员处理</strong><label class="eme-switch-label"><input v-model="enrichSettings.draft.no_avatar" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>过滤无头像演员</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.episode_cast" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>分集写入演职员</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.role_prefix" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>角色名前加“饰/配”</span></label></div>
+            <div class="eme-enrich-settings-numbers"><label>每部作品写入演员数<input v-model.number="enrichSettings.draft.max_actors" type="number" min="1" max="200" /></label><label>锁定所需最低演员数<input v-model.number="enrichSettings.draft.cast_lock_min" type="number" min="1" max="200" /></label></div>
+            <p class="eme-hint">仅当演员人数达到阈值且姓名已是中文时，才锁定 Emby 演职人员；AI 默认关闭，只有开启相应选项后才会产生 LLM 请求。</p>
+          </div>
+          <div class="eme-enrich-settings-footer"><button class="eme-button text" type="button" @click="enrichSettings.open = false">取消</button><button class="eme-button primary" type="button" :disabled="busy || enrich.status.running" @click="saveEnrichSettings">保存设置</button></div>
+        </div>
+      </div>
       <div v-if="mediaRulesOpen" class="eme-overlay eme-media-overlay" @click.self="mediaRulesOpen = false">
         <div class="eme-dialog eme-media-rule-dialog" role="dialog" aria-modal="true" aria-label="清理规则">
           <div class="eme-card-heading"><div><h3>清理规则</h3><p>从上到下比较规则；标签从左到右优先级递减。</p></div><button class="eme-button text" @click="mediaRulesOpen = false">关闭</button></div>
@@ -910,6 +954,18 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-sidebar-card .eme-nav.selected{border-color:rgba(var(--v-theme-primary),.22);background:rgba(var(--v-theme-primary),.09)}
 .eme-sidebar-card .eme-nav:focus-visible{outline:2px solid rgb(var(--v-theme-primary));outline-offset:-2px}
 .eme-main{padding-top:102px}
+.eme-enrich-settings-dialog{width:min(590px,calc(100% - 20px));height:min(660px,calc(100% - 32px));max-height:calc(100% - 32px);gap:10px;padding:20px 22px}
+.eme-enrich-settings-dialog .eme-card-heading{margin:0;flex:none}
+.eme-enrich-settings-body{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:0 2px 8px}
+.eme-enrich-settings-body .eme-hint{font-size:12px;line-height:1.6;margin:5px 0 10px}
+.eme-enrich-settings-body label.eme-switch-label{display:flex;align-items:center;position:relative;gap:11px;min-height:29px;cursor:pointer;font-size:13px}
+.eme-enrich-settings-group{display:flex;flex-direction:column;gap:7px;margin-top:14px;padding:12px 14px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px}
+.eme-enrich-settings-group>strong{font-size:13px;margin-bottom:2px}
+.eme-enrich-settings-numbers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:16px 0 8px}
+.eme-enrich-settings-numbers label{display:block;font-size:13px}
+.eme-enrich-settings-numbers input{box-sizing:border-box;display:block;width:100%;max-width:180px;padding:8px 10px;margin-top:6px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;background:rgb(var(--v-theme-background));color:inherit}
+.eme-enrich-settings-footer{display:flex;justify-content:flex-end;gap:10px;flex:none;border-top:1px solid rgba(var(--v-border-color),var(--v-border-opacity));padding-top:12px}
+@media(max-width:540px){.eme-enrich-settings-numbers{grid-template-columns:1fr}}
 @media(max-width:760px){.eme-media-version{align-items:flex-start;flex-direction:column;gap:4px}.eme-media-version small{max-width:100%;text-align:left}.eme-shell--app .eme-sidebar{overflow-x:auto}.eme-shell--app .eme-sidebar .eme-nav{padding-block:8px}}
 @media(max-height:690px) and (min-width:761px){.eme-shell--app .eme-sidebar{overflow-y:auto}}
 @media(max-width:760px){.eme-sidebar,.eme-shell--app .eme-sidebar{display:flex;flex-direction:column;width:100%;padding:16px 18px 0;overflow:visible;border:0}.eme-brand,.eme-shell--app .eme-brand{display:flex;margin-bottom:12px}.eme-sidebar-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));max-height:220px;padding:8px}.eme-sidebar-card .eme-nav{min-width:0}.eme-main{min-height:0;padding-top:18px}}

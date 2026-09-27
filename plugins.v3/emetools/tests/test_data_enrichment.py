@@ -13,7 +13,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from emetools.data_enrichment import DB_SCRIPT, DataEnrichment, _docker_job
+from emetools.data_enrichment import DB_SCRIPT, DEFAULT_ENRICH_CONFIG, DataEnrichment, _docker_job, validate_enrich_config
 
 
 class EnrichmentTests(unittest.TestCase):
@@ -50,6 +50,65 @@ class EnrichmentTests(unittest.TestCase):
                 self.assertNotIn('secret-key', str(error.exception))
 
         asyncio.run(request())
+
+    def test_settings_validate_boolean_and_actor_limits(self):
+        config = validate_enrich_config({'no_avatar': False, 'max_actors': 12, 'cast_lock_min': 6})
+        self.assertFalse(config['no_avatar'])
+        self.assertEqual(config['max_actors'], 12)
+        self.assertFalse(config['ai_enabled'])
+        for invalid in ({'max_actors': 0}, {'cast_lock_min': '10'}, {'ai_enabled': 'false'},
+                        {'unknown': True}, {'max_actors': True}):
+            with self.assertRaises(ValueError):
+                validate_enrich_config(invalid)
+
+    def test_ai_translation_uses_moviepilot_llm_only_when_requested(self):
+        seen = []
+
+        def handler(request):
+            seen.append((request.url.path, json.loads(request.content)['model']))
+            return httpx.Response(200, json={'choices': [{'message': {
+                'content': '{"Name":"中文剧名"}'}}]})
+
+        llm = httpx.AsyncClient(base_url='https://llm.example/v1/', transport=httpx.MockTransport(handler))
+        with patch('emetools.data_enrichment.settings.LLM_API_KEY', 'test-only'), \
+             patch('emetools.data_enrichment.settings.LLM_BASE_URL', 'https://llm.example/v1'), \
+             patch('emetools.data_enrichment.settings.LLM_MODEL', 'test-model'), \
+             patch('emetools.data_enrichment.settings.LLM_API_PROTOCOL', 'auto'), \
+             patch('emetools.data_enrichment.settings.LLM_USE_PROXY', False), \
+             patch('emetools.data_enrichment.httpx.AsyncClient', return_value=llm):
+            response = asyncio.run(self.enrichment._ai_map({'Name': 'English name'}, '剧集标题'))
+        self.assertEqual(response, {'Name': '中文剧名'})
+        self.assertEqual(seen, [('/v1/chat/completions', 'test-model')])
+
+    def test_cast_settings_filter_limit_prefix_and_lock(self):
+        saved = []
+
+        def emby_handler(request):
+            if request.url.path == '/emby/Users/user123/Items/73025':
+                return httpx.Response(200, json={'Id': '73025', 'Type': 'Series', 'Name': '测试剧集',
+                                                  'ProviderIds': {'Tmdb': '12345'}})
+            if request.method == 'POST' and request.url.path == '/emby/Items/73025':
+                saved.append(json.loads(request.content))
+                return httpx.Response(204)
+            return httpx.Response(404)
+
+        def tmdb_handler(request):
+            return httpx.Response(200, json={'name': '测试剧集', 'aggregate_credits': {'cast': [
+                {'name': '甲演员', 'profile_path': '/pic.jpg', 'order': 1, 'roles': [{'character': '主角'}]},
+                {'name': '乙演员', 'profile_path': None, 'order': 2, 'roles': [{'character': '配角'}]},
+                {'name': '丙演员', 'profile_path': '/pic2.jpg', 'order': 3, 'roles': [{'character': '同事'}]}]}})
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(tmdb_handler))
+        options = {**DEFAULT_ENRICH_CONFIG, 'max_actors': 2, 'cast_lock_min': 2}
+        with patch.object(self.enrichment, '_services', return_value={'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'), \
+             patch('emetools.data_enrichment.httpx.AsyncClient', return_value=tmdb):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'credits', options))
+        self.assertEqual([person['Name'] for person in saved[0]['People']], ['甲演员', '丙演员'])
+        self.assertEqual(saved[0]['People'][0]['Role'], '饰 主角')
+        self.assertIn('Cast', saved[0]['LockedFields'])
 
     def test_preview_classification_and_cached_repair(self):
         key = 'Emby::123'
