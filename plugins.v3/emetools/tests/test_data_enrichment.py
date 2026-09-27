@@ -76,6 +76,114 @@ class EnrichmentTests(unittest.TestCase):
         self.assertIn('/j/subject/18', paths)
         self.assertIn('/j/tv/series/18', paths)
 
+    def test_douban_credits_uses_emby_provider_id_and_mobile_fallback(self):
+        paths = []
+
+        def handler(request):
+            paths.append(request.url.path)
+            if request.url.path.endswith('/j/subject/18'):
+                return httpx.Response(200, json={'title': '一瓯春', 'casts': []})
+            if request.url.path.endswith('/celebrities'):
+                return httpx.Response(200, json={'actors': [{'name': '许凯', 'character': '演员',
+                    'avatar': {'normal': 'https://img.example/avatar.jpg'}}]})
+            return httpx.Response(500)
+
+        real_client = httpx.AsyncClient
+        def client(**kwargs):
+            return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+        with patch('emetools.data_enrichment.httpx.AsyncClient', side_effect=client):
+            result = asyncio.run(self.enrichment._douban_data(
+                {'Name': '一瓯春', 'ProviderIds': {'Douban': '18'}}, include_cast=True))
+        self.assertEqual(result['casts'][0]['name'], '许凯')
+        self.assertEqual(paths, ['/j/subject/18', '/rexxar/api/v2/movie/18/celebrities'])
+
+    def test_douban_tmdb_cast_merge_prefers_chinese_and_real_role(self):
+        douban = [{'name': '许凯', 'role': '演员', 'img': ''},
+                  {'name': '周也', 'role': '饰 叶昭', 'img': 'https://img.example/zhou'}]
+        tmdb = [{'name': 'Xu Kai', 'original_name': 'Xu Kai', 'role': 'Shen Run / Yan Rui',
+                 'profile_path': '/xu.jpg', 'order': 0},
+                {'name': 'Zhou Ye', 'role': 'Old English Role', 'profile_path': '/zhou.jpg', 'order': 1},
+                {'name': 'Li Meiyan', 'role': 'Third', 'profile_path': '/li.jpg', 'order': 2}]
+        merged = self.enrichment._merge_cast(douban, tmdb)
+        self.assertEqual([person['name'] for person in merged], ['许凯', '周也', 'Li Meiyan'])
+        self.assertEqual(merged[0]['role'], 'Shen Run / Yan Rui')
+        self.assertEqual(merged[0]['profile_path'], '/xu.jpg')
+        self.assertEqual(merged[1]['role'], '饰 叶昭')
+        # Two Chinese actors with the same pinyin must not be guessed as the
+        # same person: an ambiguous match is left intact.
+        ambiguous = self.enrichment._merge_cast([
+            {'name': '张伟'}, {'name': '章伟'}], [{'name': 'Zhang Wei', 'role': 'X'}])
+        self.assertEqual(len(ambiguous), 3)
+
+    def test_douban_credits_action_writes_chinese_names_and_ai_roles(self):
+        saved = []
+
+        def emby_handler(request):
+            if request.method == 'POST':
+                saved.append(json.loads(request.content))
+                return httpx.Response(204)
+            return httpx.Response(200, json={'Id': '73025', 'Type': 'Series', 'Name': '一瓯春',
+                                               'ProviderIds': {'Tmdb': '12345', 'Douban': '18'}})
+
+        def tmdb_handler(_request):
+            return httpx.Response(200, json={'aggregate_credits': {'cast': [
+                {'name': 'Xu Kai', 'profile_path': '/xu.jpg', 'order': 0,
+                 'roles': [{'character': 'Shen Run / Yan Rui'}]}]}})
+
+        async def douban_data(_item, include_cast=False):
+            return {'casts': [{'name': '许凯', 'role': '演员', 'img': ''}]}
+
+        async def ai_map(mapping, _context):
+            return {key: '沈润／晏睿' for key in mapping}
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(tmdb_handler))
+        with patch.object(self.enrichment, '_services', return_value={
+                 'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_douban_data', side_effect=douban_data) as fetched, \
+             patch.object(self.enrichment, '_ai_map', side_effect=ai_map) as translated, \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'credits',
+                {**DEFAULT_ENRICH_CONFIG, 'metadata_source': 'douban', 'ai_enabled': True}))
+        fetched.assert_called_once()
+        translated.assert_called_once()
+        self.assertEqual(len(saved[0]['People']), 1)
+        self.assertEqual(saved[0]['People'][0]['Name'], '许凯')
+        self.assertEqual(saved[0]['People'][0]['Role'], '饰 沈润／晏睿')
+
+    def test_ai_translates_english_role_even_when_douban_added_chinese_prefix(self):
+        saved, ai_inputs = [], []
+
+        def emby_handler(request):
+            if request.method == 'POST':
+                saved.append(json.loads(request.content))
+                return httpx.Response(204)
+            return httpx.Response(200, json={'Id': '73025', 'Type': 'Series', 'Name': '一瓯春',
+                                               'ProviderIds': {'Tmdb': '12345'}})
+
+        async def ai_map(mapping, _context):
+            ai_inputs.append(mapping)
+            return {'r0': '饰 沈润'}
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/',
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={
+                'aggregate_credits': {'cast': [{'name': '许凯', 'profile_path': '/pic.jpg',
+                                                'roles': [{'character': '饰 Shen Run'}]}]}})))
+        with patch.object(self.enrichment, '_services', return_value={
+                 'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_ai_map', side_effect=ai_map), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'credits',
+                {**DEFAULT_ENRICH_CONFIG, 'ai_enabled': True}))
+        self.assertEqual(ai_inputs, [{'r0': '饰 Shen Run'}])
+        self.assertEqual(saved[0]['People'][0]['Role'], '饰 沈润')
+
     def test_tmdb_connection_failure_is_actionable_and_hides_key(self):
         async def request():
             def fail(_request):
@@ -171,7 +279,7 @@ class EnrichmentTests(unittest.TestCase):
             return httpx.Response(200, json={'name': 'TMDB 标题', 'overview': 'TMDB 简介',
                                               'genres': [{'name': '剧情'}]})
 
-        async def douban_data(_item, season=None):
+        async def douban_data(_item, season=None, include_cast=False):
             return ({1: {'name': '豆瓣标题', 'overview': ''}} if season else
                     {'name': '豆瓣剧名', 'overview': '豆瓣简介'})
 
