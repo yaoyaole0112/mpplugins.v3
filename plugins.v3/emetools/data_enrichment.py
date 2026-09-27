@@ -24,6 +24,7 @@ from app.sdk.config import settings
 from app.sdk.logging import logger
 from app.sdk.services import MediaServerHelper
 from app.runtime.settings import get_runtime_setting
+from .tvmao_client import fetch_tvmao_cast
 
 
 FRAME_FILTER = "libplacebo=tonemapping=bt.2390:color_primaries=bt709:color_trc=bt709:colorspace=bt709:format=yuv420p"
@@ -403,6 +404,95 @@ class DataEnrichment:
         return merged
 
     @staticmethod
+    def _needs_chinese_cast(cast, limit):
+        if not cast:
+            return True
+        for actor in cast[:limit]:
+            role = str(actor.get("role") or "")
+            role = re.sub(r"^\s*[饰配]\s*", "", role)
+            if (not re.search(r"[\u3400-\u9fff]", str(actor.get("name") or "")) or
+                    not re.search(r"[\u3400-\u9fff]", role) or
+                    role.strip() in {"演员", "配音演员", "客串", "特别出演", "友情出演"} or
+                    re.search(r"[A-Za-z]", role)):
+                return True
+        return False
+
+    @staticmethod
+    def _merge_tvmao_cast(cast, web_cast):
+        """Only join unique verified names; never assign a role to a guessed person."""
+        def keys(name):
+            name = str(name or "").strip()
+            if not name:
+                return set()
+            result = {re.sub(r"[^\w\u3400-\u9fff]", "", name).casefold()}
+            if re.search(r"[\u3400-\u9fff]", name):
+                result.add(re.sub(r"[^a-z0-9]", "", "".join(lazy_pinyin(name)).casefold()))
+            return result - {""}
+
+        indexes = {}
+        for index, actor in enumerate(cast):
+            for key in keys(actor.get("name")) | keys(actor.get("original_name")):
+                indexes.setdefault(key, set()).add(index)
+        web_index = {}
+        for index, actor in enumerate(web_cast):
+            for key in keys(actor.get("name")):
+                web_index.setdefault(key, set()).add(index)
+
+        result = [dict(actor) for actor in cast]
+        replaced = 0
+        unmatched = []
+        web_order = []
+        matched_indices = set()
+        for actor in web_cast:
+            matches = {next(iter(indexes[key])) for key in keys(actor.get("name"))
+                       if len(indexes.get(key, ())) == 1 and len(web_index.get(key, ())) == 1}
+            if len(matches) != 1:
+                unmatched.append(actor)
+                continue
+            match_index = next(iter(matches))
+            if match_index in matched_indices:
+                continue
+            matched_indices.add(match_index)
+            web_order.append(result[match_index])
+            person = result[match_index]
+            if not re.search(r"[\u3400-\u9fff]", str(person.get("name") or "")):
+                person["name"] = actor["name"]
+                replaced += 1
+            role = re.sub(r"^\s*[饰配]\s*", "", str(person.get("role") or ""))
+            if not re.search(r"[\u3400-\u9fff]", role) or re.search(r"[A-Za-z]", role) or role in {"演员", "配音演员"}:
+                person["role"] = actor["role"]
+            if not person.get("profile_path") and actor.get("img"):
+                person["profile_path"] = actor["img"]
+
+        # Only extend with unknown web actors when no reliable Chinese cast
+        # existed; with a partial Chinese cast, unmatched names could duplicate
+        # alternate stage names and should not be appended speculatively.
+        if not any(re.search(r"[\u3400-\u9fff]", str(person.get("name") or "")) for person in cast):
+            for actor in unmatched:
+                if any(indexes.get(key) for key in keys(actor.get("name"))):
+                    continue
+                web_order.append({"name": actor["name"], "role": actor["role"],
+                                  "profile_path": actor.get("img") or ""})
+            # Give verified Chinese actors priority over a long English-only
+            # TMDB list; otherwise max_actors could truncate every new actor.
+            result = web_order + [person for index, person in enumerate(result)
+                                  if index not in matched_indices]
+            for index, person in enumerate(result):
+                person["order"] = index
+        return result, replaced, len(result) - len(cast)
+
+    async def _tvmao_cast(self, item):
+        try:
+            people = await fetch_tvmao_cast(str(item.get("Name") or ""),
+                                            str(item.get("ProductionYear") or ""))
+            self.log(f"电视猫演员表：找到 {len(people)} 人" if people else
+                     "电视猫未找到可确认的中文演职人员，保持豆瓣/TMDB 结果")
+            return people
+        except (httpx.HTTPError, ValueError) as error:
+            self.log(f"电视猫演员表不可用（{type(error).__name__}），保持豆瓣/TMDB 结果")
+            return []
+
+    @staticmethod
     def _split(item_id):
         if "::" not in item_id:
             raise ValueError("请先选择搜索到的 Emby 剧集")
@@ -649,6 +739,17 @@ class DataEnrichment:
                     else:
                         self.log(f"演职人员来源：TMDB（{len(cast)} 人）" +
                                  ("；豆瓣没有可用演员，已回退" if options["metadata_source"] == "douban" else ""))
+                    if self._needs_chinese_cast(cast, options["max_actors"]):
+                        if options["metadata_source"] != "douban":
+                            douban_cast = (await self._douban_data(item, include_cast=True)).get("casts") or []
+                            if douban_cast:
+                                cast = self._merge_cast(douban_cast, cast)
+                                self.log(f"TMDB 中文演职不足，豆瓣补缺（{len(douban_cast)} 人）")
+                        if self._needs_chinese_cast(cast, options["max_actors"]):
+                            web_cast = await self._tvmao_cast(item)
+                            if web_cast:
+                                cast, replaced, added = self._merge_tvmao_cast(cast, web_cast)
+                                self.log(f"电视猫中文演职补缺：汉化姓名 {replaced} 人，新增 {added} 人")
                     cast = sorted((p for p in cast if p.get("name") and
                                    (not options["no_avatar"] or p.get("profile_path"))),
                                   key=lambda p: p.get("order") if p.get("order") is not None else 999)

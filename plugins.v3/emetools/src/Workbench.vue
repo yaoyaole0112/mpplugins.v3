@@ -829,7 +829,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div class="eme-card-heading"><h3>补全设置</h3><button class="eme-button text" type="button" @click="enrichSettings.open = false">关闭</button></div>
           <div class="eme-enrich-settings-body">
             <div class="eme-enrich-source"><strong>元数据来源</strong><div class="eme-enrich-source-options"><label v-for="source in [{ value: 'tmdb', label: 'TMDB' }, { value: 'douban', label: '豆瓣优先' }]" :key="source.value"><input v-model="enrichSettings.draft.metadata_source" type="radio" name="enrich-metadata-source" :value="source.value" />{{ source.label }}</label></div></div>
-            <p class="eme-hint">豆瓣优先时，剧集资料、分集及演职人员优先取自豆瓣，缺失时由 TMDB 补全。豆瓣没有提供中文角色名时，需同时启用 AI 智能补齐和演职人员汉化，才能尝试翻译 TMDB 的英文角色名。</p>
+            <p class="eme-hint">演职人员中文资料不足时，依次尝试豆瓣、电视猫演员表；仅使用能确认属于该剧的中文姓名及角色。仍缺少中文角色名时，可启用 AI 智能补齐及演职人员汉化。</p>
             <label class="eme-switch-label"><input v-model="enrichSettings.draft.ai_enabled" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.ai_available" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 AI 智能补齐</span></label>
             <p class="eme-enrich-model">当前 MoviePilot AI 模型：<strong>{{ enrichSettings.ai_model || '未配置' }}</strong><span v-if="!enrichSettings.ai_available">（LLM 服务尚未配置完整或接口不兼容）</span></p>
             <p v-if="!enrichSettings.ai_available" class="eme-hint">请先在 MoviePilot 中配置 LLM API Key、地址和模型，再启用 AI。</p>

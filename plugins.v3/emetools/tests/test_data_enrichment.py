@@ -116,6 +116,67 @@ class EnrichmentTests(unittest.TestCase):
             {'name': '张伟'}, {'name': '章伟'}], [{'name': 'Zhang Wei', 'role': 'X'}])
         self.assertEqual(len(ambiguous), 3)
 
+    def test_tvmao_fills_only_confident_actor_matches(self):
+        current = [{'name': 'Li Jian', 'original_name': 'Li Jian',
+                    'role': 'Temujin', 'profile_path': '/picture.jpg', 'order': 0},
+                   {'name': 'Zhang Yao', 'role': '女侠', 'profile_path': '/zhang.jpg', 'order': 1}]
+        web = [{'name': '李健', 'role': '铁木真', 'img': ''},
+               {'name': '张瑶', 'role': '阿瑶', 'img': ''},
+               {'name': '周也', 'role': '公主', 'img': '/zhou.jpg'}]
+        merged, renamed, added = self.enrichment._merge_tvmao_cast(current, web)
+        self.assertEqual((renamed, added), (2, 1))
+        self.assertEqual([person['name'] for person in merged], ['李健', '张瑶', '周也'])
+        self.assertEqual([person['role'] for person in merged], ['铁木真', '女侠', '公主'])
+        self.assertEqual(merged[0]['profile_path'], '/picture.jpg')
+        ambiguous = self.enrichment._merge_tvmao_cast([
+            {'name': 'Zhang Wei', 'role': ''}, {'name': 'Zhang Wei', 'role': ''}],
+            [{'name': '张伟', 'role': '甲'}])
+        self.assertEqual(ambiguous[0][0]['name'], 'Zhang Wei')
+        self.assertEqual(ambiguous[0][1]['name'], 'Zhang Wei')
+        self.assertEqual(ambiguous[2], 0)
+        oversized = [{'name': f'English Actor {i}', 'role': 'Unknown', 'profile_path': '/a.jpg',
+                      'order': i} for i in range(50)]
+        prioritized = self.enrichment._merge_tvmao_cast(
+            oversized, [{'name': '李健', 'role': '铁木真', 'img': '/li.jpg'}])
+        self.assertEqual(prioritized[0][0]['name'], '李健')
+        self.assertEqual(prioritized[2], 1)
+
+    def test_credits_uses_tvmao_only_when_both_sources_need_chinese(self):
+        written, calls = [], []
+
+        def emby_handler(request):
+            if request.method == 'POST':
+                written.append(json.loads(request.content))
+                return httpx.Response(204)
+            return httpx.Response(200, json={'Id': '73025', 'Type': 'Series', 'Name': '征途',
+                                               'ProviderIds': {'Tmdb': '12345'}})
+
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/',
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={
+                'aggregate_credits': {'cast': [{'name': 'Li Jian', 'profile_path': '/li.jpg',
+                                                'roles': [{'character': 'Temujin'}]}]}})))
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(emby_handler))
+
+        async def douban(_item, include_cast=False):
+            calls.append('douban')
+            return {'casts': [{'name': 'Li Jian', 'role': '', 'img': ''}]}
+
+        async def tvmao(_item):
+            calls.append('tvmao')
+            return [{'name': '李健', 'role': '铁木真', 'img': ''}]
+
+        with patch.object(self.enrichment, '_services', return_value={
+                 'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_douban_data', side_effect=douban), \
+             patch.object(self.enrichment, '_tvmao_cast', side_effect=tvmao), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'credits', DEFAULT_ENRICH_CONFIG))
+        self.assertEqual(calls, ['douban', 'tvmao'])
+        self.assertEqual(written[0]['People'][0]['Name'], '李健')
+        self.assertEqual(written[0]['People'][0]['Role'], '饰 铁木真')
+
     def test_douban_credits_action_writes_chinese_names_and_ai_roles(self):
         saved = []
 
@@ -144,6 +205,7 @@ class EnrichmentTests(unittest.TestCase):
              patch.object(self.enrichment, '_server', return_value=emby), \
              patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
              patch.object(self.enrichment, '_douban_data', side_effect=douban_data) as fetched, \
+             patch.object(self.enrichment, '_tvmao_cast', return_value=[]), \
              patch.object(self.enrichment, '_ai_map', side_effect=ai_map) as translated, \
              patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
             asyncio.run(self.enrichment._enrich('Q4', '73025', 'credits',
@@ -177,6 +239,8 @@ class EnrichmentTests(unittest.TestCase):
                  'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
              patch.object(self.enrichment, '_server', return_value=emby), \
              patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_douban_data', return_value={}), \
+             patch.object(self.enrichment, '_tvmao_cast', return_value=[]), \
              patch.object(self.enrichment, '_ai_map', side_effect=ai_map), \
              patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
             asyncio.run(self.enrichment._enrich('Q4', '73025', 'credits',
@@ -288,6 +352,8 @@ class EnrichmentTests(unittest.TestCase):
                  'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
              patch.object(self.enrichment, '_server', return_value=emby), \
              patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_douban_data', return_value={}), \
+             patch.object(self.enrichment, '_tvmao_cast', return_value=[]), \
              patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
             asyncio.run(self.enrichment._enrich('Q4', '73025', 'credits',
                 {**DEFAULT_ENRICH_CONFIG, 'episode_cast': True}))
@@ -359,6 +425,7 @@ class EnrichmentTests(unittest.TestCase):
         with patch.object(self.enrichment, '_services', return_value={'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
              patch.object(self.enrichment, '_server', return_value=emby), \
              patch.object(self.enrichment, '_douban_data', side_effect=douban_data) as fetched, \
+             patch.object(self.enrichment, '_tvmao_cast', return_value=[]), \
              patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'), \
              patch.object(self.enrichment, '_tmdb_client', return_value=tmdb):
             asyncio.run(self.enrichment._enrich('Q4', '73025', 'all',
