@@ -96,6 +96,7 @@ class EnrichmentAction(BaseModel):
     mode: str = "all"
     episode_ids: List[str] = Field(default_factory=list)
     series_ids: List[str] = Field(default_factory=list)
+    library_ids: List[str] = Field(default_factory=list)
     force: bool = False
 
 
@@ -103,7 +104,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.0"
+    plugin_version = "2.9.1"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1429,10 +1430,12 @@ class EmeTools(_PluginBase):
                 return {"items": await self._enrichment.search(action.keyword)}
             if action.operation == "series_list":
                 return {"items": await self._enrichment.list_series()}
+            if action.operation == "tv_libraries":
+                return {"items": self._enrichment.tv_libraries()}
             if action.operation == "enrich":
                 return self._enrichment.start_enrich(action.series_id, action.mode)
             if action.operation == "batch_enrich":
-                return self._enrichment.start_batch_enrich(action.series_ids)
+                return self._enrichment.start_library_enrich(action.library_ids)
             if action.operation == "mediainfo_check":
                 return self._enrichment.start_mediainfo_check()
             if action.operation == "mediainfo_fill":
@@ -1445,7 +1448,7 @@ class EmeTools(_PluginBase):
                 return self._enrichment.start_preview_repair(
                     action.series_id, action.episode_ids, action.force)
             if action.operation == "batch_preview":
-                return self._enrichment.start_batch_preview(action.series_ids)
+                return self._enrichment.start_all_preview()
             raise HTTPException(status_code=400, detail="未知的数据补全操作")
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error

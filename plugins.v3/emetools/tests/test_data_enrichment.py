@@ -100,6 +100,45 @@ class EnrichmentTests(unittest.TestCase):
                                                      DEFAULT_ENRICH_CONFIG))
         self.assertEqual(self.enrichment.status()['batch_result'], {'ok': 2, 'fail': 1})
 
+    def test_tv_libraries_only_exposes_series_libraries(self):
+        instance = SimpleNamespace(get_librarys=lambda hidden=False: [
+            SimpleNamespace(id='11', name='电视剧', type='电视剧'),
+            SimpleNamespace(id='12', name='电影', type='电影')])
+        service = SimpleNamespace(config=SimpleNamespace(name='Q4'), instance=instance)
+        with patch('emetools.data_enrichment.MediaServerHelper') as helper, \
+             patch('emetools.data_enrichment.MediaType') as media_type:
+            helper.return_value.get_services.return_value = {'Q4': service}
+            media_type.TV.value = '电视剧'
+            self.assertEqual(self.enrichment.tv_libraries(), [
+                {'id': 'Q4::11', 'name': '电视剧', 'server': 'Q4'}])
+
+    def test_batch_library_pages_all_series_without_first_page_limit(self):
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): pass
+
+        async def items(client, path, params):
+            self.assertEqual(params['ParentId'], '11')
+            self.assertEqual(params['IncludeItemTypes'], 'Series')
+            start = params['StartIndex']
+            page = range(start, min(start + 500, 1201))
+            return {'Items': [{'Id': str(index)} for index in page], 'TotalRecordCount': 1201}
+
+        with patch.object(self.enrichment, '_server', return_value=FakeClient()), \
+             patch.object(self.enrichment, '_user_id', new=AsyncMock(return_value='user')), \
+             patch.object(self.enrichment, '_json', side_effect=items):
+            ids = asyncio.run(self.enrichment._library_series([
+                {'id': 'Q4::11', 'server': 'Q4'}]))
+        self.assertEqual(len(ids), 1201)
+        self.assertEqual(ids[-1], 'Q4::1200')
+
+    def test_library_batch_rejects_invalid_or_movie_library(self):
+        with patch.object(self.enrichment, 'tv_libraries', return_value=[
+            {'id': 'Q4::11', 'name': '电视剧', 'server': 'Q4'}]):
+            for ids in ([], ['Q4::12'], ['Q4::11', 'Q4::11']):
+                with self.subTest(ids=ids), self.assertRaises(ValueError):
+                    self.enrichment._selected_tv_libraries(ids)
+
     def test_batch_preview_only_repairs_missing_or_suspected_images(self):
         async def scan(series_id):
             self.enrichment._preview_selection = {

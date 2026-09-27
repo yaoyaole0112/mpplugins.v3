@@ -24,6 +24,7 @@ from pypinyin import lazy_pinyin
 from app.sdk.config import settings
 from app.sdk.logging import logger
 from app.sdk.services import MediaServerHelper
+from app.schemas.types import MediaType
 from app.runtime.settings import get_runtime_setting
 from .tvmao_client import fetch_tvmao_cast
 
@@ -662,6 +663,78 @@ class DataEnrichment:
                     if not page or offset >= int(data.get("TotalRecordCount", offset)):
                         break
         return results
+
+    def tv_libraries(self):
+        """Only expose actual TV libraries, scoped by server and Emby view ID."""
+        services = MediaServerHelper().get_services(type_filter="emby") or {}
+        values = services.values() if isinstance(services, dict) else services
+        result = []
+        for service in values:
+            if not getattr(service, "instance", None):
+                continue
+            server = str(service.config.name or "")
+            for library in service.instance.get_librarys(hidden=False) or []:
+                if getattr(library, "type", None) == MediaType.TV.value and getattr(library, "id", None):
+                    result.append({"id": f"{server}::{library.id}",
+                                   "name": str(library.name or "未命名"), "server": server})
+        return result
+
+    async def _library_series(self, libraries):
+        """Page through each selected TV view, without a first-N catalog cutoff."""
+        seen = set()
+        result = []
+        for library in libraries:
+            name, library_id = self._split(library["id"])
+            async with self._server(name) as client:
+                user = await self._user_id(name, client)
+                offset = 0
+                while True:
+                    data = await self._json(client, f"Users/{user}/Items", {
+                        "ParentId": library_id, "IncludeItemTypes": "Series",
+                        "Recursive": "true", "StartIndex": offset, "Limit": 500})
+                    page = data.get("Items") or []
+                    for item in page:
+                        identifier = str(item.get("Id") or "")
+                        if re.fullmatch(r"[a-zA-Z0-9-]{1,64}", identifier):
+                            key = f"{name}::{identifier}"
+                            if key not in seen:
+                                seen.add(key)
+                                result.append(key)
+                    offset += len(page)
+                    if not page or offset >= int(data.get("TotalRecordCount", offset)):
+                        break
+        return result
+
+    def _selected_tv_libraries(self, library_ids):
+        libraries = self.tv_libraries()
+        known = {library["id"]: library for library in libraries}
+        if library_ids is None:
+            if not libraries:
+                raise ValueError("没有可用的 Emby 电视剧媒体库")
+            return libraries
+        if (not isinstance(library_ids, list) or not library_ids or
+                len(library_ids) > 200 or len(set(library_ids)) != len(library_ids) or
+                any(not isinstance(value, str) or value not in known for value in library_ids)):
+            raise ValueError("请选择有效的 Emby 电视剧媒体库并重试")
+        return [known[value] for value in library_ids]
+
+    def start_library_enrich(self, library_ids):
+        libraries = self._selected_tv_libraries(library_ids)
+        return self._begin("批量补全剧集数据", self._enrich_libraries, libraries, self.options())
+
+    async def _enrich_libraries(self, libraries, options):
+        series_ids = await self._library_series(libraries)
+        self.log(f"已读取 {len(libraries)} 个电视剧媒体库，共 {len(series_ids)} 部剧集")
+        await self._batch_enrich(series_ids, options)
+
+    def start_all_preview(self):
+        libraries = self._selected_tv_libraries(None)
+        return self._begin("批量扫描与修复分集图片", self._preview_libraries, libraries)
+
+    async def _preview_libraries(self, libraries):
+        series_ids = await self._library_series(libraries)
+        self.log(f"已读取全部 {len(libraries)} 个电视剧媒体库，共 {len(series_ids)} 部剧集")
+        await self._batch_preview(series_ids)
 
     def start_batch_enrich(self, series_ids):
         if not isinstance(series_ids, list) or not 1 <= len(series_ids) <= 50:
