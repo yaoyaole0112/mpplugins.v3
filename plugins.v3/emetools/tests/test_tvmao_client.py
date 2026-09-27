@@ -62,3 +62,39 @@ class TvmaoTests(unittest.TestCase):
         with patch('emetools.tvmao_client.httpx.AsyncClient',
                    side_effect=lambda **kwargs: original(transport=httpx.MockTransport(wrong_page), **kwargs)):
             self.assertEqual(asyncio.run(fetch_tvmao_cast('征途')), [])
+
+    def test_user_provided_link_bypasses_search_only_for_confirmed_tmdb_id(self):
+        requested, stages = [], []
+
+        def handler(request):
+            requested.append(request.url.path)
+            if request.url.path == '/query.jsp':
+                return httpx.Response(200, text='<a href="/kanju/OTHER" title="征途第二季">另一剧</a>')
+            return httpx.Response(200, text='<title>电视剧《征途》演员表_电视猫</title>'
+                                  '<img src="/photos/li.jpg" alt="朱德（李健饰演）">')
+
+        original = httpx.AsyncClient
+        with patch('emetools.tvmao_client.httpx.AsyncClient',
+                   side_effect=lambda **kwargs: original(transport=httpx.MockTransport(handler), **kwargs)):
+            cast = asyncio.run(fetch_tvmao_cast('征途', '2026', '336207', stages.append))
+            unrelated = asyncio.run(fetch_tvmao_cast('征途', '2026', 'not-same-id', stages.append))
+        self.assertEqual(cast[0]['name'], '李健')
+        self.assertEqual(cast[0]['role'], '朱德')
+        self.assertIn('/kanju/YXAhXWhl/actors', requested)
+        self.assertEqual(unrelated, [])
+        self.assertTrue(any('用户提供' in stage for stage in stages))
+
+    def test_direct_link_rejects_wrong_page_title_and_reports_parse_failure(self):
+        original = httpx.AsyncClient
+        statuses = []
+
+        def handler(request):
+            if request.url.path == '/query.jsp':
+                return httpx.Response(200, text='搜索结果为空')
+            return httpx.Response(200, text='<title>另一部电视剧演员表</title>'
+                                              '<img alt="朱德（李健饰演）">')
+
+        with patch('emetools.tvmao_client.httpx.AsyncClient',
+                   side_effect=lambda **kwargs: original(transport=httpx.MockTransport(handler), **kwargs)):
+            self.assertEqual(asyncio.run(fetch_tvmao_cast('征途', '2026', '336207', statuses.append)), [])
+        self.assertTrue(any('标题与剧名不符' in stage for stage in statuses))

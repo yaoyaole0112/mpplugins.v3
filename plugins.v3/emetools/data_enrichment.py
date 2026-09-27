@@ -483,8 +483,11 @@ class DataEnrichment:
 
     async def _tvmao_cast(self, item):
         try:
+            providers = item.get("ProviderIds") or {}
             people = await fetch_tvmao_cast(str(item.get("Name") or ""),
-                                            str(item.get("ProductionYear") or ""))
+                                            str(item.get("ProductionYear") or ""),
+                                            str(providers.get("Tmdb") or providers.get("TMDB") or ""),
+                                            status=self.log)
             self.log(f"电视猫演员表：找到 {len(people)} 人" if people else
                      "电视猫未找到可确认的中文演职人员，保持豆瓣/TMDB 结果")
             return people
