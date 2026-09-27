@@ -765,7 +765,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <p class="eme-hint">开始补全会暂时停止 Emby；正在播放或有运行中的 Emby 任务时不会停机。数据库备份与源库保存在同一目录。</p>
         </section>
         <section class="eme-card">
-          <div class="eme-card-heading"><div><h3>分集图片修复</h3><button class="eme-button secondary eme-enrich-bulk-preview" :disabled="busy || enrich.status.running" @click="enrichmentAction('batch_preview')">批量修复</button><p>扫描 DoVi 分集，通过独立截帧容器转成 SDR，裁掉底部字幕后写入 STRM 同目录并刷新 Emby。批量修复会检查所有电视剧媒体库。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !enrich.previewSelected" @click="enrichmentAction('preview_scan', { series_id: enrich.previewSelected.id })">扫描分集</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.previewChecked.length" @click="enrichmentAction('preview_repair', { series_id: enrich.previewSelected.id, episode_ids: [...enrich.previewChecked], force: enrich.force })">修复图片</button></div></div>
+          <div class="eme-card-heading eme-enrich-preview-heading"><div><h3>分集图片修复</h3><p>扫描 DoVi 分集，通过独立截帧容器转成 SDR，裁掉底部字幕后写入 STRM 同目录并刷新 Emby。批量修复会检查所有电视剧媒体库。</p></div><div class="eme-enrich-preview-actions"><button class="eme-button secondary" :disabled="busy || !enrich.previewSelected" @click="enrichmentAction('preview_scan', { series_id: enrich.previewSelected.id })">扫描分集</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.previewChecked.length" @click="enrichmentAction('preview_repair', { series_id: enrich.previewSelected.id, episode_ids: [...enrich.previewChecked], force: enrich.force })">修复图片</button><button class="eme-button secondary" :disabled="busy || enrich.status.running" @click="enrichmentAction('batch_preview')">批量修复</button></div></div>
           <div class="eme-enrich-search"><input v-model.trim="enrich.previewQuery" placeholder="输入要修复的剧集名称" @keyup.enter="searchEnrichment('preview')" /><button class="eme-button secondary" :disabled="enrich.searching" @click="searchEnrichment('preview')">搜索剧集</button></div>
           <div v-if="enrich.previewItems.length" class="eme-enrich-results"><button v-for="item in enrich.previewItems" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.previewSelected?.id === item.id }" @click="enrich.previewSelected = item; enrich.previewEpisodes = []; enrich.previewChecked = []">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.server }}</button></div>
           <label class="eme-switch-label"><input v-model="enrich.force" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>强制覆盖已有预览图</span></label>
@@ -1001,7 +1001,11 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-enrich-settings-footer{display:flex;justify-content:flex-end;gap:10px;flex:none;border-top:1px solid rgba(var(--v-border-color),var(--v-border-opacity));padding-top:12px}
 .eme-enrich-library-field{display:block;max-width:460px;margin-top:10px}
 .eme-enrich-library-field .eme-picker-trigger span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.eme-enrich-bulk-preview{display:inline-flex;margin:6px 0 0}
+.eme-enrich-preview-heading{align-items:flex-start}
+.eme-enrich-preview-heading>div:first-child{min-width:0;flex:1}
+.eme-enrich-preview-actions{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:nowrap;max-width:100%;overflow-x:auto}
+.eme-enrich-preview-actions .eme-button{flex:none}
+@media(max-width:960px){.eme-enrich-preview-heading{flex-wrap:wrap}.eme-enrich-preview-actions{width:100%}}
 @media(min-height:780px){.eme-enrich-settings-group{gap:6px;margin-top:10px;padding:10px 14px}.eme-enrich-settings-numbers{margin:11px 0 6px}}
 @media(max-width:540px){.eme-enrich-settings-numbers{grid-template-columns:1fr}}
 @media(max-width:760px){.eme-media-version{align-items:flex-start;flex-direction:column;gap:4px}.eme-media-version small{max-width:100%;text-align:left}.eme-shell--app .eme-sidebar{overflow-x:auto}.eme-shell--app .eme-sidebar .eme-nav{padding-block:8px}}
