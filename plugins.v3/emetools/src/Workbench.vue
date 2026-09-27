@@ -75,7 +75,8 @@ const enrich = reactive({ query: '', items: [], selected: null, searching: false
   previewQuery: '', previewItems: [], previewSelected: null, previewEpisodes: [],
   previewChecked: [], force: false,
   status: { running: false, task: '', done: false, error: '', log: [], mediainfo: null, preview_result: null } })
-const enrichSettings = reactive({ open: false, ai_available: false, draft: {
+const enrichSettings = reactive({ open: false, ai_available: false, ai_model: '', draft: {
+  metadata_source: 'tmdb',
   ai_enabled: false, no_avatar: true, episode_cast: false, role_prefix: true,
   ai_title: true, ai_credits: true, ai_overview: false, resolve_role: true,
   max_actors: 30, cast_lock_min: 10,
@@ -87,6 +88,7 @@ async function openEnrichSettings() {
     const result = await get('enrichment/config')
     Object.assign(enrichSettings.draft, result.config || {})
     enrichSettings.ai_available = !!result.ai_available
+    enrichSettings.ai_model = result.ai_model || ''
     enrichSettings.open = true
   })
 }
@@ -826,8 +828,10 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         <div class="eme-dialog eme-enrich-settings-dialog" role="dialog" aria-modal="true" aria-label="补全设置">
           <div class="eme-card-heading"><h3>补全设置</h3><button class="eme-button text" type="button" @click="enrichSettings.open = false">关闭</button></div>
           <div class="eme-enrich-settings-body">
-            <p class="eme-hint">参考 MediaEnhance 的补全选项。元数据来源为 TMDB；启用 AI 后使用 MoviePilot 的 LLM 服务翻译缺少中文的内容，不读取 MediaEnhance 的配置。</p>
+            <div class="eme-enrich-source"><strong>元数据来源</strong><div class="eme-enrich-source-options"><label v-for="source in [{ value: 'tmdb', label: 'TMDB' }, { value: 'douban', label: '豆瓣优先' }]" :key="source.value"><input v-model="enrichSettings.draft.metadata_source" type="radio" name="enrich-metadata-source" :value="source.value" />{{ source.label }}</label></div></div>
+            <p class="eme-hint">豆瓣优先时，可靠匹配的剧集标题、简介及分集资料优先取自豆瓣；其他字段或无法匹配时使用 TMDB。</p>
             <label class="eme-switch-label"><input v-model="enrichSettings.draft.ai_enabled" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.ai_available" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 AI 智能补齐</span></label>
+            <p class="eme-enrich-model">当前 MoviePilot AI 模型：<strong>{{ enrichSettings.ai_model || '未配置' }}</strong><span v-if="!enrichSettings.ai_available">（LLM 服务尚未配置完整或接口不兼容）</span></p>
             <p v-if="!enrichSettings.ai_available" class="eme-hint">请先在 MoviePilot 中配置 LLM API Key、地址和模型，再启用 AI。</p>
             <div class="eme-enrich-settings-group"><strong>AI 翻译范围</strong><label v-for="option in [{ key: 'ai_title', label: '标题汉化' }, { key: 'ai_credits', label: '演职人员姓名和角色汉化' }, { key: 'ai_overview', label: '分集／剧集简介汉化' }, { key: 'resolve_role', label: '补全占位角色名' }]" :key="option.key" class="eme-switch-label"><input v-model="enrichSettings.draft[option.key]" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.draft.ai_enabled" /><span class="eme-switch-track" aria-hidden="true" /><span>{{ option.label }}</span></label></div>
             <div class="eme-enrich-settings-group"><strong>演职人员处理</strong><label class="eme-switch-label"><input v-model="enrichSettings.draft.no_avatar" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>过滤无头像演员</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.episode_cast" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>分集写入演职员</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.role_prefix" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>角色名前加“饰/配”</span></label></div>
@@ -954,9 +958,14 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-sidebar-card .eme-nav.selected{border-color:rgba(var(--v-theme-primary),.22);background:rgba(var(--v-theme-primary),.09)}
 .eme-sidebar-card .eme-nav:focus-visible{outline:2px solid rgb(var(--v-theme-primary));outline-offset:-2px}
 .eme-main{padding-top:102px}
-.eme-enrich-settings-dialog{width:min(590px,calc(100% - 20px));height:min(660px,calc(100% - 32px));max-height:calc(100% - 32px);gap:10px;padding:20px 22px}
+.eme-enrich-settings-dialog{width:min(680px,calc(100% - 20px));height:auto;max-height:calc(100% - 20px);gap:10px;padding:18px 22px}
 .eme-enrich-settings-dialog .eme-card-heading{margin:0;flex:none}
-.eme-enrich-settings-body{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:0 2px 8px}
+.eme-enrich-settings-body{flex:0 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:0 2px 8px}
+.eme-enrich-source{display:flex;align-items:center;gap:18px;font-size:13px}
+.eme-enrich-source-options{display:flex;gap:12px}
+.eme-enrich-source-options label{display:flex;align-items:center;gap:5px;cursor:pointer}
+.eme-enrich-source-options input{accent-color:rgb(var(--v-theme-primary))}
+.eme-enrich-model{margin:4px 0 0;font-size:13px;overflow-wrap:anywhere}
 .eme-enrich-settings-body .eme-hint{font-size:12px;line-height:1.6;margin:5px 0 10px}
 .eme-enrich-settings-body label.eme-switch-label{display:flex;align-items:center;position:relative;gap:11px;min-height:29px;cursor:pointer;font-size:13px}
 .eme-enrich-settings-group{display:flex;flex-direction:column;gap:7px;margin-top:14px;padding:12px 14px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px}
@@ -965,6 +974,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-enrich-settings-numbers label{display:block;font-size:13px}
 .eme-enrich-settings-numbers input{box-sizing:border-box;display:block;width:100%;max-width:180px;padding:8px 10px;margin-top:6px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;background:rgb(var(--v-theme-background));color:inherit}
 .eme-enrich-settings-footer{display:flex;justify-content:flex-end;gap:10px;flex:none;border-top:1px solid rgba(var(--v-border-color),var(--v-border-opacity));padding-top:12px}
+@media(min-height:780px){.eme-enrich-settings-group{gap:6px;margin-top:10px;padding:10px 14px}.eme-enrich-settings-numbers{margin:11px 0 6px}}
 @media(max-width:540px){.eme-enrich-settings-numbers{grid-template-columns:1fr}}
 @media(max-width:760px){.eme-media-version{align-items:flex-start;flex-direction:column;gap:4px}.eme-media-version small{max-width:100%;text-align:left}.eme-shell--app .eme-sidebar{overflow-x:auto}.eme-shell--app .eme-sidebar .eme-nav{padding-block:8px}}
 @media(max-height:690px) and (min-width:761px){.eme-shell--app .eme-sidebar{overflow-y:auto}}

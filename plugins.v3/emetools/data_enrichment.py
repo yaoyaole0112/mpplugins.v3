@@ -32,6 +32,7 @@ DOCKER_SOCKET = "/var/run/docker.sock"
 SHENYI_EXTRACT = "f84e5d989aa8a8b6ab1a3a8c0848faab"
 SHENYI_PERSIST = "f98bb72fe87c19265e4550abc2cad64f"
 DEFAULT_ENRICH_CONFIG = {
+    "metadata_source": "tmdb",
     "ai_enabled": False, "no_avatar": True, "episode_cast": False,
     "role_prefix": True, "ai_title": True, "ai_credits": True,
     "ai_overview": False, "resolve_role": True,
@@ -44,7 +45,10 @@ def validate_enrich_config(values):
         raise ValueError("补全设置包含不支持的选项")
     result = dict(DEFAULT_ENRICH_CONFIG)
     for key, value in values.items():
-        if key in ("max_actors", "cast_lock_min"):
+        if key == "metadata_source":
+            if value not in ("tmdb", "douban"):
+                raise ValueError("元数据来源仅支持 TMDB 或豆瓣")
+        elif key in ("max_actors", "cast_lock_min"):
             if type(value) is not int or not 1 <= value <= 200:
                 raise ValueError("演员人数和锁定阈值必须是 1–200 的整数")
         elif type(value) is not bool:
@@ -260,6 +264,69 @@ class DataEnrichment:
             raise ValueError(f"TMDB 接口返回 HTTP {error.response.status_code}，请检查 MoviePilot 的 TMDB 配置") from None
 
     @staticmethod
+    def _douban_match(results, name, year, season=1):
+        """Never use the first search result without a reliable name/season/year match."""
+        def normalize(value):
+            value = re.sub(r"第\s*[一二三四五六七八九十百\d]+\s*季", "", str(value or ""))
+            return re.sub(r"[^\w\u3400-\u9fff]", "", value).casefold()
+
+        def season_number(value):
+            match = re.search(r"第\s*([一二三四五六七八九十\d]+)\s*季", str(value or ""))
+            if not match:
+                return 1
+            raw = match.group(1)
+            if raw.isdecimal():
+                return int(raw)
+            digits = {character: index + 1 for index, character in enumerate("一二三四五六七八九")}
+            if "十" in raw:
+                tens, ones = raw.split("十", 1)
+                return (digits.get(tens, 1) if tens else 1) * 10 + digits.get(ones, 0)
+            return digits.get(raw, 0)
+
+        title = normalize(name)
+        matches = [entry for entry in results if isinstance(entry, dict)
+                   and entry.get("id") and normalize(entry.get("title")) == title
+                   and season_number(entry.get("title")) == season
+                   and (not year or not entry.get("year") or str(entry["year"])[:4] == year)]
+        return matches[0] if len(matches) == 1 else None
+
+    async def _douban_data(self, item, season=None):
+        """Read public Douban metadata directly; failures keep TMDB as fallback."""
+        name = str(item.get("Name") or "")
+        year = str(item.get("ProductionYear") or "")
+        query = name if season in (None, 1) else f"{name} 第{season}季"
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; MoviePilot/3.0)",
+                   "Referer": "https://movie.douban.com/"}
+        try:
+            async with httpx.AsyncClient(headers=headers, timeout=12, follow_redirects=True,
+                                         trust_env=False) as client:
+                response = await client.get("https://movie.douban.com/j/subject_suggest", params={"q": query})
+                response.raise_for_status()
+                match = self._douban_match(response.json(), name, year if season in (None, 1) else "", season or 1)
+                if not match:
+                    self.log(f"豆瓣未可靠匹配《{name}》第 {season or 1} 季，使用 TMDB")
+                    return {}
+                subject_id = str(match["id"])
+                if not re.fullmatch(r"\d+", subject_id):
+                    return {}
+                if season is not None:
+                    response = await client.get(f"https://movie.douban.com/j/tv/series/{subject_id}")
+                    response.raise_for_status()
+                    return {int(ep["episode"]): {"name": str(ep.get("title") or ""),
+                            "overview": str(ep.get("desc") or "")}
+                            for ep in response.json().get("episodes", [])
+                            if isinstance(ep, dict) and str(ep.get("episode") or "").isdecimal()
+                            and int(ep["episode"]) > 0}
+                response = await client.get(f"https://movie.douban.com/j/subject/{subject_id}")
+                response.raise_for_status()
+                data = response.json()
+                self.log(f"已匹配《{name}》· 豆瓣 {subject_id}（缺失字段回退 TMDB）")
+                return {"name": str(data.get("title") or ""), "overview": str(data.get("intro") or "")}
+        except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError) as error:
+            self.log(f"豆瓣数据不可用（{type(error).__name__}），使用 TMDB")
+            return {}
+
+    @staticmethod
     def _split(item_id):
         if "::" not in item_id:
             raise ValueError("请先选择搜索到的 Emby 剧集")
@@ -446,11 +513,15 @@ class DataEnrichment:
             detail = await self._tmdb_json(tmdb, f"tv/{tmdb_id}", {"api_key": api_key,
                 "language": "zh-CN", "append_to_response": "aggregate_credits"})
             self.log(f"已匹配 {item.get('Name')} · TMDB {tmdb_id}")
+            douban_detail = (await self._douban_data(item) if options["metadata_source"] == "douban"
+                             and mode in ("all", "metadata") else {})
             if mode in ("all", "metadata", "credits"):
                 update = dict(item)
                 if mode != "credits":
-                    if detail.get("name"): update["Name"] = detail["name"]
-                    if detail.get("overview"): update["Overview"] = detail["overview"]
+                    if douban_detail.get("name") or detail.get("name"):
+                        update["Name"] = douban_detail.get("name") or detail["name"]
+                    if douban_detail.get("overview") or detail.get("overview"):
+                        update["Overview"] = douban_detail.get("overview") or detail["overview"]
                     if detail.get("vote_average"): update["CommunityRating"] = detail["vote_average"]
                     if detail.get("genres"): update["Genres"] = [g["name"] for g in detail["genres"]]
                     if options["ai_enabled"]:
@@ -515,6 +586,12 @@ class DataEnrichment:
                         data = await self._tmdb_json(tmdb, f"tv/{tmdb_id}/season/{season}",
                             {"api_key": api_key, "language": "zh-CN"})
                         seasons[season] = {ep.get("episode_number"): ep for ep in data.get("episodes", [])}
+                        if options["metadata_source"] == "douban":
+                            for ep_number, db_ep in (await self._douban_data(item, season)).items():
+                                fallback = seasons[season].get(ep_number) or {}
+                                seasons[season][ep_number] = {
+                                    "name": db_ep.get("name") or fallback.get("name"),
+                                    "overview": db_ep.get("overview") or fallback.get("overview")}
                         if options["ai_enabled"] and (options["ai_title"] or options["ai_overview"]):
                             values = {}
                             emby_numbers = {entry.get("IndexNumber") for entry in episodes.get("Items", [])

@@ -102,7 +102,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.8.22"
+    plugin_version = "2.8.23"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1364,6 +1364,7 @@ class EmeTools(_PluginBase):
 
     async def enrichment_config(self) -> dict:
         return {"config": copy.deepcopy(self._enrichment_config),
+                "ai_model": str(getattr(mp_settings, "LLM_MODEL", "") or ""),
                 "ai_available": bool(getattr(mp_settings, "LLM_API_KEY", "") and
                                      getattr(mp_settings, "LLM_BASE_URL", "") and
                                      getattr(mp_settings, "LLM_MODEL", "") and

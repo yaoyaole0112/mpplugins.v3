@@ -38,6 +38,44 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(client.call_args.kwargs['proxy'], 'http://proxy.example:1080')
         self.assertFalse(client.call_args.kwargs['trust_env'])
 
+    def test_metadata_source_validation_and_legacy_default(self):
+        self.assertEqual(validate_enrich_config({})['metadata_source'], 'tmdb')
+        self.assertEqual(validate_enrich_config({'metadata_source': 'douban'})['metadata_source'], 'douban')
+        for value in ('both', 'TMDB', None, True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_enrich_config({'metadata_source': value})
+
+    def test_douban_match_requires_unambiguous_title_season_and_year(self):
+        candidate = {'id': '123', 'title': '庆余年 第二季', 'year': '2024'}
+        match = self.enrichment._douban_match
+        self.assertEqual(match([candidate], '庆余年', '2024', 2), candidate)
+        self.assertIsNone(match([candidate], '庆余年', '2024', 1))
+        self.assertIsNone(match([candidate], '庆余年', '2019', 2))
+        self.assertIsNone(match([candidate], '另一个剧集', '2024', 2))
+        self.assertIsNone(match([candidate, candidate], '庆余年', '2024', 2))
+
+    def test_douban_data_uses_matched_subject_and_episode(self):
+        paths = []
+
+        def handler(request):
+            paths.append(request.url.path)
+            if request.url.path.endswith('subject_suggest'):
+                return httpx.Response(200, json=[{'id': '18', 'title': '庆余年', 'year': '2019'}])
+            if request.url.path.endswith('/j/subject/18'):
+                return httpx.Response(200, json={'title': '庆余年', 'intro': '豆瓣简介'})
+            return httpx.Response(200, json={'episodes': [{'episode': 1, 'title': '第一集', 'desc': '豆瓣分集'}]})
+
+        real_client = httpx.AsyncClient
+        def client(**kwargs):
+            return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+        with patch('emetools.data_enrichment.httpx.AsyncClient', side_effect=client):
+            item = {'Name': '庆余年', 'ProductionYear': 2019}
+            self.assertEqual(asyncio.run(self.enrichment._douban_data(item))['overview'], '豆瓣简介')
+            self.assertEqual(asyncio.run(self.enrichment._douban_data(item, 1))[1]['name'], '第一集')
+        self.assertIn('/j/subject/18', paths)
+        self.assertIn('/j/tv/series/18', paths)
+
     def test_tmdb_connection_failure_is_actionable_and_hides_key(self):
         async def request():
             def fail(_request):
@@ -109,6 +147,49 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual([person['Name'] for person in saved[0]['People']], ['甲演员', '丙演员'])
         self.assertEqual(saved[0]['People'][0]['Role'], '饰 主角')
         self.assertIn('Cast', saved[0]['LockedFields'])
+
+    def test_douban_preferred_fields_and_tmdb_fallback_reach_emby(self):
+        saved = []
+
+        def emby_handler(request):
+            if request.method == 'POST':
+                saved.append(json.loads(request.content))
+                return httpx.Response(204)
+            if request.url.path.endswith('/Items/73025'):
+                return httpx.Response(200, json={'Id': '73025', 'Type': 'Series', 'Name': '庆余年',
+                                                  'ProviderIds': {'Tmdb': '12345'}})
+            if request.url.path.endswith('/Items'):
+                return httpx.Response(200, json={'Items': [{'Id': 'ep1', 'ParentIndexNumber': 1, 'IndexNumber': 1}]})
+            if request.url.path.endswith('/Items/ep1'):
+                return httpx.Response(200, json={'Id': 'ep1', 'Name': '旧分集'})
+            return httpx.Response(404)
+
+        def tmdb_handler(request):
+            if '/season/' in request.url.path:
+                return httpx.Response(200, json={'episodes': [{'episode_number': 1, 'name': 'TMDB 标题',
+                                                               'overview': 'TMDB 分集简介'}]})
+            return httpx.Response(200, json={'name': 'TMDB 标题', 'overview': 'TMDB 简介',
+                                              'genres': [{'name': '剧情'}]})
+
+        async def douban_data(_item, season=None):
+            return ({1: {'name': '豆瓣标题', 'overview': ''}} if season else
+                    {'name': '豆瓣剧名', 'overview': '豆瓣简介'})
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(tmdb_handler))
+        with patch.object(self.enrichment, '_services', return_value={'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_douban_data', side_effect=douban_data) as fetched, \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'all',
+                                                {**DEFAULT_ENRICH_CONFIG, 'metadata_source': 'douban'}))
+        self.assertEqual(fetched.call_count, 2)
+        self.assertEqual(saved[0]['Name'], '豆瓣剧名')
+        self.assertEqual(saved[0]['Overview'], '豆瓣简介')
+        self.assertEqual(saved[0]['Genres'], ['剧情'])
+        self.assertEqual(saved[1]['Name'], '豆瓣标题')
+        self.assertEqual(saved[1]['Overview'], 'TMDB 分集简介')
 
     def test_preview_classification_and_cached_repair(self):
         key = 'Emby::123'

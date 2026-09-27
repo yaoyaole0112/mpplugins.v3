@@ -21,7 +21,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.8.22",
+    "version": "2.8.23",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -29,6 +29,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.8.23": "数据补全设置展示 MoviePilot 当前 AI 模型；新增 TMDB、豆瓣优先元数据来源选择并实际用于剧集与分集补全，豆瓣匹配失败或字段缺失时安全回退 TMDB；增高补全设置弹窗并在小屏保留滚动",
       "v2.8.22": "数据补全的搜索剧集卡片增加补全设置弹窗：参考 MediaEnhance 配置 AI 翻译范围、无头像演员过滤、分集演职员、角色前缀、演员人数及锁定阈值；设置独立保存并接入 TMDB/Emby 补全，AI 默认关闭，启用后使用 MoviePilot 配置的兼容 OpenAI 接口的 LLM",
       "v2.8.21": "修复数据补全分集信息的 TMDB ConnectError：改用 MoviePilot 配置的 TMDB 域名与 HTTPS 代理；连接失败、超时及接口错误提供明确提示并避免在错误信息中暴露 API Key",
       "v2.8.20": "修复发送 Telegram 登录验证码后误显示已登录：仅在账号授权验证通过后标记登录，等待验证码期间保留输入框；失效会话不再误判为有效，补充对应回归测试",
