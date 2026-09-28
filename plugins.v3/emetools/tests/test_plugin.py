@@ -150,6 +150,17 @@ class PluginTests(unittest.TestCase):
             self.plugin.on_series_import(event)
         queued.assert_not_called()
 
+    def test_emby_episode_webhook_accepts_item_type_without_normalized_media_fields(self):
+        from types import SimpleNamespace
+        event = SimpleNamespace(event_data=SimpleNamespace(
+            event='ItemAdded', channel='', item_type='Episode', media_type=None,
+            item_id='episode-12345', server_name='Q4',
+            json_object={'Server': {'Name': 'Q4'},
+                         'Item': {'Type': 'Episode', 'SeriesId': 'series-678'}}))
+        with patch.object(self.plugin._enrichment, 'queue_import') as queued:
+            self.plugin.on_series_import(event)
+        queued.assert_called_once_with('Q4::series-678')
+
     def test_sidebar_uses_background_free_sparkles_icon(self):
         self.assertEqual(self.plugin.get_sidebar_nav()[0]["icon"], "mdi-shimmer")
 

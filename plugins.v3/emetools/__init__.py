@@ -104,7 +104,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.7"
+    plugin_version = "2.9.8"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -198,11 +198,32 @@ class EmeTools(_PluginBase):
         if not getattr(self, "_enabled", False) or not self._enrichment_config["auto_on_import"]:
             return
         data = getattr(event, "event_data", None)
-        if (getattr(data, "event", None) not in ("library.new", "ItemAdded") or
-                str(getattr(data, "channel", "")).lower() != "emby" or
-                getattr(data, "media_type", None) != "Episode"):
+        if not data:
             return
         raw = getattr(data, "json_object", None) or {}
+        item = raw.get("Item") if isinstance(raw, dict) else {}
+        item = item if isinstance(item, dict) else {}
+        event_name = str(getattr(data, "event", None) or "").strip()
+        channel = str(getattr(data, "channel", None) or "").strip()
+        media_type = (getattr(data, "media_type", None) or getattr(data, "item_type", None)
+                      or item.get("Type") or "")
+        # Emby Webhooks has used both ``media_type`` and ``item_type`` in
+        # MoviePilot releases.  Keep the filter strict on the payload item,
+        # but do not discard a valid Episode merely because one normalized
+        # field is absent.  This is intentionally diagnostic-only and never
+        # includes webhook URLs, tokens, paths, or message bodies.
+        if event_name not in ("library.new", "ItemAdded"):
+            return
+        if str(media_type).lower() not in ("episode", "剧集"):
+            return
+        if channel and "emby" not in channel.lower():
+            source_name = raw.get("Server", {}).get("Name") if isinstance(raw, dict) and isinstance(raw.get("Server"), dict) else ""
+            if "emby" not in str(source_name).lower():
+                return
+        logger.info("增强工具 数据补全：收到 Emby 入库事件 event=%s channel=%s type=%s series_id=%s",
+                    event_name[:32], channel[:32] or "未知", str(media_type)[:32],
+                    bool(item.get("SeriesId") or item.get("SeriesIdStr") or
+                         (item.get("Series") or {}).get("Id") if isinstance(item.get("Series"), dict) else False))
         source = raw.get("Server") if isinstance(raw, dict) else None
         server = str(getattr(data, "server_name", "") or
                      (source.get("Name") if isinstance(source, dict) else "") or "")
@@ -210,15 +231,13 @@ class EmeTools(_PluginBase):
             servers = list(self._enrichment._services())
             if len(servers) == 1:
                 server = servers[0]
-        item = raw.get("Item") if isinstance(raw, dict) else {}
-        item = item if isinstance(item, dict) else {}
         # Emby ItemAdded's item_id is the Episode ID.  Automatic enrichment
         # must debounce by the parent Series ID, otherwise _enrich receives an
         # Episode and silently fails the "Type == Series" validation.
         identifier = str(item.get("SeriesId") or item.get("SeriesIdStr") or
                          ((item.get("Series") or {}).get("Id") if isinstance(item.get("Series"), dict) else "") or "")
         if not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", identifier) or not server:
-            logger.warning("增强工具 数据补全：Emby 入库事件缺少剧集 SeriesId，已跳过自动补全")
+            logger.warning("增强工具 数据补全：Emby 入库事件缺少剧集 SeriesId 或媒体服务器，已跳过自动补全")
             return
         try:
             self._enrichment.queue_import(f"{server}::{identifier}")

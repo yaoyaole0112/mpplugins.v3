@@ -1,27 +1,9 @@
 {
-  "SubscribeOwner": {
-    "name": "订阅用户修正",
-    "description": "监听新建订阅并定时检查全部已有订阅，统一修正为指定的 MoviePilot 用户",
-    "labels": "订阅,工具",
-    "version": "1.2.1",
-    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
-    "author": "helios",
-    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
-    "release": true,
-    "system_version": ">=3.0.0",
-    "level": 2,
-    "history": {
-      "v1.2.1": "修复配置表单按钮无效：移至查看数据页面，并记录手动运行及新增订阅日志",
-      "v1.2.0": "配置页增加仅管理员可用的立即运行按钮，显示检查结果并优化字段提示间距",
-      "v1.1.0": "支持按 Cron 定时检查全部类型的已有订阅，并修正新增订阅的归属",
-      "v1.0.0": "首发：新建电视剧订阅时修正插件名称归属"
-    }
-  },
   "EmeTools": {
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.7",
+    "version": "2.9.8",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -29,6 +11,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.8": "修复部分 Emby Webhook 仅提供 item_type 或未填充 media_type/channel 时自动补全被误过滤的问题；兼容 ItemAdded 入库事件并记录安全诊断字段，仍按剧集 SeriesId 合并 5 分钟后补全",
       "v2.9.7": "修复 Emby 入库自动补全错误使用分集 ID 而非剧集 SeriesId 的问题；优先读取 Webhook 的 SeriesId，缺失时跳过并记录原因；自动补全启动失败会写入运行进度；设置说明明确 5 分钟针对最近一次分集入库而非剧集最终集数",
       "v2.9.6": "分集图片批量扫描日志显示剧名、服务器与 Emby 剧集条目 ID 含义；修复成功日志写入剧名、季集号、分集名称和 Emby 分集 ID，并在运行进度保留本次修复清单，避免早期记录被扫描日志覆盖",
       "v2.9.5": "批量分集图片修复开始前自动发现并触发 Emby MediaInfoKeeper 的近期元数据/预览缩略图任务，等待任务结束后再检测已有图片的发绿发紫；未安装或未提供该任务时安全跳过",
@@ -77,8 +60,7 @@
       "v2.7.5": "关键词监控显示真实频道名称并统一标签字号，拓宽清理确认选择框，统一执行周期与定时任务文案、卡片间距",
       "v2.7.4": "将定时清理确认方式改为与缺集检测范围一致的自定义选择框，优化单选交互和显示样式",
       "v2.7.3": "更名为增强工具，调整侧栏工具顺序，显示 Telegram 频道名称，并优化通用设置与缺集检测标题",
-      "v2.7.2": "修复订阅监控在插件重载或补漏轮询后重复转发历史命中消息的问题，增加持久化消息去重和统一频道消息标识",
-      "v2.7.1": "优化缺集检测范围选择：改为可搜索的常规多选下拉框，支持复选状态、关键词筛选和点击外部关闭",
+      "v2.7.1": "修复订阅监控在插件重载或补漏轮询后重复转发历史命中消息的问题，增加持久化消息去重和统一频道消息标识",
       "v2.7.0": "新增独立缺集检测：迁移原插件配置与历史结果，支持 Emby/TMDB 扫描、按季订阅、筛选与 CSV 导出；首次迁移默认关闭新定时任务以避免重复运行；补充插件更新说明",
       "v2.6.2": "优化定时清理确认方式与自动隔离清理选项之间的间距",
       "v2.6.1": "调整定时清理确认选项位置，统一回收站入口名称并更名为 ME工具",
@@ -217,26 +199,6 @@
       "v3.2.0": "收敛下载历史读取边界，规范媒体身份并补充下载器标签与生命周期测试。",
       "v3.1.0": "适配 V3 SDK 导入规范：插件内部导入全面迁移至 app.sdk 体系，去除对旧版兼容层的依赖。",
       "v3.0.0": "V3 独立大版本：下载历史识别改用媒体来源和媒体 ID。"
-    }
-  },
-  "BrushFlow": {
-    "name": "站点刷流",
-    "description": "自动托管多个站点刷流任务，并独立调度、统计与诊断。",
-    "labels": "刷流,仪表板",
-    "version": "6.1.4",
-    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
-    "author": "jxxghp,InfinityPacer,Seed680 / helios",
-    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
-    "release": true,
-    "system_version": ">=3.0.0",
-    "level": 2,
-    "history": {
-      "v6.1.4": "修复插件启动/更新后整表回写配置，把已保存的下载器标签重置为空。",
-      "v6.1.3": "修复高级设置里已保存的下载器标签被覆盖成空，并在添加种子后移除临时随机标签。",
-      "v6.1.2": "修复站点分享率数据缺失时误触发刷流，等待数据更新后再继续判断。",
-      "v6.1.1": "修复站点刷流工作台首次加载时短暂显示插件未启用提示的问题。",
-      "v6.1.0": "适配 V3 SDK 导入规范：插件内部导入全面迁移至 app.sdk 体系，去除对旧版兼容层的依赖。",
-      "v6.0.1": "新增种子下载标签配置，默认使用可读的「刷流-站点名」标签，新增种子仅打单一标签，不再叠加随机代码标签"
     }
   },
   "EpisodeMissingSubscribe": {
