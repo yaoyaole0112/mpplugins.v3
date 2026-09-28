@@ -139,16 +139,16 @@ class EnrichmentTests(unittest.TestCase):
                 with self.subTest(ids=ids), self.assertRaises(ValueError):
                     self.enrichment._selected_tv_libraries(ids)
 
-    def test_batch_preview_only_repairs_missing_or_suspected_images(self):
+    def test_batch_preview_only_repairs_existing_suspected_images(self):
         async def scan(series_id):
             self.enrichment._preview_selection = {
                 f'{series_id}::ep1': {'path': str(self.strm)},
                 f'{series_id}::ep2': {'path': str(self.strm)}}
             return [{'id': f'{series_id}::ep1', 'status': 'missing'},
-                    {'id': f'{series_id}::ep2', 'status': 'keep'}]
+                    {'id': f'{series_id}::ep2', 'status': 'candidate'}]
 
         async def repair(series_id, targets, force):
-            self.assertEqual([key for key, _ in targets], [f'{series_id}::ep1'])
+            self.assertEqual([key for key, _ in targets], [f'{series_id}::ep2'])
             self.assertFalse(force)
             self.enrichment.state['preview_result'] = {'ok': 1, 'fail': 0}
 

@@ -1336,6 +1336,12 @@ class DataEnrichment:
                        if key.startswith(name + "::") and key in self._preview_selection]
         if len(targets) != len(episode_ids) or len(set(episode_ids)) != len(episode_ids):
             raise ValueError("所选分集已失效，请重新扫描")
+        # Missing thumbnails are handled by Emby/Shenyi; this tool only
+        # repairs an existing thumbnail when its pixels show a color cast.
+        targets = [(key, target) for key, target in targets
+                   if self._preview_status(key, target.get("thumb", "")) == "candidate"]
+        if not targets:
+            raise ValueError("没有检测到发绿或发紫的已有分集图片")
         return self._begin("分集图片修复", self._repair_preview, series_id, targets, force)
 
     def start_batch_preview(self, series_ids):
@@ -1357,8 +1363,8 @@ class DataEnrichment:
                 episodes = await self.scan_preview(series_id)
                 scanned += len(episodes)
                 targets = [(entry["id"], self._preview_selection[entry["id"]])
-                           for entry in episodes if entry["status"] in ("missing", "candidate")]
-                self.log(f"[{index}/{len(series_ids)}] 共 {len(episodes)} 集，待修复 {len(targets)} 集")
+                           for entry in episodes if entry["status"] == "candidate"]
+                self.log(f"[{index}/{len(series_ids)}] 共 {len(episodes)} 集，检测到偏色图片 {len(targets)} 集（缺少缩略图跳过）")
                 # Prevent a large library from silently launching hundreds of
                 # network FFmpeg jobs; the user can rerun a narrower selection.
                 if len(targets) > 300:
