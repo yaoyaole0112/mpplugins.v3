@@ -21,7 +21,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.6",
+    "version": "2.9.7",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -29,6 +29,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.7": "修复 Emby 入库自动补全错误使用分集 ID 而非剧集 SeriesId 的问题；优先读取 Webhook 的 SeriesId，缺失时跳过并记录原因；自动补全启动失败会写入运行进度；设置说明明确 5 分钟针对最近一次分集入库而非剧集最终集数",
       "v2.9.6": "分集图片批量扫描日志显示剧名、服务器与 Emby 剧集条目 ID 含义；修复成功日志写入剧名、季集号、分集名称和 Emby 分集 ID，并在运行进度保留本次修复清单，避免早期记录被扫描日志覆盖",
       "v2.9.5": "批量分集图片修复开始前自动发现并触发 Emby MediaInfoKeeper 的近期元数据/预览缩略图任务，等待任务结束后再检测已有图片的发绿发紫；未安装或未提供该任务时安全跳过",
       "v2.9.4": "分集图片修复仅处理已有缩略图且检测到发绿或发紫的图片；缺少 thumb 图片的分集跳过，交由 Emby 或神医助手获取，避免批量任务因大量缺图长时间运行",

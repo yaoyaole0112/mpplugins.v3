@@ -104,7 +104,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.6"
+    plugin_version = "2.9.7"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -210,9 +210,15 @@ class EmeTools(_PluginBase):
             servers = list(self._enrichment._services())
             if len(servers) == 1:
                 server = servers[0]
-        identifier = str(getattr(data, "item_id", "") or
-                         ((raw.get("Item") or {}).get("SeriesId") if isinstance(raw, dict) else "") or "")
+        item = raw.get("Item") if isinstance(raw, dict) else {}
+        item = item if isinstance(item, dict) else {}
+        # Emby ItemAdded's item_id is the Episode ID.  Automatic enrichment
+        # must debounce by the parent Series ID, otherwise _enrich receives an
+        # Episode and silently fails the "Type == Series" validation.
+        identifier = str(item.get("SeriesId") or item.get("SeriesIdStr") or
+                         ((item.get("Series") or {}).get("Id") if isinstance(item.get("Series"), dict) else "") or "")
         if not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", identifier) or not server:
+            logger.warning("增强工具 数据补全：Emby 入库事件缺少剧集 SeriesId，已跳过自动补全")
             return
         try:
             self._enrichment.queue_import(f"{server}::{identifier}")

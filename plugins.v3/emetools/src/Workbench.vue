@@ -851,7 +851,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div class="eme-card-heading"><h3>补全设置</h3><button class="eme-button text" type="button" @click="enrichSettings.open = false">关闭</button></div>
           <div class="eme-enrich-settings-body">
             <label class="eme-switch-label"><input v-model="enrichSettings.draft.auto_on_import" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>Emby 分集入库后自动补全整剧</span></label>
-            <p class="eme-hint">同一部剧最后一集入库后静默 5 分钟再执行一次；需将 Emby 新入库事件接入 MoviePilot Webhook。启用 AI 后一并翻译演职员、标题和简介。</p>
+            <p class="eme-hint">同一部剧最近一次分集入库后静默 5 分钟再执行一次（不是指剧集的最终集数）；需将 Emby 新入库事件接入 MoviePilot Webhook。启用 AI 后一并翻译演职员、标题和简介。</p>
             <div class="eme-enrich-source"><strong>元数据来源</strong><div class="eme-enrich-source-options"><label v-for="source in [{ value: 'tmdb', label: 'TMDB' }, { value: 'douban', label: '豆瓣优先' }]" :key="source.value"><input v-model="enrichSettings.draft.metadata_source" type="radio" name="enrich-metadata-source" :value="source.value" />{{ source.label }}</label></div></div>
             <p class="eme-hint">演职人员中文资料不足时，依次尝试豆瓣、电视猫演员表；仅使用能确认属于该剧的中文姓名及角色。仍缺少中文角色名时，可启用 AI 智能补齐及演职人员汉化。</p>
             <label class="eme-switch-label"><input v-model="enrichSettings.draft.ai_enabled" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.ai_available" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 AI 智能补齐</span></label>

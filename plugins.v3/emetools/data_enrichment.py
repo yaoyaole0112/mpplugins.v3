@@ -257,7 +257,8 @@ class DataEnrichment:
             if "正在运行" in str(exc):
                 self._queue_import(series_id, time.time() + 30, expected=deadline)
             else:
-                logger.warning("增强工具 数据补全：入库自动补全未启动：%s", type(exc).__name__)
+                self.log(f"入库自动补全未启动（{_log_series(series_id)}）：{type(exc).__name__}：{str(exc)[:120]}")
+                logger.warning("增强工具 数据补全：入库自动补全未启动：%s：%s", type(exc).__name__, str(exc)[:160])
                 with self.lock:
                     if self._import_pending.get(series_id) == deadline:
                         self._import_timers.pop(series_id, None)

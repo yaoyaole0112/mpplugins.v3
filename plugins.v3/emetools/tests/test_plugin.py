@@ -125,20 +125,30 @@ class PluginTests(unittest.TestCase):
         from types import SimpleNamespace
         event = lambda **kwargs: SimpleNamespace(event_data=SimpleNamespace(**kwargs))
         data = {"event": "library.new", "channel": "emby", "media_type": "Episode",
-                "item_id": "12345", "server_name": "Q4", "json_object": {}}
+                "item_id": "episode-12345", "server_name": "Q4",
+                "json_object": {"Item": {"Id": "episode-12345", "SeriesId": "series-678"}}}
         with patch.object(self.plugin._enrichment, 'queue_import') as queued:
             self.plugin.on_series_import(event(**data))
-            queued.assert_called_once_with('Q4::12345')
+            queued.assert_called_once_with('Q4::series-678')
             self.plugin.on_series_import(event(**{**data, 'media_type': 'Movie'}))
             self.plugin.on_series_import(event(**{**data, 'event': 'item.updated'}))
             self.plugin.on_series_import(event(**{**data, 'channel': 'jellyfin'}))
             self.assertEqual(queued.call_count, 1)
             self.plugin.on_series_import(event(**{**data, 'server_name': None,
-                'json_object': {'Server': {'Name': 'Q4'}}}))
+                'json_object': {'Server': {'Name': 'Q4'}, 'Item': {'SeriesId': 'series-678'}}}))
             self.assertEqual(queued.call_count, 2)
             self.plugin._enrichment_config['auto_on_import'] = False
             self.plugin.on_series_import(event(**data))
             self.assertEqual(queued.call_count, 2)
+
+    def test_emby_episode_webhook_without_series_id_is_ignored(self):
+        from types import SimpleNamespace
+        event = SimpleNamespace(event_data=SimpleNamespace(
+            event='library.new', channel='emby', media_type='Episode',
+            item_id='episode-12345', server_name='Q4', json_object={'Item': {'Id': 'episode-12345'}}))
+        with patch.object(self.plugin._enrichment, 'queue_import') as queued:
+            self.plugin.on_series_import(event)
+        queued.assert_not_called()
 
     def test_sidebar_uses_background_free_sparkles_icon(self):
         self.assertEqual(self.plugin.get_sidebar_nav()[0]["icon"], "mdi-shimmer")
