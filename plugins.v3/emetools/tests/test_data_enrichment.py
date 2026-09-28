@@ -139,6 +139,22 @@ class EnrichmentTests(unittest.TestCase):
                 with self.subTest(ids=ids), self.assertRaises(ValueError):
                     self.enrichment._selected_tv_libraries(ids)
 
+    def test_trigger_keeper_thumbnail_task(self):
+        class Client:
+            async def post(self, path):
+                self.path = path
+                return SimpleNamespace(raise_for_status=lambda: None)
+
+        client = Client()
+        responses = iter([
+            [{"Id": "keeper-task", "Name": "MediaInfoKeeper - Refresh Recent Metadata", "State": "Idle"}],
+            {"State": "Completed"},
+        ])
+        with patch.object(self.enrichment, '_json', side_effect=lambda *_args, **_kwargs: next(responses)), \
+             patch('emetools.data_enrichment.asyncio.sleep', new=AsyncMock()):
+            asyncio.run(self.enrichment._trigger_keeper_thumbnails(client))
+        self.assertEqual(client.path, 'ScheduledTasks/Running/keeper-task')
+
     def test_batch_preview_only_repairs_existing_suspected_images(self):
         async def scan(series_id):
             self.enrichment._preview_selection = {

@@ -732,6 +732,11 @@ class DataEnrichment:
         return self._begin("批量扫描与修复分集图片", self._preview_libraries, libraries)
 
     async def _preview_libraries(self, libraries):
+        first = libraries[0] if libraries else None
+        if first:
+            name, _ = self._split(first["id"])
+            async with self._server(name) as emby:
+                await self._trigger_keeper_thumbnails(emby)
         series_ids = await self._library_series(libraries)
         self.log(f"已读取全部 {len(libraries)} 个电视剧媒体库，共 {len(series_ids)} 部剧集")
         await self._batch_preview(series_ids)
@@ -1206,6 +1211,41 @@ class DataEnrichment:
             self.log(f"神医 {label} 等待超时，继续下一步")
         except httpx.HTTPError as error:
             self.log(f"神医 {label} 不可用（{type(error).__name__}），跳过")
+
+    async def _trigger_keeper_thumbnails(self, emby):
+        """Run MediaInfoKeeper's configured metadata/thumbnail task when present."""
+        try:
+            tasks = await self._json(emby, "ScheduledTasks")
+            candidates = []
+            for task in tasks if isinstance(tasks, list) else []:
+                text = " ".join(str(task.get(key) or "") for key in ("Key", "Name", "Description"))
+                normalized = re.sub(r"\s+", "", text).lower()
+                if ("mediainfokeeper" in normalized and "refresh" in normalized and
+                        ("recentmetadata" in normalized or "thumbnail" in normalized or "image" in normalized)):
+                    candidates.append(task)
+            if not candidates:
+                self.log("未找到 MediaInfoKeeper 缩略图补全任务，跳过缺失图片补全")
+                return
+            task = candidates[0]
+            task_id = str(task.get("Id") or "")
+            if not task_id:
+                self.log("MediaInfoKeeper 缩略图补全任务缺少任务 ID，跳过")
+                return
+            if str(task.get("State") or "").lower() != "running":
+                response = await emby.post(f"ScheduledTasks/Running/{task_id}")
+                response.raise_for_status()
+                self.log("已触发 MediaInfoKeeper 缩略图补全任务")
+            else:
+                self.log("MediaInfoKeeper 缩略图补全任务已在运行")
+            for _ in range(180):
+                await asyncio.sleep(20)
+                current = await self._json(emby, f"ScheduledTasks/{task_id}")
+                if str(current.get("State") or "").lower() != "running":
+                    self.log("MediaInfoKeeper 缩略图补全任务已完成")
+                    return
+            self.log("MediaInfoKeeper 缩略图补全任务等待超时，继续检测已有图片偏色")
+        except (httpx.HTTPError, ValueError) as error:
+            self.log(f"触发 MediaInfoKeeper 缩略图补全失败（{type(error).__name__}），跳过")
 
     async def _probe(self, item):
         url = self._video_url(item["path"])
