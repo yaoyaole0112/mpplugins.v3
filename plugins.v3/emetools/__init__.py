@@ -220,10 +220,11 @@ class EmeTools(_PluginBase):
             source_name = raw.get("Server", {}).get("Name") if isinstance(raw, dict) and isinstance(raw.get("Server"), dict) else ""
             if "emby" not in str(source_name).lower():
                 return
+        has_series_id = bool(item.get("SeriesId") or item.get("SeriesIdStr") or
+                            ((item.get("Series") or {}).get("Id")
+                             if isinstance(item.get("Series"), dict) else ""))
         logger.info("增强工具 数据补全：收到 Emby 入库事件 event=%s channel=%s type=%s series_id=%s",
-                    event_name[:32], channel[:32] or "未知", str(media_type)[:32],
-                    bool(item.get("SeriesId") or item.get("SeriesIdStr") or
-                         (item.get("Series") or {}).get("Id") if isinstance(item.get("Series"), dict) else False))
+                    event_name[:32], channel[:32] or "未知", str(media_type)[:32], has_series_id)
         source = raw.get("Server") if isinstance(raw, dict) else None
         server = str(getattr(data, "server_name", "") or
                      (source.get("Name") if isinstance(source, dict) else "") or "")
