@@ -177,7 +177,7 @@ class DataEnrichment:
         self.lock = threading.Lock()
         self.state = {"running": False, "task": "", "done": False, "error": "", "log": [],
                       "mediainfo": None, "preview": [], "preview_result": None,
-                      "batch_result": None}
+                      "batch_result": None, "preview_repaired": []}
         self._preview_selection = {}
         self._mi_selection = []
         self._import_timers = {}
@@ -267,7 +267,8 @@ class DataEnrichment:
     def status(self):
         with self.lock:
             return {**self.state, "log": list(self.state["log"]),
-                    "preview": list(self.state["preview"])}
+                    "preview": list(self.state["preview"]),
+                    "preview_repaired": list(self.state["preview_repaired"])}
 
     def options(self):
         return validate_enrich_config(getattr(self.owner, "_enrichment_config", {}) or {})
@@ -679,7 +680,7 @@ class DataEnrichment:
                                    "name": str(library.name or "未命名"), "server": server})
         return result
 
-    async def _library_series(self, libraries):
+    async def _library_series(self, libraries, titles=None):
         """Page through each selected TV view, without a first-N catalog cutoff."""
         seen = set()
         result = []
@@ -700,6 +701,8 @@ class DataEnrichment:
                             if key not in seen:
                                 seen.add(key)
                                 result.append(key)
+                                if titles is not None:
+                                    titles[key] = str(item.get("Name") or "未命名剧集").replace("\n", " ")[:90]
                     offset += len(page)
                     if not page or offset >= int(data.get("TotalRecordCount", offset)):
                         break
@@ -737,9 +740,10 @@ class DataEnrichment:
             name, _ = self._split(first["id"])
             async with self._server(name) as emby:
                 await self._trigger_keeper_thumbnails(emby)
-        series_ids = await self._library_series(libraries)
+        titles = {}
+        series_ids = await self._library_series(libraries, titles)
         self.log(f"已读取全部 {len(libraries)} 个电视剧媒体库，共 {len(series_ids)} 部剧集")
-        await self._batch_preview(series_ids)
+        await self._batch_preview(series_ids, titles)
 
     def start_batch_enrich(self, series_ids):
         if not isinstance(series_ids, list) or not 1 <= len(series_ids) <= 50:
@@ -863,7 +867,9 @@ class DataEnrichment:
                 "episode": item.get("IndexNumber") or 0,
                 "dovi": dovi, "has_thumb": os.path.isfile(thumb), "status": status}
             results.append(result)
-            selected[result["id"]] = {"path": fs_path, "thumb": thumb}
+            selected[result["id"]] = {"path": fs_path, "thumb": thumb,
+                "series": str(item.get("SeriesName") or "").replace("\n", " ")[:90],
+                "season": result["season"], "episode": result["episode"], "name": result["name"]}
         with self.lock:
             self._preview_selection = selected
             self.state["preview"] = results
@@ -874,6 +880,8 @@ class DataEnrichment:
             if self.state["running"]:
                 raise ValueError("已有数据补全任务正在运行，请等待完成")
             self.state.update(running=True, done=False, task=task, error="", log=[])
+            if task in ("分集图片修复", "批量扫描与修复分集图片"):
+                self.state["preview_repaired"] = []
 
         def worker():
             try:
@@ -1395,12 +1403,16 @@ class DataEnrichment:
                 raise ValueError("所选 Emby 服务器不可用，请刷新剧集列表")
         return self._begin("批量扫描与修复分集图片", self._batch_preview, list(series_ids))
 
-    async def _batch_preview(self, series_ids):
+    async def _batch_preview(self, series_ids, titles=None):
         scanned = ok = failed = 0
         for index, series_id in enumerate(series_ids, 1):
-            self.log(f"[{index}/{len(series_ids)}] 扫描分集图片 {_log_series(series_id)}")
+            server, series_item_id = self._split(series_id)
+            title = (titles or {}).get(series_id) or "未命名剧集"
+            self.log(f"[{index}/{len(series_ids)}] 扫描《{title}》（服务器 {server}，Emby 剧集条目 ID {series_item_id}）")
             try:
                 episodes = await self.scan_preview(series_id)
+                for target in self._preview_selection.values():
+                    target["series"] = title if title != "未命名剧集" else target.get("series") or title
                 scanned += len(episodes)
                 targets = [(entry["id"], self._preview_selection[entry["id"]])
                            for entry in episodes if entry["status"] == "candidate"]
@@ -1427,6 +1439,8 @@ class DataEnrichment:
             self.state["batch_result"] = {"scanned": scanned, "ok": ok, "fail": failed}
             self.state["preview_result"] = {"ok": ok, "fail": failed}
         self.log(f"批量图片处理结束：扫描 {scanned} 集，修复 {ok} 集，失败 {failed} 项")
+        if self.state["preview_repaired"]:
+            self.log("本次已修复的剧集与分集见运行进度下方的修复清单")
 
     async def _repair_preview(self, series_id, targets, force):
         name, _ = self._split(series_id)
@@ -1480,7 +1494,17 @@ class DataEnrichment:
                 cache[key] = {"thumb": thumb, "mtime": int(stat.st_mtime), "size": stat.st_size}
                 self.owner.save_data("enrichment_preview_cache", cache)
                 completed += 1
-                self.log(f"[{position}/{len(targets)}] 分集 {key.split('::', 1)[1]} 已重截并刷新 Emby")
+                episode_id = key.split("::", 1)[1]
+                series_title = str(target.get("series") or "未命名剧集").replace("\n", " ")[:90]
+                episode_title = str(target.get("name") or "").replace("\n", " ")[:70]
+                season = target.get("season")
+                episode = target.get("episode")
+                code = (f"S{int(season):02d}E{int(episode):02d}" if season is not None and episode is not None
+                        else "季集号未知")
+                detail = f"《{series_title}》 {code}{' · ' + episode_title if episode_title else ''}（服务器 {name}，Emby 分集 ID {episode_id}）"
+                with self.lock:
+                    self.state["preview_repaired"].append(detail)
+                self.log(f"[{position}/{len(targets)}] 已修复并刷新 Emby：{detail}")
             except Exception as error:
                 failed += 1
                 self.log(f"[{position}/{len(targets)}] 修复失败：{type(error).__name__}：{str(error)[:100]}")

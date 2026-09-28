@@ -132,6 +132,20 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(len(ids), 1201)
         self.assertEqual(ids[-1], 'Q4::1200')
 
+    def test_library_series_collects_titles_for_preview_logs(self):
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): pass
+
+        names = {}
+        with patch.object(self.enrichment, '_server', return_value=FakeClient()), \
+             patch.object(self.enrichment, '_user_id', new=AsyncMock(return_value='user')), \
+             patch.object(self.enrichment, '_json', new=AsyncMock(return_value={
+                 'Items': [{'Id': '14595', 'Name': '测试剧集'}], 'TotalRecordCount': 1})):
+            ids = asyncio.run(self.enrichment._library_series([{'id': 'Q4::11'}], names))
+        self.assertEqual(ids, ['Q4::14595'])
+        self.assertEqual(names, {'Q4::14595': '测试剧集'})
+
     def test_library_batch_rejects_invalid_or_movie_library(self):
         with patch.object(self.enrichment, 'tv_libraries', return_value=[
             {'id': 'Q4::11', 'name': '电视剧', 'server': 'Q4'}]):
@@ -173,6 +187,7 @@ class EnrichmentTests(unittest.TestCase):
             asyncio.run(self.enrichment._batch_preview(['Q4::1', 'Q4::2']))
         self.assertEqual(self.enrichment.status()['batch_result'],
                          {'scanned': 4, 'ok': 2, 'fail': 0})
+        self.assertTrue(any('Emby 剧集条目 ID 1' in line for line in self.enrichment.status()['log']))
 
     def test_all_mode_writes_series_ids_studios_and_episode_people(self):
         written = {}
@@ -777,6 +792,7 @@ class EnrichmentTests(unittest.TestCase):
             asyncio.run(self.enrichment._repair_preview('Q4::series', [
                 ('Q4::ep1', {'path': str(self.strm)})], force=True))
         self.assertTrue(saved)
+        self.assertIn('Emby 分集 ID ep1', self.enrichment.status()['preview_repaired'][0])
         with Image.open(temporary) as image:
             self.assertEqual(image.size, (200, 96))
 
