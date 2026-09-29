@@ -695,7 +695,10 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
     <aside class="eme-sidebar">
       <div class="eme-brand">
         <span class="eme-brand-icon" aria-hidden="true" />
-        <strong>增强工具</strong>
+        <div class="eme-brand-copy">
+          <strong>增强工具</strong>
+          <small>订阅频道监控、缺集检测、媒体清理与数据补全</small>
+        </div>
       </div>
       <nav class="eme-sidebar-card" aria-label="增强工具页面">
         <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" :aria-current="active === section.key ? 'page' : undefined" @click="chooseSection(section.key)">
@@ -971,7 +974,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg){background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg > *){display:none}
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon::before){content:"";display:block;width:1em;height:1em;background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
-.eme-brand strong{font-size:1.35rem;line-height:1.3;font-weight:600;letter-spacing:0}
+.eme-brand-copy{min-width:0}.eme-brand strong{font-size:1.35rem;line-height:1.3;font-weight:600;letter-spacing:0}.eme-brand-copy small{margin-top:2px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .eme-sidebar-card{box-sizing:border-box;display:flex;flex-direction:column;gap:3px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:12px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:16px;background:rgb(var(--v-theme-surface));box-shadow:0 1px 2px rgba(32,35,42,.03)}
 .eme-sidebar-card .eme-nav{flex:none;padding:11px 10px;border:1px solid transparent}
 .eme-sidebar-card .eme-nav.selected{border-color:rgba(var(--v-theme-primary),.22);background:rgba(var(--v-theme-primary),.09)}
