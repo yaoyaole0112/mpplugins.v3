@@ -665,7 +665,12 @@ class DataEnrichment:
         if len(keyword) < 2:
             return []
         results = []
-        for name, instance in self._services().items():
+        try:
+            services = self._services()
+        except Exception as error:
+            logger.exception("增强工具 数据补全：读取 Emby 服务失败")
+            raise ValueError(f"读取 Emby 服务失败：{type(error).__name__}") from error
+        for name, instance in services.items():
             try:
                 async with self._server(name) as client:
                     user = await self._user_id(name, client)
