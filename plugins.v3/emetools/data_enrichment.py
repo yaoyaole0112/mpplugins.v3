@@ -161,8 +161,13 @@ def _docker_job(image, config, *, timeout=240, binary=False):
 
 def _frame_host_root():
     """Resolve MoviePilot's /config bind for a short-lived FFmpeg output dir."""
-    hostname = os.environ.get("HOSTNAME", "")
-    if not re.fullmatch(r"[a-f0-9]{12,64}", hostname):
+    hostname = os.environ.get("HOSTNAME", "").strip()
+    if not hostname:
+        try:
+            hostname = Path("/etc/hostname").read_text(encoding="utf-8").strip()
+        except OSError:
+            hostname = ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", hostname):
         raise ValueError("无法确认 MoviePilot 容器标识，已取消截帧")
     data = _docker("GET", f"/containers/{hostname}/json").json()
     mount = next((entry for entry in data.get("Mounts", [])

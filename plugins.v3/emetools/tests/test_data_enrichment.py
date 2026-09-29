@@ -754,6 +754,14 @@ class EnrichmentTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '/config'):
                 _frame_host_root()
 
+    def test_frame_mount_accepts_compose_container_name(self):
+        details = {'Mounts': [{'Destination': '/config', 'Source': '/host/moviepilot-config',
+                               'Type': 'bind'}]}
+        with patch.dict(os.environ, {'HOSTNAME': 'moviepilot'}, clear=False), \
+             patch('emetools.data_enrichment._docker', return_value=SimpleNamespace(json=lambda: details)) as docker:
+            self.assertEqual(_frame_host_root(), '/host/moviepilot-config')
+            self.assertEqual(docker.call_args.args, ('GET', '/containers/moviepilot/json'))
+
     def test_frame_failure_classifies_vulkan_without_leaking_strm_url(self):
         responses = [SimpleNamespace(json=lambda: {'Id': 'cid'}), SimpleNamespace(),
                      SimpleNamespace(json=lambda: {'StatusCode': 187}),
