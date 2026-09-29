@@ -1,5 +1,0 @@
-<<<<<<<< HEAD:plugins.v3/emetools/dist/assets/__federation_expose_Config-CrO6XKUs.js
-import{importShared as o}from"./__federation_fn_import-E6wRZccp.js";import{W as r}from"./Workbench-oH_RbXYY.js";const{openBlock:i,createBlock:c}=await o("vue"),{onMounted:p}=await o("vue"),f={__name:"Config",props:{api:{type:Object,default:()=>({})}},emits:["layout","close"],setup(a,{emit:n}){const e=n;return p(()=>e("layout",{maxWidth:"80rem"})),(l,t)=>(i(),c(r,{api:a.api,onClose:t[0]||(t[0]=s=>e("close"))},null,8,["api"]))}};export{f as default};
-========
-import{importShared as o}from"./__federation_fn_import-E6wRZccp.js";import{W as r}from"./Workbench-BONTVkUm.js";const{openBlock:i,createBlock:c}=await o("vue"),{onMounted:p}=await o("vue"),f={__name:"Config",props:{api:{type:Object,default:()=>({})}},emits:["layout","close"],setup(a,{emit:n}){const e=n;return p(()=>e("layout",{maxWidth:"80rem"})),(l,t)=>(i(),c(r,{api:a.api,onClose:t[0]||(t[0]=s=>e("close"))},null,8,["api"]))}};export{f as default};
->>>>>>>> 562bc5c (发布增强工具页面构建产物):plugins.v3/emetools/dist/assets/__federation_expose_Config-DcDCGDkZ.js

@@ -7,7 +7,7 @@
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
-    "release": false,
+    "release": true,
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
