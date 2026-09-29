@@ -230,6 +230,38 @@ class DataEnrichment:
         self._queue_import(series_id, time.time() + 300)
         logger.info("增强工具 数据补全：%s 新分集入库，5 分钟后合并补全", _log_series(series_id))
 
+    def queue_import_by_tmdb(self, tmdb_id):
+        """Fallback for successful MoviePilot transfers when Emby Webhook is unavailable."""
+        value = str(tmdb_id or "").strip()
+        if not value.isdigit():
+            return False
+        thread = threading.Thread(target=self._resolve_tmdb_import, args=(value,), daemon=True)
+        thread.start()
+        return True
+
+    def _resolve_tmdb_import(self, tmdb_id):
+        async def resolve():
+            for server in self._services():
+                try:
+                    async with self._server(server) as client:
+                        user = await self._user_id(server, client)
+                        response = await self._json(client, f"Users/{user}/Items", {
+                            "Recursive": "true", "IncludeItemTypes": "Series",
+                            "AnyProviderIdEquals": f"tmdb.{tmdb_id}",
+                            "Fields": "ProviderIds,ProductionYear", "Limit": 20})
+                    items = response.get("Items") if isinstance(response, dict) else []
+                    for item in items or []:
+                        identifier = str(item.get("Id") or "")
+                        if re.fullmatch(r"[a-zA-Z0-9-]{1,64}", identifier):
+                            self.queue_import(f"{server}::{identifier}")
+                            return
+                except Exception as exc:
+                    logger.info("增强工具 数据补全：整理完成后按 TMDB 查找剧集失败：%s", type(exc).__name__)
+        try:
+            asyncio.run(resolve())
+        except Exception as exc:
+            logger.info("增强工具 数据补全：整理完成后补全兜底失败：%s", type(exc).__name__)
+
     def _run_import(self, series_id, deadline):
         with self.lock:
             if self._closed or self._import_pending.get(series_id) != deadline:

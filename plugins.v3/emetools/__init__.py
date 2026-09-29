@@ -104,7 +104,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.8"
+    plugin_version = "2.9.9"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -244,6 +244,24 @@ class EmeTools(_PluginBase):
             self._enrichment.queue_import(f"{server}::{identifier}")
         except (ValueError, OSError, RuntimeError) as exc:
             logger.warning("增强工具 数据补全：忽略不完整的 Emby 入库事件：%s", type(exc).__name__)
+
+    @eventmanager.register(EventType.TransferComplete)
+    def on_transfer_complete(self, event: Event):
+        """Use MoviePilot's transfer event when Emby Webhook is unavailable."""
+        if not getattr(self, "_enabled", False) or not self._enrichment_config["auto_on_import"]:
+            return
+        data = getattr(event, "event_data", None)
+        if not isinstance(data, dict):
+            return
+        media = data.get("mediainfo") or {}
+        tmdb_id = (media.get("tmdb_id") if isinstance(media, dict) else
+                   getattr(media, "tmdb_id", None) or getattr(media, "tmdbid", None))
+        if not tmdb_id:
+            meta = data.get("meta") or {}
+            tmdb_id = meta.get("tmdb_id") if isinstance(meta, dict) else getattr(meta, "tmdb_id", None)
+        if str(tmdb_id).isdigit():
+            logger.info("增强工具 数据补全：整理完成事件触发入库兜底（TMDB=%s）", str(tmdb_id)[:20])
+            self._enrichment.queue_import_by_tmdb(tmdb_id)
 
     def get_state(self) -> bool:
         return self._enabled
