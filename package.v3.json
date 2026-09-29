@@ -3,7 +3,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.9",
+    "version": "2.9.10",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -11,6 +11,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.10": "优化增强工具页面布局：参照站点刷流统一顶部插件标题、三星图标、左侧工具卡片及右侧内容的间距和对齐，保持宽屏与窄屏显示一致",
       "v2.9.9": "增加 MoviePilot 整理完成事件兜底：当 Emby Webhook 未送达时，按整理事件中的 TMDB ID 查找 Emby 剧集并进入 5 分钟合并补全；保留 Webhook 路径并避免重复入队",
       "v2.9.8": "修复部分 Emby Webhook 仅提供 item_type 或未填充 media_type/channel 时自动补全被误过滤的问题；兼容 ItemAdded 入库事件并记录安全诊断字段，仍按剧集 SeriesId 合并 5 分钟后补全",
       "v2.9.7": "修复 Emby 入库自动补全错误使用分集 ID 而非剧集 SeriesId 的问题；优先读取 Webhook 的 SeriesId，缺失时跳过并记录原因；自动补全启动失败会写入运行进度；设置说明明确 5 分钟针对最近一次分集入库而非剧集最终集数",

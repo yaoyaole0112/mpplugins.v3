@@ -704,11 +704,12 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
       </nav>
     </aside>
     <main class="eme-main">
-      <!-- 页面标题与说明暂不显示，保留以便日后恢复。
       <header class="eme-header">
-        <div><h2>{{ current.title }}</h2><p>{{ current.detail }}</p></div>
+        <div class="eme-page-brand">
+          <span class="eme-page-brand-icon" aria-hidden="true" />
+          <h2>增强工具</h2>
+        </div>
       </header>
-      -->
       <div v-if="loading" class="eme-message">正在加载插件配置…</div>
       <template v-if="active === 'missing'">
         <section class="eme-card">
@@ -977,11 +978,16 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg > *){display:none}
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon::before){content:"";display:block;width:1em;height:1em;background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
 .eme-brand strong{font-size:25px;line-height:1.25;font-weight:700}
-.eme-sidebar-card{box-sizing:border-box;display:flex;flex-direction:column;gap:3px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:12px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:16px;background:rgb(var(--v-theme-surface))}
+.eme-sidebar-card{box-sizing:border-box;display:flex;flex-direction:column;gap:3px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:12px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:16px;background:rgb(var(--v-theme-surface));box-shadow:0 1px 2px rgba(32,35,42,.03)}
 .eme-sidebar-card .eme-nav{flex:none;padding:11px 10px;border:1px solid transparent}
 .eme-sidebar-card .eme-nav.selected{border-color:rgba(var(--v-theme-primary),.22);background:rgba(var(--v-theme-primary),.09)}
 .eme-sidebar-card .eme-nav:focus-visible{outline:2px solid rgb(var(--v-theme-primary));outline-offset:-2px}
-.eme-main{padding-top:102px}
+.eme-main{padding-top:28px}
+.eme-page-brand{display:flex;align-items:center;gap:14px;min-height:54px}
+.eme-page-brand h2{margin:0;font-size:27px;font-weight:700;letter-spacing:.01em;line-height:1.2}
+.eme-page-brand-icon{display:block;width:43px;height:43px;flex:none;background:rgb(var(--v-theme-primary));mask:url('./brand-stars.svg') center/contain no-repeat}
+.eme-header{margin:0 0 24px;padding:0 2px}
+.eme-main>.eme-card:first-of-type{margin-top:0}
 .eme-enrich-settings-dialog{width:min(680px,calc(100% - 20px));height:auto;max-height:calc(100% - 20px);gap:10px;padding:18px 22px}
 .eme-enrich-settings-dialog .eme-card-heading{margin:0;flex:none}
 .eme-enrich-settings-body{flex:0 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:0 2px 8px}
