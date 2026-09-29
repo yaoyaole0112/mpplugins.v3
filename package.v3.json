@@ -3,7 +3,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.16",
+    "version": "2.9.17",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -11,6 +11,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.17": "进一步修复分集图片偏色漏检：降低中等程度发绿/发紫图片的判定门槛，结合整图通道偏移识别不同画面中的色偏",
       "v2.9.16": "优化分集图片偏色检测：降低过于保守的判定阈值，并加入整图色彩偏移分析，修复 Emby 中明显发绿/发紫图片被误判为正常的问题",
       "v2.9.15": "修复增强工具标题下描述文字被截断的问题，调整描述内容和显示方式以完整适配侧栏宽度",
       "v2.9.14": "参照站点刷流页面优化增强工具布局：调整顶部标题与左侧卡片的位置和间距，并在增强工具标题下增加功能描述",

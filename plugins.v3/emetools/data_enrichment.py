@@ -863,13 +863,13 @@ class DataEnrichment:
                 # 增加整图平均通道偏移作为补充，解决偏色集中在主体区域时漏检。
                 green_mean_cast = mean_g - max(mean_r, mean_b)
                 purple_mean_cast = (mean_r + mean_b) / 2 - mean_g
-                if (green_ratio >= .30 and green_strength / max(green, 1) >= .075
-                        and green >= purple + .08 * total
-                        and (green_mean_cast >= 5 or green_ratio >= .40)):
+                if (green_ratio >= .18 and green_strength / max(green, 1) >= .04
+                        and green >= purple + .04 * total
+                        and (green_mean_cast >= 3 or green_ratio >= .28)):
                     return "green"
-                if (purple_ratio >= .30 and purple_strength / max(purple, 1) >= .065
-                        and purple >= green + .08 * total
-                        and (purple_mean_cast >= 5 or purple_ratio >= .40)):
+                if (purple_ratio >= .18 and purple_strength / max(purple, 1) >= .035
+                        and purple >= green + .04 * total
+                        and (purple_mean_cast >= 3 or purple_ratio >= .28)):
                     return "purple"
         except (OSError, ValueError):
             pass
