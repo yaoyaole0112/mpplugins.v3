@@ -3,7 +3,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.11",
+    "version": "2.9.12",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -11,6 +11,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.12": "修正页面标题位置：保留左侧顶部唯一标题，移除右侧重复标题；标题和三星图标按站点刷流尺寸显示，并让左右功能卡片顶部及列间距对齐",
       "v2.9.11": "按站点刷流页面重新对齐增强工具：顶部仅保留一个标题，标题和三星图标统一为站点刷流尺寸，左侧导航卡片与右侧功能卡片采用一致的列间距和顶部对齐",
       "v2.9.10": "优化增强工具页面布局：参照站点刷流统一顶部插件标题、三星图标、左侧工具卡片及右侧内容的间距和对齐，保持宽屏与窄屏显示一致",
       "v2.9.9": "增加 MoviePilot 整理完成事件兜底：当 Emby Webhook 未送达时，按整理事件中的 TMDB ID 查找 Emby 剧集并进入 5 分钟合并补全；保留 Webhook 路径并避免重复入队",

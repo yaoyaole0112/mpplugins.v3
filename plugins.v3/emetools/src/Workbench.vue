@@ -693,6 +693,10 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 <template>
   <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''; missingActionPicker = false; mediaPicker.open = false; mediaSchedulePicker.open = false; confirmPicker.open = false; enrich.libraryPicker = false">
     <aside class="eme-sidebar">
+      <div class="eme-brand">
+        <span class="eme-brand-icon" aria-hidden="true" />
+        <strong>增强工具</strong>
+      </div>
       <nav class="eme-sidebar-card" aria-label="增强工具页面">
         <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" :aria-current="active === section.key ? 'page' : undefined" @click="chooseSection(section.key)">
           <i :class="`mdi ${section.icon}`" /><span><strong>{{ section.title }}</strong><small>{{ section.detail }}</small></span><i class="mdi mdi-chevron-right eme-chevron" />
@@ -700,12 +704,6 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
       </nav>
     </aside>
     <main class="eme-main">
-      <header class="eme-header">
-        <div class="eme-page-brand">
-          <span class="eme-page-brand-icon" aria-hidden="true" />
-          <h2>增强工具</h2>
-        </div>
-      </header>
       <div v-if="loading" class="eme-message">正在加载插件配置…</div>
       <template v-if="active === 'missing'">
         <section class="eme-card">
@@ -965,24 +963,20 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-media-version .eme-media-choice .eme-media-file-name{color:rgba(var(--v-theme-on-surface),.6)}
 .eme-cleanup-grid{max-width:610px}
 .eme-enrich-search{display:flex;align-items:center;gap:10px;margin:12px 0}.eme-enrich-search input{box-sizing:border-box;flex:1;min-width:0;padding:10px 12px;border-radius:9px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));background:rgb(var(--v-theme-background));color:inherit}.eme-enrich-results{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0;max-height:190px;overflow:auto}.eme-enrich-result{border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:8px;padding:8px 10px;background:transparent;color:inherit;cursor:pointer}.eme-enrich-result.selected,.eme-enrich-result:hover{border-color:rgb(var(--v-theme-primary));background:rgba(var(--v-theme-primary),.12)}.eme-enrich-buttons{margin:14px 0 8px}.eme-enrich-episodes{max-height:260px;overflow:auto;margin:10px 0;display:grid;gap:6px}.eme-enrich-episode{display:flex!important;align-items:center;gap:8px;min-width:0;padding:7px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));cursor:pointer}.eme-enrich-episode>span{flex:1;min-width:0;overflow-wrap:anywhere}.eme-enrich-episode small{color:rgba(var(--v-theme-on-surface),.62)}.eme-enrich-log{max-height:230px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.65}
-.eme-sidebar{box-sizing:border-box;width:260px;flex:none;min-height:0;padding:80px 0 24px;border-right:0;overflow:visible;gap:0}
-.eme-shell--app .eme-sidebar{padding:80px 0 24px;gap:0;overflow:visible}
-.eme-brand,.eme-shell--app .eme-brand{display:none}
+.eme-sidebar{box-sizing:border-box;width:260px;flex:none;min-height:0;padding:16px 0 24px;border-right:0;overflow:visible;gap:0}
+.eme-shell--app .eme-sidebar{padding:16px 0 24px;gap:0;overflow:visible}
+.eme-brand,.eme-shell--app .eme-brand{box-sizing:border-box;display:flex;align-items:center;flex:none;gap:12px;min-height:48px;margin:0 0 16px;padding:0}
 .eme-brand-icon{width:46px;height:46px;flex:none;border-radius:0;background:rgb(var(--v-theme-primary));mask:url('./brand-stars.svg') center/contain no-repeat}
 .eme-brand-icon{display:block}
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg){background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg > *){display:none}
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon::before){content:"";display:block;width:1em;height:1em;background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
-.eme-brand strong{font-size:25px;line-height:1.25;font-weight:700}
+.eme-brand strong{font-size:1.35rem;line-height:1.3;font-weight:600;letter-spacing:0}
 .eme-sidebar-card{box-sizing:border-box;display:flex;flex-direction:column;gap:3px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:12px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:16px;background:rgb(var(--v-theme-surface));box-shadow:0 1px 2px rgba(32,35,42,.03)}
 .eme-sidebar-card .eme-nav{flex:none;padding:11px 10px;border:1px solid transparent}
 .eme-sidebar-card .eme-nav.selected{border-color:rgba(var(--v-theme-primary),.22);background:rgba(var(--v-theme-primary),.09)}
 .eme-sidebar-card .eme-nav:focus-visible{outline:2px solid rgb(var(--v-theme-primary));outline-offset:-2px}
-.eme-main{padding:16px 20px 55px 22px}
-.eme-page-brand{display:flex;align-items:center;gap:12px;min-height:48px}
-.eme-page-brand h2{margin:0;font-size:1.35rem;font-weight:600;letter-spacing:0;line-height:1.3}
-.eme-page-brand-icon{display:block;width:28px;height:28px;flex:none;background:rgb(var(--v-theme-primary));mask:url('./brand-stars.svg') center/contain no-repeat}
-.eme-header{margin:0 0 16px;padding:0}
+.eme-main{padding:80px 20px 55px 22px}
 .eme-main>.eme-card:first-of-type{margin-top:0}
 .eme-enrich-settings-dialog{width:min(680px,calc(100% - 20px));height:auto;max-height:calc(100% - 20px);gap:10px;padding:18px 22px}
 .eme-enrich-settings-dialog .eme-card-heading{margin:0;flex:none}
