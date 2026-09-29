@@ -833,23 +833,43 @@ class DataEnrichment:
                 step = max(8, min(width, height) // 64)
                 total = green = purple = 0
                 green_strength = purple_strength = 0.0
+                mean_r = mean_g = mean_b = 0.0
+                sampled = 0
                 for y in range(step // 2, height, step):
                     for x in range(step // 2, width, step):
                         red, g, blue = pixels[x, y]
+                        mean_r += red
+                        mean_g += g
+                        mean_b += blue
+                        sampled += 1
                         if max(red, g, blue) - min(red, g, blue) < 35:
                             continue
                         total += 1
-                        if g > red + 35 and g > blue + 35:
+                        # Emby 的 DoVi 截图不一定整张都呈现强烈色偏，
+                        # 使用较低的像素差阈值捕获“明显发绿/发紫但画面仍有正常区域”的情况。
+                        if g > red + 20 and g > blue + 20:
                             green += 1
                             green_strength += (g - max(red, blue)) / 255.0
-                        elif red > g + 30 and blue > g + 20:
+                        elif red > g + 20 and blue > g + 15:
                             purple += 1
                             purple_strength += ((red + blue) / 2 - g) / 255.0
-                if total < 120:
+                if total < 80 or not sampled:
                     return ""
-                if green / total >= .42 and green_strength / max(green, 1) >= .12 and green >= purple + .12 * total:
+                mean_r /= sampled
+                mean_g /= sampled
+                mean_b /= sampled
+                green_ratio = green / total
+                purple_ratio = purple / total
+                # 增加整图平均通道偏移作为补充，解决偏色集中在主体区域时漏检。
+                green_mean_cast = mean_g - max(mean_r, mean_b)
+                purple_mean_cast = (mean_r + mean_b) / 2 - mean_g
+                if (green_ratio >= .30 and green_strength / max(green, 1) >= .075
+                        and green >= purple + .08 * total
+                        and (green_mean_cast >= 5 or green_ratio >= .40)):
                     return "green"
-                if purple / total >= .42 and purple_strength / max(purple, 1) >= .10 and purple >= green + .12 * total:
+                if (purple_ratio >= .30 and purple_strength / max(purple, 1) >= .065
+                        and purple >= green + .08 * total
+                        and (purple_mean_cast >= 5 or purple_ratio >= .40)):
                     return "purple"
         except (OSError, ValueError):
             pass
