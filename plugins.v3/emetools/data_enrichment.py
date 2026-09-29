@@ -907,47 +907,47 @@ class DataEnrichment:
 
     async def scan_preview(self, series_id):
         name, identifier = self._split(series_id)
+        results, selected = [], {}
         async with self._server(name) as client:
             user = await self._user_id(name, client)
             data = await self._json(client, f"Users/{user}/Items", {"ParentId": identifier,
                 "IncludeItemTypes": "Episode", "Recursive": "true", "Fields": "Path",
                 "Limit": 5000})
-        results, selected = [], {}
-        for item in data.get("Items", []):
-            path = item.get("Path") or ""
-            try:
-                fs_path = self._safe_strm(path)
-            except ValueError:
-                continue
-            thumb = fs_path[:-5] + "-thumb.jpg"
-            dovi = bool(re.search(r"dovi|dolby[ -]?vision|\.dv[.\-_ ]", path, re.I))
-            key = f"{name}::{item['Id']}"
-            status = self._preview_status(key, thumb)
-            # Emby may serve a cached Primary image that is not the STRM
-            # sibling file.  Inspect the image Emby actually exposes too,
-            # otherwise the UI can show a green frame while local scanning
-            # reports it as normal.
-            if status == "keep":
+            for item in data.get("Items", []):
+                path = item.get("Path") or ""
                 try:
-                    image_response = await client.get(
-                        f"Items/{item['Id']}/Images/Primary",
-                        params={"quality": 100, "format": "jpg"},
-                    )
-                    content_type = str(image_response.headers.get("content-type") or "")
-                    if image_response.is_success and content_type.lower().startswith("image/"):
-                        if self._color_cast(image_response.content):
-                            status = "candidate"
-                except (httpx.HTTPError, OSError, ValueError):
-                    # Local STRM thumbnail detection remains the fallback.
-                    pass
-            result = {"id": key, "name": item.get("Name") or "",
-                "season": item.get("ParentIndexNumber") or 0,
-                "episode": item.get("IndexNumber") or 0,
-                "dovi": dovi, "has_thumb": os.path.isfile(thumb), "status": status}
-            results.append(result)
-            selected[result["id"]] = {"path": fs_path, "thumb": thumb,
-                "series": str(item.get("SeriesName") or "").replace("\n", " ")[:90],
-                "season": result["season"], "episode": result["episode"], "name": result["name"]}
+                    fs_path = self._safe_strm(path)
+                except ValueError:
+                    continue
+                thumb = fs_path[:-5] + "-thumb.jpg"
+                dovi = bool(re.search(r"dovi|dolby[ -]?vision|\.dv[.\-_ ]", path, re.I))
+                key = f"{name}::{item['Id']}"
+                status = self._preview_status(key, thumb)
+                # Emby may serve a cached Primary image that is not the STRM
+                # sibling file.  Inspect the image Emby actually exposes too,
+                # otherwise the UI can show a green frame while local scanning
+                # reports it as normal.
+                if status == "keep":
+                    try:
+                        image_response = await client.get(
+                            f"Items/{item['Id']}/Images/Primary",
+                            params={"quality": 100, "format": "jpg"},
+                        )
+                        content_type = str(image_response.headers.get("content-type") or "")
+                        if image_response.is_success and content_type.lower().startswith("image/"):
+                            if self._color_cast(image_response.content):
+                                status = "candidate"
+                    except (httpx.HTTPError, OSError, ValueError):
+                        # Local STRM thumbnail detection remains the fallback.
+                        pass
+                result = {"id": key, "name": item.get("Name") or "",
+                    "season": item.get("ParentIndexNumber") or 0,
+                    "episode": item.get("IndexNumber") or 0,
+                    "dovi": dovi, "has_thumb": os.path.isfile(thumb), "status": status}
+                results.append(result)
+                selected[result["id"]] = {"path": fs_path, "thumb": thumb,
+                    "series": str(item.get("SeriesName") or "").replace("\n", " ")[:90],
+                    "season": result["season"], "episode": result["episode"], "name": result["name"]}
         with self.lock:
             self._preview_selection = selected
             self.state["preview"] = results
