@@ -5,6 +5,7 @@ service, credentials, containers or runtime modules are used by this plugin.
 """
 
 import asyncio
+from io import BytesIO
 import json
 import os
 import re
@@ -824,7 +825,8 @@ class DataEnrichment:
     def _color_cast(thumb):
         """Use MediaEnhance's conservative green/purple threshold."""
         try:
-            with Image.open(thumb) as image:
+            source = BytesIO(thumb) if isinstance(thumb, (bytes, bytearray)) else thumb
+            with Image.open(source) as image:
                 rgb = image.convert("RGB")
                 width, height = rgb.size
                 if width < 32 or height < 32:
@@ -915,6 +917,23 @@ class DataEnrichment:
             dovi = bool(re.search(r"dovi|dolby[ -]?vision|\.dv[.\-_ ]", path, re.I))
             key = f"{name}::{item['Id']}"
             status = self._preview_status(key, thumb)
+            # Emby may serve a cached Primary image that is not the STRM
+            # sibling file.  Inspect the image Emby actually exposes too,
+            # otherwise the UI can show a green frame while local scanning
+            # reports it as normal.
+            if status == "keep":
+                try:
+                    image_response = await client.get(
+                        f"Items/{item['Id']}/Images/Primary",
+                        params={"quality": 100, "format": "jpg"},
+                    )
+                    content_type = str(image_response.headers.get("content-type") or "")
+                    if image_response.is_success and content_type.lower().startswith("image/"):
+                        if self._color_cast(image_response.content):
+                            status = "candidate"
+                except (httpx.HTTPError, OSError, ValueError):
+                    # Local STRM thumbnail detection remains the fallback.
+                    pass
             result = {"id": key, "name": item.get("Name") or "",
                 "season": item.get("ParentIndexNumber") or 0,
                 "episode": item.get("IndexNumber") or 0,
