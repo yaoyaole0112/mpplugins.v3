@@ -668,7 +668,8 @@ class DataEnrichment:
         try:
             services = self._services()
         except Exception as error:
-            logger.exception("增强工具 数据补全：读取 Emby 服务失败")
+            logger.error("增强工具 数据补全：读取 Emby 服务失败：%s：%s",
+                         type(error).__name__, str(error)[:160])
             raise ValueError(f"读取 Emby 服务失败：{type(error).__name__}") from error
         for name, instance in services.items():
             try:
@@ -966,7 +967,8 @@ class DataEnrichment:
             except Exception as error:
                 with self.lock:
                     self.state["error"] = f"{type(error).__name__}：{str(error)[:160]}"
-                logger.exception("增强工具 数据补全 %s 失败", task)
+                logger.error("增强工具 数据补全 %s 失败：%s：%s",
+                             task, type(error).__name__, str(error)[:160])
             finally:
                 with self.lock:
                     self.state["running"] = False

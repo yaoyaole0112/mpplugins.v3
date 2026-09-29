@@ -104,7 +104,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.20"
+    plugin_version = "2.9.21"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1497,8 +1497,13 @@ class EmeTools(_PluginBase):
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         except Exception as error:
-            logger.exception("增强工具 数据补全操作失败：%s", action.operation)
-            raise HTTPException(status_code=500, detail=f"数据补全操作失败：{type(error).__name__}") from error
+            logger.error("增强工具 数据补全操作失败：%s：%s：%s",
+                         action.operation, type(error).__name__, str(error)[:160])
+            detail = str(error).strip()[:160]
+            raise HTTPException(
+                status_code=500,
+                detail=f"数据补全操作失败：{type(error).__name__}{'：' + detail if detail else ''}",
+            ) from error
 
     def get_api(self) -> List[dict]:
         return [
