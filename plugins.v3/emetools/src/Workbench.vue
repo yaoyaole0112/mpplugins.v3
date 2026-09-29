@@ -966,7 +966,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-sidebar{box-sizing:border-box;width:260px;flex:none;min-height:0;padding:16px 0 24px;border-right:0;overflow:visible;gap:0}
 .eme-shell--app .eme-sidebar{padding:16px 0 24px;gap:0;overflow:visible}
 .eme-brand,.eme-shell--app .eme-brand{box-sizing:border-box;display:flex;align-items:center;flex:none;gap:12px;min-height:48px;margin:0 0 16px;padding:0}
-.eme-brand-icon{width:46px;height:46px;flex:none;border-radius:0;background:rgb(var(--v-theme-primary));mask:url('./brand-stars.svg') center/contain no-repeat}
+.eme-brand-icon{width:28px;height:28px;flex:none;border-radius:0;background:rgb(var(--v-theme-primary));mask:url('./brand-stars.svg') center/contain no-repeat}
 .eme-brand-icon{display:block}
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg){background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg > *){display:none}
