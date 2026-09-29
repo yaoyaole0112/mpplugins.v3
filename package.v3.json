@@ -3,7 +3,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.19",
+    "version": "2.9.20",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -11,6 +11,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.20": "修复数据补全搜索错误提示为未知错误的问题：保留接口真实错误原因，并让单个 Emby 服务异常不影响其他服务器搜索",
       "v2.9.19": "修复数据补全搜索提示未知错误：增强 Emby 服务读取与操作异常处理，返回明确错误原因并写入日志",
       "v2.9.18": "修复 Emby 页面显示偏色但插件检测正常的问题：扫描分集时同时检测 STRM 旁本地缩略图和 Emby 当前返回的 Primary 分集图片",
       "v2.9.17": "进一步修复分集图片偏色漏检：降低中等程度发绿/发紫图片的判定门槛，结合整图通道偏移识别不同画面中的色偏",

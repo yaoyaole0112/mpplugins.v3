@@ -679,7 +679,7 @@ class DataEnrichment:
                 results.extend({"id": f"{name}::{item['Id']}", "name": item.get("Name", ""),
                     "year": item.get("ProductionYear") or "", "server": name}
                     for item in data.get("Items", []) if item.get("Id"))
-            except (httpx.HTTPError, ValueError) as error:
+            except Exception as error:
                 logger.warning("增强工具 数据补全：搜索服务器 %s 失败：%s", name, type(error).__name__)
         return results[:40]
 
