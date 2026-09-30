@@ -213,6 +213,21 @@ class EnrichmentTests(unittest.TestCase):
                                                      DEFAULT_ENRICH_CONFIG))
         self.assertEqual(self.enrichment.status()['batch_result'], {'ok': 2, 'fail': 1})
 
+    def test_batch_enrich_logs_failure_detail(self):
+        async def enrich(name, identifier, mode, options):
+            raise ValueError('TMDB 连接失败：请检查代理设置')
+
+        with patch.object(self.enrichment, '_enrich', side_effect=enrich):
+            asyncio.run(self.enrichment._batch_enrich(['Q4::1'], DEFAULT_ENRICH_CONFIG))
+        self.assertIn('ValueError：TMDB 连接失败：请检查代理设置', self.enrichment.state['log'][-2])
+
+    def test_optional_ai_failure_keeps_enrichment_running(self):
+        with patch.object(self.enrichment, '_ai_map', new_callable=AsyncMock,
+                          side_effect=ValueError('AI 补齐已启用，请先在 MoviePilot 配置 LLM 服务')):
+            result = asyncio.run(self.enrichment._optional_ai_map({'Name': '외국剧名'}, '剧集标题'))
+        self.assertEqual(result, {})
+        self.assertIn('保留原始资料继续补全', self.enrichment.state['log'][-1])
+
     def test_tv_libraries_only_exposes_series_libraries(self):
         instance = SimpleNamespace(get_librarys=lambda hidden=False: [
             SimpleNamespace(id='11', name='电视剧', type='电视剧'),

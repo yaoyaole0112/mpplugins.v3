@@ -377,6 +377,13 @@ class DataEnrichment:
             # Never log the LLM URL or headers: provider URLs may contain secrets.
             raise ValueError(f"MoviePilot LLM 请求或响应失败：{type(exc).__name__}") from None
 
+    async def _optional_ai_map(self, mapping, context):
+        try:
+            return await self._ai_map(mapping, context)
+        except ValueError as error:
+            self.log(f"AI 翻译不可用（{error}），保留原始资料继续补全")
+            return {}
+
     def log(self, message):
         text = str(message).replace("\n", " ")[:250]
         with self.lock:
@@ -838,7 +845,8 @@ class DataEnrichment:
                 ok += 1
             except Exception as exc:
                 failed += 1
-                self.log(f"[{index}/{len(series_ids)}] 补全失败：{type(exc).__name__}（可单独重试）")
+                detail = str(exc).strip()[:160]
+                self.log(f"[{index}/{len(series_ids)}] 补全失败：{type(exc).__name__}：{detail or '未提供错误详情'}（可单独重试）")
         with self.lock:
             self.state["batch_result"] = {"ok": ok, "fail": failed}
         self.log(f"批量补全结束：成功 {ok} 部，失败 {failed} 部")
@@ -1112,7 +1120,7 @@ class DataEnrichment:
                         if options["ai_overview"] and re.search(r"[A-Za-z]", str(update.get("Overview") or "")):
                             translations["Overview"] = update["Overview"][:900]
                         if translations:
-                            translated = await self._ai_map(translations, "剧集标题和剧情简介；将韩文、日文、泰文、英文等外文译为简体中文，保留原有事实，不编造剧名")
+                            translated = await self._optional_ai_map(translations, "剧集标题和剧情简介；将韩文、日文、泰文、英文等外文译为简体中文，保留原有事实，不编造剧名")
                             update.update({key: value for key, value in translated.items()
                                            if self._is_chinese_title(value)
                                            and not re.search(r"[A-Za-z]", value)})
@@ -1172,7 +1180,7 @@ class DataEnrichment:
                             unresolved = {}
                             for start in range(0, len(pending), 25):
                                 chunk = dict(list(pending.items())[start:start + 25])
-                                translated = await self._ai_map(chunk, context)
+                                translated = await self._optional_ai_map(chunk, context)
                                 for key_name, original in chunk.items():
                                     value = translated.get(key_name, "")
                                     if (value and value != original and
@@ -1245,7 +1253,7 @@ class DataEnrichment:
                             translated_seasons[season] = {}
                             pairs = list(values.items())
                             for offset in range(0, len(pairs), 16):
-                                proposals = await self._ai_map(
+                                proposals = await self._optional_ai_map(
                                     dict(pairs[offset:offset + 16]), f"剧集：{str(item.get('Name') or '')[:70]}；第 {season} 季分集标题及简介")
                                 translated_seasons[season].update({key: value for key, value in proposals.items()
                                     if self._is_chinese_title(value) and not re.search(r"[A-Za-z]", value)})
