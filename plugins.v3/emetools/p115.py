@@ -128,7 +128,16 @@ class P115Client:
             return {"state": False, "msg": "无文件 ID"}
         response = self.client.post(f"{API}/rb/delete", data={f"fid[{index}]": str(identifier)
                                                                   for index, identifier in enumerate(identifiers)})
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            try:
+                data = response.json()
+            except (ValueError, TypeError):
+                raise
+            if str(data.get("errNo") or data.get("errno") or "") == "990001":
+                return {"state": False, "msg": "115 登录已过期，请重新登录并更新 Cookie", "errNo": 990001}
+            raise
         return response.json()
 
     def move_files(self, identifiers: list, destination: str) -> dict:

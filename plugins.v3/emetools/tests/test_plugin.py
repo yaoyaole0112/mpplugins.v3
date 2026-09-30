@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
 from fastapi import HTTPException
 
 
@@ -105,6 +106,18 @@ class P115ParseTests(unittest.TestCase):
         ]})
         self.assertEqual(result[0], [{"fid": "456", "name": "video.mkv", "size": 99}])
         self.assertEqual(result[1][0]["cid"], "123")
+
+    def test_delete_files_reports_expired_login_from_115_json(self):
+        def handler(request):
+            return httpx.Response(405, json={"state": False, "error": "登录超时，请重新登录。",
+                                             "errNo": 990001, "request": "/rb/delete"})
+
+        client = P115Client("valid-cookie")
+        client.client = httpx.Client(transport=httpx.MockTransport(handler))
+        result = client.delete_files(["123"])
+        client.client.close()
+        self.assertFalse(result["state"])
+        self.assertIn("登录已过期", result["msg"])
 
 
 class PluginTests(unittest.TestCase):
