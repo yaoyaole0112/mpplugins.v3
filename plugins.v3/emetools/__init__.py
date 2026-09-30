@@ -104,7 +104,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.29"
+    plugin_version = "2.9.30"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -587,7 +587,14 @@ class EmeTools(_PluginBase):
             record = self._consume(action.get("token", ""), "media_delete")
             if record["scan"] != self._media.last_scan:
                 raise HTTPException(status_code=409, detail="扫描结果已更新，请重新确认")
-            result = await asyncio.to_thread(self._media.delete, record["paths"])
+            try:
+                result = await asyncio.to_thread(self._media.delete, record["paths"])
+            except ValueError as error:
+                logger.warning("增强工具 媒体清理删除校验失败：%s", _log_label(error))
+                return {"ok": False, "deleted": [], "failures": [{"error": str(error)[:160]}]}
+            except Exception as error:
+                logger.exception("增强工具 媒体清理删除失败")
+                return {"ok": False, "deleted": [], "failures": [{"error": f"{type(error).__name__}：{str(error)[:120]}"}]}
             if result["deleted"]:
                 await asyncio.to_thread(self._media.refresh_emby)
             notice = notices.media_cleanup(result)

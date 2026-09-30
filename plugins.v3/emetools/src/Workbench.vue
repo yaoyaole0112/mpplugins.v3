@@ -306,8 +306,11 @@ async function deleteMedia() {
     const preview = await post('media-cleanup/action', { operation: 'preview_delete', paths })
     if (!window.confirm(`确定永久删除 ${preview.count} 个低质版本及其 115 云端文件和本地 STRM/配套文件？此操作不可恢复。`)) return
     const response = await post('media-cleanup/action', { operation: 'confirm_delete', token: preview.token })
-    notice.value = `已清理 ${response.deleted.length} 个版本；失败 ${response.failures.length} 个${response.failures.length ? '：' + response.failures.map(item => item.error).join('；') : ''}`
-    mediaSelection.value = []
+    const deleted = response.deleted || []
+    const failures = response.failures || []
+    notice.value = `已清理 ${deleted.length} 个版本；失败 ${failures.length} 个${failures.length ? '：' + failures.map(item => item.error).filter(Boolean).join('；') : ''}`
+    if (!response.ok && !deleted.length) throw new Error(failures.map(item => item.error).filter(Boolean).join('；') || '媒体清理失败')
+    mediaSelection.value = deleted.length ? [] : mediaSelection.value
     await loadMedia()
   })
 }
