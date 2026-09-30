@@ -316,6 +316,33 @@ class DataEnrichment:
     def _needs_translation(text):
         return bool(text and not re.search(r"[\u3400-\u9fff]", str(text)))
 
+    @staticmethod
+    def _is_chinese_title(text):
+        value = str(text or "").strip()
+        return bool(re.search(r"[\u3400-\u9fff]", value) and not re.search(
+            r"[\u3040-\u30ff\u31f0-\u31ff\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff\u0e00-\u0e7f]", value))
+
+    @classmethod
+    def _select_chinese_title(cls, current, *candidates):
+        return next((str(title).strip() for title in candidates if cls._is_chinese_title(title)), current)
+
+    async def _series_title(self, tmdb, tmdb_id, api_key, current, *candidates):
+        title = self._select_chinese_title(current, *candidates)
+        if self._is_chinese_title(title):
+            return title
+        try:
+            result = await self._tmdb_json(tmdb, f"tv/{tmdb_id}/translations", {"api_key": api_key})
+            translations = [entry for entry in result.get("translations", [])
+                            if entry.get("iso_639_1") == "zh"]
+            translations.sort(key=lambda entry: entry.get("iso_3166_1") not in ("CN", "SG"))
+            title = self._select_chinese_title(current, *[
+                (entry.get("data") or {}).get("name") for entry in translations])
+        except ValueError:
+            self.log("TMDB 中文剧名翻译读取失败，保留原有剧名")
+        if not self._is_chinese_title(title):
+            self.log("未找到可用中文剧名，保留 Emby 原有剧名，避免写入外文标题")
+        return title
+
     async def _ai_map(self, mapping, context):
         """Translate a bounded batch via MoviePilot's configured OpenAI-compatible LLM."""
         if not mapping:
@@ -1058,8 +1085,9 @@ class DataEnrichment:
             if mode in ("all", "metadata", "credits"):
                 update = dict(item)
                 if mode != "credits":
-                    if douban_detail.get("name") or detail.get("name"):
-                        update["Name"] = douban_detail.get("name") or detail["name"]
+                    update["Name"] = await self._series_title(
+                        tmdb, tmdb_id, api_key, item.get("Name"),
+                        douban_detail.get("name"), detail.get("name"))
                     if douban_detail.get("overview") or detail.get("overview"):
                         update["Overview"] = douban_detail.get("overview") or detail["overview"]
                     if detail.get("vote_average"): update["CommunityRating"] = detail["vote_average"]
@@ -1079,14 +1107,14 @@ class DataEnrichment:
                     update["ProviderIds"] = providers
                     if options["ai_enabled"]:
                         translations = {}
-                        if options["ai_title"] and re.search(r"[A-Za-z]", str(update.get("Name") or "")):
+                        if options["ai_title"] and update.get("Name") and not self._is_chinese_title(update["Name"]):
                             translations["Name"] = update["Name"][:180]
                         if options["ai_overview"] and re.search(r"[A-Za-z]", str(update.get("Overview") or "")):
                             translations["Overview"] = update["Overview"][:900]
                         if translations:
-                            translated = await self._ai_map(translations, "剧集标题和剧情简介；将英文及中英混写内容译为简体中文，保留原有事实")
+                            translated = await self._ai_map(translations, "剧集标题和剧情简介；将韩文、日文、泰文、英文等外文译为简体中文，保留原有事实，不编造剧名")
                             update.update({key: value for key, value in translated.items()
-                                           if re.search(r"[\u3400-\u9fff]", value)
+                                           if self._is_chinese_title(value)
                                            and not re.search(r"[A-Za-z]", value)})
                 if mode != "metadata":
                     tmdb_cast = (detail.get("aggregate_credits") or {}).get("cast") or []
@@ -1210,7 +1238,7 @@ class DataEnrichment:
                             for number_key, entry in seasons[season].items():
                                 if number_key not in emby_numbers or not isinstance(number_key, int):
                                     continue
-                                if options["ai_title"] and re.search(r"[A-Za-z]", str(entry.get("name") or "")):
+                                if options["ai_title"] and entry.get("name") and not self._is_chinese_title(entry["name"]):
                                     values[f"n{number_key}"] = str(entry["name"])[:160]
                                 if options["ai_overview"] and re.search(r"[A-Za-z]", str(entry.get("overview") or "")):
                                     values[f"o{number_key}"] = str(entry["overview"])[:700]
@@ -1220,13 +1248,15 @@ class DataEnrichment:
                                 proposals = await self._ai_map(
                                     dict(pairs[offset:offset + 16]), f"剧集：{str(item.get('Name') or '')[:70]}；第 {season} 季分集标题及简介")
                                 translated_seasons[season].update({key: value for key, value in proposals.items()
-                                    if re.search(r"[\u3400-\u9fff]", value) and not re.search(r"[A-Za-z]", value)})
+                                    if self._is_chinese_title(value) and not re.search(r"[A-Za-z]", value)})
                     tmdb_episode = seasons[season].get(number) or {}
                     if not tmdb_episode.get("name") and not tmdb_episode.get("overview") and not (options["episode_cast"] and series_people):
                         continue
                     full = await self._item(emby, user, episode["Id"])
                     translated = translated_seasons.get(season, {})
-                    if tmdb_episode.get("name"): full["Name"] = translated.get(f"n{number}", tmdb_episode["name"])
+                    if tmdb_episode.get("name"):
+                        full["Name"] = self._select_chinese_title(
+                            full.get("Name"), translated.get(f"n{number}"), tmdb_episode["name"])
                     if tmdb_episode.get("overview"): full["Overview"] = translated.get(f"o{number}", tmdb_episode["overview"])
                     if options["episode_cast"] and series_people:
                         full["People"] = series_people

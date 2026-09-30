@@ -29,6 +29,119 @@ class EnrichmentTests(unittest.TestCase):
                                 save_data=lambda key, value: self.storage.__setitem__(key, value))
         self.enrichment = DataEnrichment(owner)
 
+    def test_chinese_title_selection_rejects_foreign_scripts(self):
+        for value in ('오징어 게임', '愛の不時着です', '中文한글', 'เด็กใหม่', 'Squid Game', ''):
+            with self.subTest(title=value):
+                self.assertFalse(DataEnrichment._is_chinese_title(value))
+                self.assertEqual(DataEnrichment._select_chinese_title('原有中文剧名', value), '原有中文剧名')
+        for value in ('鱿鱼游戏', '魷魚遊戲', '我的 Happy Ending'):
+            self.assertTrue(DataEnrichment._is_chinese_title(value))
+        self.assertEqual(DataEnrichment._select_chinese_title('오징어 게임', '鱿鱼游戏'), '鱿鱼游戏')
+
+    def test_series_title_keeps_chinese_without_requesting_translations(self):
+        with patch.object(self.enrichment, '_tmdb_json', new_callable=AsyncMock) as fetch:
+            title = asyncio.run(self.enrichment._series_title(
+                object(), '12345', 'test-key', '鱿鱼游戏', '오징어 게임', 'Squid Game'))
+        self.assertEqual(title, '鱿鱼游戏')
+        fetch.assert_not_awaited()
+
+    def test_series_title_recovers_by_tmdb_id_and_prefers_simplified_chinese(self):
+        translations = {'translations': [
+            {'iso_639_1': 'ko', 'data': {'name': '오징어 게임'}},
+            {'iso_639_1': 'zh', 'iso_3166_1': 'TW', 'data': {'name': '魷魚遊戲'}},
+            {'iso_639_1': 'zh', 'iso_3166_1': 'CN', 'data': {'name': '鱿鱼游戏'}}]}
+        with patch.object(self.enrichment, '_tmdb_json', new_callable=AsyncMock,
+                          return_value=translations) as fetch:
+            title = asyncio.run(self.enrichment._series_title(
+                object(), '12345', 'test-key', '오징어 게임', None, '오징어 게임'))
+        self.assertEqual(title, '鱿鱼游戏')
+        self.assertEqual(fetch.call_args.args[1], 'tv/12345/translations')
+        translations['translations'].pop()
+        with patch.object(self.enrichment, '_tmdb_json', new_callable=AsyncMock, return_value=translations):
+            title = asyncio.run(self.enrichment._series_title(
+                object(), '12345', 'test-key', '오징어 게임', None, '오징어 게임'))
+        self.assertEqual(title, '魷魚遊戲')
+
+    def test_series_title_translation_failure_keeps_existing_title(self):
+        with patch.object(self.enrichment, '_tmdb_json', new_callable=AsyncMock,
+                          side_effect=ValueError('接口不可用')) as fetch:
+            title = asyncio.run(self.enrichment._series_title(
+                object(), '12345', 'test-key', 'Original title', None, 'Foreign title'))
+        self.assertEqual(title, 'Original title')
+        fetch.assert_awaited_once()
+
+    def test_metadata_write_preserves_and_restores_chinese_series_title(self):
+        cases = [
+            ('鱿鱼游戏', '오징어 게임', '오징어 게임', None, False, '', '鱿鱼游戏'),
+            ('鱿鱼游戏', '魷魚遊戲', '오징어 게임', None, False, '', '魷魚遊戲'),
+            ('中文剧名', '日本語です', '中文剧名', None, False, '', '中文剧名'),
+            ('오징어 게임', '', '오징어 게임', '鱿鱼游戏', False, '', '鱿鱼游戏'),
+            ('오징어 게임', '', '오징어 게임', None, True, '鱿鱼游戏', '鱿鱼游戏'),
+            ('愛の不時着です', '', '愛の不時着です', None, True, '中文剧名', '中文剧名'),
+            ('เด็กใหม่', '', 'เด็กใหม่', None, True, '禁忌女孩', '禁忌女孩'),
+            ('오징어 게임', '', '오징어 게임', None, True, '鱿鱼한글', '오징어 게임')]
+        for current, douban, tmdb_name, localized, ai_enabled, ai_title, expected in cases:
+            with self.subTest(current=current, douban=douban, ai=ai_enabled):
+                written = []
+
+                def emby_handler(request):
+                    if request.method == 'POST':
+                        written.append(json.loads(request.content))
+                        return httpx.Response(204)
+                    return httpx.Response(200, json={'Id': '73025', 'Type': 'Series', 'Name': current,
+                        'ProviderIds': {'Tmdb': '12345'}})
+
+                def tmdb_handler(request):
+                    if request.url.path.endswith('/translations'):
+                        return httpx.Response(200, json={'translations': [
+                            {'iso_639_1': 'zh', 'iso_3166_1': 'CN', 'data': {'name': localized}}]})
+                    return httpx.Response(200, json={'name': tmdb_name, 'overview': '中文简介'})
+
+                emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(emby_handler))
+                tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(tmdb_handler))
+                with patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user123'), \
+                     patch.object(self.enrichment, '_server', return_value=emby), \
+                     patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+                     patch.object(self.enrichment, '_douban_data', new_callable=AsyncMock, return_value={'name': douban}), \
+                     patch.object(self.enrichment, '_ai_map', new_callable=AsyncMock,
+                                  return_value={'Name': ai_title}) as translate, \
+                     patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+                    asyncio.run(self.enrichment._enrich('Q4', '73025', 'metadata', {
+                        **DEFAULT_ENRICH_CONFIG, 'metadata_source': 'douban', 'ai_enabled': ai_enabled}))
+                self.assertEqual(written[0]['Name'], expected)
+                if ai_enabled:
+                    self.assertEqual(translate.call_args.args[0]['Name'], current)
+
+    def test_episode_foreign_title_does_not_overwrite_existing_chinese_name(self):
+        written = []
+
+        def emby_handler(request):
+            if request.method == 'POST':
+                written.append(json.loads(request.content))
+                return httpx.Response(204)
+            if request.url.path.endswith('/Items/9'):
+                return httpx.Response(200, json={'Id': '9', 'Name': '第一集：新的开始'})
+            if request.url.path.endswith('/Items/73025'):
+                return httpx.Response(200, json={'Id': '73025', 'Type': 'Series', 'Name': '中文剧名',
+                    'ProviderIds': {'Tmdb': '12345'}})
+            return httpx.Response(200, json={'Items': [{'Id': '9', 'ParentIndexNumber': 1, 'IndexNumber': 1}]})
+
+        def tmdb_handler(request):
+            if '/season/' in request.url.path:
+                return httpx.Response(200, json={'episodes': [
+                    {'episode_number': 1, 'name': '새로운 시작', 'overview': '中文剧情'}]})
+            return httpx.Response(200, json={'name': '中文剧名'})
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(tmdb_handler))
+        with patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user123'), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'episodes', DEFAULT_ENRICH_CONFIG))
+        self.assertEqual(written[0]['Name'], '第一集：新的开始')
+        self.assertEqual(written[0]['Overview'], '中文剧情')
+
     def test_tmdb_client_uses_moviepilot_domain_and_https_proxy(self):
         with patch('emetools.data_enrichment.settings.TMDB_API_DOMAIN', 'api.tmdb.org'), \
              patch('emetools.data_enrichment.get_runtime_setting', return_value={
