@@ -149,6 +149,7 @@ class MatchingTests(unittest.TestCase):
         monitor = SubscriptionMonitor(plugin)
         monitor.channel_ids["sub"] = {12345}
         monitor.client = MagicMock()
+        monitor._channel_entities[12345] = SimpleNamespace(title="示例频道", username="sample")
         monitor.client.get_entity = AsyncMock(return_value="destination")
         monitor.client.forward_messages = AsyncMock()
         message = object()
@@ -167,6 +168,7 @@ class MatchingTests(unittest.TestCase):
         monitor.client.forward_messages.assert_awaited_with("destination", message)
         plugin._subscription_items.assert_called_once()
         self.assertEqual(len(monitor.hits), 2)
+        self.assertEqual(monitor.hits[0]["channel"], "示例频道")
         self.assertEqual(client.get.await_count, 1)
         proxy_config.assert_called_once_with("PROXY", None)
         self.assertEqual(http_class.call_args.kwargs["proxy"], "http://mp-proxy.invalid:7890")

@@ -168,6 +168,24 @@ class SubscriptionMonitor:
             self._last_msg_ids[key] = msg_id
             self._save_checkpoints()
 
+    def _channel_display_name(self, peer_id):
+        entity = self._channel_entities.get(peer_id)
+        if entity is not None:
+            title = str(getattr(entity, "title", None) or "").strip()
+            username = str(getattr(entity, "username", None) or "").strip()
+            if title:
+                return title
+            if username:
+                return f"@{username.lstrip('@')}"
+        for titles in self.channel_titles.values():
+            for channel, title in titles.items():
+                if str(channel).strip() and title:
+                    configured = str(channel).strip().lstrip("@").lower()
+                    shown = str(title).strip()
+                    if configured and shown and configured == shown.lstrip("@").lower():
+                        return f"@{shown.lstrip('@')}"
+        return str(peer_id)
+
     def _ensure_loop(self):
         if self.thread and self.thread.is_alive():
             return
@@ -479,7 +497,8 @@ class SubscriptionMonitor:
             bot = await self.client.get_entity(self._forward_bot_username)
             await self.client.forward_messages(bot, event.message)
             self._mark_seen(key)
-            self.hits.appendleft({"time": datetime.now().strftime("%m-%d %H:%M:%S"), "channel": str(event.chat_id), "matches": names})
+            self.hits.appendleft({"time": datetime.now().strftime("%m-%d %H:%M:%S"),
+                                  "channel": self._channel_display_name(peer_id), "matches": names})
             self.last_error = ""
             logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 已转发到指定 Bot", event.chat_id, event.id)
         except Exception as exc:
