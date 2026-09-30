@@ -23,7 +23,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.26",
+    "version": "2.9.27",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -31,6 +31,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "2.9.27": "将上次批量任务结果移入运行进度卡片标题下方，与日志对齐显示。",
       "2.9.26": "修复订阅监控最近命中显示 Telegram 数字频道 ID，改为显示频道名称或用户名。",
       "2.9.25": "移除增强工具标题下方的功能描述文字，简化侧栏标题显示。",
       "2.9.24": "修复 Docker Compose 环境下因容器名称不是十六进制 ID 导致分集图片修复被取消的问题。",

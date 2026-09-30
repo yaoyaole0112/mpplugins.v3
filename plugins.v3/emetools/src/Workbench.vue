@@ -778,8 +778,11 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div v-if="enrich.previewEpisodes.length" class="eme-enrich-episodes"><label v-for="episode in enrich.previewEpisodes" :key="episode.id" class="eme-enrich-episode"><input type="checkbox" :disabled="episode.status !== 'candidate'" :checked="enrich.previewChecked.includes(episode.id)" @change="togglePreviewEpisode(episode.id)" /><span>S{{ String(episode.season).padStart(2, '0') }}E{{ String(episode.episode).padStart(2, '0') }} · {{ episode.name || '未命名' }}</span><small>{{ episode.dovi ? 'DoVi · ' : '' }}{{ { missing: '缺少缩略图（由 Emby/神医助手处理）', candidate: '疑似偏色，可修复', fixed: '已修复', keep: '正常' }[episode.status] || '正常' }}</small></label></div>
           <p v-if="enrich.status.preview_result" class="eme-hint">上次修复：成功 {{ enrich.status.preview_result.ok }} 集，失败 {{ enrich.status.preview_result.fail }} 集。</p>
         </section>
-        <p v-if="enrich.status.batch_result" class="eme-hint">上次批量任务：{{ enrich.status.batch_result.scanned != null ? `扫描 ${enrich.status.batch_result.scanned} 集，` : '' }}成功 {{ enrich.status.batch_result.ok }}，失败 {{ enrich.status.batch_result.fail }}。</p>
-        <section v-if="enrich.status.running || enrich.status.log?.length || enrich.status.error" class="eme-card"><div class="eme-card-heading"><h3>运行进度</h3><span class="eme-hint">{{ enrich.status.running ? `${enrich.status.task}进行中…` : '已结束' }}</span></div><p v-if="enrich.status.error" class="eme-message eme-error">{{ enrich.status.error }}</p><p v-if="enrich.status.task?.includes('分集图片')" class="eme-hint">日志中的“服务器 Q4 / Emby 剧集条目 ID”是 Emby 服务器名称与剧集内部 ID，不是媒体库代码。</p><div class="eme-enrich-log"><div v-for="(line, index) in enrich.status.log" :key="index">{{ line }}</div></div><div v-if="enrich.status.preview_repaired?.length" class="eme-enrich-repaired"><strong>本次已修复（{{ enrich.status.preview_repaired.length }} 集）</strong><div v-for="(item, index) in enrich.status.preview_repaired" :key="index">{{ item }}</div></div></section>
+        <section v-if="enrich.status.running || enrich.status.log?.length || enrich.status.error || enrich.status.batch_result" class="eme-card">
+          <div class="eme-card-heading"><h3>运行进度</h3><span class="eme-hint">{{ enrich.status.running ? `${enrich.status.task}进行中…` : '已结束' }}</span></div>
+          <p v-if="enrich.status.batch_result" class="eme-hint eme-enrich-batch-summary">上次批量任务：{{ enrich.status.batch_result.scanned != null ? `扫描 ${enrich.status.batch_result.scanned} 集，` : '' }}成功 {{ enrich.status.batch_result.ok }}，失败 {{ enrich.status.batch_result.fail }}。</p>
+          <p v-if="enrich.status.error" class="eme-message eme-error">{{ enrich.status.error }}</p><p v-if="enrich.status.task?.includes('分集图片')" class="eme-hint">日志中的“服务器 Q4 / Emby 剧集条目 ID”是 Emby 服务器名称与剧集内部 ID，不是媒体库代码。</p><div class="eme-enrich-log"><div v-for="(line, index) in enrich.status.log" :key="index">{{ line }}</div></div><div v-if="enrich.status.preview_repaired?.length" class="eme-enrich-repaired"><strong>本次已修复（{{ enrich.status.preview_repaired.length }} 集）</strong><div v-for="(item, index) in enrich.status.preview_repaired" :key="index">{{ item }}</div></div>
+        </section>
       </template>
       <section v-if="active === 'settings'" class="eme-card">
         <div class="eme-card-heading"><h3>基础设置</h3><button class="eme-button primary" :disabled="busy" @click="saveBasicSettings">保存设置</button></div>
@@ -1009,6 +1012,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-enrich-library-row{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
 .eme-enrich-library-row>.eme-button{min-height:42px;flex:none}
 .eme-enrich-library-field{display:block;flex:0 1 460px;min-width:220px;margin-top:10px}
+.eme-enrich-batch-summary{margin:0 0 14px;line-height:1.6;overflow-wrap:anywhere}
 .eme-enrich-library-field .eme-picker-trigger span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .eme-enrich-repaired{margin-top:12px;padding-top:10px;border-top:1px solid rgba(var(--v-border-color),var(--v-border-opacity));max-height:210px;overflow:auto;font-size:12px;line-height:1.7;overflow-wrap:anywhere}.eme-enrich-repaired strong{display:block;margin-bottom:5px}
 .eme-enrich-preview-heading{align-items:flex-start}
