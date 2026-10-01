@@ -197,6 +197,15 @@ class PluginTests(unittest.TestCase):
         self.assertTrue(self.plugin._missing._auto_cancel_completed)
         self.assertTrue(self.plugin.update_config.call_args.args[0]["missing"]["auto_cancel_completed"])
 
+    def test_missing_aired_season_setting_is_independent_and_persisted(self):
+        with patch("emetools.Scheduler"):
+            self.run_async(self.plugin.missing_action({
+                "operation": "save", "config": {"auto_cancel_completed": False, "auto_cancel_aired_season": True},
+            }))
+        self.assertFalse(self.plugin._missing._auto_cancel_completed)
+        self.assertTrue(self.plugin._missing._auto_cancel_aired_season)
+        self.assertTrue(self.plugin.update_config.call_args.args[0]["missing"]["auto_cancel_aired_season"])
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

@@ -63,7 +63,7 @@ const drafts = reactive({ sub: { channels: [], keywords: [], blacklist: [] }, kw
 const entry = reactive({ sub: { channels: '' }, kw: { channels: '', keywords: '', blacklist: '' } })
 const telegram = reactive({ api_id: '', api_hash: '', forward_token: '', phone: '', code: '', password: '', password_required: false })
 const missing = reactive({ config: { enabled: false, cron: '35 3 * * *', only_existing_seasons: true,
-  missing_action: '仅检查记录', ignore_season_zero: true, ignore_future: true, auto_cancel_completed: false,
+  missing_action: '仅检查记录', ignore_season_zero: true, ignore_future: true, auto_cancel_completed: false, auto_cancel_aired_season: false,
   server_names: [], library_names: [], skip_series_ids: [] },
   results: [], cancelled_subscriptions: [], last_scan_time: '从未扫描', scanning: false, legacy_enabled: false })
 const missingOptions = reactive({ servers: [], libraries: [], series: [] })
@@ -746,9 +746,10 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
             <label class="eme-switch-label"><input v-model="missing.config.ignore_season_zero" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>忽略特别篇（S00/SP）</span></label>
             <label class="eme-switch-label"><input v-model="missing.config.ignore_future" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>忽略未上映剧集</span></label>
             <label class="eme-switch-label"><input v-model="missing.config.auto_cancel_completed" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>自动取消已完结且完整的订阅</span></label>
+            <label class="eme-switch-label"><input v-model="missing.config.auto_cancel_aired_season" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>当前订阅季度已播完且本地完整时自动取消</span></label>
           </div>
           <div class="eme-fields"><label>执行周期（cron表达式）<input v-model.trim="missing.config.cron" placeholder="35 3 * * *" /></label><label>缺集处理方式<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" aria-label="缺集处理方式" :aria-expanded="missingActionPicker" @click="missingPicker.open = ''; missingActionPicker = !missingActionPicker"><span>{{ missing.config.missing_action }}</span><i class="mdi" :class="missingActionPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingActionPicker" class="eme-picker-menu" role="listbox" aria-label="缺集处理方式"><button v-for="item in missingActionOptions" :key="item" type="button" role="option" :aria-selected="missing.config.missing_action === item" class="eme-picker-option" :class="{ selected: missing.config.missing_action === item }" @click="selectMissingAction(item)"><i class="mdi" :class="missing.config.missing_action === item ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item }}</button></div></div></label></div>
-          <p class="eme-hint">“标记为存在”仅记录处理结果；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。自动取消仅处理 TMDB 状态为已完结且 Emby 对应季度全集齐全的订阅，包括洗版订阅。</p>
+          <p class="eme-hint">“标记为存在”仅记录处理结果；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。整剧模式要求 TMDB 状态为 Ended；季度模式独立生效，不要求整剧完结，但要求总集数与连续集号一致、播出日期完整、末集播出满 7 天、无本季待播集且本地全集齐全（不含特别篇）。两项同时开启时满足任一规则即可，包括洗版订阅。季度模式依据 TMDB 当前资料推断，无法保证其后续不追加分集。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><div class="eme-inline"><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('scan')">立即检测</button><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新选项' }}</button></div></div>
           <div class="eme-missing-selects">

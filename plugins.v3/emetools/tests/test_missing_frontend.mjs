@@ -32,10 +32,12 @@ test('switching pages and refreshing preserve library selections and toggle', as
   await context.loadMissing()
   context.missing.config.library_names.push('日韩剧')
   context.missing.config.auto_cancel_completed = true
+  context.missing.config.auto_cancel_aired_season = true
   await context.loadMissing()
   await context.loadMissing()
   assert.deepEqual(Array.from(context.missing.config.library_names), ['国产剧', '日韩剧'])
   assert.equal(context.missing.config.auto_cancel_completed, true)
+  assert.equal(context.missing.config.auto_cancel_aired_season, true)
 })
 
 test('late initial response cannot overwrite a newer selection', async () => {

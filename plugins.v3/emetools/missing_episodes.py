@@ -29,6 +29,7 @@ DEFAULT_MISSING = {
     "missing_action": MissingAction.ONLY_HISTORY.value,
     "ignore_season_zero": True, "ignore_future": True,
     "auto_cancel_completed": False,
+    "auto_cancel_aired_season": False,
     "server_names": [], "library_names": [], "skip_series_ids": [],
 }
 
@@ -61,6 +62,7 @@ class MissingEpisodeDetector:
         self._ignore_season_zero = bool(config.get("ignore_season_zero", True))
         self._ignore_future = bool(config.get("ignore_future", True))
         self._auto_cancel_completed = bool(config.get("auto_cancel_completed", False))
+        self._auto_cancel_aired_season = bool(config.get("auto_cancel_aired_season", False))
         self._server_names = self._parse_names(config.get("server_names"))
         self._library_names = self._parse_names(config.get("library_names"))
         self._skip_series_ids = set(self._parse_names(config.get("skip_series_ids")))
@@ -204,11 +206,11 @@ class MissingEpisodeDetector:
     def _cancel_completed_subscriptions(
         self, completed: Set[Tuple[str, int, str]]
     ) -> List[Dict[str, Any]]:
-        """取消 TMDB 已完结且 Emby 对应季度完整的订阅。"""
-        logger.info(f"【{self.plugin_name}】自动取消核对：检测范围内有 {len(completed)} 个已完结且完整的季度")
+        """取消满足已启用规则且 Emby 对应季度完整的订阅。"""
+        logger.info(f"【{self.plugin_name}】自动取消核对：检测范围内有 {len(completed)} 个符合取消规则且完整的季度")
         if not self._subscribe_chain or not completed:
             if not completed:
-                logger.info(f"【{self.plugin_name}】未发现取消候选，请核对已保存的媒体库范围、跳过剧集、TMDB Ended 状态及本地分集编号")
+                logger.info(f"【{self.plugin_name}】未发现取消候选，请核对媒体库范围、跳过剧集、已启用的取消规则及本地分集编号")
             return []
         completed_index = {(tmdb_id, season): title for tmdb_id, season, title in completed}
         cancelled: List[Dict[str, Any]] = []
@@ -245,7 +247,7 @@ class MissingEpisodeDetector:
                         "tmdb_id": tmdb_id, "season": season,
                     })
                     logger.info(
-                        f"【{self.plugin_name}】{title} S{season:02d} 已完结且本地完整，"
+                        f"【{self.plugin_name}】{title} S{season:02d} 满足取消规则且本地完整，"
                         f"自动取消订阅 {subscribe_id}"
                     )
                 else:
@@ -263,6 +265,30 @@ class MissingEpisodeDetector:
             f"成功 {len(cancelled)} 个，失败 {failed_count} 个"
         )
         return cancelled
+
+    @staticmethod
+    def _aired_season_reason(details, season_number, episode_count, episodes, today):
+        if season_number <= 0:
+            return "季度模式不处理特别篇"
+        if type(episode_count) is not int or episode_count <= 0:
+            return "季度总集数无效"
+        if len(episodes) != episode_count:
+            return "季度分集数量与总集数不一致"
+        numbers = [episode.get("episode_number") for episode in episodes]
+        if any(type(number) is not int for number in numbers) or set(numbers) != set(range(1, episode_count + 1)):
+            return "季度集号不连续或重复"
+        next_episode = details.get("next_episode_to_air")
+        if next_episode:
+            if not isinstance(next_episode, dict) or next_episode.get("season_number") == season_number or not isinstance(next_episode.get("season_number"), int):
+                return "TMDB 仍有本季待播集或待播季度不明确"
+        try:
+            dates = [datetime.strptime(episode.get("air_date") or "", "%Y-%m-%d").date() for episode in episodes]
+            elapsed = (datetime.strptime(today, "%Y-%m-%d").date() - max(dates)).days
+        except (TypeError, ValueError):
+            return "存在未知或无效播出日期"
+        if elapsed < 7:
+            return "末集尚未播出或播出未满 7 天"
+        return ""
 
     @staticmethod
     def _format_episode_ranges(episodes: Set[int]) -> str:
@@ -362,16 +388,26 @@ class MissingEpisodeDetector:
                 aired_total += 1
                 if episode_number not in local_episodes:
                     missing.add(episode_number)
-            if (self._auto_cancel_completed and details.get("status") == "Ended"
+            strict_completed = self._auto_cancel_completed and details.get("status") == "Ended"
+            aired_reason = self._aired_season_reason(
+                details, season_number, season.get("episode_count"),
+                season_details.get("episodes") or [], today,
+            ) if self._auto_cancel_aired_season else "季度模式未开启"
+            if ((strict_completed or (self._auto_cancel_aired_season and not aired_reason))
                     and expected and len(expected) == season.get("episode_count")
                     and expected.issubset(local_episodes)):
                 completed.add((str(tmdb_id), season_number, series_title))
-            elif self._auto_cancel_completed:
+                logger.info(
+                    f"【{self.plugin_name}】{series_title} S{season_number:02d} 取消候选："
+                    f"{'整剧 Ended 且本地完整' if strict_completed else '本季全部播出满 7 天且本地完整'}"
+                )
+            elif self._auto_cancel_completed or self._auto_cancel_aired_season:
                 logger.debug(
                     f"【{self.plugin_name}】{series_title} S{season_number:02d} 保留订阅："
                     f"TMDB 状态 {details.get('status') or '未知'}，"
                     f"季度集数 {season.get('episode_count')}，有效分集 {len(expected)}，"
-                    f"本地缺少 {self._format_episode_ranges(expected - local_episodes) or '无'}"
+                    f"本地缺少 {self._format_episode_ranges(expected - local_episodes) or '无'}，"
+                    f"季度判定：{aired_reason or '已播出满 7 天'}"
                 )
             if not missing:
                 continue
@@ -554,7 +590,8 @@ class MissingEpisodeDetector:
                 logger.info(
                     f"【{self.plugin_name}】{server_name} 将扫描 {len(libraries)} 个媒体库："
                     f"{'、'.join(str(library.get('Name') or library.get('Id')) for library in libraries)}；"
-                    f"自动取消{'已开启' if self._auto_cancel_completed else '未开启'}"
+                    f"整剧取消{'已开启' if self._auto_cancel_completed else '未开启'}，"
+                    f"季度取消{'已开启' if self._auto_cancel_aired_season else '未开启'}"
                 )
                 for library in libraries:
                     library_results, library_completed = self._scan_library(
@@ -572,7 +609,7 @@ class MissingEpisodeDetector:
 
             self._cancelled_subscriptions = (
                 self._cancel_completed_subscriptions(completed)
-                if self._auto_cancel_completed else []
+                if self._auto_cancel_completed or self._auto_cancel_aired_season else []
             )
 
             results.sort(

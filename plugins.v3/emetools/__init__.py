@@ -104,7 +104,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.35"
+    plugin_version = "2.9.36"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -671,7 +671,7 @@ class EmeTools(_PluginBase):
             updated = {**self._missing_config, **changes}
             updated["enabled"] = bool(updated["enabled"])
             for key in ("only_existing_seasons", "ignore_season_zero", "ignore_future",
-                        "auto_cancel_completed"):
+                        "auto_cancel_completed", "auto_cancel_aired_season"):
                 updated[key] = bool(updated[key])
             if updated["missing_action"] not in {item.value for item in MissingAction}:
                 raise HTTPException(status_code=400, detail="缺集检测处理方式无效")

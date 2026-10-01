@@ -12,6 +12,26 @@ from emetools.missing_episodes import DEFAULT_MISSING, MissingEpisodeDetector
 class MissingEpisodeCompletionTests(unittest.TestCase):
     def test_auto_cancel_is_disabled_by_default(self):
         self.assertFalse(DEFAULT_MISSING["auto_cancel_completed"])
+        self.assertFalse(DEFAULT_MISSING["auto_cancel_aired_season"])
+
+    def test_aired_season_guard_boundaries(self):
+        check = MissingEpisodeDetector._aired_season_reason
+        episodes = [{"episode_number": 1, "air_date": "2026-09-24"}]
+        self.assertEqual(check({}, 1, 1, episodes, "2026-10-01"), "")
+        for air_date in (None, "invalid", "2026-02-30", "2026-09-25", "2026-10-01", "2026-10-02"):
+            with self.subTest(air_date=air_date):
+                self.assertTrue(check({}, 1, 1, [{"episode_number": 1, "air_date": air_date}], "2026-10-01"))
+        self.assertTrue(check({}, 0, 1, episodes, "2026-10-01"))
+        self.assertTrue(check({}, 1, 2, episodes, "2026-10-01"))
+        self.assertTrue(check({"next_episode_to_air": {"season_number": 1}}, 1, 1, episodes, "2026-10-01"))
+        self.assertTrue(check({"next_episode_to_air": {"episode_number": 2}}, 1, 1, episodes, "2026-10-01"))
+        self.assertEqual(check({"next_episode_to_air": {"season_number": 2}}, 1, 1, episodes, "2026-10-01"), "")
+
+    def test_season_mode_still_requires_local_complete_and_full_tmdb_response(self):
+        self.detector._auto_cancel_completed = False
+        self.detector._auto_cancel_aired_season = True
+        self.assertEqual(self.process(status="Returning Series", local={1})[1], set())
+        self.assertEqual(self.process(status="Returning Series", episode_count=3)[1], set())
 
     def setUp(self):
         self.detector = object.__new__(MissingEpisodeDetector)
@@ -19,6 +39,7 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
         self.detector._only_existing_seasons = True
         self.detector._ignore_future = True
         self.detector._auto_cancel_completed = True
+        self.detector._auto_cancel_aired_season = False
         self.detector._skip_series_ids = set()
 
     def process(self, status="Ended", local=None, episode_count=2):
@@ -46,6 +67,40 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
         missing, completed = self.process(local={1})
         self.assertEqual(completed, set())
         self.assertEqual(missing[0]["MissingEpisodeNumbers"], [2])
+
+    def test_aired_complete_season_can_cancel_returning_series(self):
+        self.detector._auto_cancel_completed = False
+        self.detector._auto_cancel_aired_season = True
+        missing, completed = self.process(status="Returning Series")
+        self.assertEqual(missing, [])
+        self.assertEqual(completed, {("123", 1, "完结剧")})
+
+    def test_aired_season_waits_for_final_episode_and_complete_tmdb_data(self):
+        self.detector._auto_cancel_completed = False
+        self.detector._auto_cancel_aired_season = True
+        details = {"status": "Returning Series", "seasons": [{"season_number": 1, "episode_count": 2}],
+                   "next_episode_to_air": {"season_number": 1, "episode_number": 3}}
+        season = {"episodes": [{"episode_number": 1, "air_date": "2026-01-01"},
+                                {"episode_number": 2, "air_date": "2026-10-01"}]}
+        with patch.object(self.detector, "_request_json", side_effect=[details, season]):
+            _, completed = self.detector._process_series(
+                {"Id": "series-1", "Name": "连载剧", "ProviderIds": {"Tmdb": "123"}},
+                {"series-1": {1: {1, 2}}}, "key", "tmdb.example", "2026-10-01", "Q4", "电视剧",
+            )
+        self.assertEqual(completed, set())
+
+    def test_aired_season_requires_contiguous_tmdb_episode_numbers(self):
+        self.detector._auto_cancel_completed = False
+        self.detector._auto_cancel_aired_season = True
+        details = {"status": "Returning Series", "seasons": [{"season_number": 1, "episode_count": 2}]}
+        season = {"episodes": [{"episode_number": 1, "air_date": "2026-01-01"},
+                                {"episode_number": 1, "air_date": "2026-01-02"}]}
+        with patch.object(self.detector, "_request_json", side_effect=[details, season]):
+            _, completed = self.detector._process_series(
+                {"Id": "series-1", "Name": "重复集号", "ProviderIds": {"Tmdb": "123"}},
+                {"series-1": {1: {1, 2}}}, "key", "tmdb.example", "2026-10-01", "Q4", "电视剧",
+            )
+        self.assertEqual(completed, set())
 
     def test_partial_tmdb_response_is_not_cancel_candidate(self):
         self.assertEqual(self.process(episode_count=3)[1], set())
