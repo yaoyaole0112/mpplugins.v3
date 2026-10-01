@@ -6,7 +6,14 @@ import vm from 'node:vm'
 const source = readFileSync(new URL('../src/Workbench.vue', import.meta.url), 'utf8')
 const loading = source.slice(source.indexOf('async function loadMissing()'), source.indexOf('function scheduleMissingPoll()'))
 const command = source.slice(source.indexOf('async function missingCommand('), source.indexOf('function downloadMissingCsv()'))
-const config = () => ({ server_names: ['Q4'], library_names: ['国产剧'], skip_series_ids: [], auto_cancel_completed: false })
+const config = () => ({ server_names: ['Q4'], library_names: ['国产剧'], skip_series_ids: [], auto_cancel_enabled: false, auto_cancel_mode: 'ended_or_aired' })
+
+test('template exposes one cancellation switch and a mode picker', () => {
+  assert.equal((source.match(/v-model="missing.config.auto_cancel_enabled"/g) || []).length, 1)
+  assert.equal(source.includes('v-model="missing.config.auto_cancel_completed"'), false)
+  assert.equal(source.includes('v-model="missing.config.auto_cancel_aired_season"'), false)
+  assert.ok(source.includes('aria-label="自动取消判定方式"'))
+})
 
 function fixture() {
   const calls = []
@@ -31,13 +38,13 @@ test('switching pages and refreshing preserve library selections and toggle', as
   const { context } = fixture()
   await context.loadMissing()
   context.missing.config.library_names.push('日韩剧')
-  context.missing.config.auto_cancel_completed = true
-  context.missing.config.auto_cancel_aired_season = true
+  context.missing.config.auto_cancel_enabled = true
+  context.missing.config.auto_cancel_mode = 'ended'
   await context.loadMissing()
   await context.loadMissing()
   assert.deepEqual(Array.from(context.missing.config.library_names), ['国产剧', '日韩剧'])
-  assert.equal(context.missing.config.auto_cancel_completed, true)
-  assert.equal(context.missing.config.auto_cancel_aired_season, true)
+  assert.equal(context.missing.config.auto_cancel_enabled, true)
+  assert.equal(context.missing.config.auto_cancel_mode, 'ended')
 })
 
 test('late initial response cannot overwrite a newer selection', async () => {
@@ -55,11 +62,12 @@ test('manual scan saves current scope and cancellation setting first', async () 
   const { context, calls } = fixture()
   await context.loadMissing()
   context.missing.config.library_names.push('日韩剧')
-  context.missing.config.auto_cancel_completed = true
+  context.missing.config.auto_cancel_enabled = true
   await context.missingCommand('scan')
   assert.deepEqual(calls.map(item => item.operation), ['save', 'scan'])
   assert.deepEqual(Array.from(calls[0].config.library_names), ['国产剧', '日韩剧'])
-  assert.equal(calls[0].config.auto_cancel_completed, true)
+  assert.equal(calls[0].config.auto_cancel_enabled, true)
+  assert.equal(calls[0].config.auto_cancel_mode, 'ended_or_aired')
   await context.missingCommand('scan')
   assert.deepEqual(calls.map(item => item.operation), ['save', 'scan', 'scan'])
 })
@@ -75,6 +83,20 @@ test('save failure prevents scanning with stale configuration', async () => {
   }
   await assert.rejects(context.missingCommand('scan'), /保存失败/)
   assert.deepEqual(operations, ['save'])
+})
+
+test('switch off is saved without losing the selected rule', async () => {
+  const { context, calls } = fixture()
+  await context.loadMissing()
+  context.missing.config.auto_cancel_enabled = true
+  context.missing.config.auto_cancel_mode = 'ended'
+  await context.missingCommand('save')
+  context.missing.config.auto_cancel_enabled = false
+  await context.missingCommand('save')
+  await context.loadMissing()
+  assert.equal(calls[1].config.auto_cancel_enabled, false)
+  assert.equal(context.missing.config.auto_cancel_enabled, false)
+  assert.equal(context.missing.config.auto_cancel_mode, 'ended')
 })
 
 test('concurrent initial responses do not reset initialized config', async () => {

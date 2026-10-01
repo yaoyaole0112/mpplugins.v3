@@ -6,13 +6,39 @@ from unittest.mock import MagicMock, patch
 
 from app.schemas.types import MediaSource, MediaType
 
-from emetools.missing_episodes import DEFAULT_MISSING, MissingEpisodeDetector
+from emetools.missing_episodes import DEFAULT_MISSING, MissingEpisodeDetector, normalize_cancel_config
 
 
 class MissingEpisodeCompletionTests(unittest.TestCase):
     def test_auto_cancel_is_disabled_by_default(self):
-        self.assertFalse(DEFAULT_MISSING["auto_cancel_completed"])
-        self.assertFalse(DEFAULT_MISSING["auto_cancel_aired_season"])
+        self.assertFalse(DEFAULT_MISSING["auto_cancel_enabled"])
+        self.assertEqual(DEFAULT_MISSING["auto_cancel_mode"], "ended_or_aired")
+
+    def test_legacy_cancel_modes_migrate_without_changing_behavior(self):
+        for ended, aired, mode in [(False, False, "ended_or_aired"), (True, False, "ended"),
+                                   (False, True, "aired"), (True, True, "ended_or_aired")]:
+            with self.subTest(ended=ended, aired=aired):
+                old = {"auto_cancel_completed": ended, "auto_cancel_aired_season": aired}
+                migrated = normalize_cancel_config(old)
+                self.assertEqual(migrated, {"auto_cancel_enabled": ended or aired, "auto_cancel_mode": mode})
+                self.assertEqual(normalize_cancel_config(migrated), migrated)
+                self.assertIn("auto_cancel_completed", old)
+                self.detector.configure(migrated)
+                self.assertEqual(self.detector._auto_cancel_completed, ended)
+                self.assertEqual(self.detector._auto_cancel_aired_season, aired)
+
+    def test_master_off_overrides_legacy_flags_and_keeps_mode(self):
+        config = normalize_cancel_config({"auto_cancel_enabled": False, "auto_cancel_mode": "ended_or_aired",
+                                          "auto_cancel_completed": True, "auto_cancel_aired_season": True})
+        self.detector.configure(config)
+        self.assertFalse(self.detector._auto_cancel_completed)
+        self.assertFalse(self.detector._auto_cancel_aired_season)
+        self.assertEqual(self.process()[1], set())
+        config["auto_cancel_enabled"] = True
+        self.detector.configure(config)
+        self.assertTrue(self.detector._auto_cancel_completed)
+        self.assertTrue(self.detector._auto_cancel_aired_season)
+        self.assertTrue(self.process(status="Returning Series")[1])
 
     def test_aired_season_guard_boundaries(self):
         check = MissingEpisodeDetector._aired_season_reason

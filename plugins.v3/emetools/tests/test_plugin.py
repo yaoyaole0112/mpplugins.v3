@@ -193,9 +193,11 @@ class PluginTests(unittest.TestCase):
             self.run_async(self.plugin.missing_action({
                 "operation": "save", "config": {"auto_cancel_completed": True},
             }))
-        self.assertTrue(self.plugin._missing_config["auto_cancel_completed"])
+        self.assertTrue(self.plugin._missing_config["auto_cancel_enabled"])
+        self.assertEqual(self.plugin._missing_config["auto_cancel_mode"], "ended")
         self.assertTrue(self.plugin._missing._auto_cancel_completed)
-        self.assertTrue(self.plugin.update_config.call_args.args[0]["missing"]["auto_cancel_completed"])
+        self.assertTrue(self.plugin.update_config.call_args.args[0]["missing"]["auto_cancel_enabled"])
+        self.assertNotIn("auto_cancel_completed", self.plugin.update_config.call_args.args[0]["missing"])
 
     def test_missing_aired_season_setting_is_independent_and_persisted(self):
         with patch("emetools.Scheduler"):
@@ -204,7 +206,40 @@ class PluginTests(unittest.TestCase):
             }))
         self.assertFalse(self.plugin._missing._auto_cancel_completed)
         self.assertTrue(self.plugin._missing._auto_cancel_aired_season)
-        self.assertTrue(self.plugin.update_config.call_args.args[0]["missing"]["auto_cancel_aired_season"])
+        self.assertEqual(self.plugin.update_config.call_args.args[0]["missing"]["auto_cancel_mode"], "aired")
+
+    def test_missing_master_switch_persists_and_disables_both_rules(self):
+        with patch("emetools.Scheduler"):
+            for enabled in (True, False, True):
+                self.run_async(self.plugin.missing_action({
+                    "operation": "save", "config": {"auto_cancel_enabled": enabled, "auto_cancel_mode": "ended_or_aired"},
+                }))
+                self.assertEqual(self.plugin._missing._auto_cancel_completed, enabled)
+                self.assertEqual(self.plugin._missing._auto_cancel_aired_season, enabled)
+                self.assertEqual(self.plugin.update_config.call_args.args[0]["missing"]["auto_cancel_enabled"], enabled)
+
+    def test_missing_invalid_cancel_mode_is_rejected(self):
+        for mode in ("unknown", [], None):
+            with self.subTest(mode=mode), self.assertRaises(HTTPException) as caught:
+                self.run_async(self.plugin.missing_action({"operation": "save", "config": {"auto_cancel_mode": mode}}))
+            self.assertEqual(caught.exception.status_code, 400)
+
+    def test_missing_legacy_cancel_config_is_migrated_on_initialization(self):
+        for ended, aired, mode in [(False, False, "ended_or_aired"), (True, False, "ended"),
+                                   (False, True, "aired"), (True, True, "ended_or_aired")]:
+            with self.subTest(ended=ended, aired=aired), \
+                 patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()), \
+                 patch('emetools.missing_episodes.MediaServerHelper', return_value=MagicMock()):
+                self.plugin.init_plugin({"strm_root": self.directory.name, "missing": {
+                    "auto_cancel_completed": ended, "auto_cancel_aired_season": aired,
+                }})
+                config = self.run_async(self.plugin.missing_status())["config"]
+                self.assertEqual(config["auto_cancel_enabled"], ended or aired)
+                self.assertEqual(config["auto_cancel_mode"], mode)
+                self.assertNotIn("auto_cancel_completed", config)
+                self.assertNotIn("auto_cancel_aired_season", config)
+                self.assertEqual(self.plugin._missing._auto_cancel_completed, ended)
+                self.assertEqual(self.plugin._missing._auto_cancel_aired_season, aired)
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -253,7 +288,7 @@ class PluginTests(unittest.TestCase):
         with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()):
             plugin.init_plugin({"strm_root": self.directory.name})
         self.assertFalse(plugin._missing_config["enabled"])
-        self.assertFalse(plugin._missing_config["auto_cancel_completed"])
+        self.assertFalse(plugin._missing_config["auto_cancel_enabled"])
         self.assertEqual(plugin._missing_config["missing_action"], MissingAction.ADD_SUBSCRIBE.value)
         plugin.save_data.assert_any_call("missing_episodes", [{"SeriesName": "测试剧"}])
         self.assertEqual(plugin._missing._subscribe_chain._delete_subscription.call_count, 0)

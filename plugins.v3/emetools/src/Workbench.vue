@@ -63,7 +63,7 @@ const drafts = reactive({ sub: { channels: [], keywords: [], blacklist: [] }, kw
 const entry = reactive({ sub: { channels: '' }, kw: { channels: '', keywords: '', blacklist: '' } })
 const telegram = reactive({ api_id: '', api_hash: '', forward_token: '', phone: '', code: '', password: '', password_required: false })
 const missing = reactive({ config: { enabled: false, cron: '35 3 * * *', only_existing_seasons: true,
-  missing_action: '仅检查记录', ignore_season_zero: true, ignore_future: true, auto_cancel_completed: false, auto_cancel_aired_season: false,
+  missing_action: '仅检查记录', ignore_season_zero: true, ignore_future: true, auto_cancel_enabled: false, auto_cancel_mode: 'ended_or_aired',
   server_names: [], library_names: [], skip_series_ids: [] },
   results: [], cancelled_subscriptions: [], last_scan_time: '从未扫描', scanning: false, legacy_enabled: false })
 const missingOptions = reactive({ servers: [], libraries: [], series: [] })
@@ -73,6 +73,13 @@ let missingSavedConfig = ''
 const missingPicker = reactive({ open: '', query: '' })
 const missingActionPicker = ref(false)
 const missingActionOptions = ['仅检查记录', '添加到订阅', '标记为存在']
+const missingCancelPicker = ref(false)
+const missingCancelModes = [
+  { value: 'ended_or_aired', title: '整剧完结或季度播完' },
+  { value: 'ended', title: '仅整剧完结（严格）' },
+  { value: 'aired', title: '仅季度播完（保留旧配置）' },
+]
+const missingCancelLabel = computed(() => missingCancelModes.find(item => item.value === missing.config.auto_cancel_mode)?.title || '请选择判定方式')
 const enrich = reactive({ query: '', items: [], selected: null, searching: false,
   libraries: [], catalogLoading: false, libraryIds: [], libraryPicker: false, libraryQuery: '',
   previewQuery: '', previewItems: [], previewSelected: null, previewEpisodes: [],
@@ -469,6 +476,7 @@ function missingSelectedLabel(type) {
   return `已选 ${names.length} 个${title}：${names.join('、')}`
 }
 function openMissingPicker(type) {
+  missingCancelPicker.value = false
   missingActionPicker.value = false
   missingPicker.open = missingPicker.open === type ? '' : type
   missingPicker.query = ''
@@ -705,6 +713,7 @@ function selectFolder() {
   folder.open = false
 }
 function chooseSection(key) {
+  missingCancelPicker.value = false
   active.value = key
   if (key !== 'missing') clearTimeout(missingPollTimer)
   if (key !== 'enrichment') clearTimeout(enrichmentPollTimer)
@@ -720,7 +729,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 </script>
 
 <template>
-  <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''; missingActionPicker = false; mediaPicker.open = false; mediaSchedulePicker.open = false; confirmPicker.open = false; enrich.libraryPicker = false">
+  <div class="eme-shell" :class="{ 'eme-shell--app': appPage }" @click="missingPicker.open = ''; missingActionPicker = false; missingCancelPicker = false; mediaPicker.open = false; mediaSchedulePicker.open = false; confirmPicker.open = false; enrich.libraryPicker = false">
     <aside class="eme-sidebar">
       <div class="eme-brand">
         <span class="eme-brand-icon" aria-hidden="true" />
@@ -745,11 +754,11 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
             <label class="eme-switch-label"><input v-model="missing.config.only_existing_seasons" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>仅检查已有季缺失</span></label>
             <label class="eme-switch-label"><input v-model="missing.config.ignore_season_zero" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>忽略特别篇（S00/SP）</span></label>
             <label class="eme-switch-label"><input v-model="missing.config.ignore_future" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>忽略未上映剧集</span></label>
-            <label class="eme-switch-label"><input v-model="missing.config.auto_cancel_completed" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>自动取消已完结且完整的订阅</span></label>
-            <label class="eme-switch-label"><input v-model="missing.config.auto_cancel_aired_season" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>当前订阅季度已播完且本地完整时自动取消</span></label>
+            <label class="eme-switch-label"><input v-model="missing.config.auto_cancel_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>自动取消已完成的订阅</span></label>
           </div>
+          <div v-if="missing.config.auto_cancel_enabled" class="eme-fields"><label>自动取消判定方式<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" aria-label="自动取消判定方式" :aria-expanded="missingCancelPicker" @click="missingCancelPicker = !missingCancelPicker"><span>{{ missingCancelLabel }}</span><i class="mdi" :class="missingCancelPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingCancelPicker" class="eme-picker-menu" role="listbox" aria-label="自动取消判定方式"><button v-for="item in missingCancelModes" :key="item.value" type="button" role="option" :aria-selected="missing.config.auto_cancel_mode === item.value" class="eme-picker-option" :class="{ selected: missing.config.auto_cancel_mode === item.value }" @click="missing.config.auto_cancel_mode = item.value; missingCancelPicker = false"><i class="mdi" :class="missing.config.auto_cancel_mode === item.value ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item.title }}</button></div></div></label></div>
           <div class="eme-fields"><label>执行周期（cron表达式）<input v-model.trim="missing.config.cron" placeholder="35 3 * * *" /></label><label>缺集处理方式<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" aria-label="缺集处理方式" :aria-expanded="missingActionPicker" @click="missingPicker.open = ''; missingActionPicker = !missingActionPicker"><span>{{ missing.config.missing_action }}</span><i class="mdi" :class="missingActionPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingActionPicker" class="eme-picker-menu" role="listbox" aria-label="缺集处理方式"><button v-for="item in missingActionOptions" :key="item" type="button" role="option" :aria-selected="missing.config.missing_action === item" class="eme-picker-option" :class="{ selected: missing.config.missing_action === item }" @click="selectMissingAction(item)"><i class="mdi" :class="missing.config.missing_action === item ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item }}</button></div></div></label></div>
-          <p class="eme-hint">“标记为存在”仅记录处理结果；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。整剧模式要求 TMDB 状态为 Ended；季度模式独立生效，不要求整剧完结，但要求总集数与连续集号一致、播出日期完整、末集播出满 7 天、无本季待播集且本地全集齐全（不含特别篇）。两项同时开启时满足任一规则即可，包括洗版订阅。季度模式依据 TMDB 当前资料推断，无法保证其后续不追加分集。</p>
+          <p class="eme-hint">“标记为存在”仅记录处理结果；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。自动取消始终要求本地对应季度全集齐全，包括洗版订阅。整剧完结要求 TMDB 状态为 Ended；季度播完要求总集数与连续集号一致、播出日期完整、末集播出满 7 天且无本季待播集（不含特别篇）。选择“整剧完结或季度播完”时满足任一规则即可；关闭总开关后两种规则均不执行。季度模式依据 TMDB 当前资料推断，无法保证其后续不追加分集。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><div class="eme-inline"><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('scan')">立即检测</button><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新选项' }}</button></div></div>
           <div class="eme-missing-selects">

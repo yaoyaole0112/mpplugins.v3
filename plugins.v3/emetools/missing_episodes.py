@@ -28,10 +28,23 @@ DEFAULT_MISSING = {
     "enabled": False, "cron": "35 3 * * *", "only_existing_seasons": True,
     "missing_action": MissingAction.ONLY_HISTORY.value,
     "ignore_season_zero": True, "ignore_future": True,
-    "auto_cancel_completed": False,
-    "auto_cancel_aired_season": False,
+    "auto_cancel_enabled": False,
+    "auto_cancel_mode": "ended_or_aired",
     "server_names": [], "library_names": [], "skip_series_ids": [],
 }
+
+
+def normalize_cancel_config(config):
+    updated = dict(config)
+    ended = bool(updated.pop("auto_cancel_completed", False))
+    aired = bool(updated.pop("auto_cancel_aired_season", False))
+    if "auto_cancel_enabled" not in updated:
+        updated["auto_cancel_enabled"] = ended or aired
+    if "auto_cancel_mode" not in updated:
+        updated["auto_cancel_mode"] = (
+            "ended" if ended and not aired else "aired" if aired and not ended else "ended_or_aired"
+        )
+    return updated
 
 
 class MissingEpisodeDetector:
@@ -55,14 +68,17 @@ class MissingEpisodeDetector:
         self._load_saved_data()
 
     def configure(self, config):
+        config = normalize_cancel_config(config)
         self._enabled = bool(config.get("enabled", False))
         self._cron = str(config.get("cron") or DEFAULT_MISSING["cron"])
         self._only_existing_seasons = bool(config.get("only_existing_seasons", True))
         self._missing_action = str(config.get("missing_action") or MissingAction.ONLY_HISTORY.value)
         self._ignore_season_zero = bool(config.get("ignore_season_zero", True))
         self._ignore_future = bool(config.get("ignore_future", True))
-        self._auto_cancel_completed = bool(config.get("auto_cancel_completed", False))
-        self._auto_cancel_aired_season = bool(config.get("auto_cancel_aired_season", False))
+        cancel_enabled = bool(config["auto_cancel_enabled"])
+        cancel_mode = config["auto_cancel_mode"]
+        self._auto_cancel_completed = cancel_enabled and cancel_mode in {"ended", "ended_or_aired"}
+        self._auto_cancel_aired_season = cancel_enabled and cancel_mode in {"aired", "ended_or_aired"}
         self._server_names = self._parse_names(config.get("server_names"))
         self._library_names = self._parse_names(config.get("library_names"))
         self._skip_series_ids = set(self._parse_names(config.get("skip_series_ids")))

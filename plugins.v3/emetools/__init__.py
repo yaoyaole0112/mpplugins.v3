@@ -30,7 +30,7 @@ from app.application.messaging.channel.admin import matches_channel_admin
 from .invalid_data import InvalidDataCleaner
 from .p115 import P115Client
 from .subscription_monitor import SubscriptionMonitor, normalize_channel
-from .missing_episodes import DEFAULT_MISSING, MissingAction, MissingEpisodeDetector
+from .missing_episodes import DEFAULT_MISSING, MissingAction, MissingEpisodeDetector, normalize_cancel_config
 from .media_cleanup import MediaCleanup, DEFAULT_CONFIG as DEFAULT_MEDIA_CLEANUP, DEFAULT_RULES, validate_rules
 from .data_enrichment import DataEnrichment, DEFAULT_ENRICH_CONFIG, validate_enrich_config
 from . import tool_notifications as notices
@@ -104,7 +104,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.36"
+    plugin_version = "2.9.37"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -143,6 +143,7 @@ class EmeTools(_PluginBase):
                     if old_time:
                         self.save_data("last_scan_time", old_time)
         self._missing_config = copy.deepcopy(DEFAULT_MISSING)
+        saved_missing = normalize_cancel_config(saved_missing)
         self._missing_config.update({key: value for key, value in saved_missing.items() if key in DEFAULT_MISSING})
         self._missing = MissingEpisodeDetector(self, self._missing_config)
         self._missing_manual_scan_id = 0
@@ -666,13 +667,17 @@ class EmeTools(_PluginBase):
         operation = action.get("operation")
         if operation == "save":
             changes = action.get("config")
-            if not isinstance(changes, dict) or set(changes) - set(DEFAULT_MISSING):
+            if not isinstance(changes, dict) or set(changes) - (set(DEFAULT_MISSING) | {"auto_cancel_completed", "auto_cancel_aired_season"}):
                 raise HTTPException(status_code=400, detail="缺集检测配置格式不正确")
+            if "auto_cancel_completed" in changes or "auto_cancel_aired_season" in changes:
+                changes = normalize_cancel_config(changes)
             updated = {**self._missing_config, **changes}
             updated["enabled"] = bool(updated["enabled"])
             for key in ("only_existing_seasons", "ignore_season_zero", "ignore_future",
-                        "auto_cancel_completed", "auto_cancel_aired_season"):
+                        "auto_cancel_enabled"):
                 updated[key] = bool(updated[key])
+            if not isinstance(updated["auto_cancel_mode"], str) or updated["auto_cancel_mode"] not in {"ended", "aired", "ended_or_aired"}:
+                raise HTTPException(status_code=400, detail="自动取消判定方式无效")
             if updated["missing_action"] not in {item.value for item in MissingAction}:
                 raise HTTPException(status_code=400, detail="缺集检测处理方式无效")
             for key in ("server_names", "library_names", "skip_series_ids"):
