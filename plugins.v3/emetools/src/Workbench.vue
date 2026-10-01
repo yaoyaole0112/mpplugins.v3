@@ -68,6 +68,8 @@ const missing = reactive({ config: { enabled: false, cron: '35 3 * * *', only_ex
   results: [], cancelled_subscriptions: [], last_scan_time: '从未扫描', scanning: false, legacy_enabled: false })
 const missingOptions = reactive({ servers: [], libraries: [], series: [] })
 const missingOptionsLoading = ref(false)
+let missingConfigInitialized = false
+let missingSavedConfig = ''
 const missingPicker = reactive({ open: '', query: '' })
 const missingActionPicker = ref(false)
 const missingActionOptions = ['仅检查记录', '添加到订阅', '标记为存在']
@@ -406,8 +408,14 @@ async function loadMonitor() {
   }
 }
 async function loadMissing() {
+  const draft = JSON.stringify(missing.config)
   const status = await get('missing/status')
-  applyMissingStatus(status, true)
+  const initialize = !missingConfigInitialized
+  if (initialize) {
+    missingConfigInitialized = true
+    missingSavedConfig = JSON.stringify(status.config)
+  }
+  applyMissingStatus(status, initialize && draft === JSON.stringify(missing.config))
 }
 function applyMissingStatus(status, updateConfig = false) {
   const { config, ...state } = status
@@ -479,7 +487,15 @@ function confirmModeLabel() {
 }
 async function missingCommand(operation) {
   await work(async () => {
-    const result = await post('missing/action', { operation, ...(operation === 'save' ? { config: missing.config } : {}) })
+    if (!missingConfigInitialized) await loadMissing()
+    if (operation === 'scan' && missingSavedConfig !== JSON.stringify(missing.config)) {
+      const config = JSON.parse(JSON.stringify(missing.config))
+      await post('missing/action', { operation: 'save', config })
+      missingSavedConfig = JSON.stringify(config)
+    }
+    const config = operation === 'save' ? JSON.parse(JSON.stringify(missing.config)) : null
+    const result = await post('missing/action', { operation, ...(config ? { config } : {}) })
+    if (config) missingSavedConfig = JSON.stringify(config)
     if (operation === 'scan') missingScanPendingId = result.scan_id
     notice.value = result.message
     await loadMissing()
@@ -739,7 +755,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
             <label>Emby 服务器（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('servers')"><span>{{ missingSelectedLabel('servers') }}</span><i class="mdi" :class="missingPicker.open === 'servers' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'servers'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索服务器" @click.stop /><button v-for="item in missingOptionItems('servers')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.server_names.includes(item.value) }" @click="toggleMissingOption('servers', item.value)"><i class="mdi" :class="missing.config.server_names.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('servers').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
             <label>电视剧媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('libraries')"><span>{{ missingSelectedLabel('libraries') }}</span><i class="mdi" :class="missingPicker.open === 'libraries' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'libraries'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索媒体库" @click.stop /><button v-for="item in missingOptionItems('libraries')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.library_names.includes(item.value) }" @click="toggleMissingOption('libraries', item.value)"><i class="mdi" :class="missing.config.library_names.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('libraries').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
             <label>跳过检测剧集（按拼音排序，可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('series')"><span>{{ missingSelectedLabel('series') }}</span><i class="mdi" :class="missingPicker.open === 'series' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'series'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索剧集名称或 TMDB ID" @click.stop /><button v-for="item in missingOptionItems('series')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.skip_series_ids.includes(item.value) }" @click="toggleMissingOption('series', item.value)"><i class="mdi" :class="missing.config.skip_series_ids.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('series').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
-          </div><p class="eme-hint">点击选择框即可展开，支持搜索和多选；再次点击已选项可取消。更改检测范围后请先保存配置。</p>
+          </div><p class="eme-hint">点击选择框即可展开，支持搜索和多选；切换工具页面保留当前选择。“立即检测”会先保存当前配置；定时检测使用已保存配置。自动取消仅在检测时处理所选媒体库内的剧集。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测结果</h3><p>{{ missing.scanning ? '后台扫描中' : `上次扫描：${missing.last_scan_time}` }} · {{ missing.results.length }} 条缺失季 · 自动取消 {{ missing.cancelled_subscriptions.length }} 个订阅</p></div><div class="eme-inline"><button class="eme-button danger" :disabled="busy || missing.scanning || !missing.results.length" @click="clearMissing">清理检查记录</button><button class="eme-button secondary" :disabled="busy" @click="loadMissing">刷新结果</button><button class="eme-button secondary" :disabled="busy" @click="downloadMissingCsv">导出 CSV</button></div></div>
           <div v-if="missing.results.length" class="eme-missing-results"><table><thead><tr><th>服务器</th><th>媒体库</th><th>剧集名称</th><th>缺失季度</th><th>缺失集号</th><th>处理结果</th></tr></thead><tbody><tr v-for="(item, index) in missing.results" :key="index"><td>{{ item.ServerName }}</td><td>{{ item.LibraryName }}</td><td>{{ item.SeriesName }}</td><td>{{ item.SeasonFormatted }}</td><td>{{ item.MissingEpisodes }}</td><td>{{ item.ActionResult }}</td></tr></tbody></table></div><p v-else class="eme-hint">暂无缺失数据或尚未运行扫描。</p>

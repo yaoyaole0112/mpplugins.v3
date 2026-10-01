@@ -205,7 +205,10 @@ class MissingEpisodeDetector:
         self, completed: Set[Tuple[str, int, str]]
     ) -> List[Dict[str, Any]]:
         """取消 TMDB 已完结且 Emby 对应季度完整的订阅。"""
+        logger.info(f"【{self.plugin_name}】自动取消核对：检测范围内有 {len(completed)} 个已完结且完整的季度")
         if not self._subscribe_chain or not completed:
+            if not completed:
+                logger.info(f"【{self.plugin_name}】未发现取消候选，请核对已保存的媒体库范围、跳过剧集、TMDB Ended 状态及本地分集编号")
             return []
         completed_index = {(tmdb_id, season): title for tmdb_id, season, title in completed}
         cancelled: List[Dict[str, Any]] = []
@@ -214,20 +217,27 @@ class MissingEpisodeDetector:
         except Exception as error:  # noqa: BLE001 - 读取失败不影响缺集结果
             logger.error(f"【{self.plugin_name}】读取待核对订阅失败：{error}")
             return []
+        television_count = matched_count = failed_count = 0
+        source_skipped = season_skipped = unmatched_count = 0
         for subscribe in subscribes or []:
             if getattr(subscribe, "type", None) != MediaType.TV.value:
                 continue
+            television_count += 1
             if getattr(subscribe, "media_source", None) != MediaSource.TMDB:
+                source_skipped += 1
                 continue
             tmdb_id = str(getattr(subscribe, "media_id", "") or "")
             try:
                 season = int(getattr(subscribe, "season", None))
             except (TypeError, ValueError):
+                season_skipped += 1
                 continue
             title = completed_index.get((tmdb_id, season))
             subscribe_id = getattr(subscribe, "id", None)
             if not title or not subscribe_id:
+                unmatched_count += 1
                 continue
+            matched_count += 1
             try:
                 if self._subscribe_chain._delete_subscription(int(subscribe_id)):
                     cancelled.append({
@@ -238,10 +248,20 @@ class MissingEpisodeDetector:
                         f"【{self.plugin_name}】{title} S{season:02d} 已完结且本地完整，"
                         f"自动取消订阅 {subscribe_id}"
                     )
+                else:
+                    failed_count += 1
+                    logger.warning(f"【{self.plugin_name}】自动取消 {title} S{season:02d} 未成功，订阅 {subscribe_id} 删除接口返回失败")
             except Exception as error:  # noqa: BLE001 - 单条失败不影响其他订阅
+                failed_count += 1
                 logger.error(
                     f"【{self.plugin_name}】自动取消 {title} S{season:02d} 订阅失败：{error}"
                 )
+        logger.info(
+            f"【{self.plugin_name}】自动取消核对：电视剧订阅 {television_count} 个，"
+            f"非 TMDB 来源 {source_skipped} 个，无有效季度 {season_skipped} 个，"
+            f"未匹配完整完结季度 {unmatched_count} 个，匹配 {matched_count} 个，"
+            f"成功 {len(cancelled)} 个，失败 {failed_count} 个"
+        )
         return cancelled
 
     @staticmethod
@@ -343,8 +363,16 @@ class MissingEpisodeDetector:
                 if episode_number not in local_episodes:
                     missing.add(episode_number)
             if (self._auto_cancel_completed and details.get("status") == "Ended"
-                    and expected and expected.issubset(local_episodes)):
+                    and expected and len(expected) == season.get("episode_count")
+                    and expected.issubset(local_episodes)):
                 completed.add((str(tmdb_id), season_number, series_title))
+            elif self._auto_cancel_completed:
+                logger.debug(
+                    f"【{self.plugin_name}】{series_title} S{season_number:02d} 保留订阅："
+                    f"TMDB 状态 {details.get('status') or '未知'}，"
+                    f"季度集数 {season.get('episode_count')}，有效分集 {len(expected)}，"
+                    f"本地缺少 {self._format_episode_ranges(expected - local_episodes) or '无'}"
+                )
             if not missing:
                 continue
             results.append(
@@ -524,7 +552,9 @@ class MissingEpisodeDetector:
                     continue
                 libraries = self._selected_libraries(host, api_key, user_id)
                 logger.info(
-                    f"【{self.plugin_name}】{server_name} 将扫描 {len(libraries)} 个媒体库"
+                    f"【{self.plugin_name}】{server_name} 将扫描 {len(libraries)} 个媒体库："
+                    f"{'、'.join(str(library.get('Name') or library.get('Id')) for library in libraries)}；"
+                    f"自动取消{'已开启' if self._auto_cancel_completed else '未开启'}"
                 )
                 for library in libraries:
                     library_results, library_completed = self._scan_library(
