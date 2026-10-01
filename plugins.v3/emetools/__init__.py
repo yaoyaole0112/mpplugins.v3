@@ -104,7 +104,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.33"
+    plugin_version = "2.9.34"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -655,6 +655,7 @@ class EmeTools(_PluginBase):
                 "manual_scan_id": self._missing_manual_scan_id,
                 "finished_scan_id": self._missing_finished_scan_id,
                 "last_scan_time": self._missing._last_scan_time,
+                "cancelled_subscriptions": copy.deepcopy(self._missing._cancelled_subscriptions),
                 "results": copy.deepcopy(self._missing._results)}
 
     async def missing_options(self) -> dict:
@@ -669,7 +670,8 @@ class EmeTools(_PluginBase):
                 raise HTTPException(status_code=400, detail="缺集检测配置格式不正确")
             updated = {**self._missing_config, **changes}
             updated["enabled"] = bool(updated["enabled"])
-            for key in ("only_existing_seasons", "ignore_season_zero", "ignore_future"):
+            for key in ("only_existing_seasons", "ignore_season_zero", "ignore_future",
+                        "auto_cancel_completed"):
                 updated[key] = bool(updated[key])
             if updated["missing_action"] not in {item.value for item in MissingAction}:
                 raise HTTPException(status_code=400, detail="缺集检测处理方式无效")
@@ -722,8 +724,10 @@ class EmeTools(_PluginBase):
             if self._missing._is_scanning:
                 raise HTTPException(status_code=409, detail="缺集检测正在扫描")
             self._missing._results = []
+            self._missing._cancelled_subscriptions = []
             self._missing._last_scan_time = "从未扫描"
             self.save_data("missing_episodes", [])
+            self.save_data("missing_cancelled_subscriptions", [])
             self.save_data("last_scan_time", "从未扫描")
             return {"message": "检测记录已清空（原插件记录仍保留）"}
         raise HTTPException(status_code=400, detail="未知缺集检测操作")

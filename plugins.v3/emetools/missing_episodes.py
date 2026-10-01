@@ -28,6 +28,7 @@ DEFAULT_MISSING = {
     "enabled": False, "cron": "35 3 * * *", "only_existing_seasons": True,
     "missing_action": MissingAction.ONLY_HISTORY.value,
     "ignore_season_zero": True, "ignore_future": True,
+    "auto_cancel_completed": False,
     "server_names": [], "library_names": [], "skip_series_ids": [],
 }
 
@@ -38,6 +39,7 @@ class MissingEpisodeDetector:
     plugin_name = "ME工具 缺集检测"
     _DATA_KEY = "missing_episodes"
     _TIME_KEY = "last_scan_time"
+    _CANCELLED_KEY = "missing_cancelled_subscriptions"
 
     def __init__(self, owner, config):
         self.owner = owner
@@ -46,6 +48,7 @@ class MissingEpisodeDetector:
         self._scan_lock = threading.Lock()
         self._is_scanning = False
         self._results = []
+        self._cancelled_subscriptions = []
         self._last_scan_time = "从未扫描"
         self.configure(config)
         self._load_saved_data()
@@ -57,6 +60,7 @@ class MissingEpisodeDetector:
         self._missing_action = str(config.get("missing_action") or MissingAction.ONLY_HISTORY.value)
         self._ignore_season_zero = bool(config.get("ignore_season_zero", True))
         self._ignore_future = bool(config.get("ignore_future", True))
+        self._auto_cancel_completed = bool(config.get("auto_cancel_completed", False))
         self._server_names = self._parse_names(config.get("server_names"))
         self._library_names = self._parse_names(config.get("library_names"))
         self._skip_series_ids = set(self._parse_names(config.get("skip_series_ids")))
@@ -72,7 +76,9 @@ class MissingEpisodeDetector:
     def _load_saved_data(self):
         results = self.owner.get_data(self._DATA_KEY)
         timestamp = self.owner.get_data(self._TIME_KEY)
+        cancelled = self.owner.get_data(self._CANCELLED_KEY)
         self._results = results if isinstance(results, list) else []
+        self._cancelled_subscriptions = cancelled if isinstance(cancelled, list) else []
         self._last_scan_time = str(timestamp) if timestamp else "从未扫描"
 
     def save_data(self, key, value):
@@ -195,6 +201,49 @@ class MissingEpisodeDetector:
                     f"【{self.plugin_name}】取消 TMDB {tmdb_id} 订阅失败：{error}"
                 )
 
+    def _cancel_completed_subscriptions(
+        self, completed: Set[Tuple[str, int, str]]
+    ) -> List[Dict[str, Any]]:
+        """取消 TMDB 已完结且 Emby 对应季度完整的订阅。"""
+        if not self._subscribe_chain or not completed:
+            return []
+        completed_index = {(tmdb_id, season): title for tmdb_id, season, title in completed}
+        cancelled: List[Dict[str, Any]] = []
+        try:
+            subscribes = self._subscribe_chain.subscription_repository.list()
+        except Exception as error:  # noqa: BLE001 - 读取失败不影响缺集结果
+            logger.error(f"【{self.plugin_name}】读取待核对订阅失败：{error}")
+            return []
+        for subscribe in subscribes or []:
+            if getattr(subscribe, "type", None) != MediaType.TV.value:
+                continue
+            if getattr(subscribe, "media_source", None) != MediaSource.TMDB:
+                continue
+            tmdb_id = str(getattr(subscribe, "media_id", "") or "")
+            try:
+                season = int(getattr(subscribe, "season", None))
+            except (TypeError, ValueError):
+                continue
+            title = completed_index.get((tmdb_id, season))
+            subscribe_id = getattr(subscribe, "id", None)
+            if not title or not subscribe_id:
+                continue
+            try:
+                if self._subscribe_chain._delete_subscription(int(subscribe_id)):
+                    cancelled.append({
+                        "id": int(subscribe_id), "name": title,
+                        "tmdb_id": tmdb_id, "season": season,
+                    })
+                    logger.info(
+                        f"【{self.plugin_name}】{title} S{season:02d} 已完结且本地完整，"
+                        f"自动取消订阅 {subscribe_id}"
+                    )
+            except Exception as error:  # noqa: BLE001 - 单条失败不影响其他订阅
+                logger.error(
+                    f"【{self.plugin_name}】自动取消 {title} S{season:02d} 订阅失败：{error}"
+                )
+        return cancelled
+
     @staticmethod
     def _format_episode_ranges(episodes: Set[int]) -> str:
         """把集号集合压缩成连续区间。"""
@@ -233,27 +282,29 @@ class MissingEpisodeDetector:
         today: str,
         server_name: str,
         library_name: str,
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], Set[Tuple[str, int, str]]]:
         """将一部 Emby 剧集与 TMDB 季集信息进行比对。"""
         series_id = str(series.get("Id") or "")
         provider_ids = series.get("ProviderIds") or {}
         tmdb_id = provider_ids.get("Tmdb") or provider_ids.get("tmdb") or provider_ids.get("TMDB")
         if not series_id or not tmdb_id:
-            return []
+            return [], set()
         if str(tmdb_id) in self._skip_series_ids:
             logger.debug(
                 f"【{self.plugin_name}】{series.get('Name') or tmdb_id} 已配置跳过检测"
             )
-            return []
+            return [], set()
 
         details = self._request_json(
             f"https://{tmdb_domain}/3/tv/{tmdb_id}?language=zh-CN&api_key={tmdb_key}"
         )
         if not details:
-            return []
+            return [], set()
 
         local_inventory = inventory.get(series_id, {})
         results: List[Dict[str, Any]] = []
+        completed: Set[Tuple[str, int, str]] = set()
+        series_title = str(series.get("Name") or details.get("name") or "未知剧集")
         for season in details.get("seasons") or []:
             season_number = season.get("season_number")
             if season_number is None or not season.get("episode_count"):
@@ -275,26 +326,32 @@ class MissingEpisodeDetector:
                 continue
 
             missing: Set[int] = set()
+            expected: Set[int] = set()
             aired_total = 0
             for episode in season_details.get("episodes") or []:
                 episode_number = episode.get("episode_number")
                 air_date = episode.get("air_date")
-                if self._ignore_future and (not air_date or air_date > today):
-                    continue
                 try:
                     episode_number = int(episode_number)
                 except (TypeError, ValueError):
                     continue
+                if episode_number > 0:
+                    expected.add(episode_number)
+                if self._ignore_future and (not air_date or air_date > today):
+                    continue
                 aired_total += 1
                 if episode_number not in local_episodes:
                     missing.add(episode_number)
+            if (self._auto_cancel_completed and details.get("status") == "Ended"
+                    and expected and expected.issubset(local_episodes)):
+                completed.add((str(tmdb_id), season_number, series_title))
             if not missing:
                 continue
             results.append(
                 {
                     "ServerName": server_name,
                     "LibraryName": library_name,
-                    "SeriesName": series.get("Name") or details.get("name") or "未知剧集",
+                    "SeriesName": series_title,
                     "Year": str(series.get("ProductionYear") or (details.get("first_air_date") or "")[:4]),
                     "TmdbId": str(tmdb_id),
                     "SeasonNum": season_number,
@@ -305,7 +362,7 @@ class MissingEpisodeDetector:
                     "ActionResult": "待处理",
                 }
             )
-        return results
+        return results, completed
 
     def _selected_libraries(
         self, host: str, api_key: str, user_id: str
@@ -336,12 +393,12 @@ class MissingEpisodeDetector:
         tmdb_key: str,
         tmdb_domain: str,
         today: str,
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], Set[Tuple[str, int, str]]]:
         """扫描一个 Emby 媒体库并返回缺失季集。"""
         library_id = str(library.get("Id") or "")
         library_name = str(library.get("Name") or library_id)
         if not library_id:
-            return []
+            return [], set()
         common = f"ParentId={library_id}&Recursive=true&api_key={api_key}"
         series_payload = self._request_json(
             f"{host}/emby/Users/{user_id}/Items?{common}&IncludeItemTypes=Series&Fields=ProviderIds,ProductionYear"
@@ -367,6 +424,7 @@ class MissingEpisodeDetector:
                 inventory[series_id][season_number].update(range(first, last + 1))
 
         results: List[Dict[str, Any]] = []
+        completed: Set[Tuple[str, int, str]] = set()
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             futures = [
                 executor.submit(
@@ -383,10 +441,12 @@ class MissingEpisodeDetector:
             ]
             for future in concurrent.futures.as_completed(futures):
                 try:
-                    results.extend(future.result())
+                    series_results, series_completed = future.result()
+                    results.extend(series_results)
+                    completed.update(series_completed)
                 except Exception as error:  # noqa: BLE001 - 单剧失败不影响其他剧集
                     logger.error(f"【{self.plugin_name}】单部剧集检测失败：{error}")
-        return results
+        return results, completed
 
     def _handle_missing(self, result: Dict[str, Any]) -> None:
         """按配置处理一条缺失季记录。"""
@@ -450,6 +510,7 @@ class MissingEpisodeDetector:
             tmdb_domain = tmdb_domain.replace("https://", "").replace("http://", "").strip("/")
             today = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d")
             results: List[Dict[str, Any]] = []
+            completed: Set[Tuple[str, int, str]] = set()
 
             service_values = services.values() if isinstance(services, dict) else services
             for service in service_values:
@@ -466,18 +527,23 @@ class MissingEpisodeDetector:
                     f"【{self.plugin_name}】{server_name} 将扫描 {len(libraries)} 个媒体库"
                 )
                 for library in libraries:
-                    results.extend(
-                        self._scan_library(
-                            host,
-                            api_key,
-                            user_id,
-                            server_name,
-                            library,
-                            tmdb_key,
-                            tmdb_domain,
-                            today,
-                        )
+                    library_results, library_completed = self._scan_library(
+                        host,
+                        api_key,
+                        user_id,
+                        server_name,
+                        library,
+                        tmdb_key,
+                        tmdb_domain,
+                        today,
                     )
+                    results.extend(library_results)
+                    completed.update(library_completed)
+
+            self._cancelled_subscriptions = (
+                self._cancel_completed_subscriptions(completed)
+                if self._auto_cancel_completed else []
+            )
 
             results.sort(
                 key=lambda item: (
@@ -496,10 +562,11 @@ class MissingEpisodeDetector:
             )
             self.save_data(self._DATA_KEY, results)
             self.save_data(self._TIME_KEY, self._last_scan_time)
+            self.save_data(self._CANCELLED_KEY, self._cancelled_subscriptions)
             elapsed = (datetime.now() - started_at).total_seconds()
             logger.info(
                 f"【{self.plugin_name}】扫描完成，发现 {len(results)} 条缺失季记录，"
-                f"耗时 {elapsed:.1f} 秒"
+                f"自动取消 {len(self._cancelled_subscriptions)} 个完整完结订阅，耗时 {elapsed:.1f} 秒"
             )
         except Exception as error:  # noqa: BLE001 - 扫描任务必须自行收口
             logger.error(f"【{self.plugin_name}】扫描失败：{error}", exc_info=True)

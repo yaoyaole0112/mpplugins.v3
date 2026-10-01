@@ -188,6 +188,15 @@ class PluginTests(unittest.TestCase):
         self.plugin._missing.scan_missing_episodes.assert_called_once()
         self.assertEqual(self.run_async(self.plugin.missing_status())["finished_scan_id"], 1)
 
+    def test_missing_auto_cancel_setting_is_persisted(self):
+        with patch("emetools.Scheduler"):
+            self.run_async(self.plugin.missing_action({
+                "operation": "save", "config": {"auto_cancel_completed": True},
+            }))
+        self.assertTrue(self.plugin._missing_config["auto_cancel_completed"])
+        self.assertTrue(self.plugin._missing._auto_cancel_completed)
+        self.assertTrue(self.plugin.update_config.call_args.args[0]["missing"]["auto_cancel_completed"])
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -235,6 +244,7 @@ class PluginTests(unittest.TestCase):
         with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()):
             plugin.init_plugin({"strm_root": self.directory.name})
         self.assertFalse(plugin._missing_config["enabled"])
+        self.assertFalse(plugin._missing_config["auto_cancel_completed"])
         self.assertEqual(plugin._missing_config["missing_action"], MissingAction.ADD_SUBSCRIBE.value)
         plugin.save_data.assert_any_call("missing_episodes", [{"SeriesName": "测试剧"}])
         self.assertEqual(plugin._missing._subscribe_chain._delete_subscription.call_count, 0)
