@@ -23,6 +23,21 @@ class TestMusicContextPatch(TestCase):
     def tearDown(self):
         module.MusicContextPatcher.disable()
 
+    def test_missing_validation_interface_is_added_and_removed(self):
+        original = FileFilterMixin.__dict__.get("_transfer_validation_error")
+        if original is not None:
+            delattr(FileFilterMixin, "_transfer_validation_error")
+            self.addCleanup(setattr, FileFilterMixin, "_transfer_validation_error", original)
+        module.MusicContextPatcher.enable()
+        task = SimpleNamespace(meta=None, mediainfo=None)
+        with patch.object(FileFilterMixin, "_requires_automatic_category", return_value=False):
+            self.assertIsNone(FileFilterMixin._transfer_validation_error(task))
+        task.mediainfo = SimpleNamespace(category=None, tmdb_id=123)
+        with patch.object(FileFilterMixin, "_requires_automatic_category", return_value=True):
+            self.assertIn("分类", FileFilterMixin._transfer_validation_error(task))
+        module.MusicContextPatcher.disable()
+        self.assertNotIn("_transfer_validation_error", FileFilterMixin.__dict__)
+
     def test_modern_host_is_unchanged(self):
         def modern(cls, history, path, *, storage="local", batch_mtype=None):
             return history, path

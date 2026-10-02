@@ -5,6 +5,7 @@ from threading import RLock
 from typing import Optional
 
 from app.application.history import DownloadHistorySnapshot
+from app.application.music.observation import BLOCKING_MUSIC_RECOGNITION_STATES
 from app.chain.media import MediaChain
 from app.domain.context import MusicInfo
 from app.domain.meta.metamusic import MetaMusic
@@ -90,6 +91,23 @@ class MusicContextPatcher:
     _owner = None
     _original = None
     _replacement = None
+    _validation_owner = None
+    _validation_replacement = None
+
+    @staticmethod
+    def _transfer_validation_error(owner, task):
+        if isinstance(task.meta, MetaMusic) and task.meta.organization_error:
+            return task.meta.organization_error
+        if isinstance(task.mediainfo, MusicInfo):
+            recognition = task.mediainfo.raw_data.get("recognition")
+            if isinstance(recognition, dict) and recognition.get("status") in BLOCKING_MUSIC_RECOGNITION_STATES:
+                return str(recognition.get("message") or "音乐识别尚需确认，请重新预览或手动选择专辑")
+        if not (owner._requires_automatic_category(task) and task.mediainfo and not task.mediainfo.category):
+            return None
+        return (
+            "TMDB 信息未匹配到媒体分类，无法按媒体类别整理" if task.mediainfo.tmdb_id
+            else "媒体识别结果未匹配到媒体分类，无法按媒体类别整理"
+        )
 
     @classmethod
     def enable(cls):
@@ -98,6 +116,11 @@ class MusicContextPatcher:
                 return
             from app.chain.transfer.filter import FileFilterMixin
 
+            if not hasattr(FileFilterMixin, "_transfer_validation_error"):
+                cls._validation_replacement = classmethod(cls._transfer_validation_error)
+                FileFilterMixin._transfer_validation_error = cls.__dict__["_validation_replacement"]
+                cls._validation_owner = FileFilterMixin
+                logger.info("【音乐上下文】旧宿主整理校验接口兼容补丁已启用")
             parameters = signature(FileFilterMixin._restore_music_download_context).parameters
             if any(parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters.values()):
                 return
@@ -112,6 +135,11 @@ class MusicContextPatcher:
     @classmethod
     def disable(cls):
         with cls._lock:
+            if cls._validation_owner is not None:
+                if getattr_static(cls._validation_owner, "_transfer_validation_error", None) is cls.__dict__["_validation_replacement"]:
+                    delattr(cls._validation_owner, "_transfer_validation_error")
+                cls._validation_owner = None
+                cls._validation_replacement = None
             if cls._owner is None:
                 return
             if getattr_static(cls._owner, "_restore_music_download_context") is cls.__dict__["_replacement"]:
