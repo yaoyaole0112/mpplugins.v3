@@ -109,6 +109,7 @@ class MonitorLife:
         self._client = client
         self.mediainfodownloader = mediainfodownloader
         self.stop_event = stop_event
+        self._life_pull_failures = 0
 
         self._monitor_life_notification_timer = None
         self._monitor_life_notification_queue = defaultdict(
@@ -2339,10 +2340,24 @@ class MonitorLife:
                 if self._wait_or_stop(self.LIFE_405_COOLDOWN):
                     return from_time, from_id
                 return from_time, from_id
-            logger.error("【监控生活事件】拉取数据失败：%s", e)
-            if self._wait_or_stop(2):
+            self._life_pull_failures += 1
+            retry_delay = min(2 ** min(self._life_pull_failures, 6), 60)
+            logger.error(
+                "【监控生活事件】拉取数据失败（第 %s 次，%s 秒后重试，游标不变）：%s",
+                self._life_pull_failures,
+                retry_delay,
+                e,
+            )
+            if self._wait_or_stop(retry_delay):
                 return from_time, from_id
             return from_time, from_id
+
+        if self._life_pull_failures:
+            logger.info(
+                "【监控生活事件】连接已恢复，连续失败 %s 次，继续从原游标拉取",
+                self._life_pull_failures,
+            )
+            self._life_pull_failures = 0
 
         if not events_batch:
             if self.stop_event and self.stop_event.wait(timeout=self.WAIT_TIME_OUT):

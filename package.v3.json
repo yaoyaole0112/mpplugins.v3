@@ -151,7 +151,7 @@
     "name": "115网盘STRM助手",
     "description": "115网盘STRM生成一条龙服务（MoviePilot V3 适配：整理拦截、本地目录浏览、405 风控熔断）",
     "labels": "云盘",
-    "version": "3.0.3",
+    "version": "3.0.4",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
     "author": "DDSRem / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -159,6 +159,7 @@
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
+      "v3.0.4": "完整仓库安装：整合本地兼容补丁、生活事件断线退避重试、旧宿主音乐 storage/batch_mtype 参数适配，并锁定 p115client 兼容依赖",
       "v3.0.3": "修复批量转存遗漏：115 生活事件按游标分页读取全部记录，分页异常时不推进监听游标；历史遗漏文件可手动补扫",
       "v3.0.2": "音乐整理不拦截：识别为音乐时回退 MoviePilot 原生整理，避免当成影视伴随音轨吞掉",
       "v3.0.1": "修复 V3 本地目录无法浏览：恢复 dist，browse_dir 优先并兼容 storage/list 响应包装；增量同步 405 风控熔断",

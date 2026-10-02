@@ -57,6 +57,7 @@ from .mcp import MCPManager
 from .patch.u115_open import U115Patcher
 from .patch.p115disk_upload import P115DiskPatcher
 from .patch.app_ver import AppVerPatcher
+from .patch.music_context import MusicContextPatcher
 from .core.message import UploadNotifyAggregator
 from .interactive.framework.callbacks import decode_action, Action
 from .interactive.framework.manager import BaseSessionManager
@@ -200,6 +201,7 @@ class P115StrmHelper(_PluginBase):
         self.stop_service()
 
         if configer.enabled:
+            MusicContextPatcher.enable()
             self.init_database()
 
             if servicer.init_service():
@@ -2214,6 +2216,7 @@ class P115StrmHelper(_PluginBase):
         """
         type(self)._rename_media_fields_cache.clear()
         servicer.stop()
+        MusicContextPatcher.disable()
         ct_db_manager.close_database()
         U115Patcher().disable()
         P115DiskPatcher().disable()
