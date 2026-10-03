@@ -93,7 +93,15 @@ def normalize_release_title(value: Any) -> str:
 def meta_from_any(meta: Any, extra_title: Optional[str] = None) -> Optional[MetaMusic]:
     """影视 MetaVideo、种子名、已解析 MetaMusic 都收成可检索的音乐元数据。"""
     if isinstance(meta, MetaMusic):
-        return deepcopy(meta)
+        preserved = deepcopy(meta)
+        if not preserved.artists and not preserved.album:
+            query_text = _text(preserved.org_string or preserved.title)
+            parts = [part for part in re.split(r"\s+", query_text) if part]
+            if len(parts) >= 2 and _CJK_RE.search(parts[0]) and len(parts[0]) >= 2:
+                preserved.artists = [parts[0]]
+                preserved.title = " ".join(parts[1:])
+                preserved.org_string = query_text
+        return preserved
     raw_title = _text(extra_title)
     subtitle = ""
     fallback_artist = ""
@@ -470,13 +478,18 @@ class CnMusicProvider:
 
     def _search_albums(self, source: MediaSource, query: SearchQuery, limit: int) -> list[MusicInfo]:
         items: list[MusicInfo] = []
-        keyword = query.album or query.title
-        if not keyword:
-            return []
-        if source == QQ_SOURCE:
-            items.extend(self._qq_search_albums(keyword, limit))
-        else:
-            items.extend(self._netease_search_albums(keyword, limit))
+        keywords = query.keywords()[:3]
+        for keyword in keywords:
+            if source == QQ_SOURCE:
+                items.extend(self._qq_search_albums(keyword, limit))
+            else:
+                items.extend(self._netease_search_albums(keyword, limit))
+            if items and query.artists and any(self._artist_hit(info, query.artists) for info in items):
+                break
+        if query.artists:
+            matched = [info for info in items if self._artist_hit(info, query.artists)]
+            if matched:
+                return matched
         return items
 
     def _qq_search_songs(self, keyword: str, limit: int) -> list[MusicInfo]:

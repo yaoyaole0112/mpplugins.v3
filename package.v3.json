@@ -205,7 +205,7 @@
     "name": "华语音乐识别",
     "description": "接入 QQ 音乐 / 网易云元数据，MusicBrainz 识别失败时回退匹配华语歌曲。",
     "labels": "音乐,识别",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -213,6 +213,7 @@
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
+      "v1.0.6": "修复搜索框输入艺人和曲名时无法稳定搜到原唱专辑的问题",
       "v1.0.5": "保留音乐标签中的曲名、艺人与专辑；尊重专辑/录音实体类型，避免自动回退混配",
       "v1.0.4": "手动音乐数据源兼容影视格式种子标题，清理发行规格后搜索",
       "v1.0.3": "修复 QQ/网易云搜索结果点击后再搜资源时，异步识别拿不到媒体信息",

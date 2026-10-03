@@ -44,6 +44,27 @@ class RecognitionTests(unittest.TestCase):
         query = provider._search_recordings.call_args.args[1]
         self.assertEqual(query.artists, ["张杰"])
 
+    def test_search_box_query_splits_cjk_artist_and_title(self):
+        raw = MetaMusic.from_dict({"title": "周杰伦 晴天", "org_string": "周杰伦 晴天"})
+        result = PROVIDER.meta_from_any(raw)
+        self.assertEqual(result.artists, ["周杰伦"])
+        self.assertEqual(result.title, "晴天")
+
+    def test_album_search_keeps_matching_artist(self):
+        provider = PROVIDER.CnMusicProvider()
+        provider._qq_search_albums = Mock(side_effect=[[
+            MusicInfo(title="翻唱晴天", album="翻唱晴天", artists=["其他歌手"],
+                      media_source=PROVIDER.QQ_SOURCE, media_id="wrong",
+                      music_type=MUSIC_ENTITY_ALBUM),
+            MusicInfo(title="叶惠美", album="叶惠美", artists=["周杰伦"],
+                      media_source=PROVIDER.QQ_SOURCE, media_id="right",
+                      music_type=MUSIC_ENTITY_ALBUM),
+        ]])
+        raw = MetaMusic.from_dict({"title": "周杰伦 晴天", "org_string": "周杰伦 晴天"})
+        result = provider.search(raw, media_source=PROVIDER.QQ_SOURCE,
+                                 music_types=[MUSIC_ENTITY_ALBUM])
+        self.assertEqual(result[0].media_id, "right")
+
     def test_explicit_recording_does_not_match_album(self):
         provider = PROVIDER.CnMusicProvider()
         provider.search = Mock(return_value=[MusicInfo(
