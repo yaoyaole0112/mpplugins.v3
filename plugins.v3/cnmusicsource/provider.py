@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Optional
@@ -52,6 +53,82 @@ _EDITION_SUFFIX_RE = re.compile(
     r"\s*[\(（](?:explicit(?:\s*version)?|deluxe(?:\s*edition)?|remaster(?:ed)?(?:\s*version)?|豪华版|典藏版|明示版)[\)）]\s*$",
     re.I,
 )
+_SPEC_TAIL_RE = re.compile(
+    r"\s+((?:19|20)\d{2})\s*[-–—−－/|｜]?\s*"
+    r"(?:WEB-?DL|WEB-?RIP|BLU-?RAY|BLURAY|BDRip|CD|SACD|16-?bit|24-?bit|32-?bit|"
+    r"FLAC|ALAC|APE|WAV|DSD|MP3|AAC|Hi-?Res|无损).*$",
+    re.I,
+)
+_BARE_SPEC_RE = re.compile(
+    r"\s*[-–—−－]?\s*[\[\(（【]*\s*(?:WEB-?DL|WEB-?RIP|BLU-?RAY|16-?bit|24-?bit|FLAC|ALAC|APE|WAV|DSD|"
+    r"HHWEB|WEB|Hi-?Res|无损)\b.*$",
+    re.I,
+)
+_CJK_COMPACT_RE = re.compile(
+    r"^(?P<artist>[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]{1,20})"
+    r"[-–—−－]"
+    r"(?P<work>[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af].+)$"
+)
+
+
+def normalize_release_title(value: Any) -> str:
+    """把种子名收成可检索的「艺人 - 作品」，去掉 WEB-DL/FLAC 等发行尾巴。"""
+    text = _SPACE_RE.sub(" ", _text(value))
+    if not text:
+        return ""
+    length = len(text)
+    if length >= 16 and length % 2 == 0 and text[: length // 2] == text[length // 2 :]:
+        text = text[: length // 2].strip()
+    stripped = _SPEC_TAIL_RE.sub(r" \1", text)
+    text = stripped if stripped != text else _BARE_SPEC_RE.sub("", text)
+    text = text.strip(" -–—−－/|[]【】")
+    matched = _CJK_COMPACT_RE.match(text)
+    if matched:
+        work = matched.group("work").strip()
+        if not re.fullmatch(r"(?:19|20)\d{2}", work):
+            text = f"{matched.group('artist')} - {work}"
+    return text.strip()
+
+
+def meta_from_any(meta: Any, extra_title: Optional[str] = None) -> Optional[MetaMusic]:
+    """影视 MetaVideo、种子名、已解析 MetaMusic 都收成可检索的音乐元数据。"""
+    if isinstance(meta, MetaMusic):
+        return deepcopy(meta)
+    raw_title = _text(extra_title)
+    subtitle = ""
+    fallback_artist = ""
+    fallback_title = ""
+    year = None
+    if meta is not None:
+        raw_title = raw_title or _text(getattr(meta, "org_string", None)) or _text(getattr(meta, "title", None))
+        subtitle = _text(getattr(meta, "subtitle", None))
+        fallback_artist = _text(getattr(meta, "cn_name", None))
+        fallback_title = _text(getattr(meta, "en_name", None))
+        year = getattr(meta, "year", None)
+    blob = " ".join(part for part in (raw_title, subtitle) if part)
+    cleaned = normalize_release_title(blob or raw_title)
+    if not cleaned and not raw_title:
+        return None
+    parsed = MetaMusic.parse_query(cleaned or raw_title)
+    if fallback_artist and fallback_title and _CJK_RE.search(fallback_artist) and _CJK_RE.search(fallback_title):
+        parsed_title = _compact(parsed.title)
+        parsed_artists = {_compact(name) for name in (parsed.artists or [])}
+        # 无空格「艺人-作品」常被核心按「作品-艺人」拆反，这里用影视解析出的中英名纠正。
+        if parsed_title == _compact(fallback_artist) and _compact(fallback_title) in parsed_artists:
+            parsed.artists = [fallback_artist]
+            parsed.title = fallback_title
+        elif not parsed.artists and parsed.title:
+            parsed.artists = [fallback_artist]
+            if not parsed.title or parsed_title == _compact(cleaned):
+                parsed.title = fallback_title
+    if year and not parsed.year:
+        parsed.year = year
+    if parsed.title and not parsed.album and re.search(
+        r"FLAC|WEB-?DL|专辑|album|(?:19|20)\d{2}", blob or cleaned, re.I
+    ):
+        parsed.album = parsed.title
+    parsed.org_string = cleaned or raw_title
+    return parsed
 
 
 def _text(value: Any) -> str:
@@ -247,6 +324,7 @@ class CnMusicProvider:
         music_types: Optional[Iterable[str]] = None,
         extra_title: Optional[str] = None,
     ) -> list[MusicInfo]:
+        meta = meta_from_any(meta, extra_title) or meta
         query = SearchQuery.from_meta(meta, extra_title=extra_title)
         if not query.title and not query.original:
             return []
@@ -287,15 +365,38 @@ class CnMusicProvider:
         extra_title: Optional[str] = None,
         min_score: int = 16,
     ) -> Optional[MusicInfo]:
-        query = SearchQuery.from_meta(meta, extra_title=extra_title)
+        resolved = meta_from_any(meta, extra_title)
+        query = SearchQuery.from_meta(resolved, extra_title=extra_title)
         types = [music_type] if music_type else [MUSIC_ENTITY_RECORDING, MUSIC_ENTITY_ALBUM]
         candidates = self.search(
-            meta,
+            resolved,
             limit=10,
             media_source=media_source,
             music_types=types,
-            extra_title=extra_title,
+            extra_title=query.original or extra_title,
         )
+        candidates = [info for info in candidates if info.music_type in types]
+        picked = self._pick_candidate(candidates, query, min_score)
+        if picked:
+            return picked
+        if query.artists and query.title:
+            swapped = SearchQuery(
+                title=query.artists[0],
+                artists=[query.title],
+                album=query.album or query.artists[0],
+                year=query.year,
+                hints=query.hints,
+                original=query.original,
+            )
+            return self._pick_candidate(candidates, swapped, min_score)
+        return None
+
+    def _pick_candidate(
+        self,
+        candidates: list[MusicInfo],
+        query: SearchQuery,
+        min_score: int,
+    ) -> Optional[MusicInfo]:
         best: Optional[MusicInfo] = None
         best_score = -1
         for info in candidates:
@@ -324,7 +425,8 @@ class CnMusicProvider:
                 return self.match(meta, media_source=source, music_type=music_type)
             return None
         if not media_id:
-            return self.match(meta, media_source=source, music_type=music_type) if meta else None
+            resolved = meta_from_any(meta)
+            return self.match(resolved, media_source=source, music_type=music_type) if resolved else None
         if music_type == MUSIC_ENTITY_ALBUM:
             album = self.get_album(source, media_id)
             return album.to_music_info() if album else None
@@ -777,7 +879,7 @@ class CnMusicProvider:
         if not expected:
             return True
         core_expected = _core_title(title)
-        names = [info.title, *(info.title_aliases or []), *(info.names or [])]
+        names = [info.title, info.album, *(info.title_aliases or []), *(info.names or [])]
         for name in names:
             if not name:
                 continue
