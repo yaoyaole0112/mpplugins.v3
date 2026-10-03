@@ -65,6 +65,24 @@ class RecognitionTests(unittest.TestCase):
                                  music_types=[MUSIC_ENTITY_ALBUM])
         self.assertEqual(result[0].media_id, "right")
 
+    def test_untyped_search_keeps_an_album_candidate(self):
+        provider = PROVIDER.CnMusicProvider()
+        provider._selected_sources = Mock(return_value=[PROVIDER.QQ_SOURCE])
+        provider._search_recordings = Mock(return_value=[
+            MusicInfo(title=f"曲目{i}", artists=["周杰伦"], media_source=PROVIDER.QQ_SOURCE,
+                      media_id=f"song-{i}", music_type=MUSIC_ENTITY_RECORDING)
+            for i in range(8)
+        ])
+        provider._search_albums = Mock(return_value=[
+            MusicInfo(title="叶惠美", artists=["周杰伦"], media_source=PROVIDER.QQ_SOURCE,
+                      media_id="album-1", music_type=MUSIC_ENTITY_ALBUM)
+        ])
+        result = provider.search(
+            MetaMusic.from_dict({"title": "晴天", "artists": ["周杰伦"]}),
+            media_source=PROVIDER.QQ_SOURCE, limit=8,
+        )
+        self.assertIn(MUSIC_ENTITY_ALBUM, [item.music_type for item in result])
+
     def test_explicit_recording_does_not_match_album(self):
         provider = PROVIDER.CnMusicProvider()
         provider.search = Mock(return_value=[MusicInfo(

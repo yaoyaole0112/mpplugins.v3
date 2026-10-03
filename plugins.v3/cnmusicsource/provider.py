@@ -363,6 +363,10 @@ class CnMusicProvider:
             unique.append(info)
             if len(unique) >= max(1, limit):
                 break
+        if not wanted and unique and not any(info.music_type == MUSIC_ENTITY_ALBUM for info in unique):
+            album = next((info for info in ranked if info.music_type == MUSIC_ENTITY_ALBUM), None)
+            if album:
+                unique[-1] = album
         return unique
 
     def match(
