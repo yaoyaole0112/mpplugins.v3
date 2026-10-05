@@ -38,6 +38,23 @@ test('dismissed confirmation never submits', () => {
   assert.equal(calls.length, 0)
 })
 
+test('free resource confirmation keeps zero cost and explicit consent', async () => {
+  const { context, calls, prompts } = fixture()
+  context.confirmFill({ id: 'task' }, { id: 'free', label: 'S05 [免费]', points: 0, covered: [12] })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.match(prompts[0], /扣除 0 积分/)
+  assert.equal(calls[0].option_id, 'free')
+  assert.equal(calls[0].confirmed, true)
+})
+
+test('limit label sits outside the centered controls row', () => {
+  assert.ok(source.includes('<label for="eme-fill-max-points">单次积分上限</label>'))
+  assert.ok(source.includes('<div class="eme-inline eme-fill-limit-row"><input id="eme-fill-max-points"'))
+  assert.ok(source.includes('.eme-fill-limit-row{align-items:center;margin-top:7px}'))
+  assert.ok(source.includes('.eme-card .eme-fill-limit-row input{flex:0 1 140px;width:140px;height:40px;margin-top:0}'))
+  assert.ok(source.includes('.eme-fill-limit-row .eme-button{height:40px;display:inline-flex;align-items:center;justify-content:center}'))
+})
+
 test('pending same-season tasks prevent duplicate start despite changed episodes', () => {
   const { context } = fixture()
   context.fill.tasks = [{ record, state: 'uncertain' }]

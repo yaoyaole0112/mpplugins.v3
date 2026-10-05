@@ -36,6 +36,7 @@ class Client:
         self.messages = []
         self.extra_outgoing = False
         self.series_labels = ["📺 剧集 | [已入库]半熟恋人 (2021)", "📺 剧集 | [未入库]半熟恋人 (2012)"]
+        self.resource_labels = ["1. S05+S00 4K [4积分]", "2. S05E01-E28 4K [4积分]", "3. S04 更新至E26 [4积分]"]
 
     def advance(self):
         self.stage += 1
@@ -44,7 +45,7 @@ class Client:
         elif self.stage == 2:
             self.menu = Menu(self, "请选择网盘", ["123", "115", "夸克"])
         elif self.stage == 3:
-            self.menu = Menu(self, "共 3 个 115 资源", ["1. S05+S00 4K [4积分]", "2. S05E01-E28 4K [4积分]", "3. S04 更新至E26 [4积分]"])
+            self.menu = Menu(self, "115 资源", self.resource_labels)
         else:
             self.menu = Menu(self, "115 转存成功，成功 1 个，失败 0 个", [], message_id=102)
         self.messages = [self.menu]
@@ -88,6 +89,21 @@ class ParsingTests(unittest.TestCase):
                 info = MODULE.resource_info(label, RECORD)
                 self.assertEqual(info["coverage"], coverage)
                 self.assertEqual(info["covered"], covered)
+
+    def test_free_markers_and_unknown_cost(self):
+        for label, expected in [("S00-S06 4K [UBWEB] [免费]", 0),
+                                ("S05E01-E28 【免费】", 0),
+                                ("S05 （ 免费 ）", 0),
+                                ("S05 (免费)", 0),
+                                ("S05 [免积分]", 0),
+                                ("S05 [0积分]", 0),
+                                ("S05 [免费] [8积分]", 8),
+                                ("免费剧场 S05", None),
+                                ("S05 [非免费]", None),
+                                ("S05 [免费试看]", None),
+                                ("S05 4K", None)]:
+            with self.subTest(label=label):
+                self.assertEqual(MODULE.resource_info(label, RECORD)["points"], expected)
 
     def test_url_buttons_are_not_clickable(self):
         message = SimpleNamespace(buttons=[[SimpleNamespace(text="URL", data=None),
@@ -159,6 +175,20 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.fill.action(self.confirm(task))
         self.assertEqual(len(self.client.clicks), 2)
+
+    async def test_free_resource_requires_confirmation_and_allows_zero_limit(self):
+        self.client.resource_labels = ["1. S05E01-E28 [免费]"]
+        await self.fill.action({"operation": "save", "max_points": 0})
+        task = await self.ready()
+        self.assertEqual(task["options"][0]["points"], 0)
+        self.assertEqual(len(self.client.clicks), 2)
+        with self.assertRaises(ValueError):
+            await self.fill.action(self.confirm(task, confirmed=False))
+        await self.fill.action(self.confirm(task))
+        await self.fill.worker
+        self.assertEqual(len(self.client.clicks), 3)
+        self.assertEqual(task["selected"]["points"], 0)
+        self.assertEqual(task["state"], "awaiting_verify")
 
     async def test_noncovering_resource_is_rejected(self):
         task = await self.ready()

@@ -32,6 +32,7 @@ def resource_info(label, record):
     missing = set(record["MissingEpisodeNumbers"])
     text = label.upper()
     points = re.search(r"(\d+)\s*积分", text)
+    free = re.search(r"[\[【（(]\s*(?:免费|免积分)\s*[\]】）)]", text)
     seasons = set()
     ranges = {}
     for match in re.finditer(r"S(\d{1,2})(?:\s*[-–~]\s*S(\d{1,2}))?", text):
@@ -54,7 +55,7 @@ def resource_info(label, record):
     explicit = season in ranges
     covered = sorted(missing & ranges[season]) if explicit else []
     possible = not explicit and (season in seasons or not seasons)
-    return {"points": int(points[1]) if points else None, "covered": covered,
+    return {"points": int(points[1]) if points else 0 if free else None, "covered": covered,
             "coverage": "明确覆盖" if covered else "可能覆盖（需确认）" if possible else "不覆盖",
             "eligible": bool(covered or possible), "ambiguous": possible}
 
