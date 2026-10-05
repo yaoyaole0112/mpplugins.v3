@@ -561,7 +561,8 @@ async function fillCommand(operation, extra = {}) {
 }
 function confirmFill(task, option) {
   const coverage = option.ambiguous ? '仅可能覆盖，描述不能证明具体缺集存在。' : `描述覆盖缺集：${option.covered.join('、')}。`
-  if (window.confirm(`确认选择「${option.label}」？\n${coverage}\n可能扣除 ${option.points} 积分，并转存整包（包含已有集数）。\n提交后不会自动重试，请勿同时手动操作此 Bot。`)) {
+  const size = option.size ? `\n文件大小：${option.size}。` : ''
+  if (window.confirm(`确认选择「${option.label}」？\n${coverage}\n可能扣除 ${option.points} 积分，并转存整包（包含已有集数）。${size}\n提交后不会自动重试，请勿同时手动操作此 Bot。`)) {
     fillCommand('confirm', { task_id: task.id, option_id: option.id, confirmed: true })
   }
 }
@@ -824,14 +825,14 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div class="eme-card-heading"><div><h3>缺集补全</h3><p>复用通用设置中的用户登录与转发 Bot，自动搜索、选剧、选择 115；点击资源前必须确认。</p></div><button class="eme-button secondary" :disabled="busy" @click="loadFill">刷新任务</button></div>
           <label for="eme-fill-max-points">单次积分上限</label>
           <div class="eme-inline eme-fill-limit-row"><input id="eme-fill-max-points" v-model.number="fillMaxPoints" type="number" min="0" max="100" aria-label="TG 补全单次积分上限" /><button class="eme-button primary" :disabled="busy || !fillLoaded" @click="fillCommand('save', { max_points: fillMaxPoints })">保存上限</button><span class="eme-hint">已保存：{{ fill.max_points }} 积分 · 未知积分禁止点击</span></div>
-          <p class="eme-hint">第一版仅手动发起，不自动扣积分。Bot 交互串行执行，期间频道转发暂缓；请勿同时手动操作此 Bot。转存依赖现有 Bot 与 MP 整理配置，不保证仅转存缺失集。</p>
+          <p class="eme-hint eme-fill-limit-hint">Bot 交互串行执行，期间频道转发暂缓；请勿同时手动操作此 Bot。转存依赖现有 Bot 与 MP 整理配置，不保证仅转存缺失集。</p>
           <p v-if="!fill.tasks.length" class="eme-hint">从缺集记录点击「TG 搜索补全」开始。</p>
           <article v-for="task in fill.tasks" :key="task.id" class="eme-fill-task">
             <div class="eme-card-heading"><div><strong>{{ task.record.SeriesName }} ({{ task.record.Year }}) · {{ task.record.SeasonFormatted }} · {{ fillStateLabels[task.state] || task.state }}</strong><p>{{ task.record.ServerName }} / {{ task.record.LibraryName }} · 目标缺集 {{ task.record.MissingEpisodes }} · {{ new Date(task.created_at * 1000).toLocaleString() }}</p></div><div class="eme-inline"><button v-if="['searching', 'choose_series', 'resources'].includes(task.state)" class="eme-button secondary" :disabled="busy" @click="fillCommand('cancel', { task_id: task.id })">取消</button><button v-if="['awaiting_verify', 'uncertain'].includes(task.state)" class="eme-button primary" :disabled="busy" @click="fillCommand('verify', { task_id: task.id })">复查入库</button><button v-if="['awaiting_verify', 'uncertain'].includes(task.state)" class="eme-button secondary" :disabled="busy" @click="closeFill(task)">人工核实关闭</button></div></div>
             <p class="eme-message" :class="{ 'eme-error': ['failed', 'uncertain'].includes(task.state) }">{{ task.message }}</p>
-            <p v-if="task.selected" class="eme-hint">已选：{{ task.selected.label }} · {{ task.selected.points }} 积分 · {{ task.selected.coverage }}</p>
+            <p v-if="task.selected" class="eme-hint">已选：{{ task.selected.label }} · {{ task.selected.points }} 积分{{ task.selected.size ? ` · ${task.selected.size}` : '' }} · {{ task.selected.coverage }}</p>
             <div v-if="task.state === 'choose_series'" class="eme-fill-options"><button v-for="option in task.options" :key="option.id" class="eme-button secondary" :disabled="busy" @click="chooseFillSeries(task, option)">{{ option.label }}</button></div>
-            <div v-if="task.state === 'resources'" class="eme-fill-options"><div v-for="(option, index) in task.options" :key="option.id" class="eme-fill-resource"><div><strong>{{ index === 0 && option.eligible ? '优先候选 · ' : '' }}{{ option.label }}</strong><p class="eme-hint">{{ option.coverage }}{{ option.covered.length ? '：' + option.covered.join('、') : '' }} · {{ option.points === null ? '积分未知' : option.points + ' 积分' }}{{ option.previously_submitted ? ' · 已提交过，禁止重复点击' : '' }}</p></div><button class="eme-button primary" :disabled="busy || !option.eligible || option.points === null || option.points > fill.max_points || option.previously_submitted" @click="confirmFill(task, option)">确认转存</button></div></div>
+            <div v-if="task.state === 'resources'" class="eme-fill-options"><div v-for="(option, index) in task.options" :key="option.id" class="eme-fill-resource"><div><strong>{{ index === 0 && option.eligible ? '优先候选 · ' : '' }}{{ option.label }}</strong><p class="eme-hint">{{ option.coverage }}{{ option.covered.length ? '：' + option.covered.join('、') : '' }} · {{ option.points === null ? '积分未知' : option.points + ' 积分' }}{{ option.size ? ' · ' + option.size : '' }}{{ option.previously_submitted ? ' · 已提交过，禁止重复点击' : '' }}</p></div><button class="eme-button primary" :disabled="busy || !option.eligible || option.points === null || option.points > fill.max_points || option.previously_submitted" @click="confirmFill(task, option)">确认转存</button></div></div>
             <details><summary>任务日志</summary><p v-for="(entry, index) in task.log" :key="index" class="eme-hint">{{ new Date(entry.time * 1000).toLocaleTimeString() }} · {{ entry.message }}</p></details>
           </article>
         </section>
@@ -1002,6 +1003,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-card .eme-fill-limit-row input{flex:0 1 140px;width:140px;height:40px;margin-top:0}
 .eme-fill-limit-row .eme-button{height:40px;display:inline-flex;align-items:center;justify-content:center}
 .eme-fill-limit-row .eme-hint{margin:0;line-height:1.5}
+.eme-fill-limit-hint{margin-top:16px}
 .eme-shell{position:relative}
 .eme-overlay{position:absolute;box-sizing:border-box;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;overflow:hidden}
 .eme-overlay{background:transparent;backdrop-filter:none}

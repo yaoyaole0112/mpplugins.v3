@@ -55,6 +55,13 @@ test('limit label sits outside the centered controls row', () => {
   assert.ok(source.includes('.eme-fill-limit-row .eme-button{height:40px;display:inline-flex;align-items:center;justify-content:center}'))
 })
 
+test('resource cards show file size and revised bot guidance', () => {
+  assert.ok(source.includes('Bot 交互串行执行，期间频道转发暂缓；请勿同时手动操作此 Bot。'))
+  assert.ok(!source.includes('第一版仅手动发起，不自动扣积分。'))
+  assert.ok(source.includes("option.size ? ' · ' + option.size : ''"))
+  assert.ok(source.includes('eme-fill-limit-hint{margin-top:16px}'))
+})
+
 test('pending same-season tasks prevent duplicate start despite changed episodes', () => {
   const { context } = fixture()
   context.fill.tasks = [{ record, state: 'uncertain' }]

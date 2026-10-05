@@ -25,8 +25,13 @@ class Menu:
         self.buttons = [[SimpleNamespace(text=label, data=f"{index}:{label}".encode()) for index, label in enumerate(labels)]]
 
     async def click(self, row, column):
-        self.client.clicks.append(self.buttons[row][column].text)
-        self.client.advance()
+        label = self.buttons[row][column].text
+        self.client.clicks.append(label)
+        if self.client.resource_pages and label in {"下一页", "上一页"}:
+            self.client.resource_page += 1 if label == "下一页" else -1
+            self.client.set_resource_page(self.client.resource_page)
+        else:
+            self.client.advance()
         return SimpleNamespace(message="")
 
 
@@ -38,6 +43,8 @@ class Client:
         self.series_labels = ["📺 剧集 | [已入库]半熟恋人 (2021)", "📺 剧集 | [未入库]半熟恋人 (2012)"]
         self.resource_labels = ["1. S05+S00 4K [4积分]", "2. S05E01-E28 4K [4积分]", "3. S04 更新至E26 [4积分]"]
         self.resource_text = "115 资源"
+        self.resource_pages = None
+        self.resource_page = 1
 
     def advance(self):
         self.stage += 1
@@ -46,9 +53,18 @@ class Client:
         elif self.stage == 2:
             self.menu = Menu(self, "请选择网盘", ["123", "115", "夸克"])
         elif self.stage == 3:
+            if self.resource_pages:
+                self.resource_page = 1
+                self.set_resource_page(1)
+                return
             self.menu = Menu(self, self.resource_text, self.resource_labels)
         else:
             self.menu = Menu(self, "115 转存成功，成功 1 个，失败 0 个", [], message_id=102)
+        self.messages = [self.menu]
+
+    def set_resource_page(self, page):
+        labels, text = self.resource_pages[page - 1]
+        self.menu = Menu(self, text, labels, message_id=101)
         self.messages = [self.menu]
 
     async def send_message(self, bot, text):
@@ -119,6 +135,12 @@ class ParsingTests(unittest.TestCase):
         self.assertIsNone(MODULE.message_resource_points(label, text + "💰 8积分 | 1GB"))
         self.assertIsNone(MODULE.message_resource_points(label, text.replace("4积分", "积分未知")))
 
+    def test_message_resource_size_matches_number_and_truncated_title(self):
+        text = "115 资源 第1/2页\n3. 种地吧 (2023) - S03E01-E80(完结) 2160p 📦 文件: 80 个 💾 大小: 455.03 GB [32人解锁]\n💰 4积分 | 455.03 GB | 4K\n"
+        label = "3. 种地吧 (2023) - S03E01-E80(完结) 2160p 📦 文件: 80 个 💾 大小:..."
+        self.assertEqual(MODULE.message_resource_size(label, text), "455.03 GB")
+        self.assertIsNone(MODULE.message_resource_size("4. 其他资源...", text))
+
     def test_url_buttons_are_not_clickable(self):
         message = SimpleNamespace(buttons=[[SimpleNamespace(text="URL", data=None),
                                             SimpleNamespace(text="115", data=b"callback")]])
@@ -170,6 +192,18 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self.fill.action({"operation": "verify", "task_id": task["id"]})
         await asyncio.gather(*[worker for worker in self.fill.verifiers if worker.get_coro().__name__ == "_verify"])
         self.assertEqual(task["state"], "complete")
+
+    async def test_all_resource_pages_are_collected_and_target_page_is_restored(self):
+        self.client.resource_pages = [
+            (["1. S05E01-E28 [4积分]", "下一页"], "115 资源 第1/2页\n1. S05E01-E28\n💰 4积分 | 12GB"),
+            (["2. S04 更新至E26 [4积分]", "上一页"], "115 资源 第2/2页\n2. S04 更新至E26\n💰 4积分 | 8GB"),
+        ]
+        task = await self.ready()
+        self.assertEqual([option["label"] for option in task["options"]], self.client.resource_pages[0][0][:1] + self.client.resource_pages[1][0][:1])
+        self.assertEqual(task["options"][0]["size"], "12GB")
+        await self.fill.action(self.confirm(task, option_id=task["options"][0]["id"]))
+        await self.fill.worker
+        self.assertEqual(self.client.clicks[-3:], ["下一页", "上一页", self.client.resource_pages[0][0][0]])
 
     async def test_double_confirmation_is_rejected(self):
         task = await self.ready()

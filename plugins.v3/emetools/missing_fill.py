@@ -80,6 +80,32 @@ def message_resource_points(label, text):
     return int(re.search(r"\d+", costs[0])[0]) if re.search(r"\d+", costs[0]) else 0
 
 
+def message_resource_size(label, text):
+    """从资源正文中提取与编号对应的文件大小。"""
+    number = re.match(r"\s*(\d+)[.、．]\s*(.+)", label)
+    if not number:
+        return None
+    headings = list(re.finditer(r"(?m)^\s*(\d+)[.、．]\s*(?=\S)", text))
+    matches = [index for index, heading in enumerate(headings) if int(heading[1]) == int(number[1])]
+    if len(matches) != 1:
+        return None
+    index = matches[0]
+    section = text[headings[index].end():headings[index + 1].start() if index + 1 < len(headings) else len(text)]
+    prefix = re.split(r"\.{3,}|…+", number[2], maxsplit=1)[0]
+    prefix = re.sub(r"\s*(?:\[[^]]*(?:积分|免费|免积分)[^]]*\]|【[^】]*(?:积分|免费|免积分)[^】]*】|（[^）]*(?:积分|免费|免积分)[^）]*）|\([^)]*(?:积分|免费|免积分)[^)]*\))\s*$", "", prefix)
+    normalize = lambda value: re.sub(r"\s+", "", value).upper()
+    if not normalize(prefix) or not normalize(section).startswith(normalize(prefix)):
+        return None
+    matches = re.findall(r"(?:大小\s*[:：]\s*|[|｜]\s*)(\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB|B))", section, re.I)
+    return matches[-1] if matches else None
+
+
+def resource_page(message):
+    """返回资源菜单当前页码和总页数；无法识别时按单页处理。"""
+    match = re.search(r"第\s*(\d+)\s*/\s*(\d+)\s*页", message.raw_text or "")
+    return (int(match[1]), int(match[2])) if match else (1, 1)
+
+
 def buttons(message):
     """仅接受回调按钮，绝不打开 URL 或分享联系方式的按钮。"""
     return [{"row": row_index, "column": column_index, "label": button.text,
@@ -188,7 +214,7 @@ class MissingFill:
                         raise ValueError("该资源未覆盖缺集")
                     if selected["fingerprint"] in self.spent:
                         raise ValueError("该资源已有提交记录，禁止重复点击；请在 Bot 中人工核实")
-                    task["selected"] = {key: selected[key] for key in ("label", "points", "coverage", "covered")}
+                    task["selected"] = {key: selected[key] for key in ("label", "points", "size", "coverage", "covered")}
                     self._set(task, "submitting", "已确认，正在提交转存；此后不自动重试。")
                     self.worker = asyncio.create_task(self._run(task, self._submit(task, selected)))
                 else:
@@ -267,6 +293,8 @@ class MissingFill:
         return {message.id: signature(message) for message in await self._messages() if not message.out}
 
     async def _click(self, selected, task=None):
+        if selected.get("page") and selected["page"] != resource_page(self.menu)[0]:
+            await self._go_to_resource_page(selected["page"])
         await self._messages()
         current = await asyncio.wait_for(self.plugin._monitor.client.get_messages(self.bot, ids=self.menu.id), timeout=15)
         if not current or signature(current) != signature(self.menu):
@@ -278,6 +306,22 @@ class MissingFill:
             self._persist()
         result = await asyncio.wait_for(current.click(selected["row"], selected["column"]), timeout=20)
         return snapshot, getattr(result, "message", "") or ""
+
+    async def _go_to_resource_page(self, target_page):
+        current_page, total_pages = resource_page(self.menu)
+        if not 1 <= target_page <= total_pages:
+            raise ValueError("资源页码已失效，请重新搜索")
+        while current_page != target_page:
+            wanted = "下一页" if current_page < target_page else "上一页"
+            button = next((item for item in buttons(self.menu) if wanted in item["label"]), None)
+            if not button:
+                raise ValueError("无法切换到资源所在页，请重新搜索")
+            snapshot, _ = await self._click(button)
+            self.menu = await self._wait(
+                snapshot,
+                lambda message: resource_page(message)[0] != current_page,
+            )
+            current_page, total_pages = resource_page(self.menu)
 
     def _publish(self, task, message, items, state, description):
         self.menu, self.options = message, items
@@ -312,20 +356,37 @@ class MissingFill:
         snapshot, _ = await self._click(disk)
         menu = await self._wait(snapshot, lambda message: bool(buttons(message)) and "115" in (message.raw_text or "")
                                and any(re.match(r"\s*\d+[.、．]", item["label"]) for item in buttons(message)))
+        self.menu = menu
         resources = []
-        for index, item in enumerate(buttons(menu)):
-            if not re.match(r"\s*\d+[.、．]", item["label"]):
-                continue
-            info = resource_info(item["label"], task["record"])
-            if info["points"] is None:
-                info["points"] = message_resource_points(item["label"], menu.raw_text or "")
-            stable_label = re.sub(r"^\s*\d+[.、．]\s*", "", item["label"])
-            fingerprint = hashlib.sha256(repr((record_key(task["record"]), int(self.bot.id), stable_label)).encode()).hexdigest()
-            resources.append({**item, **info, "id": str(index), "fingerprint": fingerprint,
-                              "previously_submitted": fingerprint in self.spent})
+        visited = set()
+        while True:
+            current_page, total_pages = resource_page(menu)
+            if current_page in visited:
+                raise ValueError("Bot 资源分页循环异常，请重新搜索")
+            visited.add(current_page)
+            for index, item in enumerate(buttons(menu)):
+                if not re.match(r"\s*\d+[.、．]", item["label"]):
+                    continue
+                info = resource_info(item["label"], task["record"])
+                if info["points"] is None:
+                    info["points"] = message_resource_points(item["label"], menu.raw_text or "")
+                info["size"] = message_resource_size(item["label"], menu.raw_text or "")
+                stable_label = re.sub(r"^\s*\d+[.、．]\s*", "", item["label"])
+                fingerprint = hashlib.sha256(repr((record_key(task["record"]), int(self.bot.id), stable_label)).encode()).hexdigest()
+                resources.append({**item, **info, "id": f"{current_page}-{index}", "page": current_page,
+                                  "fingerprint": fingerprint, "previously_submitted": fingerprint in self.spent})
+            if current_page >= total_pages:
+                break
+            next_button = next((item for item in buttons(menu) if "下一页" in item["label"]), None)
+            if not next_button:
+                raise ValueError("Bot 资源分页缺少下一页按钮，请重新搜索")
+            snapshot, _ = await self._click(next_button)
+            menu = await self._wait(snapshot, lambda message: resource_page(message)[0] == current_page + 1)
+            self.menu = menu
         resources.sort(key=lambda item: (not item["eligible"], item["ambiguous"], -len(item["covered"]),
                                         item["points"] if item["points"] is not None else 999))
-        self._publish(task, menu, resources, "resources", "请选择资源并确认；季包仅可能覆盖缺集，可能转存已有集数。确认窗口 10 分钟。")
+        self.menu = menu
+        self._publish(task, menu, resources, "resources", f"已读取全部 {len(resources)} 个资源；请选择并确认，季包仅可能覆盖缺集，可能转存已有集数。确认窗口 10 分钟。")
 
     async def _submit(self, task, selected):
         snapshot, callback = await self._click(selected, task)
