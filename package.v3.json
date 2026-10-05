@@ -23,7 +23,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.38",
+    "version": "2.9.39",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -31,6 +31,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.39": "缺集补全卡片标题统一为缺集补全，修复保存上限按钮与单次积分上限输入框未对齐。",
       "v2.9.38": "缺集检测新增 Telegram 半自动补全：按名称年份选剧、选择115、积分确认、串行与重复保护、只读入库复查。",
       "2.9.37": "合并自动取消为一个总开关，增加判定方式选择；旧双开关按原规则迁移，两项开启对应整剧完结或季度播完，关闭总开关停用全部自动取消规则，保留季度 7 天保护期。",
       "2.9.36": "新增独立的季度播完完整自动取消开关：不要求整剧 Ended，核对连续集号、总集数、完整播出日期、本季待播信息及本地全集，末集播出满 7 天后才处理；默认关闭，保留原严格模式。",
