@@ -37,6 +37,7 @@ class Client:
         self.extra_outgoing = False
         self.series_labels = ["📺 剧集 | [已入库]半熟恋人 (2021)", "📺 剧集 | [未入库]半熟恋人 (2012)"]
         self.resource_labels = ["1. S05+S00 4K [4积分]", "2. S05E01-E28 4K [4积分]", "3. S04 更新至E26 [4积分]"]
+        self.resource_text = "115 资源"
 
     def advance(self):
         self.stage += 1
@@ -45,7 +46,7 @@ class Client:
         elif self.stage == 2:
             self.menu = Menu(self, "请选择网盘", ["123", "115", "夸克"])
         elif self.stage == 3:
-            self.menu = Menu(self, "115 资源", self.resource_labels)
+            self.menu = Menu(self, self.resource_text, self.resource_labels)
         else:
             self.menu = Menu(self, "115 转存成功，成功 1 个，失败 0 个", [], message_id=102)
         self.messages = [self.menu]
@@ -104,6 +105,19 @@ class ParsingTests(unittest.TestCase):
                                 ("S05 4K", None)]:
             with self.subTest(label=label):
                 self.assertEqual(MODULE.resource_info(label, RECORD)["points"], expected)
+
+    def test_message_cost_matches_number_and_truncated_title(self):
+        text = "115 资源 第1/2页\n1. S05 全集 [120人解锁]\n💰 8积分 | 1.10TB\n5. 五十公里桃花坞 · 城市角落 - 4K.SDR S06E01-S06E24 - 已更新至\n2026-07-17 第10期下 [47人解锁]\n💰 4积分 | 137.89GB\n"
+        label = "5. 五十公里桃花坞 · 城市角落 - 4K.SDR S06E01-S06E24 - 已更新至 2026-07-17 第1..."
+        self.assertEqual(MODULE.message_resource_points(label, text), 4)
+        self.assertEqual(MODULE.message_resource_points(label, text.replace("4积分", "免费")), 0)
+        self.assertEqual(MODULE.message_resource_points(label, text.replace("4积分", "0积分")), 0)
+        self.assertIsNone(MODULE.message_resource_points(label.replace("5.", "6."), text))
+        self.assertIsNone(MODULE.message_resource_points("5. 其他剧集...", text))
+        self.assertIsNone(MODULE.message_resource_points(label, text + "5. 重复编号\n💰 8积分 | 1GB"))
+        self.assertIsNone(MODULE.message_resource_points(label, text.replace("💰 4积分 | 137.89GB", "137.89GB")))
+        self.assertIsNone(MODULE.message_resource_points(label, text + "💰 8积分 | 1GB"))
+        self.assertIsNone(MODULE.message_resource_points(label, text.replace("4积分", "积分未知")))
 
     def test_url_buttons_are_not_clickable(self):
         message = SimpleNamespace(buttons=[[SimpleNamespace(text="URL", data=None),
@@ -189,6 +203,31 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.client.clicks), 3)
         self.assertEqual(task["selected"]["points"], 0)
         self.assertEqual(task["state"], "awaiting_verify")
+
+    async def test_message_cost_fallback_preserves_coverage_and_button_cost(self):
+        self.client.resource_labels = ["5. S06E01-E24 长标题...", "2. S05E01-E28 [免费]"]
+        self.client.resource_text = "115 资源\n2. S05E01-E28\n💰 8积分 | 1GB\n5. S06E01-E24 长标题已更新\n💰 4积分 | 137.89GB"
+        task = await self.ready()
+        options = {item["label"]: item for item in task["options"]}
+        fifth = options[self.client.resource_labels[0]]
+        self.assertEqual(fifth["points"], 4)
+        self.assertFalse(fifth["eligible"])
+        self.assertEqual(options[self.client.resource_labels[1]]["points"], 0)
+        with self.assertRaises(ValueError):
+            await self.fill.action(self.confirm(task, option_id=fifth["id"]))
+        self.assertEqual(len(self.client.clicks), 2)
+
+    async def test_message_free_cost_requires_confirmation(self):
+        self.client.resource_labels = ["5. S05E01-E28 长标题..."]
+        self.client.resource_text = "115 资源\n5. S05E01-E28 长标题已更新\n💰 免费 | 137.89GB"
+        await self.fill.action({"operation": "save", "max_points": 0})
+        task = await self.ready()
+        self.assertEqual(task["options"][0]["points"], 0)
+        self.assertEqual(len(self.client.clicks), 2)
+        await self.fill.action(self.confirm(task))
+        await self.fill.worker
+        self.assertEqual(task["state"], "awaiting_verify")
+        self.assertEqual(len(self.client.clicks), 3)
 
     async def test_noncovering_resource_is_rejected(self):
         task = await self.ready()

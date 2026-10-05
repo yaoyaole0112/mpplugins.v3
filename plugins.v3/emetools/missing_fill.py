@@ -60,6 +60,26 @@ def resource_info(label, record):
             "eligible": bool(covered or possible), "ambiguous": possible}
 
 
+def message_resource_points(label, text):
+    number = re.match(r"\s*(\d+)[.、．]\s*(.+)", label)
+    if not number:
+        return None
+    headings = list(re.finditer(r"(?m)^\s*(\d+)[.、．]\s*(?=\S)", text))
+    matches = [index for index, heading in enumerate(headings) if int(heading[1]) == int(number[1])]
+    if len(matches) != 1:
+        return None
+    index = matches[0]
+    section = text[headings[index].end():headings[index + 1].start() if index + 1 < len(headings) else len(text)]
+    prefix = re.split(r"\.{3,}|…+", number[2], maxsplit=1)[0]
+    normalize = lambda value: re.sub(r"\s+", "", value).upper()
+    if not normalize(prefix) or not normalize(section).startswith(normalize(prefix)):
+        return None
+    costs = re.findall(r"(?m)^\s*💰\s*(\d+\s*积分|免费|免积分)\s*(?=[|｜]|$)", section)
+    if len(costs) != 1:
+        return None
+    return int(re.search(r"\d+", costs[0])[0]) if re.search(r"\d+", costs[0]) else 0
+
+
 def buttons(message):
     """仅接受回调按钮，绝不打开 URL 或分享联系方式的按钮。"""
     return [{"row": row_index, "column": column_index, "label": button.text,
@@ -297,6 +317,8 @@ class MissingFill:
             if not re.match(r"\s*\d+[.、．]", item["label"]):
                 continue
             info = resource_info(item["label"], task["record"])
+            if info["points"] is None:
+                info["points"] = message_resource_points(item["label"], menu.raw_text or "")
             stable_label = re.sub(r"^\s*\d+[.、．]\s*", "", item["label"])
             fingerprint = hashlib.sha256(repr((record_key(task["record"]), int(self.bot.id), stable_label)).encode()).hexdigest()
             resources.append({**item, **info, "id": str(index), "fingerprint": fingerprint,
