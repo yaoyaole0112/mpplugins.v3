@@ -1,12 +1,88 @@
 """Regressions for completed-series subscription cleanup."""
 
 import unittest
+import copy
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.schemas.types import MediaSource, MediaType
 
 from emetools.missing_episodes import DEFAULT_MISSING, MissingEpisodeDetector, normalize_cancel_config
+
+
+class MissingFillInventoryTests(unittest.TestCase):
+    def setUp(self):
+        self.record = {"ServerName": "Emby", "LibraryName": "剧集", "TmdbId": "123", "SeriesId": "series",
+                       "SeasonNum": 5, "MissingEpisodeNumbers": [12, 13], "MissingEpisodes": "12-13"}
+        self.detector = object.__new__(MissingEpisodeDetector)
+        self.detector._scan_lock = threading.Lock()
+        service = SimpleNamespace(config=SimpleNamespace(name="Emby", config={"host": "http://emby.invalid", "apikey": "fake"}),
+                                  instance=SimpleNamespace(get_user=lambda: "user"))
+        self.detector._mediaserver_helper = SimpleNamespace(get_services=lambda **kwargs: {"emby": service})
+        self.detector._results = [copy.deepcopy(self.record)]
+        self.detector.save_data = MagicMock()
+        self.views = {"Items": [{"Id": "library", "Name": "剧集"}]}
+        self.series = {"Items": [{"Id": "series", "ProviderIds": {"Tmdb": "123"}}], "TotalRecordCount": 1}
+        self.episodes = {"Items": [{"SeriesId": "series", "ParentIndexNumber": 5, "IndexNumber": 12, "IndexNumberEnd": 13}],
+                         "TotalRecordCount": 1}
+        self.detector._request_json = MagicMock(side_effect=[self.views, self.series, self.episodes])
+
+    def test_complete_requires_real_matching_series_episodes(self):
+        self.assertEqual(self.detector.verify_inventory(self.record), [])
+        self.assertEqual(self.detector._results, [])
+        self.detector.save_data.assert_called_once()
+
+    def test_virtual_wrong_season_and_wrong_series_are_not_complete(self):
+        for change in [{"LocationType": "Virtual"}, {"ParentIndexNumber": 4}, {"SeriesId": "other"}]:
+            with self.subTest(change=change):
+                self.episodes["Items"][0] = {"SeriesId": "series", "ParentIndexNumber": 5,
+                                              "IndexNumber": 12, "IndexNumberEnd": 13, **change}
+                self.detector._request_json.side_effect = [self.views, self.series, self.episodes]
+                self.assertEqual(self.detector.verify_inventory(self.record), [12, 13])
+
+    def test_partial_inventory_updates_missing_ranges_without_subscription_actions(self):
+        self.episodes["Items"][0]["IndexNumberEnd"] = 12
+        self.assertEqual(self.detector.verify_inventory(self.record), [13])
+        self.assertEqual(self.detector._results[0]["MissingEpisodeNumbers"], [13])
+        self.assertEqual(self.detector._results[0]["MissingEpisodes"], "13")
+
+    def test_server_failure_absent_series_and_incomplete_payload_raise(self):
+        for responses in [[None], [self.views, {"Items": [], "TotalRecordCount": 0}],
+                          [self.views, self.series, None], [self.views, self.series, {"Items": []}]]:
+            with self.subTest(responses=responses):
+                self.detector._request_json.side_effect = responses
+                with self.assertRaises(ValueError):
+                    self.detector.verify_inventory(self.record)
+                self.assertEqual(self.detector._results[0]["MissingEpisodeNumbers"], [12, 13])
+        self.detector.save_data.assert_not_called()
+
+    def test_pagination_is_required_even_when_first_page_contains_targets(self):
+        self.episodes["TotalRecordCount"] = 2
+        self.detector._request_json.side_effect = [self.views, self.series, self.episodes,
+                                                  {"Items": [], "TotalRecordCount": 2}]
+        with self.assertRaisesRegex(ValueError, "分页查询未完成"):
+            self.detector.verify_inventory(self.record)
+        self.detector.save_data.assert_not_called()
+
+    def test_later_episode_page_is_read(self):
+        self.episodes["Items"][0]["IndexNumberEnd"] = 12
+        self.episodes["TotalRecordCount"] = 2
+        later = {"Items": [{"SeriesId": "series", "ParentIndexNumber": 5, "IndexNumber": 13}], "TotalRecordCount": 2}
+        self.detector._request_json.side_effect = [self.views, self.series, self.episodes, later]
+        self.assertEqual(self.detector.verify_inventory(self.record), [])
+        self.assertIn("StartIndex=1", self.detector._request_json.call_args.args[0])
+
+    def test_concurrent_detector_scan_refuses_verification(self):
+        self.detector._scan_lock.acquire()
+        with self.assertRaisesRegex(ValueError, "正在扫描"):
+            self.detector.verify_inventory(self.record)
+        self.detector._request_json.assert_not_called()
+
+    def test_newly_missing_episodes_are_preserved(self):
+        self.detector._results[0]["MissingEpisodeNumbers"].append(14)
+        self.assertEqual(self.detector.verify_inventory(self.record), [])
+        self.assertEqual(self.detector._results[0]["MissingEpisodeNumbers"], [14])
 
 
 class MissingEpisodeCompletionTests(unittest.TestCase):

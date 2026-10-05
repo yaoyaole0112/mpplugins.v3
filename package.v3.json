@@ -1,4 +1,24 @@
 {
+  "BrushFlow": {
+    "name": "站点刷流",
+    "description": "自动托管多个站点刷流任务，并独立调度、统计与诊断。",
+    "labels": "刷流,仪表板",
+    "version": "6.1.4",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
+    "author": "jxxghp,InfinityPacer,Seed680 / helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 2,
+    "history": {
+      "v6.1.4": "修复插件启动/更新后整表回写配置，把已保存的下载器标签重置为空。",
+      "v6.1.3": "修复高级设置里已保存的下载器标签被覆盖成空，并在添加种子后移除临时随机标签。",
+      "v6.1.2": "修复站点分享率数据缺失时误触发刷流，等待数据更新后再继续判断。",
+      "v6.1.1": "修复站点刷流工作台首次加载时短暂显示插件未启用提示的问题。",
+      "v6.1.0": "适配 V3 SDK 导入规范：插件内部导入全面迁移至 app.sdk 体系，去除对旧版兼容层的依赖。",
+      "v6.0.1": "新增种子下载标签配置，默认使用可读的「刷流-站点名」标签，新增种子仅打单一标签，不再叠加随机代码标签。"
+    }
+  },
   "EmeTools": {
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
@@ -7,11 +27,26 @@
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
-    "release": false,
+    "release": true,
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
       "v2.9.38": "缺集检测新增 Telegram 半自动补全：按名称年份选剧、选择115、积分确认、串行与重复保护、只读入库复查。",
+      "2.9.37": "合并自动取消为一个总开关，增加判定方式选择；旧双开关按原规则迁移，两项开启对应整剧完结或季度播完，关闭总开关停用全部自动取消规则，保留季度 7 天保护期。",
+      "2.9.36": "新增独立的季度播完完整自动取消开关：不要求整剧 Ended，核对连续集号、总集数、完整播出日期、本季待播信息及本地全集，末集播出满 7 天后才处理；默认关闭，保留原严格模式。",
+      "2.9.35": "修复缺集检测切页及刷新覆盖媒体库多选和开关；立即检测先保存当前配置，避免继续扫描旧范围；增加自动取消候选、匹配与失败诊断，TMDB 分集列表不完整时不取消。",
+      "2.9.34": "缺集检测新增自动取消已完结完整订阅开关：仅当 TMDB 状态为 Ended 且 Emby 对应季度全集齐全时，按 TMDB ID 和季度精确取消订阅（包括洗版），并显示上次取消数量。",
+      "2.9.33": "将缺集检测页面的刷新可选项按钮文字改为刷新选项。",
+      "2.9.32": "统一插件所有页面文字按钮字号为 13px，修复删除所选、保存配置、全选低质与选择窗口字号不一致；保留纯图标按钮尺寸。",
+      "2.9.31": "修复清理文件遇到 115 登录超时返回 405 时显示原始错误，改为提示重新登录并更新 Cookie。",
+      "2.9.30": "修复媒体清理删除所选提示未知错误：删除校验失败时返回具体原因，并在页面显示失败明细。",
+      "2.9.29": "修复批量数据补全因 AI 翻译配置或接口异常导致整部剧失败；失败日志显示具体原因，AI 翻译失败时保留原资料继续补全。",
+      "2.9.28": "修复日韩剧数据补全用外文覆盖中文剧名：优先中文标题，缺失时保留原名；支持按 TMDB ID 获取中文翻译恢复剧名，AI 标题翻译支持日韩泰文，分集标题同样保护中文。",
+      "2.9.27": "将上次批量任务结果移入运行进度卡片标题下方，与日志对齐显示。",
+      "2.9.26": "修复订阅监控最近命中显示 Telegram 数字频道 ID，改为显示频道名称或用户名。",
+      "2.9.25": "移除增强工具标题下方的功能描述文字，简化侧栏标题显示。",
+      "2.9.24": "修复 Docker Compose 环境下因容器名称不是十六进制 ID 导致分集图片修复被取消的问题。",
+      "2.9.23": "增强工具多选窗口显示已选项目名称，便于确认当前选择范围。",
       "2.9.22": "修复分集图片扫描读取 Emby Primary 图片时客户端被提前关闭的问题。",
       "v2.9.21": "修复数据补全搜索异常处理二次报错：改用 MoviePilot 支持的日志接口，并在页面与日志保留原始异常类型和原因",
       "v2.9.20": "修复数据补全搜索错误提示为未知错误的问题：保留接口真实错误原因，并让单个 Emby 服务异常不影响其他服务器搜索",
@@ -113,26 +148,11 @@
     "system_version": ">=3.0.0",
     "level": 1
   },
-  "CloudPanStrmHelper": {
-    "name": "网盘STRM助手",
-    "description": "仿115网盘STRM助手：全量/增量STRM同步、整理监控、网盘目录整理。插件ID：CloudPanStrmHelper",
-    "labels": "云盘",
-    "version": "1.0.0",
-    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
-    "author": "helios",
-    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
-    "release": false,
-    "system_version": ">=3.0.0",
-    "level": 1,
-    "history": {
-      "v1.0.0": "首发：全量/增量STRM同步、整理事件监控、网盘整理"
-    }
-  },
   "P115StrmHelper": {
     "name": "115网盘STRM助手",
     "description": "115网盘STRM生成一条龙服务（MoviePilot V3 适配：整理拦截、本地目录浏览、405 风控熔断）",
     "labels": "云盘",
-    "version": "3.0.3",
+    "version": "3.0.5",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
     "author": "DDSRem / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -140,6 +160,8 @@
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
+      "v3.0.4": "完整仓库安装：整合本地兼容补丁、生活事件断线退避重试、旧宿主音乐 storage/batch_mtype 参数适配，并锁定 p115client 兼容依赖",
+      "v3.0.5": "补齐旧宿主缺失的整理校验接口，避免 _transfer_validation_error 异常，保持音乐识别状态和分类校验",
       "v3.0.3": "修复批量转存遗漏：115 生活事件按游标分页读取全部记录，分页异常时不推进监听游标；历史遗漏文件可手动补扫",
       "v3.0.2": "音乐整理不拦截：识别为音乐时回退 MoviePilot 原生整理，避免当成影视伴随音轨吞掉",
       "v3.0.1": "修复 V3 本地目录无法浏览：恢复 dist，browse_dir 优先并兼容 storage/list 响应包装；增量同步 405 风控熔断",
@@ -184,7 +206,7 @@
     "name": "华语音乐识别",
     "description": "接入 QQ 音乐 / 网易云元数据，MusicBrainz 识别失败时回退匹配华语歌曲。",
     "labels": "音乐,识别",
-    "version": "1.0.3",
+    "version": "1.0.6",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -192,6 +214,9 @@
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
+      "v1.0.6": "修复搜索框输入艺人和曲名时无法稳定搜到原唱专辑的问题，并兼容核心未转发实体类型",
+      "v1.0.5": "保留音乐标签中的曲名、艺人与专辑；尊重专辑/录音实体类型，避免自动回退混配",
+      "v1.0.4": "手动音乐数据源兼容影视格式种子标题，清理发行规格后搜索",
       "v1.0.3": "修复 QQ/网易云搜索结果点击后再搜资源时，异步识别拿不到媒体信息",
       "v1.0.2": "合集/群星占位专辑名改为使用识别到的真实专辑名",
       "v1.0.1": "合奏/多艺人标签按空格、分号、括号拆开，命中其中一位即可",
@@ -249,6 +274,24 @@
     "history": {
       "v4.2.0": "适配猫眼 H5Guard 加密榜单接口，修复网播与网络电影榜单 403/空响应导致的 JSON 解析失败",
       "v4.1.0": "适配 MoviePilot V3 媒体身份与浏览器接口"
+    }
+  },
+  "SubscribeOwner": {
+    "name": "订阅用户修正",
+    "description": "监听新建订阅并定时检查全部已有订阅，统一修正为指定的 MoviePilot 用户",
+    "labels": "订阅,工具",
+    "version": "1.2.1",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
+    "author": "helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 2,
+    "history": {
+      "v1.2.1": "修复配置表单按钮无效：移至查看数据页面，并记录手动运行及新增订阅日志",
+      "v1.2.0": "配置页增加仅管理员可用的立即运行按钮，显示检查结果并优化字段提示间距",
+      "v1.1.0": "支持按 Cron 定时检查全部类型的已有订阅，并修正新增订阅的归属",
+      "v1.0.0": "首发：新建电视剧订阅时修正插件名称归属"
     }
   }
 }
