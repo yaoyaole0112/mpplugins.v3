@@ -434,6 +434,7 @@ class MissingEpisodeDetector:
                     "SeriesName": series_title,
                     "Year": str(series.get("ProductionYear") or (details.get("first_air_date") or "")[:4]),
                     "TmdbId": str(tmdb_id),
+                    "SeriesId": series_id,
                     "SeasonNum": season_number,
                     "SeasonFormatted": "SP" if season_number == 0 else f"S{season_number}",
                     "MissingEpisodeNumbers": sorted(missing),
@@ -558,6 +559,85 @@ class MissingEpisodeDetector:
                 f"【{self.plugin_name}】订阅 {result.get('SeriesName')} "
                 f"{result.get('SeasonFormatted')} 失败：{error}"
             )
+
+    def verify_inventory(self, record: Dict[str, Any]) -> List[int]:
+        """只读复查目标分集，失败必须报错；不新增或取消任何订阅。"""
+        from urllib.parse import urlencode
+
+        if not self._scan_lock.acquire(blocking=False):
+            raise ValueError("缺集检测正在扫描，请稍后复查")
+        try:
+            if not self._mediaserver_helper:
+                raise ValueError("Emby 服务未初始化")
+            services = self._mediaserver_helper.get_services(type_filter="emby") or {}
+            values = services.values() if isinstance(services, dict) else services
+            matches = [service for service in values if str(service.config.name) == record["ServerName"]]
+            if len(matches) != 1:
+                raise ValueError("无法唯一匹配原 Emby 服务器")
+            service = matches[0]
+            config = service.config.config or {}
+            host, api_key = str(config.get("host") or "").rstrip("/"), str(config.get("apikey") or "")
+            user_id = str(service.instance.get_user() or "")
+            if not host or not api_key or not user_id:
+                raise ValueError("Emby 连接配置不完整")
+            views = self._request_json(f"{host}/emby/Users/{user_id}/Views?{urlencode({'api_key': api_key})}")
+            if not views or not isinstance(views.get("Items"), list):
+                raise ValueError("无法读取 Emby 媒体库")
+            libraries = [item for item in views["Items"] if item.get("Name") == record["LibraryName"]]
+            if len(libraries) != 1:
+                raise ValueError("无法唯一匹配原媒体库")
+
+            def read_items(kind, fields, series_id=""):
+                items = []
+                while True:
+                    query = {"api_key": api_key, "ParentId": libraries[0]["Id"], "Recursive": "true",
+                             "IncludeItemTypes": kind, "Fields": fields, "StartIndex": len(items), "Limit": 200}
+                    if series_id:
+                        query["SeriesId"] = series_id
+                    payload = self._request_json(f"{host}/emby/Users/{user_id}/Items?{urlencode(query)}")
+                    if not payload or not isinstance(payload.get("Items"), list) or type(payload.get("TotalRecordCount")) is not int:
+                        raise ValueError("Emby 分页查询失败或返回不完整，不能判定补全")
+                    page, total = payload["Items"], payload["TotalRecordCount"]
+                    items.extend(page)
+                    if len(items) >= total:
+                        return items
+                    if not page or len(items) > 100000:
+                        raise ValueError("Emby 分页查询未完成")
+
+            series = [item for item in read_items("Series", "ProviderIds")
+                      if str(next((value for key, value in (item.get("ProviderIds") or {}).items()
+                                   if key.lower() == "tmdb"), "")) == str(record["TmdbId"])]
+            if record.get("SeriesId"):
+                series = [item for item in series if item.get("Id") == record["SeriesId"]]
+            if len(series) != 1:
+                raise ValueError("原剧集不存在或无法唯一匹配，不能判定补全")
+            present = set()
+            for episode in read_items("Episode", "IndexNumberEnd,LocationType", series[0]["Id"]):
+                if episode.get("LocationType") == "Virtual" or episode.get("SeriesId") != series[0]["Id"]:
+                    continue
+                try:
+                    if int(episode.get("ParentIndexNumber")) != int(record["SeasonNum"]):
+                        continue
+                    first = int(episode["IndexNumber"])
+                    last = int(episode.get("IndexNumberEnd") or first)
+                    if 0 < first <= last <= 9999:
+                        present.update(range(first, last + 1))
+                except (TypeError, ValueError, KeyError):
+                    continue
+            remaining = sorted(set(record["MissingEpisodeNumbers"]) - present)
+            key_fields = ("ServerName", "LibraryName", "TmdbId", "SeasonNum")
+            for item in list(self._results):
+                if all(str(item.get(key)) == str(record.get(key)) for key in key_fields):
+                    current = set(item["MissingEpisodeNumbers"]) - present
+                    if current:
+                        item["MissingEpisodeNumbers"] = sorted(current)
+                        item["MissingEpisodes"] = self._format_episode_ranges(current)
+                    else:
+                        self._results.remove(item)
+            self.save_data(self._DATA_KEY, self._results)
+            return remaining
+        finally:
+            self._scan_lock.release()
 
     def scan_missing_episodes(self) -> None:
         """扫描配置范围内的 Emby 媒体库并处理缺失季集。"""

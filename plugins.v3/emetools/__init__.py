@@ -31,6 +31,7 @@ from .invalid_data import InvalidDataCleaner
 from .p115 import P115Client
 from .subscription_monitor import SubscriptionMonitor, normalize_channel
 from .missing_episodes import DEFAULT_MISSING, MissingAction, MissingEpisodeDetector, normalize_cancel_config
+from .missing_fill import MissingFill
 from .media_cleanup import MediaCleanup, DEFAULT_CONFIG as DEFAULT_MEDIA_CLEANUP, DEFAULT_RULES, validate_rules
 from .data_enrichment import DataEnrichment, DEFAULT_ENRICH_CONFIG, validate_enrich_config
 from . import tool_notifications as notices
@@ -104,7 +105,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.37"
+    plugin_version = "2.9.38"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -146,6 +147,7 @@ class EmeTools(_PluginBase):
         saved_missing = normalize_cancel_config(saved_missing)
         self._missing_config.update({key: value for key, value in saved_missing.items() if key in DEFAULT_MISSING})
         self._missing = MissingEpisodeDetector(self, self._missing_config)
+        self._fill = MissingFill(self)
         self._missing_manual_scan_id = 0
         self._missing_finished_scan_id = 0
         saved_media = config.get("media_cleanup") or {}
@@ -403,6 +405,7 @@ class EmeTools(_PluginBase):
         monitor = getattr(self, "_monitor", None)
         if monitor and monitor.loop and monitor.thread and monitor.thread.is_alive():
             try:
+                asyncio.run_coroutine_threadsafe(self._fill.shutdown(), monitor.loop).result(timeout=8)
                 asyncio.run_coroutine_threadsafe(monitor.shutdown(), monitor.loop).result(timeout=8)
             except Exception as exc:
                 logger.warning(f"ME工具 Telegram 客户端关闭失败: {type(exc).__name__}")
@@ -662,6 +665,17 @@ class EmeTools(_PluginBase):
     async def missing_options(self) -> dict:
         servers, libraries, series = await asyncio.to_thread(self._missing._get_form_options)
         return {"servers": servers, "libraries": libraries, "series": series}
+
+    async def missing_fill_status(self) -> dict:
+        """查询半自动 Telegram 补全任务，不连接机器人。"""
+        return await self._monitor.call(self._fill.status())
+
+    async def missing_fill_action(self, action: dict) -> dict:
+        """所有补全操作均在现有用户会话的事件循环中执行。"""
+        try:
+            return await self._monitor.call(self._fill.action(action))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     async def missing_action(self, action: dict) -> dict:
         operation = action.get("operation")
@@ -1532,6 +1546,8 @@ class EmeTools(_PluginBase):
             {"path": "/missing/status", "endpoint": self.missing_status, "methods": ["GET"], "auth": "bear", "summary": "缺集检测状态"},
             {"path": "/missing/options", "endpoint": self.missing_options, "methods": ["GET"], "auth": "bear", "summary": "缺集检测可选服务器和媒体库"},
             {"path": "/missing/action", "endpoint": self.missing_action, "methods": ["POST"], "auth": "bear", "summary": "缺集检测操作"},
+            {"path": "/missing/fill/status", "endpoint": self.missing_fill_status, "methods": ["GET"], "auth": "bear", "summary": "TG 缺集补全任务"},
+            {"path": "/missing/fill/action", "endpoint": self.missing_fill_action, "methods": ["POST"], "auth": "bear", "summary": "TG 缺集补全确认操作"},
             {"path": "/media-cleanup/status", "endpoint": self.media_status, "methods": ["GET"], "auth": "bear", "summary": "媒体清理状态"},
             {"path": "/media-cleanup/libraries", "endpoint": self.media_libraries, "methods": ["GET"], "auth": "bear", "summary": "媒体清理媒体库"},
             {"path": "/media-cleanup/action", "endpoint": self.media_action, "methods": ["POST"], "auth": "bear", "summary": "媒体清理操作"},

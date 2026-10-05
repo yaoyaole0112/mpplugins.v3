@@ -407,8 +407,10 @@ class SubscriptionMonitor:
                             if message.id <= min_id:
                                 continue
                             if message.raw_text:
-                                await self._on_message(SimpleNamespace(chat_id=message.chat_id or -int(f"100{peer_id}"),
-                                                                       id=message.id, raw_text=message.raw_text, message=message))
+                                processed = await self._on_message(SimpleNamespace(chat_id=message.chat_id or -int(f"100{peer_id}"),
+                                                                                   id=message.id, raw_text=message.raw_text, message=message))
+                                if processed is False:
+                                    break
                                 recent += 1
                             self._advance_checkpoint(peer_id, message.id)
                         if peer_id in self._poll_failures:
@@ -447,7 +449,27 @@ class SubscriptionMonitor:
             self.last_error = f"读取 MoviePilot 订阅失败：{type(exc).__name__}"
             logger.warning("ME工具读取订阅失败: %s", type(exc).__name__)
 
+    async def resolve_forward_bot(self):
+        """复用转发 Bot 配置，按宿主 HTTPS 代理解析目标用户名。"""
+        import httpx
+        token = self.plugin._tg_forward_token
+        if token != self._forward_bot_token or not self._forward_bot_username:
+            proxies = get_runtime_setting("PROXY", None)
+            proxy = proxies.get("https") if isinstance(proxies, dict) else proxies
+            async with httpx.AsyncClient(proxy=proxy, timeout=15) as http:
+                response = await http.get(f"https://api.telegram.org/bot{token}/getMe")
+                result = response.json()
+            if not result.get("ok") or not result.get("result", {}).get("username"):
+                raise ValueError("转发 Bot Token 无效")
+            self._forward_bot_username = str(result["result"]["username"])
+            self._forward_bot_token = token
+            logger.info("ME工具 Telegram：已按 MP 网络配置解析转发 Bot（代理=%s）", bool(proxy))
+        return await self.client.get_entity(self._forward_bot_username)
+
     async def _on_message(self, event):
+        fill = getattr(self.plugin, "_fill", None)
+        if fill and fill.busy is True:
+            return False
         peer_id = int(str(event.chat_id)[4:]) if str(event.chat_id).startswith("-100") else abs(int(event.chat_id or 0))
         scopes = [scope for scope in ("sub", "kw") if self.plugin._monitor_config[scope]["enabled"] and peer_id in self.channel_ids[scope]]
         if not scopes or not event.raw_text:
@@ -456,7 +478,6 @@ class SubscriptionMonitor:
         key = self._message_key(event.chat_id, event.id)
         if key in self._seen:
             return
-        self._advance_checkpoint(event.chat_id, event.id)
         text = event.raw_text
         # Never log full posts: they can contain private links, credentials or user data.
         logger.info("ME工具 Telegram：收到频道消息，频道ID=%s，消息ID=%s，监控=%s，正文=%d 字",
@@ -474,29 +495,20 @@ class SubscriptionMonitor:
             logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 未命中（已比较订阅=%d）",
                         event.chat_id, event.id, len(self._subscriptions) if "sub" in scopes else 0)
             self._mark_seen(key)
+            self._advance_checkpoint(event.chat_id, event.id)
             return
         logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 命中 %d 项：%s，开始转发",
                     event.chat_id, event.id, len(names), ", ".join(re.sub(r"[\r\n\x00-\x1f]", " ", str(name))[:55]
                                                              for name in names[:5]))
         try:
-            import httpx
-            token = self.plugin._tg_forward_token
-            if token != self._forward_bot_token or not self._forward_bot_username:
-                # Match MoviePilot's Telegram notification channel: Bot API calls go
-                # through the host's HTTPS proxy, while Telethon uses its own connection.
-                proxies = get_runtime_setting("PROXY", None)
-                proxy = proxies.get("https") if isinstance(proxies, dict) else proxies
-                async with httpx.AsyncClient(proxy=proxy, timeout=15) as http:
-                    response = await http.get(f"https://api.telegram.org/bot{token}/getMe")
-                    result = response.json()
-                if not result.get("ok") or not result.get("result", {}).get("username"):
-                    raise ValueError("转发 Bot Token 无效")
-                self._forward_bot_username = str(result["result"]["username"])
-                self._forward_bot_token = token
-                logger.info("ME工具 Telegram：已按 MP 网络配置解析转发 Bot（代理=%s）", bool(proxy))
-            bot = await self.client.get_entity(self._forward_bot_username)
+            bot = await self.resolve_forward_bot()
+            fill = getattr(self.plugin, "_fill", None)
+            if fill and fill.busy is True:
+                logger.info("ME工具 Telegram：补全交互期间暂缓频道转发，保留未处理记录")
+                return False
             await self.client.forward_messages(bot, event.message)
             self._mark_seen(key)
+            self._advance_checkpoint(event.chat_id, event.id)
             self.hits.appendleft({"time": datetime.now().strftime("%m-%d %H:%M:%S"),
                                   "channel": self._channel_display_name(peer_id), "matches": names})
             self.last_error = ""
