@@ -78,3 +78,16 @@ test('template blocks unknown cost, excess cost, wrong coverage and repeated res
   assert.ok(source.includes('复查入库'))
   assert.ok(source.includes('clearTimeout(fillPollTimer)'))
 })
+
+test('missing results and fill task history use horizontal pagination', () => {
+  assert.ok(source.includes('const missingResultsPageSize = 6'))
+  assert.ok(source.includes('missing.results.slice('))
+  assert.ok(source.includes('v-for="item in missingResultsPageItems"'))
+  assert.ok(source.includes('aria-label="检测结果分页"'))
+  assert.ok(source.includes('const fillTasksPageSize = 2'))
+  assert.ok(source.includes('v-for="task in fillTasksPageItems"'))
+  assert.ok(source.includes('aria-label="缺集补全任务分页"'))
+  assert.ok(source.includes('function changeMissingResultsPage(delta)'))
+  assert.ok(source.includes('function changeFillTasksPage(delta)'))
+  assert.ok(source.includes('.eme-missing-results{overflow:visible;max-height:none;margin-top:16px}'))
+})

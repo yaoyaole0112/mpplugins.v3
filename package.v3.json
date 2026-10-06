@@ -23,7 +23,7 @@
     "name": "增强工具",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.42",
+    "version": "2.9.43",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -31,6 +31,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.43": "缺集检测结果和补全任务记录改为卡片内左右分页浏览，避免列表内部纵向滚动与全局页面滚动冲突。",
       "v2.9.42": "缺集补全读取 Bot 115 资源全部分页；资源卡片显示文件大小；优化积分提示间距并更新交互说明。",
       "v2.9.41": "修复长资源按钮截断费用后显示积分未知：按同一回复中的编号与标题前缀匹配正文费用，保留未知费用和不覆盖拦截。",
       "v2.9.40": "缺集补全积分输入框、保存按钮和提示文字居中对齐；明确免费资源识别为0积分，保留未知积分拦截与人工确认。",

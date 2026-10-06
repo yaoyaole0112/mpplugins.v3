@@ -68,7 +68,23 @@ const missing = reactive({ config: { enabled: false, cron: '35 3 * * *', only_ex
   results: [], cancelled_subscriptions: [], last_scan_time: '从未扫描', scanning: false, legacy_enabled: false })
 const missingOptions = reactive({ servers: [], libraries: [], series: [] })
 const missingOptionsLoading = ref(false)
+const missingResultsPage = ref(1)
+const missingResultsPageSize = 6
+const missingResultsPageCount = computed(() => Math.max(1, Math.ceil(missing.results.length / missingResultsPageSize)))
+const missingResultsPageItems = computed(() => missing.results.slice(
+  (missingResultsPage.value - 1) * missingResultsPageSize,
+  missingResultsPage.value * missingResultsPageSize,
+))
 const fill = reactive({ tasks: [], busy: false, max_points: 4 })
+const fillTasksPage = ref(1)
+const fillTasksPageSize = 2
+const fillTasksPageCount = computed(() => Math.max(1, Math.ceil(fill.tasks.length / fillTasksPageSize)))
+const fillTasksPageItems = computed(() => fill.tasks.slice(
+  (fillTasksPage.value - 1) * fillTasksPageSize,
+  fillTasksPage.value * fillTasksPageSize,
+))
+watch(missingResultsPageCount, pageCount => { missingResultsPage.value = Math.min(missingResultsPage.value, pageCount) })
+watch(fillTasksPageCount, pageCount => { fillTasksPage.value = Math.min(fillTasksPage.value, pageCount) })
 const fillMaxPoints = ref(4)
 const fillLoaded = ref(false)
 let fillPollTimer = null
@@ -501,6 +517,7 @@ function confirmModeLabel() {
   return confirmOptions.find(item => item.value === schedule.tools.confirm_mode)?.title || confirmOptions[0].title
 }
 async function missingCommand(operation) {
+  if (operation === 'scan') missingResultsPage.value = 1
   await work(async () => {
     if (!missingConfigInitialized) await loadMissing()
     if (operation === 'scan' && missingSavedConfig !== JSON.stringify(missing.config)) {
@@ -530,7 +547,16 @@ function downloadMissingCsv() {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 function clearMissing() {
-  if (window.confirm('清空 ME工具 的缺集检测记录？原插件记录不受影响。')) missingCommand('clear')
+  if (window.confirm('清空 ME工具 的缺集检测记录？原插件记录不受影响。')) {
+    missingResultsPage.value = 1
+    missingCommand('clear')
+  }
+}
+function changeMissingResultsPage(delta) {
+  missingResultsPage.value = Math.max(1, Math.min(missingResultsPageCount.value, missingResultsPage.value + delta))
+}
+function changeFillTasksPage(delta) {
+  fillTasksPage.value = Math.max(1, Math.min(fillTasksPageCount.value, fillTasksPage.value + delta))
 }
 function fillKey(item) {
   return ['ServerName', 'LibraryName', 'TmdbId', 'SeasonNum'].map(key => String(item[key] || ''))
@@ -552,6 +578,7 @@ async function loadFill() {
   }
 }
 async function fillCommand(operation, extra = {}) {
+  if (operation === 'start') fillTasksPage.value = 1
   await work(async () => {
     Object.assign(fill, await post('missing/fill/action', { operation, ...extra }))
     notice.value = operation === 'save' ? '积分上限已保存' : '补全任务状态已更新'
@@ -819,7 +846,9 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           </div><p class="eme-hint">点击选择框即可展开，支持搜索和多选；切换工具页面保留当前选择。“立即检测”会先保存当前配置；定时检测使用已保存配置。自动取消仅在检测时处理所选媒体库内的剧集。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测结果</h3><p>{{ missing.scanning ? '后台扫描中' : `上次扫描：${missing.last_scan_time}` }} · {{ missing.results.length }} 条缺失季 · 自动取消 {{ missing.cancelled_subscriptions.length }} 个订阅</p></div><div class="eme-inline"><button class="eme-button danger" :disabled="busy || missing.scanning || !missing.results.length" @click="clearMissing">清理检查记录</button><button class="eme-button secondary" :disabled="busy" @click="loadMissing">刷新结果</button><button class="eme-button secondary" :disabled="busy" @click="downloadMissingCsv">导出 CSV</button></div></div>
-          <div v-if="missing.results.length" class="eme-missing-results"><table><thead><tr><th>服务器</th><th>媒体库</th><th>剧集名称</th><th>缺失季度</th><th>缺失集号</th><th>处理结果</th><th>TG 补全</th></tr></thead><tbody><tr v-for="(item, index) in missing.results" :key="index"><td>{{ item.ServerName }}</td><td>{{ item.LibraryName }}</td><td>{{ item.SeriesName }}</td><td>{{ item.SeasonFormatted }}</td><td>{{ item.MissingEpisodes }}</td><td>{{ item.ActionResult }}</td><td><button class="eme-button secondary" :disabled="busy || !fillLoaded || fill.busy || missing.scanning || fillBlocked(item)" @click="fillCommand('start', { key: fillKey(item) })">{{ fillBlocked(item) ? '已有待核实任务' : 'TG 搜索补全' }}</button></td></tr></tbody></table></div><p v-else class="eme-hint">暂无缺失数据或尚未运行扫描。</p>
+          <div v-if="missing.results.length" class="eme-missing-results"><table><thead><tr><th>服务器</th><th>媒体库</th><th>剧集名称</th><th>缺失季度</th><th>缺失集号</th><th>处理结果</th><th>TG 补全</th></tr></thead><tbody><tr v-for="item in missingResultsPageItems" :key="fillKey(item).join(':')"><td>{{ item.ServerName }}</td><td>{{ item.LibraryName }}</td><td>{{ item.SeriesName }}</td><td>{{ item.SeasonFormatted }}</td><td>{{ item.MissingEpisodes }}</td><td>{{ item.ActionResult }}</td><td><button class="eme-button secondary" :disabled="busy || !fillLoaded || fill.busy || missing.scanning || fillBlocked(item)" @click="fillCommand('start', { key: fillKey(item) })">{{ fillBlocked(item) ? '已有待核实任务' : 'TG 搜索补全' }}</button></td></tr></tbody></table>
+            <nav v-if="missingResultsPageCount > 1" class="eme-pagination" aria-label="检测结果分页"><button class="eme-button secondary" :disabled="missingResultsPage <= 1" @click="changeMissingResultsPage(-1)"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ missingResultsPage }} / {{ missingResultsPageCount }} 页 · 共 {{ missing.results.length }} 条</span><button class="eme-button secondary" :disabled="missingResultsPage >= missingResultsPageCount" @click="changeMissingResultsPage(1)">下一页<i class="mdi mdi-chevron-right" /></button></nav>
+          </div><p v-else class="eme-hint">暂无缺失数据或尚未运行扫描。</p>
         </section>
         <section class="eme-card">
           <div class="eme-card-heading"><div><h3>缺集补全</h3><p>复用通用设置中的用户登录与转发 Bot，自动搜索、选剧、选择 115；点击资源前必须确认。</p></div><button class="eme-button secondary" :disabled="busy" @click="loadFill">刷新任务</button></div>
@@ -827,7 +856,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div class="eme-inline eme-fill-limit-row"><input id="eme-fill-max-points" v-model.number="fillMaxPoints" type="number" min="0" max="100" aria-label="TG 补全单次积分上限" /><button class="eme-button primary" :disabled="busy || !fillLoaded" @click="fillCommand('save', { max_points: fillMaxPoints })">保存上限</button><span class="eme-hint">已保存：{{ fill.max_points }} 积分 · 未知积分禁止点击</span></div>
           <p class="eme-hint eme-fill-limit-hint">Bot 交互串行执行，期间频道转发暂缓；请勿同时手动操作此 Bot。转存依赖现有 Bot 与 MP 整理配置，不保证仅转存缺失集。</p>
           <p v-if="!fill.tasks.length" class="eme-hint">从缺集记录点击「TG 搜索补全」开始。</p>
-          <article v-for="task in fill.tasks" :key="task.id" class="eme-fill-task">
+          <article v-for="task in fillTasksPageItems" :key="task.id" class="eme-fill-task">
             <div class="eme-card-heading"><div><strong>{{ task.record.SeriesName }} ({{ task.record.Year }}) · {{ task.record.SeasonFormatted }} · {{ fillStateLabels[task.state] || task.state }}</strong><p>{{ task.record.ServerName }} / {{ task.record.LibraryName }} · 目标缺集 {{ task.record.MissingEpisodes }} · {{ new Date(task.created_at * 1000).toLocaleString() }}</p></div><div class="eme-inline"><button v-if="['searching', 'choose_series', 'resources'].includes(task.state)" class="eme-button secondary" :disabled="busy" @click="fillCommand('cancel', { task_id: task.id })">取消</button><button v-if="['awaiting_verify', 'uncertain'].includes(task.state)" class="eme-button primary" :disabled="busy" @click="fillCommand('verify', { task_id: task.id })">复查入库</button><button v-if="['awaiting_verify', 'uncertain'].includes(task.state)" class="eme-button secondary" :disabled="busy" @click="closeFill(task)">人工核实关闭</button></div></div>
             <p class="eme-message" :class="{ 'eme-error': ['failed', 'uncertain'].includes(task.state) }">{{ task.message }}</p>
             <p v-if="task.selected" class="eme-hint">已选：{{ task.selected.label }} · {{ task.selected.points }} 积分{{ task.selected.size ? ` · ${task.selected.size}` : '' }} · {{ task.selected.coverage }}</p>
@@ -835,6 +864,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
             <div v-if="task.state === 'resources'" class="eme-fill-options"><div v-for="(option, index) in task.options" :key="option.id" class="eme-fill-resource"><div><strong>{{ index === 0 && option.eligible ? '优先候选 · ' : '' }}{{ option.label }}</strong><p class="eme-hint">{{ option.coverage }}{{ option.covered.length ? '：' + option.covered.join('、') : '' }} · {{ option.points === null ? '积分未知' : option.points + ' 积分' }}{{ option.size ? ' · ' + option.size : '' }}{{ option.previously_submitted ? ' · 已提交过，禁止重复点击' : '' }}</p></div><button class="eme-button primary" :disabled="busy || !option.eligible || option.points === null || option.points > fill.max_points || option.previously_submitted" @click="confirmFill(task, option)">确认转存</button></div></div>
             <details><summary>任务日志</summary><p v-for="(entry, index) in task.log" :key="index" class="eme-hint">{{ new Date(entry.time * 1000).toLocaleTimeString() }} · {{ entry.message }}</p></details>
           </article>
+          <nav v-if="fillTasksPageCount > 1" class="eme-pagination" aria-label="缺集补全任务分页"><button class="eme-button secondary" :disabled="fillTasksPage <= 1" @click="changeFillTasksPage(-1)"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ fillTasksPage }} / {{ fillTasksPageCount }} 页 · 共 {{ fill.tasks.length }} 个任务</span><button class="eme-button secondary" :disabled="fillTasksPage >= fillTasksPageCount" @click="changeFillTasksPage(1)">下一页<i class="mdi mdi-chevron-right" /></button></nav>
         </section>
       </template>
       <template v-if="active === 'media'">
@@ -1004,7 +1034,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-fill-limit-row .eme-button{height:40px;display:inline-flex;align-items:center;justify-content:center}
 .eme-fill-limit-row .eme-hint{margin:0;line-height:1.5}
 .eme-fill-limit-hint{margin-top:16px}
-.eme-shell{position:relative}
+.eme-pagination{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:16px}.eme-pagination>span{color:rgba(var(--v-theme-on-surface),.65);font-size:12px}.eme-pagination .eme-button{display:inline-flex;align-items:center;gap:4px}.eme-shell{position:relative}
 .eme-overlay{position:absolute;box-sizing:border-box;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;overflow:hidden}
 .eme-overlay{background:transparent;backdrop-filter:none}
 :global(.v-theme--dark .eme-overlay){background:transparent}
@@ -1057,7 +1087,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-move-arrow{font-size:18px}
 .eme-chips{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:12px 0}.eme-chip{padding:5px 8px;border-radius:9px;background:rgba(var(--v-theme-primary),.1);overflow-wrap:anywhere}.eme-chip button{border:0;background:transparent;color:#e45c5c;cursor:pointer;font-size:18px;margin-left:5px}
 .eme-chip{font-size:14px;line-height:1.5}
-.eme-missing-selects{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.eme-missing-selects>label:last-child{grid-column:1/-1}.eme-picker{position:relative;margin-top:7px}.eme-picker-trigger{box-sizing:border-box;width:100%;min-height:42px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;background:rgb(var(--v-theme-background));color:inherit;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;cursor:pointer;text-align:left}.eme-picker-trigger:hover,.eme-picker-trigger:focus-visible{border-color:rgb(var(--v-theme-primary));outline:none}.eme-picker-menu{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 5px);max-height:300px;overflow:auto;padding:8px;background:rgb(var(--v-theme-surface));border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px;box-shadow:0 12px 28px rgba(0,0,0,.3)}.eme-picker-search{width:100%!important;box-sizing:border-box;margin:0 0 7px!important}.eme-picker-option{width:100%;display:flex;align-items:flex-start;gap:8px;padding:8px;border:0;border-radius:7px;background:transparent;color:inherit;text-align:left;cursor:pointer;line-height:1.35}.eme-picker-option:hover,.eme-picker-option.selected{background:rgba(var(--v-theme-primary),.12);color:rgb(var(--v-theme-primary))}.eme-picker-option i{font-size:18px;flex:none}.eme-picker-empty{padding:10px;margin:0;color:rgba(var(--v-theme-on-surface),.6)}.eme-missing-results{overflow:auto;max-height:360px;margin-top:16px}.eme-missing-results table{border-collapse:collapse;width:100%;min-width:740px;text-align:left}.eme-missing-results th,.eme-missing-results td{padding:10px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));white-space:normal}.eme-missing-results th{font-weight:700;white-space:nowrap}
+.eme-missing-selects{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.eme-missing-selects>label:last-child{grid-column:1/-1}.eme-picker{position:relative;margin-top:7px}.eme-picker-trigger{box-sizing:border-box;width:100%;min-height:42px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;background:rgb(var(--v-theme-background));color:inherit;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;cursor:pointer;text-align:left}.eme-picker-trigger:hover,.eme-picker-trigger:focus-visible{border-color:rgb(var(--v-theme-primary));outline:none}.eme-picker-menu{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 5px);max-height:300px;overflow:auto;padding:8px;background:rgb(var(--v-theme-surface));border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px;box-shadow:0 12px 28px rgba(0,0,0,.3)}.eme-picker-search{width:100%!important;box-sizing:border-box;margin:0 0 7px!important}.eme-picker-option{width:100%;display:flex;align-items:flex-start;gap:8px;padding:8px;border:0;border-radius:7px;background:transparent;color:inherit;text-align:left;cursor:pointer;line-height:1.35}.eme-picker-option:hover,.eme-picker-option.selected{background:rgba(var(--v-theme-primary),.12);color:rgb(var(--v-theme-primary))}.eme-picker-option i{font-size:18px;flex:none}.eme-picker-empty{padding:10px;margin:0;color:rgba(var(--v-theme-on-surface),.6)}.eme-missing-results{overflow:visible;max-height:none;margin-top:16px}.eme-missing-results table{border-collapse:collapse;width:100%;min-width:740px;text-align:left}.eme-missing-results th,.eme-missing-results td{padding:10px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));white-space:normal}.eme-missing-results th{font-weight:700;white-space:nowrap}
 @media(max-width:760px){.eme-cleanup-grid{grid-template-columns:1fr}.eme-move-row{flex-wrap:wrap}.eme-move-row .eme-folder-choice{max-width:none;min-width:80px}}
 @media(max-width:760px){.eme-missing-selects{grid-template-columns:1fr}}
 .eme-media-library-field{max-width:460px;margin:16px 0 20px}.eme-media-library-field .eme-picker-menu{max-height:265px}
