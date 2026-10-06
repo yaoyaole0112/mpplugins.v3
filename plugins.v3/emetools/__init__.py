@@ -105,7 +105,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.44"
+    plugin_version = "2.9.45"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -700,6 +700,30 @@ class EmeTools(_PluginBase):
                 updated[key] = self._missing._parse_names(updated[key])
             if any(not name.isdecimal() for name in updated["skip_series_ids"]):
                 raise HTTPException(status_code=400, detail="跳过剧集的 TMDB ID 必须是数字")
+            overrides = updated.get("episode_overrides")
+            if not isinstance(overrides, list) or len(overrides) > 500:
+                raise HTTPException(status_code=400, detail="集数修正配置格式不正确")
+            normalized_overrides = []
+            seen_overrides = set()
+            for item in overrides:
+                if not isinstance(item, dict) or set(item) - {"tmdb_id", "season", "total_episodes"}:
+                    raise HTTPException(status_code=400, detail="集数修正配置格式不正确")
+                tmdb_id = str(item.get("tmdb_id") or "")
+                if not tmdb_id.isdecimal():
+                    raise HTTPException(status_code=400, detail="集数修正的 TMDB ID 必须是数字")
+                try:
+                    season = int(item.get("season"))
+                    total = int(item.get("total_episodes"))
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(status_code=400, detail="集数修正的季号和集数必须是整数") from exc
+                if not 0 <= season <= 99 or not 1 <= total <= 999:
+                    raise HTTPException(status_code=400, detail="集数修正的季号应为 0–99，正确集数应为 1–999")
+                key = (tmdb_id, season)
+                if key in seen_overrides:
+                    raise HTTPException(status_code=400, detail="同一剧集和季度不能重复设置集数修正")
+                seen_overrides.add(key)
+                normalized_overrides.append({"tmdb_id": tmdb_id, "season": season, "total_episodes": total})
+            updated["episode_overrides"] = normalized_overrides
             try:
                 CronTrigger.from_crontab(str(updated["cron"]))
             except ValueError as exc:

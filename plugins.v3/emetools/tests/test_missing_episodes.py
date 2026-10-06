@@ -207,6 +207,26 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
     def test_partial_tmdb_response_is_not_cancel_candidate(self):
         self.assertEqual(self.process(episode_count=3)[1], set())
 
+    def test_episode_override_limits_missing_and_subscription_total(self):
+        self.detector._episode_overrides = {("123", 1): {"tmdb_id": "123", "season": 1, "total_episodes": 1}}
+        missing, completed = self.process(local={1}, episode_count=2)
+        self.assertEqual(missing, [])
+        self.assertEqual(completed, {("123", 1, "完结剧")})
+
+    def test_invalid_episode_number_does_not_abort_scan(self):
+        self.detector._episode_overrides = {}
+        details = {"status": "Ended", "name": "异常剧", "seasons": [{"season_number": 1, "episode_count": 2}]}
+        season = {"episodes": [{"episode_number": "未知", "air_date": "2026-01-01"},
+                                {"episode_number": 1, "air_date": "2026-01-01"},
+                                {"episode_number": 2, "air_date": "2026-01-02"}]}
+        with patch.object(self.detector, "_request_json", side_effect=[details, season]):
+            missing, completed = self.detector._process_series(
+                {"Id": "series-1", "Name": "异常剧", "ProviderIds": {"Tmdb": "123"}},
+                {"series-1": {1: {1}}}, "key", "tmdb.example", "2026-10-01", "Q4", "电视剧",
+            )
+        self.assertEqual(missing[0]["MissingEpisodeNumbers"], [2])
+        self.assertEqual(completed, set())
+
     def test_disabled_or_unknown_status_does_not_cancel(self):
         for status in (None, "Canceled", "Returning Series"):
             self.assertEqual(self.process(status=status)[1], set())

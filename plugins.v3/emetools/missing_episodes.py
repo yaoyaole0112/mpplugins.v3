@@ -31,6 +31,7 @@ DEFAULT_MISSING = {
     "auto_cancel_enabled": False,
     "auto_cancel_mode": "ended_or_aired",
     "server_names": [], "library_names": [], "skip_series_ids": [],
+    "episode_overrides": [],
 }
 
 
@@ -82,6 +83,7 @@ class MissingEpisodeDetector:
         self._server_names = self._parse_names(config.get("server_names"))
         self._library_names = self._parse_names(config.get("library_names"))
         self._skip_series_ids = set(self._parse_names(config.get("skip_series_ids")))
+        self._episode_overrides = self._parse_episode_overrides(config.get("episode_overrides"))
 
     @staticmethod
     def _parse_names(value):
@@ -90,6 +92,28 @@ class MissingEpisodeDetector:
         else:
             values = str(value or "").replace("\n", ",").split(",")
         return list(dict.fromkeys(str(item).strip() for item in values if str(item).strip()))
+
+    @staticmethod
+    def _parse_episode_overrides(value):
+        result = {}
+        if not isinstance(value, list):
+            return result
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            tmdb_id = str(item.get("tmdb_id") or "").strip()
+            try:
+                season = int(item.get("season"))
+                total = int(item.get("total_episodes"))
+            except (TypeError, ValueError):
+                continue
+            if tmdb_id.isdecimal() and 0 <= season <= 99 and 1 <= total <= 999:
+                result[(tmdb_id, season)] = {"tmdb_id": tmdb_id, "season": season,
+                                             "total_episodes": total}
+        return result
+
+    def _episode_override(self, tmdb_id, season_number):
+        return getattr(self, "_episode_overrides", {}).get((str(tmdb_id), int(season_number)))
 
     def _load_saved_data(self):
         results = self.owner.get_data(self._DATA_KEY)
@@ -387,10 +411,23 @@ class MissingEpisodeDetector:
             if not season_details:
                 continue
 
+            override = self._episode_override(tmdb_id, season_number)
+            expected_total = override["total_episodes"] if override else int(season.get("episode_count") or 0)
+            episodes = []
+            for episode in season_details.get("episodes") or []:
+                if not isinstance(episode, dict):
+                    continue
+                try:
+                    episode_number = int(episode.get("episode_number") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if episode_number <= expected_total:
+                    episodes.append(episode)
+
             missing: Set[int] = set()
             expected: Set[int] = set()
             aired_total = 0
-            for episode in season_details.get("episodes") or []:
+            for episode in episodes:
                 episode_number = episode.get("episode_number")
                 air_date = episode.get("air_date")
                 try:
@@ -406,11 +443,11 @@ class MissingEpisodeDetector:
                     missing.add(episode_number)
             strict_completed = self._auto_cancel_completed and details.get("status") == "Ended"
             aired_reason = self._aired_season_reason(
-                details, season_number, season.get("episode_count"),
-                season_details.get("episodes") or [], today,
+                details, season_number, expected_total,
+                episodes, today,
             ) if self._auto_cancel_aired_season else "季度模式未开启"
             if ((strict_completed or (self._auto_cancel_aired_season and not aired_reason))
-                    and expected and len(expected) == season.get("episode_count")
+                    and expected and len(expected) == expected_total
                     and expected.issubset(local_episodes)):
                 completed.add((str(tmdb_id), season_number, series_title))
                 logger.info(
@@ -421,7 +458,7 @@ class MissingEpisodeDetector:
                 logger.debug(
                     f"【{self.plugin_name}】{series_title} S{season_number:02d} 保留订阅："
                     f"TMDB 状态 {details.get('status') or '未知'}，"
-                    f"季度集数 {season.get('episode_count')}，有效分集 {len(expected)}，"
+                    f"季度集数 {expected_total}，有效分集 {len(expected)}，"
                     f"本地缺少 {self._format_episode_ranges(expected - local_episodes) or '无'}，"
                     f"季度判定：{aired_reason or '已播出满 7 天'}"
                 )
@@ -439,7 +476,7 @@ class MissingEpisodeDetector:
                     "SeasonFormatted": "SP" if season_number == 0 else f"S{season_number}",
                     "MissingEpisodeNumbers": sorted(missing),
                     "MissingEpisodes": self._format_episode_ranges(missing),
-                    "TotalEpisodes": int(season.get("episode_count") or aired_total),
+                    "TotalEpisodes": expected_total or aired_total,
                     "ActionResult": "待处理",
                 }
             )

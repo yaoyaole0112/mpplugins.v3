@@ -6,7 +6,7 @@ import vm from 'node:vm'
 const source = readFileSync(new URL('../src/Workbench.vue', import.meta.url), 'utf8')
 const loading = source.slice(source.indexOf('async function loadMissing()'), source.indexOf('function scheduleMissingPoll()'))
 const command = source.slice(source.indexOf('async function missingCommand('), source.indexOf('function downloadMissingCsv()'))
-const config = () => ({ server_names: ['Q4'], library_names: ['国产剧'], skip_series_ids: [], auto_cancel_enabled: false, auto_cancel_mode: 'ended_or_aired' })
+const config = () => ({ server_names: ['Q4'], library_names: ['国产剧'], skip_series_ids: [], episode_overrides: [], auto_cancel_enabled: false, auto_cancel_mode: 'ended_or_aired' })
 
 test('template exposes one cancellation switch and a mode picker', () => {
   assert.equal((source.match(/v-model="missing.config.auto_cancel_enabled"/g) || []).length, 1)
@@ -15,13 +15,19 @@ test('template exposes one cancellation switch and a mode picker', () => {
   assert.ok(source.includes('aria-label="自动取消判定方式"'))
 })
 
+test('template exposes episode correction controls', () => {
+  assert.ok(source.includes('集数修正'))
+  assert.ok(source.includes('episode_overrides'))
+  assert.ok(source.includes('添加修正'))
+})
+
 function fixture() {
   const calls = []
   const saved = config()
   const context = vm.createContext({
     missing: { config: config() }, active: { value: 'subscription' },
     notice: { value: '' }, missingConfigInitialized: false, missingSavedConfig: '',
-    missingScanPendingId: 0, scheduleMissingPoll() {},
+    missingScanPendingId: 0, missingResultsPage: { value: 1 }, scheduleMissingPoll() {},
     get: async () => ({ config: structuredClone(saved), scanning: false, results: [] }),
     post: async (path, payload) => {
       calls.push(structuredClone(payload))

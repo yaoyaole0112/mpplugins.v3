@@ -64,10 +64,11 @@ const entry = reactive({ sub: { channels: '' }, kw: { channels: '', keywords: ''
 const telegram = reactive({ api_id: '', api_hash: '', forward_token: '', phone: '', code: '', password: '', password_required: false })
 const missing = reactive({ config: { enabled: false, cron: '35 3 * * *', only_existing_seasons: true,
   missing_action: '仅检查记录', ignore_season_zero: true, ignore_future: true, auto_cancel_enabled: false, auto_cancel_mode: 'ended_or_aired',
-  server_names: [], library_names: [], skip_series_ids: [] },
+  server_names: [], library_names: [], skip_series_ids: [], episode_overrides: [] },
   results: [], cancelled_subscriptions: [], last_scan_time: '从未扫描', scanning: false, legacy_enabled: false })
 const missingOptions = reactive({ servers: [], libraries: [], series: [] })
 const missingOptionsLoading = ref(false)
+const episodeOverrideDraft = reactive({ tmdb_id: '', season: 1, total_episodes: 1 })
 const missingResultsPage = ref(1)
 const missingResultsPageSize = 6
 const missingResultsPageCount = computed(() => Math.max(1, Math.ceil(missing.results.length / missingResultsPageSize)))
@@ -451,7 +452,8 @@ function applyMissingStatus(status, updateConfig = false) {
   const { config, ...state } = status
   Object.assign(missing, state)
   if (updateConfig) missing.config = { ...config, server_names: [...config.server_names],
-    library_names: [...config.library_names], skip_series_ids: [...config.skip_series_ids] }
+    library_names: [...config.library_names], skip_series_ids: [...config.skip_series_ids],
+    episode_overrides: (config.episode_overrides || []).map(item => ({ ...item })) }
   if (missingScanPendingId && (status.finished_scan_id || 0) >= missingScanPendingId) missingScanPendingId = 0
   missing.scanning = Boolean(status.scanning || missingScanPendingId)
   if (active.value === 'missing' && missing.scanning) scheduleMissingPoll()
@@ -503,6 +505,27 @@ function openMissingPicker(type) {
   missingActionPicker.value = false
   missingPicker.open = missingPicker.open === type ? '' : type
   missingPicker.query = ''
+}
+function episodeOverrideTitle(tmdbId) {
+  return missingOptions.series.find(item => item.value === tmdbId)?.title || `TMDB ${tmdbId}`
+}
+function addEpisodeOverride() {
+  const tmdbId = String(episodeOverrideDraft.tmdb_id || '').trim()
+  const season = Number(episodeOverrideDraft.season)
+  const totalEpisodes = Number(episodeOverrideDraft.total_episodes)
+  if (!tmdbId) { error.value = '请选择需要修正集数的剧集'; return }
+  if (!Number.isInteger(season) || season < 0 || season > 99) { error.value = '季号应为 0–99 的整数'; return }
+  if (!Number.isInteger(totalEpisodes) || totalEpisodes < 1 || totalEpisodes > 999) { error.value = '正确总集数应为 1–999 的整数'; return }
+  const overrides = missing.config.episode_overrides || (missing.config.episode_overrides = [])
+  const existing = overrides.find(item => item.tmdb_id === tmdbId && Number(item.season) === season)
+  if (existing) existing.total_episodes = totalEpisodes
+  else overrides.push({ tmdb_id: tmdbId, season, total_episodes: totalEpisodes })
+  episodeOverrideDraft.tmdb_id = ''
+  episodeOverrideDraft.season = 1
+  episodeOverrideDraft.total_episodes = 1
+}
+function removeEpisodeOverride(index) {
+  missing.config.episode_overrides.splice(index, 1)
 }
 function selectMissingAction(value) {
   missing.config.missing_action = value
@@ -844,6 +867,19 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
             <label>电视剧媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('libraries')"><span>{{ missingSelectedLabel('libraries') }}</span><i class="mdi" :class="missingPicker.open === 'libraries' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'libraries'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索媒体库" @click.stop /><button v-for="item in missingOptionItems('libraries')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.library_names.includes(item.value) }" @click="toggleMissingOption('libraries', item.value)"><i class="mdi" :class="missing.config.library_names.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('libraries').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
             <label>跳过检测剧集（按拼音排序，可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('series')"><span>{{ missingSelectedLabel('series') }}</span><i class="mdi" :class="missingPicker.open === 'series' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'series'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索剧集名称或 TMDB ID" @click.stop /><button v-for="item in missingOptionItems('series')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.skip_series_ids.includes(item.value) }" @click="toggleMissingOption('series', item.value)"><i class="mdi" :class="missing.config.skip_series_ids.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('series').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
           </div><p class="eme-hint">点击选择框即可展开，支持搜索和多选；切换工具页面保留当前选择。“立即检测”会先保存当前配置；定时检测使用已保存配置。自动取消仅在检测时处理所选媒体库内的剧集。</p>
+          <div class="eme-episode-overrides">
+            <div class="eme-card-heading"><div><h3>集数修正</h3><p>按剧集和季度设置实际正片总集数，修正网络数据或订阅中的错误集数。</p></div></div>
+            <div class="eme-episode-override-form">
+              <label>剧集<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('override-series')"><span>{{ episodeOverrideDraft.tmdb_id ? episodeOverrideTitle(episodeOverrideDraft.tmdb_id) : '请选择剧集' }}</span><i class="mdi" :class="missingPicker.open === 'override-series' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'override-series'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索剧集名称或 TMDB ID" @click.stop /><button v-for="item in missingOptionItems('series')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: episodeOverrideDraft.tmdb_id === item.value }" @click="episodeOverrideDraft.tmdb_id = item.value; missingPicker.open = ''"><i class="mdi" :class="episodeOverrideDraft.tmdb_id === item.value ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item.title }}</button><p v-if="!missingOptionItems('series').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
+              <label>季号<input v-model.number="episodeOverrideDraft.season" type="number" min="0" max="99" step="1" /></label>
+              <label>正确总集数<input v-model.number="episodeOverrideDraft.total_episodes" type="number" min="1" max="999" step="1" /></label>
+              <button type="button" class="eme-button secondary" @click="addEpisodeOverride">添加修正</button>
+            </div>
+            <div v-if="missing.config.episode_overrides.length" class="eme-episode-override-list">
+              <div v-for="(item, index) in missing.config.episode_overrides" :key="`${item.tmdb_id}-${item.season}`" class="eme-episode-override-row"><span>{{ episodeOverrideTitle(item.tmdb_id) }} · S{{ String(item.season).padStart(2, '0') }} · 正确 {{ item.total_episodes }} 集</span><button type="button" class="eme-remove" @click="removeEpisodeOverride(index)"><i class="mdi mdi-close" />删除</button></div>
+            </div>
+            <p class="eme-hint">例如《半熟恋人》第五季实际为 28 集，可设置为 S05、28；保存后重新检测生效，也会用于按季订阅的总集数。</p>
+          </div>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测结果</h3><p>{{ missing.scanning ? '后台扫描中' : `上次扫描：${missing.last_scan_time}` }} · {{ missing.results.length }} 条缺失季 · 自动取消 {{ missing.cancelled_subscriptions.length }} 个订阅</p></div><div class="eme-inline"><button class="eme-button danger" :disabled="busy || missing.scanning || !missing.results.length" @click="clearMissing">清理检查记录</button><button class="eme-button secondary" :disabled="busy" @click="loadMissing">刷新结果</button><button class="eme-button secondary" :disabled="busy" @click="downloadMissingCsv">导出 CSV</button></div></div>
           <div v-if="missing.results.length" class="eme-missing-results"><table><thead><tr><th>服务器</th><th>媒体库</th><th>剧集名称</th><th>缺失季度</th><th>缺失集号</th><th>处理结果</th><th>TG 补全</th></tr></thead><tbody><tr v-for="item in missingResultsPageItems" :key="fillKey(item).join(':')"><td>{{ item.ServerName }}</td><td>{{ item.LibraryName }}</td><td>{{ item.SeriesName }}</td><td>{{ item.SeasonFormatted }}</td><td>{{ item.MissingEpisodes }}</td><td>{{ item.ActionResult }}</td><td><button class="eme-button secondary" :disabled="busy || !fillLoaded || fill.busy || missing.scanning || fillBlocked(item)" @click="fillCommand('start', { key: fillKey(item) })">{{ fillBlocked(item) ? '已有待核实任务' : 'TG 搜索补全' }}</button></td></tr></tbody></table>
@@ -1088,6 +1124,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-chips{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:12px 0}.eme-chip{padding:5px 8px;border-radius:9px;background:rgba(var(--v-theme-primary),.1);overflow-wrap:anywhere}.eme-chip button{border:0;background:transparent;color:#e45c5c;cursor:pointer;font-size:18px;margin-left:5px}
 .eme-chip{font-size:14px;line-height:1.5}
 .eme-missing-selects{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.eme-missing-selects>label:last-child{grid-column:1/-1}.eme-picker{position:relative;margin-top:7px}.eme-picker-trigger{box-sizing:border-box;width:100%;min-height:42px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;background:rgb(var(--v-theme-background));color:inherit;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;cursor:pointer;text-align:left}.eme-picker-trigger:hover,.eme-picker-trigger:focus-visible{border-color:rgb(var(--v-theme-primary));outline:none}.eme-picker-menu{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 5px);max-height:300px;overflow:auto;padding:8px;background:rgb(var(--v-theme-surface));border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px;box-shadow:0 12px 28px rgba(0,0,0,.3)}.eme-picker-search{width:100%!important;box-sizing:border-box;margin:0 0 7px!important}.eme-picker-option{width:100%;display:flex;align-items:flex-start;gap:8px;padding:8px;border:0;border-radius:7px;background:transparent;color:inherit;text-align:left;cursor:pointer;line-height:1.35}.eme-picker-option:hover,.eme-picker-option.selected{background:rgba(var(--v-theme-primary),.12);color:rgb(var(--v-theme-primary))}.eme-picker-option i{font-size:18px;flex:none}.eme-picker-empty{padding:10px;margin:0;color:rgba(var(--v-theme-on-surface),.6)}.eme-missing-results{overflow:visible;max-height:none;margin-top:16px}.eme-missing-results table{border-collapse:collapse;width:100%;min-width:740px;text-align:left}.eme-missing-results th,.eme-missing-results td{padding:10px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));white-space:normal}.eme-missing-results th{font-weight:700;white-space:nowrap}
+.eme-episode-overrides{margin-top:20px;padding-top:16px;border-top:1px solid rgba(var(--v-border-color),var(--v-border-opacity))}.eme-episode-overrides .eme-card-heading{margin-bottom:8px}.eme-episode-override-form{display:grid;grid-template-columns:minmax(220px,2fr) minmax(110px,.7fr) minmax(130px,.9fr) auto;align-items:end;gap:12px}.eme-episode-override-form label{display:block}.eme-episode-override-form input{box-sizing:border-box;width:100%;min-height:42px;margin-top:7px;padding:10px 12px;background:rgb(var(--v-theme-background));color:inherit;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px}.eme-episode-override-form>.eme-button{min-height:42px;white-space:nowrap}.eme-episode-override-list{display:flex;flex-direction:column;gap:7px;margin-top:12px}.eme-episode-override-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 11px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px}.eme-episode-override-row .eme-remove{display:inline-flex;align-items:center;gap:3px;padding:4px 6px;white-space:nowrap}
 @media(max-width:760px){.eme-cleanup-grid{grid-template-columns:1fr}.eme-move-row{flex-wrap:wrap}.eme-move-row .eme-folder-choice{max-width:none;min-width:80px}}
 @media(max-width:760px){.eme-missing-selects{grid-template-columns:1fr}}
 .eme-media-library-field{max-width:460px;margin:16px 0 20px}.eme-media-library-field .eme-picker-menu{max-height:265px}
@@ -1154,6 +1191,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-enrich-preview-heading>div:first-child{min-width:0;flex:1}
 .eme-enrich-preview-actions{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:nowrap;max-width:100%;overflow-x:auto}
 .eme-enrich-preview-actions .eme-button{flex:none}
+@media(max-width:760px){.eme-episode-override-form{grid-template-columns:1fr 1fr}.eme-episode-override-form>label:first-child{grid-column:1/-1}.eme-episode-override-form>.eme-button{grid-column:1/-1}.eme-episode-override-row{align-items:flex-start;flex-direction:column}}
 @media(max-width:960px){.eme-enrich-preview-heading{flex-wrap:wrap}.eme-enrich-preview-actions{width:100%}}
 @media(min-height:780px){.eme-enrich-settings-group{gap:6px;margin-top:10px;padding:10px 14px}.eme-enrich-settings-numbers{margin:11px 0 6px}}
 @media(max-width:540px){.eme-enrich-settings-numbers{grid-template-columns:1fr}}
