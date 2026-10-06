@@ -436,7 +436,22 @@ class DataEnrichment:
         if not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", str(item_id)):
             raise ValueError("Emby 条目 ID 无效")
         return await self._json(client, f"Users/{user}/Items/{item_id}",
-                                {"Fields": "MediaSources,MediaStreams,Path,Size,ProviderIds"})
+                                {"Fields": "MediaSources,MediaStreams,Path,Size,ProviderIds,Genres,Tags"})
+
+    @staticmethod
+    def _enrichment_title(item):
+        """Use the overall title for variety series stored with a season suffix."""
+        title = str(item.get("Name") or "").strip()
+        values = []
+        for field in ("Genres", "Tags"):
+            value = item.get(field) or []
+            values.extend([value] if isinstance(value, str) else value)
+        categories = " ".join(str(value) for value in values)
+        if not re.search(r"综艺|真人秀|脱口秀|variety|reality|talk\s*show", categories, re.I):
+            return title
+        normalized = re.sub(
+            r"\s*[-_：:·]?\s*(?:第\s*)?[零〇一二两三四五六七八九十百\d]+\s*季\s*$", "", title)
+        return normalized.strip() or title
 
     @staticmethod
     def _tmdb_client():
@@ -1068,6 +1083,11 @@ class DataEnrichment:
             item = await self._item(emby, user, identifier)
             if item.get("Type") != "Series":
                 raise ValueError("选中项目不是 Emby 剧集")
+            original_title = str(item.get("Name") or "").strip()
+            enrichment_title = self._enrichment_title(item)
+            if enrichment_title != item.get("Name"):
+                self.log(f"综艺按整体名称《{enrichment_title}》补全，不使用季标题")
+                item = {**item, "Name": enrichment_title}
             provider = item.get("ProviderIds") or {}
             tmdb_id = provider.get("Tmdb") or provider.get("TMDB")
             if not tmdb_id:
@@ -1093,9 +1113,10 @@ class DataEnrichment:
             if mode in ("all", "metadata", "credits"):
                 update = dict(item)
                 if mode != "credits":
-                    update["Name"] = await self._series_title(
+                    matched_title = await self._series_title(
                         tmdb, tmdb_id, api_key, item.get("Name"),
                         douban_detail.get("name"), detail.get("name"))
+                    update["Name"] = enrichment_title if enrichment_title != original_title else matched_title
                     if douban_detail.get("overview") or detail.get("overview"):
                         update["Overview"] = douban_detail.get("overview") or detail["overview"]
                     if detail.get("vote_average"): update["CommunityRating"] = detail["vote_average"]

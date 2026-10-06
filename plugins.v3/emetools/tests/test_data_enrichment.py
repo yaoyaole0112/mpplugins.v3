@@ -38,6 +38,19 @@ class EnrichmentTests(unittest.TestCase):
             self.assertTrue(DataEnrichment._is_chinese_title(value))
         self.assertEqual(DataEnrichment._select_chinese_title('오징어 게임', '鱿鱼游戏'), '鱿鱼游戏')
 
+    def test_variety_season_suffix_is_removed_but_other_titles_are_unchanged(self):
+        for title, expected in [('奔跑吧兄弟 第一季', '奔跑吧兄弟'),
+                                ('半熟恋人 第 1 季', '半熟恋人'),
+                                ('综艺节目 第二季', '综艺节目'),
+                                ('脱口秀 2024', '脱口秀 2024')]:
+            with self.subTest(title=title):
+                self.assertEqual(DataEnrichment._enrichment_title(
+                    {'Name': title, 'Genres': ['综艺']}), expected)
+        self.assertEqual(DataEnrichment._enrichment_title(
+            {'Name': '庆余年 第一季', 'Genres': ['剧情']}), '庆余年 第一季')
+        self.assertEqual(DataEnrichment._enrichment_title(
+            {'Name': '奔跑吧兄弟 第一季', 'Tags': ['Reality']}), '奔跑吧兄弟')
+
     def test_series_title_keeps_chinese_without_requesting_translations(self):
         with patch.object(self.enrichment, '_tmdb_json', new_callable=AsyncMock) as fetch:
             title = asyncio.run(self.enrichment._series_title(
@@ -369,6 +382,58 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(episode['People'], series['People'])
         self.assertEqual(episode['Name'], '第一集')
         self.assertEqual(episode['Overview'], '剧情简介')
+
+    def test_batch_enrichment_uses_overall_variety_title_and_actual_emby_season(self):
+        written = {}
+        search_queries = []
+        season_paths = []
+
+        def emby_handler(request):
+            if request.method == 'POST':
+                written[request.url.path] = json.loads(request.content)
+                return httpx.Response(204)
+            if request.url.path.endswith('/Items/variety1'):
+                return httpx.Response(200, json={'Id': 'variety1', 'Type': 'Series',
+                    'Name': '奔跑吧兄弟 第一季', 'Genres': ['综艺'], 'ProductionYear': 2014,
+                    'ProviderIds': {}})
+            if request.url.path.endswith('/Items'):
+                return httpx.Response(200, json={'Items': [{'Id': 'ep1', 'IndexNumber': 1,
+                    'ParentIndexNumber': 2}]})
+            if request.url.path.endswith('/Items/ep1'):
+                return httpx.Response(200, json={'Id': 'ep1', 'Name': '旧分集'})
+            return httpx.Response(404)
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/',
+                                 transport=httpx.MockTransport(emby_handler))
+
+        def tmdb_handler(request):
+            if request.url.path.endswith('/search/tv'):
+                search_queries.append(request.url.params['query'])
+                return httpx.Response(200, json={'results': [
+                    {'id': 222, 'name': '奔跑吧', 'first_air_date': '2014-01-01'}]})
+            if '/season/' in request.url.path:
+                season_paths.append(request.url.path)
+                return httpx.Response(200, json={'episodes': [
+                    {'episode_number': 1, 'name': '第二季第一集', 'overview': '本季内容'}]})
+            return httpx.Response(200, json={'name': '奔跑吧', 'overview': '综艺简介',
+                'genres': [{'name': '真人秀'}], 'aggregate_credits': {'cast': []},
+                'external_ids': {}})
+
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/',
+                                 transport=httpx.MockTransport(tmdb_handler))
+        with patch.object(self.enrichment, '_services', return_value={
+                 'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_douban_data', return_value={}), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', 'variety1', 'all', DEFAULT_ENRICH_CONFIG))
+
+        self.assertEqual(search_queries, ['奔跑吧兄弟'])
+        self.assertEqual(season_paths, ['/3/tv/222/season/2'])
+        self.assertEqual(written['/emby/Items/variety1']['Name'], '奔跑吧兄弟')
+        self.assertEqual(written['/emby/Items/ep1']['Name'], '第二季第一集')
+        self.assertEqual(written['/emby/Items/ep1']['Overview'], '本季内容')
 
     def test_douban_match_requires_unambiguous_title_season_and_year(self):
         candidate = {'id': '123', 'title': '庆余年 第二季', 'year': '2024'}
