@@ -227,6 +227,21 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
         self.assertEqual(missing[0]["MissingEpisodeNumbers"], [2])
         self.assertEqual(completed, set())
 
+    def test_auto_episode_correction_uses_douban_and_media_inventory_consensus(self):
+        self.detector._auto_episode_correction = True
+        self.detector._douban_episode_total = MagicMock(return_value=1)
+        missing, completed = self.process(local={1}, episode_count=2)
+        self.assertEqual(missing, [])
+        self.assertEqual(completed, {("123", 1, "完结剧")})
+        self.detector._douban_episode_total.assert_called_once()
+
+    def test_auto_episode_correction_keeps_tmdb_when_sources_disagree(self):
+        self.detector._auto_episode_correction = True
+        self.detector._douban_episode_total = MagicMock(return_value=3)
+        missing, completed = self.process(local={1}, episode_count=2)
+        self.assertEqual(missing[0]["MissingEpisodeNumbers"], [2])
+        self.assertEqual(completed, set())
+
     def test_disabled_or_unknown_status_does_not_cancel(self):
         for status in (None, "Canceled", "Returning Series"):
             self.assertEqual(self.process(status=status)[1], set())

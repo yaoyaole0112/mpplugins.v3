@@ -1,11 +1,13 @@
 """Independent Emby/TMDB missing-episode detector for ME tools."""
 
 import concurrent.futures
+import re
 import threading
 from collections import defaultdict
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import quote
 
 import pytz
 from pypinyin import lazy_pinyin
@@ -32,6 +34,7 @@ DEFAULT_MISSING = {
     "auto_cancel_mode": "ended_or_aired",
     "server_names": [], "library_names": [], "skip_series_ids": [],
     "episode_overrides": [],
+    "auto_episode_correction": False,
 }
 
 
@@ -84,6 +87,7 @@ class MissingEpisodeDetector:
         self._library_names = self._parse_names(config.get("library_names"))
         self._skip_series_ids = set(self._parse_names(config.get("skip_series_ids")))
         self._episode_overrides = self._parse_episode_overrides(config.get("episode_overrides"))
+        self._auto_episode_correction = bool(config.get("auto_episode_correction", False))
 
     @staticmethod
     def _parse_names(value):
@@ -114,6 +118,81 @@ class MissingEpisodeDetector:
 
     def _episode_override(self, tmdb_id, season_number):
         return getattr(self, "_episode_overrides", {}).get((str(tmdb_id), int(season_number)))
+
+    @staticmethod
+    def _douban_title_match(results, name, year, season_number):
+        def normalize(value):
+            value = re.sub(r"第\s*[一二三四五六七八九十百\d]+\s*季", "", str(value or ""))
+            return re.sub(r"[^\w\u3400-\u9fff]", "", value).casefold()
+
+        def season_of(value):
+            match = re.search(r"第\s*([一二三四五六七八九十\d]+)\s*季", str(value or ""))
+            if not match:
+                return 1
+            raw = match.group(1)
+            if raw.isdecimal():
+                return int(raw)
+            digits = {character: index + 1 for index, character in enumerate("一二三四五六七八九")}
+            if "十" in raw:
+                tens, ones = raw.split("十", 1)
+                return (digits.get(tens, 1) if tens else 1) * 10 + digits.get(ones, 0)
+            return digits.get(raw, 0)
+
+        title = normalize(name)
+        matches = [item for item in results if isinstance(item, dict)
+                   and item.get("id") and normalize(item.get("title")) == title
+                   and season_of(item.get("title")) == season_number
+                   and (not year or not item.get("year") or str(item["year"])[:4] == year)]
+        return matches[0] if len(matches) == 1 else None
+
+    def _douban_episode_total(self, series, season_number):
+        """读取豆瓣公开分集数量；无法可靠匹配时返回 None。"""
+        if season_number <= 0:
+            return None
+        provider_ids = series.get("ProviderIds") or {}
+        subject_id = str(provider_ids.get("Douban") or provider_ids.get("douban") or
+                         provider_ids.get("DOUBAN") or "")
+        name = str(series.get("Name") or "")
+        year = str(series.get("ProductionYear") or "")[:4]
+        try:
+            if not subject_id.isdecimal():
+                query = name if season_number == 1 else f"{name} 第{season_number}季"
+                payload = self._request_json(
+                    "https://movie.douban.com/j/subject_suggest?q=" +
+                    quote(query)
+                )
+                match = self._douban_title_match(payload if isinstance(payload, list) else [], name, year, season_number)
+                subject_id = str(match.get("id") or "") if match else ""
+            if not subject_id.isdecimal():
+                return None
+            payload = self._request_json(f"https://movie.douban.com/j/tv/series/{subject_id}")
+            episodes = payload.get("episodes") if isinstance(payload, dict) else None
+            numbers = {int(item.get("episode")) for item in episodes or []
+                       if isinstance(item, dict) and str(item.get("episode") or "").isdecimal()
+                       and int(item["episode"]) > 0}
+            return max(numbers) if numbers and numbers == set(range(1, max(numbers) + 1)) else None
+        except Exception as error:  # noqa: BLE001 - 豆瓣不可用时回退 TMDB
+            logger.debug(f"【{self.plugin_name}】豆瓣集数读取失败：{type(error).__name__}")
+            return None
+
+    def _auto_episode_total(self, series, season_number, tmdb_total, episodes, local_episodes):
+        if not getattr(self, "_auto_episode_correction", False):
+            return tmdb_total, "TMDB"
+        tmdb_numbers = {int(item.get("episode_number")) for item in episodes
+                        if isinstance(item, dict) and str(item.get("episode_number") or "").isdigit()
+                        and int(item["episode_number"]) > 0}
+        tmdb_actual = max(tmdb_numbers) if tmdb_numbers and tmdb_numbers == set(range(1, max(tmdb_numbers) + 1)) else None
+        douban_total = self._douban_episode_total(series, season_number)
+        local_numbers = {int(number) for number in local_episodes if isinstance(number, int) and number > 0}
+        local_actual = max(local_numbers) if local_numbers and local_numbers == set(range(1, max(local_numbers) + 1)) else None
+        if douban_total and tmdb_actual and douban_total == tmdb_actual:
+            return douban_total, "TMDB/豆瓣一致"
+        if douban_total and douban_total == tmdb_total:
+            return douban_total, "TMDB/豆瓣一致"
+        if douban_total and local_actual and douban_total == local_actual:
+            return douban_total, "豆瓣/媒体库一致"
+        logger.info(f"【{self.plugin_name}】{series.get('Name') or '未知剧集'} S{season_number:02d} 自动修正未形成一致来源，使用 TMDB 集数")
+        return tmdb_total, "TMDB（豆瓣、媒体库不一致或不可用）"
 
     def _load_saved_data(self):
         results = self.owner.get_data(self._DATA_KEY)
@@ -348,13 +427,13 @@ class MissingEpisodeDetector:
         return "、".join(ranges)
 
     @staticmethod
-    def _request_json(url: str) -> Optional[Dict[str, Any]]:
+    def _request_json(url: str) -> Any:
         """请求 JSON，失败时返回空值并记录调试日志。"""
         try:
             response = RequestUtils().get_res(url)
             if response and response.status_code == 200:
                 payload = response.json()
-                return payload if isinstance(payload, dict) else None
+                return payload if isinstance(payload, (dict, list)) else None
         except Exception as error:  # noqa: BLE001 - 外部服务错误不能中断整次扫描
             logger.debug(f"请求失败 {url.split('?')[0]}：{error}")
         return None
@@ -412,7 +491,7 @@ class MissingEpisodeDetector:
                 continue
 
             override = self._episode_override(tmdb_id, season_number)
-            expected_total = override["total_episodes"] if override else int(season.get("episode_count") or 0)
+            tmdb_total = int(season.get("episode_count") or 0)
             episodes = []
             for episode in season_details.get("episodes") or []:
                 if not isinstance(episode, dict):
@@ -421,8 +500,15 @@ class MissingEpisodeDetector:
                     episode_number = int(episode.get("episode_number") or 0)
                 except (TypeError, ValueError):
                     continue
-                if episode_number <= expected_total:
+                if episode_number <= tmdb_total:
                     episodes.append(episode)
+
+            expected_total, total_source = (
+                (override["total_episodes"], "手动修正") if override else
+                self._auto_episode_total(series, season_number, tmdb_total, episodes, local_episodes)
+            )
+            episodes = [episode for episode in episodes
+                        if int(episode.get("episode_number") or 0) <= expected_total]
 
             missing: Set[int] = set()
             expected: Set[int] = set()
@@ -477,6 +563,7 @@ class MissingEpisodeDetector:
                     "MissingEpisodeNumbers": sorted(missing),
                     "MissingEpisodes": self._format_episode_ranges(missing),
                     "TotalEpisodes": expected_total or aired_total,
+                    "TotalEpisodesSource": total_source,
                     "ActionResult": "待处理",
                 }
             )

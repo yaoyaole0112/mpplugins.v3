@@ -105,7 +105,7 @@ class EmeTools(_PluginBase):
     plugin_name = "增强工具"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.45"
+    plugin_version = "2.9.46"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -688,7 +688,7 @@ class EmeTools(_PluginBase):
             updated = {**self._missing_config, **changes}
             updated["enabled"] = bool(updated["enabled"])
             for key in ("only_existing_seasons", "ignore_season_zero", "ignore_future",
-                        "auto_cancel_enabled"):
+                        "auto_cancel_enabled", "auto_episode_correction"):
                 updated[key] = bool(updated[key])
             if not isinstance(updated["auto_cancel_mode"], str) or updated["auto_cancel_mode"] not in {"ended", "aired", "ended_or_aired"}:
                 raise HTTPException(status_code=400, detail="自动取消判定方式无效")
