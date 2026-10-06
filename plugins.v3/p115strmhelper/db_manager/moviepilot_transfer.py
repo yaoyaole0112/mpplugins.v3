@@ -1,3 +1,4 @@
+from inspect import signature
 from typing import List
 
 from app.db import DbOper
@@ -25,8 +26,20 @@ class TransferHBOper(DbOper):
         """
         words = jieba_cut(path, HMM=False)
         title = "%".join(words)
-        total = TransferHistory.count_by_title(self._db, title=title)
-        result = TransferHistory.list_by_title(
-            self._db, title=title, page=1, count=total
-        )
-        return result
+
+        def query(db):
+            count_kwargs = {"title": title}
+            list_kwargs = {"title": title, "page": 1}
+            if "wildcard" in signature(TransferHistory.count_by_title).parameters:
+                count_kwargs["wildcard"] = True
+            if "wildcard" in signature(TransferHistory.list_by_title).parameters:
+                list_kwargs["wildcard"] = True
+            total = TransferHistory.count_by_title(db, **count_kwargs)
+            if not total:
+                return []
+            return TransferHistory.list_by_title(db, count=total, **list_kwargs)
+
+        executor = getattr(self, "_execute_sync_query", None)
+        if callable(executor):
+            return executor(query)
+        return query(self._db)

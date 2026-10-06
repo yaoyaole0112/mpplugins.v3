@@ -1501,9 +1501,24 @@ class MonitorLife:
 
         # 检查文件是否还存在
         storagechain = StorageChain()
-        fileitem = storagechain.get_file_item(
-            storage=configer.storage_module, path=Path(file_path)
-        )
+        strict_query = getattr(storagechain, "get_file_item_strict", None)
+        if not callable(strict_query):
+            logger.warning(
+                "【监控生活事件】宿主不支持严格查询，无法确认网盘路径是否不存在，保留本地文件: %s",
+                file_path,
+            )
+            return
+        try:
+            fileitem = strict_query(
+                storage=configer.storage_module, path=Path(file_path)
+            )
+        except Exception as error:
+            logger.warning(
+                "【监控生活事件】网盘路径查询失败，保留本地文件及历史记录: %s - %s",
+                file_path,
+                error,
+            )
+            return
         if fileitem:
             logger.warn(
                 f"【监控生活事件】网盘 {file_path} 目录存在，跳过本地删除: {fileitem}"
