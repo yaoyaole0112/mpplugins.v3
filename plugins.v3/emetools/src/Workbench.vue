@@ -1080,12 +1080,12 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-dialog{box-sizing:border-box;flex:none;width:min(500px,100%);height:min(480px,calc(100% - 64px));max-height:calc(100% - 32px);min-height:0;overflow:hidden;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));box-shadow:0 20px 56px rgba(28,25,45,.3)}
 .eme-folder-list{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
 .eme-shell{height:min(840px,calc(100dvh - 88px));min-height:0;overflow:hidden}
-.eme-shell.eme-shell--app{height:calc(100dvh - 88px);min-height:0;width:100%;box-sizing:border-box;overscroll-behavior:contain}
-.eme-shell--app .eme-main{overflow-y:auto;scrollbar-gutter:stable;overscroll-behavior:contain}
-.eme-shell--app .eme-sidebar{overflow:hidden;padding-block:16px;gap:4px}
+.eme-shell.eme-shell--app{height:auto;min-height:calc(100dvh - 88px);width:100%;box-sizing:border-box;overflow:visible;overscroll-behavior:auto}
+.eme-shell--app .eme-main{overflow:visible;scrollbar-gutter:auto;overscroll-behavior:auto}
+.eme-shell--app .eme-sidebar{overflow:visible;padding-block:16px;gap:4px}
 .eme-shell--app .eme-sidebar .eme-nav{padding-block:10px}
 .eme-shell--app .eme-brand{padding-bottom:8px}
-:global(html:has(.eme-shell--app)),:global(body:has(.eme-shell--app)),:global(.v-main:has(.eme-shell--app)){overflow:hidden!important;overscroll-behavior:none}
+:global(html:has(.eme-shell--app)),:global(body:has(.eme-shell--app)),:global(.v-main:has(.eme-shell--app)){overflow:auto!important;overscroll-behavior:auto}
 .eme-card{padding-top:14px}
 .eme-sidebar,.eme-main{min-height:0}
 .eme-sidebar{overflow-y:auto}
@@ -1199,6 +1199,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-shell--app .eme-sidebar{width:260px;padding:0;overflow:visible;border-right:0}
 .eme-shell--app .eme-brand{padding:0 12px 16px;margin-bottom:0}
 .eme-shell--app .eme-main{padding:44px 0 20px}
+.eme-shell--app .eme-sidebar-card{overflow:visible}
 .eme-shell--dialog{box-sizing:border-box;gap:22px;padding:22px 28px 26px;min-height:0;width:100%;height:100%;overflow:hidden}
 .eme-shell--dialog .eme-sidebar{width:260px;padding:0;overflow:visible;border-right:0}
 .eme-shell--dialog .eme-brand{padding:0 12px 16px;margin-bottom:0}
