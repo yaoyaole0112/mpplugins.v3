@@ -227,7 +227,7 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
         self.assertEqual(missing[0]["MissingEpisodeNumbers"], [2])
         self.assertEqual(completed, set())
 
-    def test_auto_episode_correction_uses_douban_and_media_inventory_consensus(self):
+    def test_auto_episode_correction_uses_matching_douban_count(self):
         self.detector._auto_episode_correction = True
         self.detector._douban_episode_total = MagicMock(return_value=1)
         missing, completed = self.process(local={1}, episode_count=2)
@@ -235,12 +235,47 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
         self.assertEqual(completed, {("123", 1, "完结剧")})
         self.detector._douban_episode_total.assert_called_once()
 
+    def test_auto_episode_correction_trusts_reliably_matched_lower_douban_count(self):
+        self.detector._auto_episode_correction = True
+        self.detector._douban_episode_total = MagicMock(return_value=1)
+        missing, _ = self.process(local=set(), episode_count=2)
+        self.assertEqual(missing[0]["TotalEpisodes"], 1)
+        self.assertEqual(missing[0]["TotalEpisodesSource"], "豆瓣匹配（下修）")
+
     def test_auto_episode_correction_keeps_tmdb_when_sources_disagree(self):
         self.detector._auto_episode_correction = True
         self.detector._douban_episode_total = MagicMock(return_value=3)
         missing, completed = self.process(local={1}, episode_count=2)
         self.assertEqual(missing[0]["MissingEpisodeNumbers"], [2])
+        self.assertEqual(missing[0]["TotalEpisodes"], 2)
+        self.assertIn("未上修", missing[0]["TotalEpisodesSource"])
         self.assertEqual(completed, set())
+
+    def test_douban_episode_count_uses_season_specific_match_and_explicit_count(self):
+        detector = object.__new__(MissingEpisodeDetector)
+        detector._request_json = MagicMock(side_effect=[
+            [{"id": "5555", "title": "半熟恋人第五季", "year": "2025"}],
+            {"episodes_count_str": "28集"},
+        ])
+        count = detector._douban_episode_total(
+            {"Name": "半熟恋人", "ProductionYear": "2021",
+             "ProviderIds": {"Douban": "series-douban-id"}}, 5, "2025",
+        )
+        self.assertEqual(count, 28)
+        self.assertIn("q=%E5%8D%8A%E7%86%9F%E6%81%8B%E4%BA%BA%20%E7%AC%AC5%E5%AD%A3",
+                      detector._request_json.call_args_list[0].args[0])
+        self.assertIn("/5555", detector._request_json.call_args_list[1].args[0])
+
+    def test_auto_episode_correction_skips_animation_genre(self):
+        detector = object.__new__(MissingEpisodeDetector)
+        detector._auto_episode_correction = True
+        detector._douban_episode_total = MagicMock(return_value=12)
+        total, source = detector._auto_episode_total(
+            {"Name": "动画剧"}, 1, 10, details={"genres": [{"id": 16, "name": "Animation"}]}
+        )
+        self.assertEqual(total, 10)
+        self.assertIn("动画类型", source)
+        detector._douban_episode_total.assert_not_called()
 
     def test_disabled_or_unknown_status_does_not_cancel(self):
         for status in (None, "Canceled", "Returning Series"):

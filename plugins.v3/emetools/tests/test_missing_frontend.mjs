@@ -21,6 +21,7 @@ test('template exposes episode correction controls', () => {
   assert.ok(source.includes('添加修正'))
   assert.ok(source.includes('auto_episode_correction'))
   assert.ok(source.includes('自动修正集数'))
+  assert.ok(source.includes('总集数判定'))
 })
 
 function fixture() {
