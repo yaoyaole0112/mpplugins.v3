@@ -24,6 +24,13 @@ test('template exposes episode correction controls', () => {
   assert.ok(source.includes('总集数判定'))
 })
 
+test('AppPage modal expands and standalone columns keep a shared top offset', () => {
+  assert.ok(source.includes(':global(.v-overlay__content:has(.eme-shell--app))'))
+  assert.ok(source.includes('width:min(96vw,1900px)'))
+  assert.ok(source.includes('height:94dvh'))
+  assert.ok(source.includes('.eme-shell--app .eme-main{padding:44px 0 20px}'))
+})
+
 function fixture() {
   const calls = []
   const saved = config()
