@@ -24,21 +24,20 @@ test('template exposes episode correction controls', () => {
   assert.ok(source.includes('总集数判定'))
 })
 
-test('AppPage modal expands and standalone columns keep a shared top offset', () => {
-  assert.ok(source.includes(':global(.v-overlay__content:has(.eme-shell--app))'))
-  assert.ok(source.includes('width:94vw'))
-  assert.ok(source.includes('height:92dvh'))
-  assert.ok(source.includes('.eme-shell--app{box-sizing:border-box;gap:22px;padding:22px 28px 26px;min-height:0}'))
+test('AppPage stays full-page while dialog layout is isolated', () => {
+  assert.ok(source.includes('.eme-shell--app{box-sizing:border-box;gap:22px;padding:18px 22px 22px;min-height:0;width:100%;max-width:100%;overflow:hidden}'))
+  assert.ok(source.includes('.eme-shell--dialog{box-sizing:border-box;gap:22px;padding:22px 28px 26px;min-height:0;width:100%;height:100%;overflow:hidden}'))
   assert.ok(source.includes('.eme-shell--app .eme-main{padding:44px 0 20px}'))
 })
 
 test('AppPage adjusts the host dialog instead of relying only on scoped CSS', () => {
   const appPage = readFileSync(new URL('../src/AppPage.vue', import.meta.url), 'utf8')
-  assert.ok(appPage.includes('v-overlay__content'))
-  assert.ok(appPage.includes('[role="dialog"]'))
-  assert.ok(appPage.includes('isNarrowHost'))
-  assert.ok(appPage.includes("node.style.setProperty('width', '94vw'"))
-  assert.ok(appPage.includes('eme-app-page-host'))
+  const page = readFileSync(new URL('../src/Page.vue', import.meta.url), 'utf8')
+  assert.equal(appPage.includes('onMounted'), false)
+  assert.ok(page.includes('v-overlay__content'))
+  assert.ok(page.includes('[role="dialog"]'))
+  assert.ok(page.includes("node.style.setProperty('width', '94vw'"))
+  assert.ok(page.includes('dialog-page'))
 })
 
 function fixture() {
