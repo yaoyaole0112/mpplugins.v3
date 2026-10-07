@@ -26,9 +26,16 @@ test('template exposes episode correction controls', () => {
 
 test('AppPage modal expands and standalone columns keep a shared top offset', () => {
   assert.ok(source.includes(':global(.v-overlay__content:has(.eme-shell--app))'))
-  assert.ok(source.includes('width:min(96vw,1900px)'))
-  assert.ok(source.includes('height:94dvh'))
+  assert.ok(source.includes('width:92vw'))
+  assert.ok(source.includes('height:90dvh'))
   assert.ok(source.includes('.eme-shell--app .eme-main{padding:44px 0 20px}'))
+})
+
+test('AppPage adjusts the host dialog instead of relying only on scoped CSS', () => {
+  const appPage = readFileSync(new URL('../src/AppPage.vue', import.meta.url), 'utf8')
+  assert.ok(appPage.includes('v-overlay__content'))
+  assert.ok(appPage.includes("node.style.setProperty('width', '92vw'"))
+  assert.ok(appPage.includes('eme-app-page-host'))
 })
 
 function fixture() {
