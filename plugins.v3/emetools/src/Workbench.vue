@@ -1193,11 +1193,15 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-enrich-preview-heading>div:first-child{min-width:0;flex:1}
 .eme-enrich-preview-actions{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:nowrap;max-width:100%;overflow-x:auto}
 .eme-enrich-preview-actions .eme-button{flex:none}
+.eme-shell--app{box-sizing:border-box;gap:22px;padding:18px 22px 22px;min-height:0}
+.eme-shell--app .eme-sidebar{width:260px;padding:0;overflow:visible;border-right:0}
+.eme-shell--app .eme-brand{padding:0 12px 16px;margin-bottom:0}
+.eme-shell--app .eme-main{padding:62px 0 20px}
 @media(max-width:760px){.eme-episode-override-form{grid-template-columns:1fr 1fr}.eme-episode-override-form>label:first-child{grid-column:1/-1}.eme-episode-override-form>.eme-button{grid-column:1/-1}.eme-episode-override-row{align-items:flex-start;flex-direction:column}}
 @media(max-width:960px){.eme-enrich-preview-heading{flex-wrap:wrap}.eme-enrich-preview-actions{width:100%}}
 @media(min-height:780px){.eme-enrich-settings-group{gap:6px;margin-top:10px;padding:10px 14px}.eme-enrich-settings-numbers{margin:11px 0 6px}}
 @media(max-width:540px){.eme-enrich-settings-numbers{grid-template-columns:1fr}}
 @media(max-width:760px){.eme-media-version{align-items:flex-start;flex-direction:column;gap:4px}.eme-media-version small{max-width:100%;text-align:left}.eme-shell--app .eme-sidebar{overflow-x:auto}.eme-shell--app .eme-sidebar .eme-nav{padding-block:8px}}
 @media(max-height:690px) and (min-width:761px){.eme-shell--app .eme-sidebar{overflow-y:auto}}
-@media(max-width:760px){.eme-sidebar,.eme-shell--app .eme-sidebar{display:flex;flex-direction:column;width:100%;padding:16px 18px 0;overflow:visible;border:0}.eme-brand,.eme-shell--app .eme-brand{display:flex;margin-bottom:12px}.eme-sidebar-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));max-height:220px;padding:8px}.eme-sidebar-card .eme-nav{min-width:0}.eme-main{min-height:0;padding-top:18px}}
+@media(max-width:760px){.eme-sidebar,.eme-shell--app .eme-sidebar{display:flex;flex-direction:column;width:100%;padding:16px 18px 0;overflow:visible;border:0}.eme-brand,.eme-shell--app .eme-brand{display:flex;margin-bottom:12px}.eme-sidebar-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));max-height:220px;padding:8px}.eme-sidebar-card .eme-nav{min-width:0}.eme-main,.eme-shell--app .eme-main{min-height:0;padding-top:18px}.eme-shell--app{gap:0;padding:0}}
 </style>
