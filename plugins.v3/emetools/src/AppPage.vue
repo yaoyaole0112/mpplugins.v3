@@ -3,17 +3,20 @@ import { onMounted, ref } from 'vue'
 import Workbench from './Workbench.vue'
 defineProps({ api: { type: Object, default: () => ({}) }, pluginId: { type: String, default: 'EmeTools' } })
 const hostRoot = ref(null)
-onMounted(() => {
+const resizeHostDialog = () => {
   let node = hostRoot.value?.parentElement
-  for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
-    if (!node.classList?.contains('v-overlay__content') && !node.classList?.contains('v-dialog')) continue
-    node.style.setProperty('width', '92vw', 'important')
+  for (let depth = 0; node && depth < 12; depth += 1, node = node.parentElement) {
+    if (!node.matches?.('.v-overlay__content, .v-dialog, [role="dialog"]')) continue
+    node.style.setProperty('width', '94vw', 'important')
     node.style.setProperty('max-width', '1900px', 'important')
-    node.style.setProperty('height', '90dvh', 'important')
-    node.style.setProperty('max-height', '90dvh', 'important')
+    node.style.setProperty('height', '92dvh', 'important')
+    node.style.setProperty('max-height', '92dvh', 'important')
     node.style.setProperty('margin', '0', 'important')
-    break
   }
+}
+onMounted(() => {
+  resizeHostDialog()
+  requestAnimationFrame(resizeHostDialog)
 })
 </script>
 
