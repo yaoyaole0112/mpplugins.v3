@@ -12,9 +12,23 @@ onMounted(() => {
     node.style.setProperty('height', '92dvh', 'important')
     node.style.setProperty('max-height', '92dvh', 'important')
     node.style.setProperty('margin', '0 auto', 'important')
+    node.style.setProperty('background', 'rgb(var(--v-theme-background))', 'important')
+    node.style.setProperty('overflow', 'hidden', 'important')
     break
   }
 })
 </script>
 
 <template><div ref="pageRoot" class="eme-dialog-page-root"><Workbench :api="api" dialog-page /></div></template>
+
+<style>
+.eme-dialog-page-root {
+  box-sizing: border-box;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  overflow: hidden;
+  background: rgb(var(--v-theme-background));
+}
+</style>

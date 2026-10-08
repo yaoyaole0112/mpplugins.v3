@@ -1198,13 +1198,13 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-enrich-preview-heading>div:first-child{min-width:0;flex:1}
 .eme-enrich-preview-actions{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:nowrap;max-width:100%;overflow-x:auto}
 .eme-enrich-preview-actions .eme-button{flex:none}
-.eme-app-page-host,.eme-dialog-page-root{box-sizing:border-box;width:100%;height:100%;min-width:0;min-height:0}
+.eme-app-page-host,.eme-dialog-page-root{box-sizing:border-box;width:100%;height:100%;min-width:0;min-height:100%;background:rgb(var(--v-theme-background))}
 .eme-shell--app{box-sizing:border-box;gap:22px;padding:18px 22px 22px;min-height:0;width:100%;max-width:100%;overflow:hidden}
 .eme-shell--app .eme-sidebar{width:260px;padding:0;overflow:visible;border-right:0}
 .eme-shell--app .eme-brand{padding:0 12px 16px;margin-bottom:0}
 .eme-shell--app .eme-main{padding:44px 0 20px}
 .eme-shell--app .eme-sidebar-card{overflow:visible}
-.eme-shell--dialog{box-sizing:border-box;gap:22px;padding:22px 28px 26px;min-height:0;width:100%;height:100%;overflow:hidden}
+.eme-shell--dialog{box-sizing:border-box;gap:22px;padding:22px 28px 26px;min-height:100%;width:100%;height:100%;overflow:hidden;background:rgb(var(--v-theme-background))}
 .eme-shell--dialog .eme-sidebar{width:260px;padding:0;overflow:visible;border-right:0}
 .eme-shell--dialog .eme-brand{padding:0 12px 16px;margin-bottom:0}
 .eme-shell--dialog .eme-main{padding:44px 0 20px}
