@@ -58,7 +58,7 @@ const base = computed(() => `plugin/${props.pluginId}`)
 const current = computed(() => sections.find(section => section.key === active.value))
 const rules = computed(() => schedule.p115_move.rules || [])
 const cleanupDirs = ref([])
-const monitor = reactive({ configured: false, logged_in: false, dependency_ready: false, hits: [], last_error: '', last_event: '', listening_channels: {}, channel_titles: {}, subscription_count: 0,
+const monitor = reactive({ configured: false, logged_in: false, dependency_ready: false, hits: [], last_error: '', poll_warnings: {}, last_event: '', listening_channels: {}, channel_titles: {}, subscription_count: 0,
   sub: { enabled: false, channels: [], keywords: [], blacklist: [] }, kw: { enabled: false, channels: [], keywords: [], blacklist: [] } })
 const drafts = reactive({ sub: { channels: [], keywords: [], blacklist: [] }, kw: { channels: [], keywords: [], blacklist: [] } })
 const entry = reactive({ sub: { channels: '' }, kw: { channels: '', keywords: '', blacklist: '' } })
@@ -974,6 +974,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         <section v-for="scope in ['sub', 'kw']" :key="scope" class="eme-card"><div class="eme-card-heading"><div><h3>{{ scope === 'sub' ? '订阅监控' : '关键词监控' }}</h3><p>{{ scope === 'sub' ? '按订阅名称、TMDB ID、年份、类型和季号校验频道消息。' : '按自定义关键词及黑名单筛选频道消息。' }}命中后原样转发给设置中的 Bot。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || monitor[scope].enabled" @click="saveMonitor(scope)">保存</button><button class="eme-button primary" :disabled="busy || (!monitor.logged_in && !monitor[scope].enabled)" @click="toggleMonitor(scope)">{{ monitor[scope].enabled ? '停止监控' : '启动监控' }}</button></div></div>
           <p class="eme-hint">状态：{{ monitor[scope].enabled ? (monitor.logged_in && monitor.listening_channels?.[scope] ? '运行中' : '等待连接') : '已停止' }} · 已监听 {{ monitor.listening_channels?.[scope] || 0 }} / {{ drafts[scope].channels.length }} 个频道<span v-if="scope === 'sub'"> · 已读取 {{ monitor.subscription_count || 0 }} 条 MoviePilot 订阅</span><span v-if="monitor.last_poll"> · 最近检查频道 {{ monitor.last_poll }}</span><span v-if="monitor.last_event"> · 最近收到消息 {{ monitor.last_event }}</span></p>
           <p v-if="monitor.last_error" class="eme-message eme-error">{{ monitor.last_error }}</p>
+          <p v-if="monitor.poll_warnings?.[scope]" class="eme-message eme-warning">{{ monitor.poll_warnings[scope] }}</p>
           <label>监控频道（公开频道 @用户名或 t.me/链接）<div class="eme-inline"><input v-model.trim="entry[scope].channels" :disabled="monitor[scope].enabled" placeholder="@channelname" @keyup.enter="addEntry(scope, 'channels')" /><button class="eme-button secondary" :disabled="monitor[scope].enabled" @click="addEntry(scope, 'channels')">添加</button></div></label>
           <div class="eme-chips"><span v-for="(value, index) in drafts[scope].channels" :key="value" class="eme-chip">{{ monitor.channel_titles?.[scope]?.[value] || value }}<button :disabled="monitor[scope].enabled" @click="drafts[scope].channels.splice(index, 1)">×</button></span></div>
           <template v-if="scope === 'kw'"><div v-for="field in ['keywords', 'blacklist']" :key="field"><label>{{ field === 'keywords' ? '匹配关键词' : '排除关键词（黑名单）' }}（支持正则）<div class="eme-inline"><input v-model.trim="entry.kw[field]" :disabled="monitor.kw.enabled" :placeholder="field === 'keywords' ? '添加匹配关键词' : '添加排除关键词'" @keyup.enter="addEntry('kw', field)" /><button class="eme-button secondary" :disabled="monitor.kw.enabled" @click="addEntry('kw', field)">添加</button></div></label><div class="eme-chips"><span v-for="(value, index) in drafts.kw[field]" :key="value" class="eme-chip">{{ value }}<button :disabled="monitor.kw.enabled" @click="drafts.kw[field].splice(index, 1)">×</button></span></div></div></template>
@@ -1063,6 +1064,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 </template>
 
 <style scoped>
+.eme-warning{background:rgba(220,160,45,.14);color:#c89237}
 .eme-fill-task{margin-top:18px;padding-top:18px;border-top:1px solid rgba(var(--v-border-color),var(--v-border-opacity))}.eme-fill-options{display:grid;gap:10px;margin:12px 0}.eme-fill-resource{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px}.eme-fill-resource>div{min-width:0;overflow-wrap:anywhere}.eme-fill-resource>button{flex-shrink:0}.eme-fill-task details{margin-top:12px}.eme-fill-task summary{cursor:pointer}.eme-fill-task .eme-message{overflow-wrap:anywhere}
 @media(max-width:760px){.eme-fill-resource{align-items:flex-start;flex-direction:column}}
 .eme-shell{--eme-button-font-size:13px}

@@ -87,6 +87,7 @@ class SubscriptionMonitor:
         self.channel_ids = {"sub": set(), "kw": set()}
         self._channel_entities = {}
         self._poll_failures = {}
+        self._poll_errors = {}
         saved_titles = self.plugin.get_data("monitor_channel_titles") or {}
         self.channel_titles = {scope: dict(saved_titles.get(scope) or {}) for scope in ("sub", "kw")} if isinstance(saved_titles, dict) else {"sub": {}, "kw": {}}
         self.hits = deque(maxlen=40)
@@ -369,9 +370,16 @@ class SubscriptionMonitor:
                         logger.warning("ME工具 Telegram：读取频道名称失败，频道=%s，错误=%s", channel, type(exc).__name__)
             if changed:
                 self.plugin.save_data("monitor_channel_titles", self.channel_titles)
+        poll_warnings = {
+            scope: "；".join(self._poll_errors[peer_id] for peer_id in sorted(self.channel_ids[scope])
+                             if peer_id in self._poll_errors)
+            if self.plugin._monitor_config[scope]["enabled"] else ""
+            for scope in ("sub", "kw")
+        }
         return {"configured": bool(self.plugin._tg_api_id and self.plugin._tg_api_hash), "logged_in": logged,
                 "dependency_ready": TelegramClient is not None, "hits": list(self.hits),
                 "last_error": self.last_error, "last_event": self.last_event,
+                "poll_warnings": poll_warnings,
                 "last_poll": self.last_poll,
                 "listening_channels": {scope: len(self.channel_ids[scope]) for scope in ("sub", "kw")},
                 "channel_titles": {scope: dict(self.channel_titles[scope]) for scope in ("sub", "kw")},
@@ -416,11 +424,15 @@ class SubscriptionMonitor:
                         if peer_id in self._poll_failures:
                             logger.info("ME工具 Telegram：频道ID=%s 补漏恢复", peer_id)
                             del self._poll_failures[peer_id]
+                        self._poll_errors.pop(peer_id, None)
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
                         failures += 1
-                        self.last_error = f"频道 {peer_id} 补漏失败：{type(exc).__name__}（下轮重试）"
+                        self._poll_errors[peer_id] = (
+                            f"频道 {peer_id} 读取超时，Telegram 连接暂时不稳定；下轮自动补漏（游标保留）"
+                            if isinstance(exc, TimeoutError) else
+                            f"频道 {peer_id} 补漏失败：{type(exc).__name__}（下轮重试，游标保留）")
                         now = time.monotonic()
                         last_warning = self._poll_failures.get(peer_id, 0)
                         if not last_warning or now - last_warning >= 300:
@@ -428,8 +440,6 @@ class SubscriptionMonitor:
                                            peer_id, type(exc).__name__)
                             self._poll_failures[peer_id] = now
                 self.last_poll = datetime.now().strftime("%m-%d %H:%M:%S")
-                if not failures and self.last_error.startswith("频道 ") and "补漏失败" in self.last_error:
-                    self.last_error = ""
                 logger.info("ME工具 Telegram：频道补漏完成，成功频道=%d，失败频道=%d，新消息=%d，订阅=%d，累计命中=%d",
                             checked, failures, recent, len(self._subscriptions), len(self.hits))
             except asyncio.CancelledError:

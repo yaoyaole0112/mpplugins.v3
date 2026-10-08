@@ -38,7 +38,46 @@ class MatchingTests(unittest.TestCase):
         self.assertEqual(monitor._last_msg_ids["12345"], 10)
         self.assertEqual(monitor._last_msg_ids["67890"], 21)
         self.assertEqual(monitor._on_message.await_count, 1)
-        self.assertIn("频道 12345 补漏失败", monitor.last_error)
+        self.assertFalse(monitor.last_error)
+        self.assertIn("频道 12345 读取超时", monitor._poll_errors[12345])
+
+    def test_poll_warning_clears_after_recovery_and_is_scoped(self):
+        plugin = MagicMock()
+        plugin.get_data.return_value = None
+        plugin._monitor_config = {"sub": {"enabled": True, "channels": []},
+                                  "kw": {"enabled": True, "channels": []}}
+        monitor = SubscriptionMonitor(plugin)
+        monitor.channel_ids = {"sub": {12345}, "kw": {67890}}
+        monitor._last_refresh = float("inf")
+        monitor._last_msg_ids = {"12345": 10, "67890": 20}
+        monitor.client = MagicMock()
+        monitor.client.is_connected.return_value = True
+        client = MagicMock()
+        attempts = []
+
+        async def get_messages(entity, **kwargs):
+            attempts.append(entity)
+            if entity == 12345 and attempts.count(12345) == 1:
+                raise TimeoutError()
+            return []
+
+        client.get_messages = AsyncMock(side_effect=get_messages)
+        monitor._authorized = AsyncMock(return_value=client)
+        monitor._subscriptions = []
+
+        async def stop_after_recovery(_seconds):
+            if attempts.count(12345) == 2:
+                plugin._monitor_config["sub"]["enabled"] = False
+                plugin._monitor_config["kw"]["enabled"] = False
+            else:
+                warnings = (await monitor.status())["poll_warnings"]
+                self.assertIn("频道 12345 读取超时", warnings["sub"])
+                self.assertFalse(warnings["kw"])
+
+        with patch("emetools.subscription_monitor.asyncio.sleep", side_effect=stop_after_recovery):
+            asyncio.run(monitor._poll_channels())
+        self.assertFalse(monitor._poll_errors)
+        self.assertEqual(monitor._last_msg_ids, {"12345": 10, "67890": 20})
 
     def test_status_resolves_stopped_keyword_channel_title_and_caches_it(self):
         plugin = MagicMock()
