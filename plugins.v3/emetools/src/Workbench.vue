@@ -1082,12 +1082,14 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-dialog{box-sizing:border-box;flex:none;width:min(500px,100%);height:min(480px,calc(100% - 64px));max-height:calc(100% - 32px);min-height:0;overflow:hidden;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));box-shadow:0 20px 56px rgba(28,25,45,.3)}
 .eme-folder-list{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
 .eme-shell{height:min(840px,calc(100dvh - 88px));min-height:0;overflow:hidden}
-.eme-shell.eme-shell--app{height:auto;min-height:calc(100dvh - 88px);width:100%;box-sizing:border-box;overflow:visible;overscroll-behavior:auto}
-.eme-shell--app .eme-main{overflow:visible;scrollbar-gutter:auto;overscroll-behavior:auto}
+.eme-shell.eme-shell--app{height:calc(100dvh - 88px);min-height:0;width:100%;box-sizing:border-box;overflow:hidden;overscroll-behavior:none}
+.eme-shell--app .eme-main{min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:auto;overscroll-behavior:contain}
 .eme-shell--app .eme-sidebar{overflow:visible;padding-block:16px;gap:4px}
 .eme-shell--app .eme-sidebar .eme-nav{padding-block:10px}
 .eme-shell--app .eme-brand{padding-bottom:8px}
-:global(html:has(.eme-shell--app)),:global(body:has(.eme-shell--app)),:global(.v-main:has(.eme-shell--app)){overflow:auto!important;overscroll-behavior:auto}
+:global(html:has(.eme-shell--app)),:global(body:has(.eme-shell--app)),:global(.v-application:has(.eme-shell--app)),:global(.v-layout:has(.eme-shell--app)),:global(.v-main:has(.eme-shell--app)){overflow:hidden!important;overscroll-behavior:none}
+:global(.eme-app-document-lock){overflow:hidden!important;overscroll-behavior:none!important}
+:global(.eme-app-host-lock){overflow:hidden!important;overscroll-behavior:none!important;min-height:0!important}
 .eme-card{padding-top:14px}
 .eme-sidebar,.eme-main{min-height:0}
 .eme-sidebar{overflow-y:auto}
