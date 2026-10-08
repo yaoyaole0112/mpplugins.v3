@@ -23,7 +23,7 @@
     "name": "媒体增强",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.55",
+    "version": "2.9.56",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -31,6 +31,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.56": "修复数据补全 TMDB 地址重复拼接 /3 导致的 HTTP 404；区分 TMDB 数据不存在与连接配置错误，提示检查媒体 TMDB ID 或 API 地址。",
       "v2.9.55": "插件名称由增强工具更名为媒体增强，保留 EmeTools 技术标识与现有配置兼容。",
       "v2.9.54": "修复侧栏完整页面滚动条位于卡片内容区的问题：恢复页面外层滚动，避免插件内容区滚动条与卡片重叠。",
       "v2.9.53": "修复侧栏完整页面被弹窗布局裁切的问题：恢复 AppPage 独立页面布局，仅在 Page 弹窗入口应用尺寸与边距调整。",

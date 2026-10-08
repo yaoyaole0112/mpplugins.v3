@@ -457,11 +457,16 @@ class DataEnrichment:
     def _tmdb_client():
         # Use MoviePilot's configured mirror and proxy, not a hard-coded TMDB
         # hostname that may be unreachable from the MoviePilot container.
-        domain = str(getattr(settings, "TMDB_API_DOMAIN", "api.themoviedb.org")
-                     or "api.themoviedb.org").strip().removeprefix("https://").removeprefix("http://").strip("/")
+        configured = str(getattr(settings, "TMDB_API_DOMAIN", "api.themoviedb.org")
+                         or "api.themoviedb.org").strip()
+        parsed = urlsplit(configured if "://" in configured else f"https://{configured}")
+        domain = parsed.netloc or parsed.path.split("/", 1)[0]
+        base_path = parsed.path if parsed.netloc else ""
+        base_path = re.sub(r"/3/?$", "", base_path.rstrip("/"))
+        base_path = "/" + base_path.strip("/") if base_path.strip("/") else ""
         proxies = get_runtime_setting("PROXY", None)
         proxy = proxies.get("https") if isinstance(proxies, dict) else proxies
-        return httpx.AsyncClient(base_url=f"https://{domain}/3/", proxy=proxy,
+        return httpx.AsyncClient(base_url=f"https://{domain}{base_path}/3/", proxy=proxy,
                                  timeout=30, trust_env=False)
 
     async def _tmdb_json(self, client, path, params):
@@ -473,6 +478,8 @@ class DataEnrichment:
             raise ValueError("TMDB 请求超时：请检查 MoviePilot 的 TMDB 域名和代理设置") from None
         except httpx.HTTPStatusError as error:
             # Never include the request URL: the API key is in its query string.
+            if error.response.status_code == 404:
+                raise ValueError("TMDB 未找到对应数据（HTTP 404），请检查媒体的 TMDB ID 或 MoviePilot 的 TMDB API 地址") from None
             raise ValueError(f"TMDB 接口返回 HTTP {error.response.status_code}，请检查 MoviePilot 的 TMDB 配置") from None
 
     @staticmethod

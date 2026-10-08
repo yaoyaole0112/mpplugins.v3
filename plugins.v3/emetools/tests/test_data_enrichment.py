@@ -165,6 +165,26 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(client.call_args.kwargs['proxy'], 'http://proxy.example:1080')
         self.assertFalse(client.call_args.kwargs['trust_env'])
 
+    def test_tmdb_client_does_not_duplicate_api_path(self):
+        with patch('emetools.data_enrichment.settings.TMDB_API_DOMAIN',
+                   'https://mirror.example/tmdb/3/'), \
+             patch('emetools.data_enrichment.get_runtime_setting', return_value=None), \
+             patch('emetools.data_enrichment.httpx.AsyncClient') as client:
+            self.enrichment._tmdb_client()
+        self.assertEqual(client.call_args.kwargs['base_url'], 'https://mirror.example/tmdb/3/')
+
+    def test_tmdb_not_found_error_points_to_id_or_domain(self):
+        async def request():
+            async with httpx.AsyncClient(base_url='https://api.tmdb.org/3/',
+                                         transport=httpx.MockTransport(
+                                             lambda _request: httpx.Response(404))) as client:
+                with self.assertRaisesRegex(ValueError, 'TMDB 未找到对应数据') as error:
+                    await self.enrichment._tmdb_json(client, 'tv/12345', {'api_key': 'secret-key'})
+                self.assertIn('TMDB ID', str(error.exception))
+                self.assertNotIn('secret-key', str(error.exception))
+
+        asyncio.run(request())
+
     def test_metadata_source_validation_and_legacy_default(self):
         self.assertEqual(validate_enrich_config({})['metadata_source'], 'tmdb')
         self.assertTrue(validate_enrich_config({})['auto_on_import'])
