@@ -23,7 +23,7 @@
     "name": "媒体增强",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.57",
+    "version": "2.9.58",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -31,6 +31,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.58": "统一调整媒体增强各页面容器滚动策略：内容未超出窗口时不再显示侧栏或内容区滚动条；仅保留明确的长列表、日志和设置弹窗内部滚动。",
       "v2.9.57": "频道补漏遇到 Telegram 临时超时，保留游标下轮重试；按监控范围显示可恢复告警，成功读取后自动清除，不再作为全局故障在两张卡片重复显示。",
       "v2.9.56": "修复数据补全 TMDB 地址重复拼接 /3 导致的 HTTP 404；区分 TMDB 数据不存在与连接配置错误，提示检查媒体 TMDB ID 或 API 地址。",
       "v2.9.55": "插件名称由增强工具更名为媒体增强，保留 EmeTools 技术标识与现有配置兼容。",

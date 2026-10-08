@@ -1164,7 +1164,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg > *){display:none}
 :global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon::before){content:"";display:block;width:1em;height:1em;background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
 .eme-brand-copy{min-width:0}.eme-brand strong{font-size:1.35rem;line-height:1.3;font-weight:600;letter-spacing:0}
-.eme-sidebar-card{box-sizing:border-box;display:flex;flex-direction:column;gap:3px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:12px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:16px;background:rgb(var(--v-theme-surface));box-shadow:0 1px 2px rgba(32,35,42,.03)}
+.eme-sidebar-card{box-sizing:border-box;display:flex;flex-direction:column;gap:3px;min-height:0;overflow:visible;overscroll-behavior:contain;padding:12px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:16px;background:rgb(var(--v-theme-surface));box-shadow:0 1px 2px rgba(32,35,42,.03)}
 .eme-sidebar-card .eme-nav{flex:none;padding:11px 10px;border:1px solid transparent}
 .eme-sidebar-card .eme-nav.selected{border-color:rgba(var(--v-theme-primary),.22);background:rgba(var(--v-theme-primary),.09)}
 .eme-sidebar-card .eme-nav:focus-visible{outline:2px solid rgb(var(--v-theme-primary));outline-offset:-2px}
@@ -1206,12 +1206,12 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-shell--dialog .eme-sidebar{width:260px;padding:0;overflow:visible;border-right:0}
 .eme-shell--dialog .eme-brand{padding:0 12px 16px;margin-bottom:0}
 .eme-shell--dialog .eme-main{padding:44px 0 20px}
-.eme-shell--dialog .eme-main{overflow-y:auto;scrollbar-gutter:stable}
+.eme-shell--dialog .eme-main{overflow:visible;scrollbar-gutter:auto}
 @media(max-width:760px){.eme-episode-override-form{grid-template-columns:1fr 1fr}.eme-episode-override-form>label:first-child{grid-column:1/-1}.eme-episode-override-form>.eme-button{grid-column:1/-1}.eme-episode-override-row{align-items:flex-start;flex-direction:column}}
 @media(max-width:960px){.eme-enrich-preview-heading{flex-wrap:wrap}.eme-enrich-preview-actions{width:100%}}
 @media(min-height:780px){.eme-enrich-settings-group{gap:6px;margin-top:10px;padding:10px 14px}.eme-enrich-settings-numbers{margin:11px 0 6px}}
 @media(max-width:540px){.eme-enrich-settings-numbers{grid-template-columns:1fr}}
 @media(max-width:760px){.eme-media-version{align-items:flex-start;flex-direction:column;gap:4px}.eme-media-version small{max-width:100%;text-align:left}.eme-shell--app .eme-sidebar{overflow-x:auto}.eme-shell--app .eme-sidebar .eme-nav{padding-block:8px}}
-@media(max-height:690px) and (min-width:761px){.eme-shell--app .eme-sidebar{overflow-y:auto}}
+@media(max-height:690px) and (min-width:761px){.eme-shell--app .eme-sidebar{overflow:visible}}
 @media(max-width:760px){.eme-sidebar,.eme-shell--app .eme-sidebar,.eme-shell--dialog .eme-sidebar{display:flex;flex-direction:column;width:100%;padding:16px 18px 0;overflow:visible;border:0}.eme-brand,.eme-shell--app .eme-brand,.eme-shell--dialog .eme-brand{display:flex;margin-bottom:12px}.eme-sidebar-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));max-height:220px;padding:8px}.eme-sidebar-card .eme-nav{min-width:0}.eme-main,.eme-shell--app .eme-main,.eme-shell--dialog .eme-main{min-height:0;padding-top:18px}.eme-shell--app{gap:0;padding:12px}.eme-shell--dialog{gap:0;padding:12px}}
 </style>
