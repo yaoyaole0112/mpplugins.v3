@@ -20,10 +20,10 @@
     }
   },
   "EmeTools": {
-    "name": "增强工具",
+    "name": "媒体增强",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.54",
+    "version": "2.9.55",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -31,7 +31,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
-      "v2.9.54": "修复侧栏完整页面滚动条位于卡片内容区的问题：恢复页面外层滚动，避免插件内容区滚动条与卡片重叠。",
+      "v2.9.55": "插件名称由增强工具更名为媒体增强，保留 EmeTools 技术标识与现有配置兼容。",
       "v2.9.49": "扩大增强工具 AppPage 弹窗的最大宽高至视口 96%/94%；修复独立页面内容区多余顶部偏移，恢复左右栏卡片顶部对齐，并适配窄屏弹窗。",
       "v2.9.48": "优化增强工具 AppPage 弹窗布局：增加整体留白和侧栏与内容区间距，避免侧栏卡片贴住弹窗边缘；保留移动端自适应布局。",
       "v2.9.47": "参考 ETK 的豆瓣集数辅助与锁定思路优化自动修正：非首季按季检索豆瓣，优先读取明确总集数，可靠匹配后仅自动下修 TMDB 偏大值；动画、来源不足和豆瓣集数偏高时安全回退，并在缺集结果显示集数判定来源。",

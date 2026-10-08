@@ -836,10 +836,10 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
       <div class="eme-brand">
         <span class="eme-brand-icon" aria-hidden="true" />
         <div class="eme-brand-copy">
-          <strong>增强工具</strong>
+          <strong>媒体增强</strong>
         </div>
       </div>
-      <nav class="eme-sidebar-card" aria-label="增强工具页面">
+      <nav class="eme-sidebar-card" aria-label="媒体增强页面">
         <button v-for="section in sections" :key="section.key" type="button" class="eme-nav" :class="{ selected: active === section.key }" :aria-current="active === section.key ? 'page' : undefined" @click="chooseSection(section.key)">
           <i :class="`mdi ${section.icon}`" /><span><strong>{{ section.title }}</strong><small>{{ section.detail }}</small></span><i class="mdi mdi-chevron-right eme-chevron" />
         </button>

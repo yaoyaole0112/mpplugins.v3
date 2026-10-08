@@ -102,7 +102,7 @@ class EnrichmentAction(BaseModel):
 
 
 class EmeTools(_PluginBase):
-    plugin_name = "增强工具"
+    plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
     plugin_version = "2.9.54"
@@ -226,7 +226,7 @@ class EmeTools(_PluginBase):
         has_series_id = bool(item.get("SeriesId") or item.get("SeriesIdStr") or
                             ((item.get("Series") or {}).get("Id")
                              if isinstance(item.get("Series"), dict) else ""))
-        logger.info("增强工具 数据补全：收到 Emby 入库事件 event=%s channel=%s type=%s series_id=%s",
+        logger.info("媒体增强 数据补全：收到 Emby 入库事件 event=%s channel=%s type=%s series_id=%s",
                     event_name[:32], channel[:32] or "未知", str(media_type)[:32], has_series_id)
         source = raw.get("Server") if isinstance(raw, dict) else None
         server = str(getattr(data, "server_name", "") or
@@ -241,12 +241,12 @@ class EmeTools(_PluginBase):
         identifier = str(item.get("SeriesId") or item.get("SeriesIdStr") or
                          ((item.get("Series") or {}).get("Id") if isinstance(item.get("Series"), dict) else "") or "")
         if not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", identifier) or not server:
-            logger.warning("增强工具 数据补全：Emby 入库事件缺少剧集 SeriesId 或媒体服务器，已跳过自动补全")
+            logger.warning("媒体增强 数据补全：Emby 入库事件缺少剧集 SeriesId 或媒体服务器，已跳过自动补全")
             return
         try:
             self._enrichment.queue_import(f"{server}::{identifier}")
         except (ValueError, OSError, RuntimeError) as exc:
-            logger.warning("增强工具 数据补全：忽略不完整的 Emby 入库事件：%s", type(exc).__name__)
+            logger.warning("媒体增强 数据补全：忽略不完整的 Emby 入库事件：%s", type(exc).__name__)
 
     @eventmanager.register(EventType.TransferComplete)
     def on_transfer_complete(self, event: Event):
@@ -263,7 +263,7 @@ class EmeTools(_PluginBase):
             meta = data.get("meta") or {}
             tmdb_id = meta.get("tmdb_id") if isinstance(meta, dict) else getattr(meta, "tmdb_id", None)
         if str(tmdb_id).isdigit():
-            logger.info("增强工具 数据补全：整理完成事件触发入库兜底（TMDB=%s）", str(tmdb_id)[:20])
+            logger.info("媒体增强 数据补全：整理完成事件触发入库兜底（TMDB=%s）", str(tmdb_id)[:20])
             self._enrichment.queue_import_by_tmdb(tmdb_id)
 
     def get_state(self) -> bool:
@@ -360,9 +360,9 @@ class EmeTools(_PluginBase):
             buttons = [[{"text": "✅ 确认清理", "callback_data": f"[PLUGIN]EmeTools|media:{token}:y"},
                         {"text": "取消", "callback_data": f"[PLUGIN]EmeTools|media:{token}:n"}]]
             self._media_bot_reply(source, user, title, text, buttons)
-            logger.info("增强工具 媒体清理命令：已向发起 Bot 的管理员提交 %d 个候选确认", len(versions))
+            logger.info("媒体增强 媒体清理命令：已向发起 Bot 的管理员提交 %d 个候选确认", len(versions))
         except Exception as error:
-            logger.warning("增强工具 媒体清理命令扫描失败：%s", type(error).__name__)
+            logger.warning("媒体增强 媒体清理命令扫描失败：%s", type(error).__name__)
             self._media_bot_reply(source, user, "ME工具", f"❌ 扫描或发送确认失败：{_log_label(error)}")
 
     def _handle_media_bot_confirmation(self, token: str, approve: bool, data: dict) -> None:
@@ -371,7 +371,7 @@ class EmeTools(_PluginBase):
                 or not source or not user or str(data.get("original_chat_id") or "") != user
                 or not matches_channel_admin(NotificationChannel.Telegram,
                                              self._telegram_command_sources().get(source), user)):
-            logger.warning("增强工具 媒体清理：Telegram 确认被拒绝（需要原 Bot 管理员私聊）")
+            logger.warning("媒体增强 媒体清理：Telegram 确认被拒绝（需要原 Bot 管理员私聊）")
             return
         try:
             # Validate ownership before consuming: another administrator must not
@@ -394,7 +394,7 @@ class EmeTools(_PluginBase):
                 text = f"{notice[0]}\n{notice[1]}" if notice else "✅ 未发现需删除的低质版本。"
             self._media_bot_reply(source, user, "ME工具", text)
         except Exception as error:
-            logger.warning("增强工具 媒体清理：Telegram 确认失败：%s", type(error).__name__)
+            logger.warning("媒体增强 媒体清理：Telegram 确认失败：%s", type(error).__name__)
             self._media_bot_reply(source, user, "ME工具", f"❌ 确认已过期、已处理或执行失败：{_log_label(error)}")
 
     def stop_service(self) -> None:
@@ -419,7 +419,7 @@ class EmeTools(_PluginBase):
     def get_sidebar_nav(self) -> List[dict]:
         if not self._enabled or not self._show_sidebar_nav:
             return []
-        return [{"nav_key": "main", "title": "增强工具", "icon": "mdi-shimmer",
+        return [{"nav_key": "main", "title": "媒体增强", "icon": "mdi-shimmer",
                  "section": "organize", "permission": "manage", "order": 46}]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -464,10 +464,10 @@ class EmeTools(_PluginBase):
         if self._media_config["enabled"]:
             try:
                 trigger = CronTrigger.from_crontab(self._media_config["cron"])
-                services.append({"id": "EmeTools_media_cleanup", "name": "增强工具 媒体清理",
+                services.append({"id": "EmeTools_media_cleanup", "name": "媒体增强 媒体清理",
                                  "trigger": trigger, "func": self._run_media_scheduled, "kwargs": {}})
             except ValueError as error:
-                logger.error("增强工具 媒体清理周期无效：%s", error)
+                logger.error("媒体增强 媒体清理周期无效：%s", error)
         return services
 
     def _run_media_scheduled(self) -> None:
@@ -477,7 +477,7 @@ class EmeTools(_PluginBase):
             result = self._media.scan(self._media_config["library_ids"])
             paths = [version["file_path"] for group in result["results"]
                      for version in group["versions"] if not version["is_best"]]
-            logger.info("增强工具 媒体清理定时扫描：重复组=%d，待清理=%d", result["duplicate_groups"], len(paths))
+            logger.info("媒体增强 媒体清理定时扫描：重复组=%d，待清理=%d", result["duplicate_groups"], len(paths))
             if paths:
                 outcome = {"deleted": [], "failures": []}
                 for start in range(0, len(paths), 1000):
@@ -489,10 +489,10 @@ class EmeTools(_PluginBase):
                 notice = notices.media_cleanup(outcome)
                 if notice:
                     self._send_tool_notice(*notice)
-                logger.info("增强工具 媒体清理定时任务：已清理=%d，失败=%d",
+                logger.info("媒体增强 媒体清理定时任务：已清理=%d，失败=%d",
                             len(outcome["deleted"]), len(outcome["failures"]))
         except Exception as error:
-            logger.warning("增强工具 媒体清理定时任务失败：%s：%s", type(error).__name__, _log_label(error))
+            logger.warning("媒体增强 媒体清理定时任务失败：%s：%s", type(error).__name__, _log_label(error))
             if "STRM 根目录不存在" not in str(error):
                 self._send_tool_notice("", f"⏰ 定时去重执行失败：{_log_label(error)}")
 
@@ -574,7 +574,7 @@ class EmeTools(_PluginBase):
                 try:
                     self._media.scan(selected)
                 except Exception as error:
-                    logger.warning("增强工具 媒体清理扫描失败：%s：%s",
+                    logger.warning("媒体增强 媒体清理扫描失败：%s：%s",
                                    type(error).__name__, _log_label(error))
                     self._media.last_error = str(error)[:160]
             self._media.running = True
@@ -594,10 +594,10 @@ class EmeTools(_PluginBase):
             try:
                 result = await asyncio.to_thread(self._media.delete, record["paths"])
             except ValueError as error:
-                logger.warning("增强工具 媒体清理删除校验失败：%s", _log_label(error))
+                logger.warning("媒体增强 媒体清理删除校验失败：%s", _log_label(error))
                 return {"ok": False, "deleted": [], "failures": [{"error": str(error)[:160]}]}
             except Exception as error:
-                logger.exception("增强工具 媒体清理删除失败")
+                logger.exception("媒体增强 媒体清理删除失败")
                 return {"ok": False, "deleted": [], "failures": [{"error": f"{type(error).__name__}：{str(error)[:120]}"}]}
             if result["deleted"]:
                 await asyncio.to_thread(self._media.refresh_emby)
@@ -1551,7 +1551,7 @@ class EmeTools(_PluginBase):
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         except Exception as error:
-            logger.error("增强工具 数据补全操作失败：%s：%s：%s",
+            logger.error("媒体增强 数据补全操作失败：%s：%s：%s",
                          action.operation, type(error).__name__, str(error)[:160])
             detail = str(error).strip()[:160]
             raise HTTPException(
