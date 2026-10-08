@@ -1208,7 +1208,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-shell--dialog .eme-sidebar{width:260px;padding:0;overflow:visible;border-right:0}
 .eme-shell--dialog .eme-brand{padding:0 12px 16px;margin-bottom:0}
 .eme-shell--dialog .eme-main{padding:44px 0 20px}
-.eme-shell--dialog .eme-main{overflow:visible;scrollbar-gutter:auto}
+.eme-shell--dialog .eme-main{flex:1 1 auto;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;overscroll-behavior:contain}
 @media(max-width:760px){.eme-episode-override-form{grid-template-columns:1fr 1fr}.eme-episode-override-form>label:first-child{grid-column:1/-1}.eme-episode-override-form>.eme-button{grid-column:1/-1}.eme-episode-override-row{align-items:flex-start;flex-direction:column}}
 @media(max-width:960px){.eme-enrich-preview-heading{flex-wrap:wrap}.eme-enrich-preview-actions{width:100%}}
 @media(min-height:780px){.eme-enrich-settings-group{gap:6px;margin-top:10px;padding:10px 14px}.eme-enrich-settings-numbers{margin:11px 0 6px}}

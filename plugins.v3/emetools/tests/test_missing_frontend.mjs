@@ -26,17 +26,17 @@ test('template exposes episode correction controls', () => {
 
 test('AppPage stays full-page while dialog layout is isolated', () => {
   assert.ok(source.includes('.eme-shell--app{box-sizing:border-box;gap:22px;padding:18px 22px 22px;min-height:0;width:100%;max-width:100%;overflow:hidden}'))
-  assert.ok(source.includes('.eme-shell--dialog{box-sizing:border-box;gap:22px;padding:22px 28px 26px;min-height:0;width:100%;height:100%;overflow:hidden}'))
+  assert.ok(source.includes('.eme-shell--dialog{box-sizing:border-box;gap:22px;padding:22px 28px 26px;min-height:100%;width:100%;height:100%;overflow:hidden;background:rgb(var(--v-theme-background))}'))
   assert.ok(source.includes('.eme-shell--app .eme-main{padding:44px 0 20px}'))
-  assert.ok(source.includes('.eme-shell.eme-shell--app{height:auto;min-height:calc(100dvh - 88px)'))
-  assert.ok(source.includes('.eme-shell--app .eme-main{overflow:visible'))
-  assert.ok(source.includes('html:has(.eme-shell--app)),:global(body:has(.eme-shell--app)),:global(.v-main:has(.eme-shell--app)){overflow:auto'))
+  assert.ok(source.includes('.eme-shell.eme-shell--app{height:calc(100dvh - 88px);min-height:0'))
+  assert.ok(source.includes('.eme-shell--app .eme-main{min-height:0;overflow-y:auto'))
+  assert.ok(source.includes('html:has(.eme-shell--app)),:global(body:has(.eme-shell--app)),:global(.v-application:has(.eme-shell--app)),:global(.v-layout:has(.eme-shell--app)),:global(.v-main:has(.eme-shell--app)){overflow:hidden'))
 })
 
 test('AppPage adjusts the host dialog instead of relying only on scoped CSS', () => {
   const appPage = readFileSync(new URL('../src/AppPage.vue', import.meta.url), 'utf8')
   const page = readFileSync(new URL('../src/Page.vue', import.meta.url), 'utf8')
-  assert.equal(appPage.includes('onMounted'), false)
+  assert.ok(appPage.includes('onMounted'))
   assert.ok(page.includes('v-overlay__content'))
   assert.ok(page.includes('[role="dialog"]'))
   assert.ok(page.includes("node.style.setProperty('width', '94vw'"))
