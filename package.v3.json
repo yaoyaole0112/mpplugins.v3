@@ -23,7 +23,7 @@
     "name": "媒体增强",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.67",
+    "version": "2.9.68",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -31,6 +31,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.68": "修复缺集结果在播状态全部显示未知：刷新结果时为旧扫描记录补齐待播、在播或完结。",
       "v2.9.67": "缺集补全识别 G/T 简写文件大小，目标缺集标红；检测结果去掉导出 CSV 并显示待播/在播/完结。可清除已结束的补全历史任务。",
       "v2.9.66": "缺集结果总集数只显示集数并居中对齐；补全入口改为搜索补全和已执行搜索。自动修正读取豆瓣条目摘要中的集数，避免页面已有集数时仍提示豆瓣无可靠数据。",
       "v2.9.65": "继续修复电影与剧集演职人员汉化：保留豆瓣中英文姓名映射以准确替换 TMDB 英文演员和导演，清理中文角色后的英文别名；修复电视猫搜索，并增加最近入库轮询兜底，Webhook 或整理事件漏发时仍会安排自动补全。",

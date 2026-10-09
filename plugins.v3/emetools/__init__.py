@@ -105,7 +105,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.67"
+    plugin_version = "2.9.68"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -657,7 +657,9 @@ class EmeTools(_PluginBase):
                 "last_run": dict(self._last_run)}
 
     async def missing_status(self) -> dict:
-        self._missing._load_saved_data() if not self._missing._is_scanning else None
+        if not self._missing._is_scanning:
+            self._missing._load_saved_data()
+            await asyncio.to_thread(self._missing.backfill_airing_status)
         return {"config": copy.deepcopy(self._missing_config),
                 "legacy_enabled": self._legacy_missing_active(),
                 "scanning": self._missing._is_scanning,

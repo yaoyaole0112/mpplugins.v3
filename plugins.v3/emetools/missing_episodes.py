@@ -331,6 +331,52 @@ class MissingEpisodeDetector:
             return status
         return self._douban_broadcast_status(series, season_number, season_year) or "未知"
 
+    def backfill_airing_status(self):
+        """旧扫描结果没有在播状态时，按已保存的 TMDB 季度补齐，避免页面全部显示未知。"""
+        if getattr(self, "_is_scanning", False):
+            return
+        pending = [item for item in self._results if isinstance(item, dict) and not item.get("AiringStatus")]
+        if not pending:
+            return
+        tmdb_key = str(getattr(settings, "TMDB_API_KEY", "") or "")
+        if not tmdb_key:
+            return
+        domain = str(getattr(settings, "TMDB_API_DOMAIN", "") or "api.themoviedb.org")
+        today = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d")
+        filled = 0
+        for item in pending:
+            status = self._saved_airing_status(item, tmdb_key, domain, today)
+            item["AiringStatus"] = status if status in {"待播", "在播", "完结"} else "未知"
+            if item["AiringStatus"] != "未知":
+                filled += 1
+        self.save_data(self._DATA_KEY, self._results)
+        logger.info(f"【{self.plugin_name}】已为 {filled}/{len(pending)} 条旧缺集记录补齐在播状态")
+
+    def _saved_airing_status(self, item, tmdb_key, domain, today):
+        tmdb_id = str(item.get("TmdbId") or "")
+        try:
+            season_number = int(item.get("SeasonNum"))
+            expected_total = int(item.get("TotalEpisodes") or 0)
+        except (TypeError, ValueError):
+            return None
+        if not tmdb_id.isdecimal() or season_number < 0:
+            return None
+        details = self._request_json(
+            f"https://{domain}/3/tv/{tmdb_id}?language=zh-CN&api_key={tmdb_key}"
+        ) or {}
+        season = self._request_json(
+            f"https://{domain}/3/tv/{tmdb_id}/season/{season_number}?language=zh-CN&api_key={tmdb_key}"
+        ) or {}
+        episodes = [episode for episode in season.get("episodes") or [] if isinstance(episode, dict)]
+        if expected_total:
+            episodes = [episode for episode in episodes
+                        if int(episode.get("episode_number") or 0) <= expected_total]
+        year = str((next((row.get("air_date") for row in details.get("seasons") or []
+                          if row.get("season_number") == season_number), "") or item.get("Year") or ""))[:4]
+        series = {"Name": item.get("SeriesName") or details.get("name") or "",
+                  "ProductionYear": item.get("Year") or year}
+        return self._season_airing_status(series, season_number, details, episodes, today, expected_total, year)
+
     def _auto_episode_total(self, series, season_number, tmdb_total, details=None, season_year=None):
         if not getattr(self, "_auto_episode_correction", False):
             return tmdb_total, "TMDB"

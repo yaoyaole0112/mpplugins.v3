@@ -340,7 +340,34 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
         self.assertEqual(status, "在播")
         self.assertIn("/tv/36868927", detector._request_json.call_args.args[0])
 
+    def test_backfill_airing_status_fills_old_results_once(self):
+        detector = object.__new__(MissingEpisodeDetector)
+        detector.plugin_name = "ME工具 缺集检测"
+        detector._is_scanning = False
+        detector._results = [{"SeriesName": "花儿与少年", "Year": "2014", "TmdbId": "121876",
+                              "SeasonNum": 8, "TotalEpisodes": 20}]
+        detector.save_data = MagicMock()
+        detector._request_json = MagicMock(side_effect=[
+            {"name": "花儿与少年", "status": "Returning Series",
+             "seasons": [{"season_number": 8, "air_date": "2026-08-01", "episode_count": 20}],
+             "next_episode_to_air": {"season_number": 8, "air_date": "2026-10-14"}},
+            {"episodes": [
+                {"episode_number": 1, "air_date": "2026-08-01"},
+                {"episode_number": 2, "air_date": "2026-10-14"},
+            ]},
+        ])
+        with patch("emetools.missing_episodes.settings") as plugin_settings:
+            plugin_settings.TMDB_API_KEY = "key"
+            plugin_settings.TMDB_API_DOMAIN = "api.themoviedb.org"
+            plugin_settings.TZ = "Asia/Shanghai"
+            detector.backfill_airing_status()
+            detector.backfill_airing_status()
+        self.assertEqual(detector._results[0]["AiringStatus"], "在播")
+        self.assertEqual(detector._request_json.call_count, 2)
+        detector.save_data.assert_called_once()
+
     def test_auto_episode_correction_skips_animation_genre(self):
+
 
         detector = object.__new__(MissingEpisodeDetector)
         detector._auto_episode_correction = True
