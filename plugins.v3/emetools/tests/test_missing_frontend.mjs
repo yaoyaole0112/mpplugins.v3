@@ -21,7 +21,11 @@ test('template exposes episode correction controls', () => {
   assert.ok(source.includes('添加修正'))
   assert.ok(source.includes('auto_episode_correction'))
   assert.ok(source.includes('自动修正集数'))
-  assert.ok(source.includes('总集数判定'))
+  assert.ok(source.includes('<th>总集数</th>'))
+  assert.equal(source.includes('总集数判定'), false)
+  assert.ok(source.includes('{{ item.TotalEpisodes }} 集'))
+  assert.equal(source.includes('TotalEpisodesSource'), false)
+  assert.ok(source.includes('text-align:center;vertical-align:middle'))
 })
 
 test('AppPage stays full-page while dialog layout is isolated', () => {

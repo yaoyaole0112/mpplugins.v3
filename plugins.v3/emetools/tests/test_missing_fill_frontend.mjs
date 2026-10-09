@@ -74,7 +74,11 @@ test('pending same-season tasks prevent duplicate start despite changed episodes
 test('template blocks unknown cost, excess cost, wrong coverage and repeated resources', () => {
   assert.ok(source.includes('option.points === null || option.points > fill.max_points || option.previously_submitted'))
   assert.ok(source.includes('!option.eligible'))
-  assert.ok(source.includes('TG 搜索补全'))
+  assert.ok(source.includes('搜索补全'))
+  assert.equal(source.includes('TG 搜索补全'), false)
+  assert.ok(source.includes('已执行搜索'))
+  assert.equal(source.includes('已有待核实任务'), false)
+  assert.ok(source.includes('<th>资源补全</th>'))
   assert.ok(source.includes('复查入库'))
   assert.ok(source.includes('clearTimeout(fillPollTimer)'))
 })

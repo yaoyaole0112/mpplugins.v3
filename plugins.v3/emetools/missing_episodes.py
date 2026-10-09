@@ -154,6 +154,53 @@ class MissingEpisodeDetector:
                 matches.append(item)
         return matches[0] if len(matches) == 1 else None
 
+
+    @staticmethod
+    def _explicit_episode_count(value):
+        match = re.fullmatch(r"\s*(\d{1,3})\s*(?:集)?\s*", str(value or ""))
+        if not match:
+            return None
+        count = int(match.group(1))
+        return count if 1 <= count <= 999 else None
+
+    def _douban_suggest_match(self, name, year, season_number):
+        queries = [name] if season_number == 1 else [f"{name} 第{season_number}季", f"{name}{season_number}"]
+        for query in queries:
+            payload = self._request_json("https://movie.douban.com/j/subject_suggest?q=" + quote(query))
+            match = self._douban_title_match(
+                payload if isinstance(payload, list) else [], name, year, season_number
+            )
+            if match:
+                return match
+        return None
+
+    def _douban_subject_episode_total(self, subject_id):
+        """读取豆瓣页面“集数”。摘要接口才包含该字段，条目 JSON 经常只有标题。"""
+        abstract = self._request_json(
+            f"https://movie.douban.com/j/subject_abstract?subject_id={subject_id}"
+        )
+        subject = abstract.get("subject") if isinstance(abstract, dict) else None
+        if isinstance(subject, dict):
+            count = self._explicit_episode_count(subject.get("episodes_count"))
+            is_movie = (subject.get("is_tv") is False
+                        and str(subject.get("subtype") or "").upper() == "MOVIE")
+            if count and not is_movie:
+                return count
+        subject = self._request_json(f"https://movie.douban.com/j/subject/{subject_id}")
+        if isinstance(subject, dict):
+            for field in ("episodes_count", "episodes_count_str", "episode_count", "total_episodes"):
+                count = self._explicit_episode_count(subject.get(field))
+                if count:
+                    return count
+        payload = self._request_json(f"https://movie.douban.com/j/tv/series/{subject_id}")
+        episodes = payload.get("episodes") if isinstance(payload, dict) else None
+        numbers = {int(item.get("episode")) for item in episodes or []
+                   if isinstance(item, dict) and str(item.get("episode") or "").isdecimal()
+                   and int(item["episode"]) > 0}
+        if numbers and numbers == set(range(1, max(numbers) + 1)):
+            return max(numbers)
+        return None
+
     def _douban_episode_total(self, series, season_number, season_year=None):
         """读取豆瓣公开分集数量；无法可靠匹配时返回 None。"""
         if season_number <= 0:
@@ -170,39 +217,21 @@ class MissingEpisodeDetector:
         ).strip()
         year = str(season_year or series.get("ProductionYear") or "")[:4]
         try:
-            if not subject_id.isdecimal():
-                queries = [base_name] if season_number == 1 else [
-                    f"{base_name} 第{season_number}季", f"{base_name}{season_number}"
-                ]
-                match = None
-                for query in queries:
-                    payload = self._request_json(
-                        "https://movie.douban.com/j/subject_suggest?q=" + quote(query)
-                    )
-                    match = self._douban_title_match(
-                        payload if isinstance(payload, list) else [], base_name, year, season_number
-                    )
-                    if match:
-                        break
-                subject_id = str(match.get("id") or "") if match else ""
-            if not subject_id.isdecimal():
+            checked = set()
+            if subject_id.isdecimal():
+                checked.add(subject_id)
+                total = self._douban_subject_episode_total(subject_id)
+                if total:
+                    return total
+            match = self._douban_suggest_match(base_name, year, season_number)
+            if not match:
                 return None
-            subject = self._request_json(f"https://movie.douban.com/j/subject/{subject_id}")
-            if isinstance(subject, dict):
-                for field in ("episodes_count", "episodes_count_str", "episode_count", "total_episodes"):
-                    value = subject.get(field)
-                    match = re.fullmatch(r"\s*(\d{1,3})\s*(?:集)?\s*", str(value or ""))
-                    if not match:
-                        continue
-                    count = int(match.group(1))
-                    if 1 <= count <= 999:
-                        return count
-            payload = self._request_json(f"https://movie.douban.com/j/tv/series/{subject_id}")
-            episodes = payload.get("episodes") if isinstance(payload, dict) else None
-            numbers = {int(item.get("episode")) for item in episodes or []
-                       if isinstance(item, dict) and str(item.get("episode") or "").isdecimal()
-                       and int(item["episode"]) > 0}
-            return max(numbers) if numbers and numbers == set(range(1, max(numbers) + 1)) else None
+            matched_id = str(match.get("id") or "")
+            if matched_id.isdecimal() and matched_id not in checked:
+                total = self._douban_subject_episode_total(matched_id)
+                if total:
+                    return total
+            return self._explicit_episode_count(match.get("episode"))
         except Exception as error:  # noqa: BLE001 - 豆瓣不可用时回退 TMDB
             logger.debug(f"【{self.plugin_name}】豆瓣集数读取失败：{type(error).__name__}")
             return None

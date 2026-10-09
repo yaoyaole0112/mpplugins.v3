@@ -255,6 +255,7 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
         detector = object.__new__(MissingEpisodeDetector)
         detector._request_json = MagicMock(side_effect=[
             [{"id": "5555", "title": "半熟恋人第五季", "year": "2025"}],
+            {"r": 0, "subject": {"is_tv": True}},
             {"episodes_count_str": "28集"},
         ])
         count = detector._douban_episode_total(
@@ -262,9 +263,54 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
              "ProviderIds": {"Douban": "series-douban-id"}}, 5, "2025",
         )
         self.assertEqual(count, 28)
-        self.assertIn("q=%E5%8D%8A%E7%86%9F%E6%81%8B%E4%BA%BA%20%E7%AC%AC5%E5%AD%A3",
-                      detector._request_json.call_args_list[0].args[0])
-        self.assertIn("/5555", detector._request_json.call_args_list[1].args[0])
+        calls = [call.args[0] for call in detector._request_json.call_args_list]
+        self.assertIn("q=%E5%8D%8A%E7%86%9F%E6%81%8B%E4%BA%BA%20%E7%AC%AC5%E5%AD%A3", calls[0])
+        self.assertIn("subject_abstract?subject_id=5555", calls[1])
+        self.assertIn("/j/subject/5555", calls[2])
+
+    def test_douban_episode_count_reads_page_total_from_subject_abstract(self):
+        detector = object.__new__(MissingEpisodeDetector)
+        detector._request_json = MagicMock(return_value={
+            "r": 0, "subject": {"episodes_count": "24", "is_tv": True, "subtype": "TV"},
+        })
+        count = detector._douban_episode_total(
+            {"Name": "喜剧之王", "ProductionYear": "2026", "ProviderIds": {"Douban": "36868927"}},
+            1, "2026",
+        )
+        self.assertEqual(count, 24)
+        self.assertEqual(detector._request_json.call_count, 1)
+        self.assertIn("subject_abstract?subject_id=36868927", detector._request_json.call_args.args[0])
+
+    def test_douban_episode_count_uses_suggest_when_detail_has_no_total(self):
+        detector = object.__new__(MissingEpisodeDetector)
+        detector._request_json = MagicMock(side_effect=[
+            {"r": 0, "subject": {"is_tv": False, "subtype": "MOVIE", "episodes_count": ""}},
+            {"sid": "1302425", "title": "喜剧之王"},
+            None,
+            [
+                {"id": "36868927", "title": "喜剧之王", "year": "2026", "type": "movie", "episode": "24"},
+                {"id": "1302425", "title": "喜剧之王", "year": "1999", "type": "movie", "episode": ""},
+            ],
+            {"r": 0, "subject": {"episodes_count": "24", "is_tv": True, "subtype": "TV"}},
+        ])
+        count = detector._douban_episode_total(
+            {"Name": "喜剧之王", "ProductionYear": "1999", "ProviderIds": {"Douban": "1302425"}},
+            1, "2026",
+        )
+        self.assertEqual(count, 24)
+
+    def test_douban_episode_count_ignores_unknown_suggest_episode(self):
+        detector = object.__new__(MissingEpisodeDetector)
+        detector._request_json = MagicMock(side_effect=[
+            [{"id": "38554758", "title": "密室大逃脱大神版 第八季", "year": "2026", "episode": "unknow"}],
+            {"r": 0, "subject": {"is_tv": True, "episodes_count": ""}},
+            {"title": "密室大逃脱大神版 第八季"},
+            None,
+        ])
+        count = detector._douban_episode_total(
+            {"Name": "密室大逃脱 大神版", "ProductionYear": "2026"}, 8, "2026",
+        )
+        self.assertIsNone(count)
 
     def test_auto_episode_correction_skips_animation_genre(self):
         detector = object.__new__(MissingEpisodeDetector)
