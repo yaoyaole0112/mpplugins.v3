@@ -76,7 +76,7 @@ test('template blocks unknown cost, excess cost, wrong coverage and repeated res
   assert.ok(source.includes('!option.eligible'))
   assert.ok(source.includes('搜索补全'))
   assert.equal(source.includes('TG 搜索补全'), false)
-  assert.ok(source.includes('已执行搜索'))
+  assert.ok(source.includes("fillBlocked(item) ? '已执行' : '搜索补全'"))
   assert.equal(source.includes('已有待核实任务'), false)
   assert.ok(source.includes('<th>资源补全</th>'))
   assert.ok(source.includes('清除历史任务'))
