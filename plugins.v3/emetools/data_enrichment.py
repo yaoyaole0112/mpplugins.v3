@@ -546,7 +546,12 @@ class DataEnrichment:
                 response.raise_for_status()
                 data = response.json()
                 casts = data.get("casts") or []
-                if not casts and include_cast:
+                cast_needs_mobile = include_cast and (
+                    not casts or any(
+                        not re.search(r"[\u3400-\u9fff]", str(actor.get("name") or "")) or
+                        re.search(r"[A-Za-z]", str(actor.get("role") or ""))
+                        for actor in casts if isinstance(actor, dict)))
+                if cast_needs_mobile:
                     # j/subject may omit cast; mobile celebrities includes names
                     # and photos, but its generic '演员' is not a character name.
                     try:
@@ -556,11 +561,13 @@ class DataEnrichment:
                             headers={"Referer": "https://m.douban.com/"})
                         mobile.raise_for_status()
                         celebrities = mobile.json().get("actors") or []
-                        casts = [{"name": actor.get("name"), "role": actor.get("character"),
-                                  "img": (actor.get("avatar") or {}).get("large") or
-                                         (actor.get("avatar") or {}).get("normal") or
-                                         (actor.get("avatar") or {}).get("small")}
-                                 for actor in celebrities if isinstance(actor, dict)]
+                        mobile_cast = [{"name": actor.get("name"), "role": actor.get("character"),
+                                        "img": (actor.get("avatar") or {}).get("large") or
+                                               (actor.get("avatar") or {}).get("normal") or
+                                               (actor.get("avatar") or {}).get("small")}
+                                       for actor in celebrities if isinstance(actor, dict)]
+                        if mobile_cast:
+                            casts = mobile_cast
                     except (httpx.HTTPError, ValueError, AttributeError, TypeError):
                         self.log("豆瓣移动端演职人员不可用，使用 TMDB 补全演员")
                 self.log(f"已匹配《{name}》· 豆瓣 {subject_id}（缺失字段回退 TMDB）")
@@ -1116,9 +1123,15 @@ class DataEnrichment:
                 douban_cast = (await self._douban_data(item, include_cast=True)).get("casts") or []
             if douban_cast:
                 cast = self._merge_cast(douban_cast, cast)
+            if self._needs_chinese_cast(cast, options["max_actors"]):
+                tvmao_cast = await self._tvmao_cast(item)
+                if tvmao_cast:
+                    cast, replaced, added = self._merge_tvmao_cast(cast, tvmao_cast)
+                    self.log(f"电影电视猫中文演职补缺：汉化姓名 {replaced} 人，新增 {added} 人")
             people = [{"Name": actor["name"], "Type": "Actor", "Role": actor.get("role") or ""}
                       for actor in cast if actor.get("name") and
-                      (not options["no_avatar"] or actor.get("profile_path"))][:options["max_actors"]]
+                      (not options["no_avatar"] or actor.get("profile_path") or
+                       re.search(r"[\u3400-\u9fff]", actor["name"]))][:options["max_actors"]]
             directors = [{"Name": crew["name"], "Type": "Director", "Role": "导演"}
                          for crew in credits.get("crew") or []
                          if crew.get("job") == "Director" and crew.get("name")]
@@ -1126,9 +1139,9 @@ class DataEnrichment:
             if people and options["ai_enabled"] and options["ai_credits"]:
                 values = {}
                 for index, person in enumerate(people):
-                    if self._needs_translation(person["Name"]):
+                    if re.search(r"[A-Za-z]", person["Name"]):
                         values[f"n{index}"] = person["Name"][:130]
-                    if self._needs_translation(person["Role"]):
+                    if re.search(r"[A-Za-z]", person["Role"]):
                         values[f"r{index}"] = person["Role"][:130]
                 for start in range(0, len(values), 25):
                     translated = await self._optional_ai_map(

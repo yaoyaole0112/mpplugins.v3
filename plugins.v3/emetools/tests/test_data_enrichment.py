@@ -78,6 +78,53 @@ class EnrichmentTests(unittest.TestCase):
             asyncio.run(self.enrichment._enrich('Q4', 'movie1', 'metadata', DEFAULT_ENRICH_CONFIG))
         self.assertEqual(saved[0]['Overview'], '已有中文简介')
 
+    def test_movie_uses_tvmao_cast_and_prefixes_actor_roles(self):
+        saved = []
+        def emby_handler(request):
+            if request.method == 'POST':
+                saved.append(json.loads(request.content))
+                return httpx.Response(204)
+            return httpx.Response(200, json={'Id': 'movie1', 'Type': 'Movie', 'Name': '蜘蛛侠：崭新之日',
+                'ProductionYear': 2026, 'ProviderIds': {'Tmdb': '12345'}})
+
+        emby = httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={'title': '蜘蛛侠：崭新之日', 'overview': '简介',
+                'credits': {'cast': [{'name': 'Tom Holland', 'character': 'Peter Parker / Spider-Man',
+                                      'profile_path': '/tom.jpg'}], 'crew': []}})))
+        with patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user'), \
+             patch.object(self.enrichment, '_douban_data', new_callable=AsyncMock,
+                          return_value={'casts': [{'name': '汤姆·赫兰德', 'role': '彼得·帕克／蜘蛛侠', 'img': ''}]}), \
+             patch.object(self.enrichment, '_tvmao_cast', new_callable=AsyncMock, return_value=[]), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', 'movie1', 'credits', DEFAULT_ENRICH_CONFIG))
+        self.assertEqual(saved[0]['People'][0]['Name'], '汤姆·赫兰德')
+        self.assertEqual(saved[0]['People'][0]['Role'], '饰 彼得·帕克／蜘蛛侠')
+
+    def test_douban_mobile_replaces_english_movie_cast(self):
+        paths = []
+
+        def handler(request):
+            paths.append(request.url.path)
+            if request.url.path.endswith('/j/subject/18'):
+                return httpx.Response(200, json={'title': '蜘蛛侠：崭新之日',
+                    'casts': [{'name': 'Tom Holland', 'role': 'Peter Parker', 'img': ''}]})
+            if request.url.path.endswith('/celebrities'):
+                return httpx.Response(200, json={'actors': [
+                    {'name': '汤姆·赫兰德', 'character': '彼得·帕克／蜘蛛侠', 'avatar': {}}]})
+            return httpx.Response(404)
+
+        real_client = httpx.AsyncClient
+        with patch('emetools.data_enrichment.httpx.AsyncClient',
+                   side_effect=lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs)):
+            result = asyncio.run(self.enrichment._douban_data(
+                {'Name': '蜘蛛侠：崭新之日', 'ProviderIds': {'Douban': '18'}}, include_cast=True))
+        self.assertEqual(result['casts'][0]['name'], '汤姆·赫兰德')
+        self.assertEqual(result['casts'][0]['role'], '彼得·帕克／蜘蛛侠')
+        self.assertEqual(paths, ['/j/subject/18', '/rexxar/api/v2/movie/18/celebrities'])
+
     def test_chinese_title_selection_rejects_foreign_scripts(self):
         for value in ('오징어 게임', '愛の不時着です', '中文한글', 'เด็กใหม่', 'Squid Game', ''):
             with self.subTest(title=value):
