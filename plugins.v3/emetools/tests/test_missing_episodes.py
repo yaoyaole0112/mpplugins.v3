@@ -23,7 +23,7 @@ class MissingFillInventoryTests(unittest.TestCase):
         self.detector._results = [copy.deepcopy(self.record)]
         self.detector.save_data = MagicMock()
         self.views = {"Items": [{"Id": "library", "Name": "剧集"}]}
-        self.series = {"Items": [{"Id": "series", "ProviderIds": {"Tmdb": "123"}}], "TotalRecordCount": 1}
+        self.series = {"Items": [{"Id": "series", "Name": "完结剧", "ProviderIds": {"Tmdb": "123"}}], "TotalRecordCount": 1}
         self.episodes = {"Items": [{"SeriesId": "series", "ParentIndexNumber": 5, "IndexNumber": 12, "IndexNumberEnd": 13}],
                          "TotalRecordCount": 1}
         self.detector._request_json = MagicMock(side_effect=[self.views, self.series, self.episodes])
@@ -46,6 +46,19 @@ class MissingFillInventoryTests(unittest.TestCase):
         self.assertEqual(self.detector.verify_inventory(self.record), [13])
         self.assertEqual(self.detector._results[0]["MissingEpisodeNumbers"], [13])
         self.assertEqual(self.detector._results[0]["MissingEpisodes"], "13")
+
+    def test_same_title_other_series_is_visible_in_emby_show_and_counts_for_verification(self):
+        self.episodes["Items"] = [
+            {"SeriesId": "other-series", "SeriesName": "完结剧", "ParentIndexNumber": 5,
+             "IndexNumber": 12, "ParentId": "other-season"},
+            {"SeriesId": "series", "SeriesName": "完结剧", "ParentIndexNumber": 5,
+             "IndexNumber": 13},
+        ]
+        self.episodes["TotalRecordCount"] = 2
+        self.assertEqual(self.detector.verify_inventory(self.record), [])
+        calls = [call.args[0] for call in self.detector._request_json.call_args_list]
+        self.assertTrue(any("/Shows/series/Episodes?" in url for url in calls))
+        self.assertFalse(any("SeriesId=series" in url for url in calls))
 
     def test_server_failure_absent_series_and_incomplete_payload_raise(self):
         for responses in [[None], [self.views, {"Items": [], "TotalRecordCount": 0}],
@@ -72,6 +85,10 @@ class MissingFillInventoryTests(unittest.TestCase):
         self.detector._request_json.side_effect = [self.views, self.series, self.episodes, later]
         self.assertEqual(self.detector.verify_inventory(self.record), [])
         self.assertIn("StartIndex=1", self.detector._request_json.call_args.args[0])
+
+    def test_ambiguous_other_series_name_is_not_counted(self):
+        self.episodes["Items"][0].update({"SeriesId": "other-series", "SeriesName": "另一部剧"})
+        self.assertEqual(self.detector.verify_inventory(self.record), [12, 13])
 
     def test_concurrent_detector_scan_refuses_verification(self):
         self.detector._scan_lock.acquire()
@@ -425,10 +442,10 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
     def test_library_scan_collects_completed_candidates(self):
         series_payload = {"Items": [
             {"Id": "series-1", "Name": "完结剧", "ProviderIds": {"Tmdb": "123"}},
-        ]}
+        ], "TotalRecordCount": 1}
         episode_payload = {"Items": [
             {"SeriesId": "series-1", "ParentIndexNumber": 1, "IndexNumber": 1},
-        ]}
+        ], "TotalRecordCount": 1}
         candidate = {("123", 1, "完结剧")}
         with patch.object(self.detector, "_request_json",
                           side_effect=[series_payload, episode_payload]), \
@@ -441,6 +458,34 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
             )
         self.assertEqual(results, [])
         self.assertEqual(completed, candidate)
+
+    def test_scan_reads_show_episodes_across_pages_and_merged_series(self):
+        series = {"Id": "series-1", "Name": "食神·百厨大战", "ProviderIds": {"Tmdb": "297509"}}
+        first_page = {"Items": [{"SeriesId": "series-1", "ParentIndexNumber": 2,
+                                  "IndexNumber": 1}], "TotalRecordCount": 3}
+        second_page = {"Items": [
+            {"SeriesId": "other-series", "SeriesName": "食神·百厨大战", "ParentIndexNumber": 2,
+             "IndexNumber": 3},
+            {"SeriesId": "other-series", "SeriesName": "食神·百厨大战", "ParentIndexNumber": 2,
+             "IndexNumber": 4},
+        ], "TotalRecordCount": 3}
+        detector = self.detector
+        detector._only_existing_seasons = True
+        detector._auto_cancel_completed = False
+        detector._request_json = MagicMock(side_effect=[
+            {"Items": [series], "TotalRecordCount": 1}, first_page, second_page,
+            {"name": "食神·百厨大战", "seasons": [{"season_number": 2, "episode_count": 4}]},
+            {"episodes": [{"episode_number": index, "air_date": "2026-01-01"}
+                          for index in range(1, 5)]},
+        ])
+        results, completed = detector._scan_library(
+            "http://emby", "key", "user", "Q4", {"Id": "library", "Name": "综艺"},
+            "tmdb-key", "tmdb.example", "2026-10-09",
+        )
+        self.assertEqual([row["MissingEpisodeNumbers"] for row in results], [[2]])
+        self.assertFalse(completed)
+        calls = [call.args[0] for call in detector._request_json.call_args_list]
+        self.assertTrue(any("/Shows/series-1/Episodes?" in url and "StartIndex=1" in url for url in calls))
 
 
 if __name__ == "__main__":

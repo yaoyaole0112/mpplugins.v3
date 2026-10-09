@@ -7,7 +7,7 @@ from collections import defaultdict
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import pytz
 from pypinyin import lazy_pinyin
@@ -806,6 +806,62 @@ class MissingEpisodeDetector:
             selected.append(library)
         return selected
 
+    def _emby_items(self, host, api_key, user_id, kind, parent_id="", series_id=""):
+        items = []
+        while True:
+            params = {"api_key": api_key, "StartIndex": len(items), "Limit": 200,
+                      "Fields": "ProviderIds" if kind == "Series" else "IndexNumberEnd,LocationType"}
+            if series_id:
+                params["UserId"] = user_id
+                path = f"Shows/{series_id}/Episodes"
+            else:
+                params.update({"ParentId": parent_id, "Recursive": "true", "IncludeItemTypes": kind})
+                path = f"Users/{user_id}/Items"
+            payload = self._request_json(f"{host}/emby/{path}?{urlencode(params)}")
+            if (not isinstance(payload, dict) or not isinstance(payload.get("Items"), list)
+                    or type(payload.get("TotalRecordCount")) is not int):
+                raise ValueError(f"Emby {kind} 分页查询失败或返回不完整")
+            page, total = payload["Items"], payload["TotalRecordCount"]
+            items.extend(page)
+            if len(items) >= total and (total > 0 or not page):
+                return items
+            if not page or len(items) > 100000:
+                raise ValueError(f"Emby {kind} 分页查询未完成")
+
+    @staticmethod
+    def _emby_episode_inventory(episodes, series):
+        inventory = defaultdict(set)
+        series_id = str(series.get("Id") or "")
+        series_name = str(series.get("Name") or "").strip()
+        for episode in episodes:
+            if episode.get("LocationType") == "Virtual":
+                continue
+            episode_series_id = str(episode.get("SeriesId") or "")
+            if (episode_series_id != series_id and
+                    (not episode_series_id or not series_name or
+                     str(episode.get("SeriesName") or "").strip() != series_name)):
+                continue
+            try:
+                season = int(episode.get("ParentIndexNumber"))
+                first = int(episode.get("IndexNumber"))
+                last = int(episode.get("IndexNumberEnd") or first)
+            except (TypeError, ValueError):
+                continue
+            if season >= 0 and 0 < first <= last <= 9999:
+                inventory[season].update(range(first, last + 1))
+        return inventory
+
+    def _scan_series(self, host, api_key, user_id, series, tmdb_key, tmdb_domain,
+                     today, server_name, library_name):
+        provider_ids = series.get("ProviderIds") or {}
+        tmdb_id = provider_ids.get("Tmdb") or provider_ids.get("tmdb") or provider_ids.get("TMDB")
+        if not series.get("Id") or not tmdb_id or str(tmdb_id) in self._skip_series_ids:
+            return [], set()
+        episodes = self._emby_items(host, api_key, user_id, "Episode", series_id=series["Id"])
+        inventory = {str(series["Id"]): self._emby_episode_inventory(episodes, series)}
+        return self._process_series(series, inventory, tmdb_key, tmdb_domain,
+                                    today, server_name, library_name)
+
     def _scan_library(
         self,
         host: str,
@@ -822,38 +878,18 @@ class MissingEpisodeDetector:
         library_name = str(library.get("Name") or library_id)
         if not library_id:
             return [], set()
-        common = f"ParentId={library_id}&Recursive=true&api_key={api_key}"
-        series_payload = self._request_json(
-            f"{host}/emby/Users/{user_id}/Items?{common}&IncludeItemTypes=Series&Fields=ProviderIds,ProductionYear"
-        )
-        episode_payload = self._request_json(
-            f"{host}/emby/Users/{user_id}/Items?{common}&IncludeItemTypes=Episode&Fields=IndexNumberEnd,LocationType"
-        )
-        series_items = series_payload.get("Items", []) if series_payload else []
-        episode_items = episode_payload.get("Items", []) if episode_payload else []
-
-        inventory: Dict[str, Dict[int, Set[int]]] = defaultdict(lambda: defaultdict(set))
-        for episode in episode_items:
-            if episode.get("LocationType") == "Virtual":
-                continue
-            try:
-                season_number = int(episode.get("ParentIndexNumber"))
-                first = int(episode.get("IndexNumber"))
-                last = int(episode.get("IndexNumberEnd") or first)
-            except (TypeError, ValueError):
-                continue
-            series_id = str(episode.get("SeriesId") or "")
-            if series_id:
-                inventory[series_id][season_number].update(range(first, last + 1))
+        series_items = self._emby_items(host, api_key, user_id, "Series", parent_id=library_id)
 
         results: List[Dict[str, Any]] = []
         completed: Set[Tuple[str, int, str]] = set()
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             futures = [
                 executor.submit(
-                    self._process_series,
+                    self._scan_series,
+                    host,
+                    api_key,
+                    user_id,
                     series,
-                    inventory,
                     tmdb_key,
                     tmdb_domain,
                     today,
@@ -904,7 +940,6 @@ class MissingEpisodeDetector:
 
     def verify_inventory(self, record: Dict[str, Any]) -> List[int]:
         """只读复查目标分集，失败必须报错；不新增或取消任何订阅。"""
-        from urllib.parse import urlencode
 
         if not self._scan_lock.acquire(blocking=False):
             raise ValueError("缺集检测正在扫描，请稍后复查")
@@ -929,43 +964,16 @@ class MissingEpisodeDetector:
             if len(libraries) != 1:
                 raise ValueError("无法唯一匹配原媒体库")
 
-            def read_items(kind, fields, series_id=""):
-                items = []
-                while True:
-                    query = {"api_key": api_key, "ParentId": libraries[0]["Id"], "Recursive": "true",
-                             "IncludeItemTypes": kind, "Fields": fields, "StartIndex": len(items), "Limit": 200}
-                    if series_id:
-                        query["SeriesId"] = series_id
-                    payload = self._request_json(f"{host}/emby/Users/{user_id}/Items?{urlencode(query)}")
-                    if not payload or not isinstance(payload.get("Items"), list) or type(payload.get("TotalRecordCount")) is not int:
-                        raise ValueError("Emby 分页查询失败或返回不完整，不能判定补全")
-                    page, total = payload["Items"], payload["TotalRecordCount"]
-                    items.extend(page)
-                    if len(items) >= total:
-                        return items
-                    if not page or len(items) > 100000:
-                        raise ValueError("Emby 分页查询未完成")
-
-            series = [item for item in read_items("Series", "ProviderIds")
+            series = [item for item in self._emby_items(host, api_key, user_id, "Series",
+                                                         parent_id=libraries[0]["Id"])
                       if str(next((value for key, value in (item.get("ProviderIds") or {}).items()
                                    if key.lower() == "tmdb"), "")) == str(record["TmdbId"])]
             if record.get("SeriesId"):
                 series = [item for item in series if item.get("Id") == record["SeriesId"]]
             if len(series) != 1:
                 raise ValueError("原剧集不存在或无法唯一匹配，不能判定补全")
-            present = set()
-            for episode in read_items("Episode", "IndexNumberEnd,LocationType", series[0]["Id"]):
-                if episode.get("LocationType") == "Virtual" or episode.get("SeriesId") != series[0]["Id"]:
-                    continue
-                try:
-                    if int(episode.get("ParentIndexNumber")) != int(record["SeasonNum"]):
-                        continue
-                    first = int(episode["IndexNumber"])
-                    last = int(episode.get("IndexNumberEnd") or first)
-                    if 0 < first <= last <= 9999:
-                        present.update(range(first, last + 1))
-                except (TypeError, ValueError, KeyError):
-                    continue
+            episodes = self._emby_items(host, api_key, user_id, "Episode", series_id=series[0]["Id"])
+            present = self._emby_episode_inventory(episodes, series[0]).get(int(record["SeasonNum"]), set())
             remaining = sorted(set(record["MissingEpisodeNumbers"]) - present)
             key_fields = ("ServerName", "LibraryName", "TmdbId", "SeasonNum")
             for item in list(self._results):
