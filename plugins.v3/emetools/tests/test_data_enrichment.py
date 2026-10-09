@@ -29,6 +29,55 @@ class EnrichmentTests(unittest.TestCase):
                                 save_data=lambda key, value: self.storage.__setitem__(key, value))
         self.enrichment = DataEnrichment(owner)
 
+    def test_movie_enrichment_writes_localized_overview_cast_and_director(self):
+        saved = []
+        def emby_handler(request):
+            if request.method == 'POST':
+                saved.append(json.loads(request.content))
+                return httpx.Response(204)
+            return httpx.Response(200, json={'Id': 'movie1', 'Type': 'Movie', 'Name': '旧电影名',
+                'ProductionYear': 2026, 'ProviderIds': {'Tmdb': '12345'},
+                'Overview': 'English description', 'LockedFields': ['Cast']})
+
+        def tmdb_handler(request):
+            self.assertIn('/movie/12345', request.url.path)
+            return httpx.Response(200, json={'title': '中文电影名', 'overview': '中文剧情介绍',
+                'credits': {'cast': [{'name': '演员甲', 'character': '主角', 'profile_path': '/a.jpg'}],
+                            'crew': [{'name': '导演乙', 'job': 'Director'}]}})
+
+        emby = httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(tmdb_handler))
+        with patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user'), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', 'movie1', 'all', DEFAULT_ENRICH_CONFIG))
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]['Name'], '中文电影名')
+        self.assertEqual(saved[0]['Overview'], '中文剧情介绍')
+        self.assertEqual([(person['Name'], person['Type']) for person in saved[0]['People']],
+                         [('导演乙', 'Director'), ('演员甲', 'Actor')])
+        self.assertNotIn('Cast', saved[0]['LockedFields'])
+
+    def test_movie_preserves_chinese_overview_when_tmdb_only_has_english(self):
+        saved = []
+        def emby_handler(request):
+            if request.method == 'POST':
+                saved.append(json.loads(request.content))
+                return httpx.Response(204)
+            return httpx.Response(200, json={'Id': 'movie1', 'Type': 'Movie', 'Name': '电影名',
+                'ProviderIds': {'Tmdb': '12345'}, 'Overview': '已有中文简介'})
+
+        emby = httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={'title': '电影名', 'overview': 'English only'})))
+        with patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user'), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', 'movie1', 'metadata', DEFAULT_ENRICH_CONFIG))
+        self.assertEqual(saved[0]['Overview'], '已有中文简介')
+
     def test_chinese_title_selection_rejects_foreign_scripts(self):
         for value in ('오징어 게임', '愛の不時着です', '中文한글', 'เด็กใหม่', 'Squid Game', ''):
             with self.subTest(title=value):
@@ -261,7 +310,7 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(result, {})
         self.assertIn('保留原始资料继续补全', self.enrichment.state['log'][-1])
 
-    def test_tv_libraries_only_exposes_series_libraries(self):
+    def test_tv_libraries_exposes_series_and_movie_libraries(self):
         instance = SimpleNamespace(get_librarys=lambda hidden=False: [
             SimpleNamespace(id='11', name='电视剧', type='电视剧'),
             SimpleNamespace(id='12', name='电影', type='电影')])
@@ -270,8 +319,10 @@ class EnrichmentTests(unittest.TestCase):
              patch('emetools.data_enrichment.MediaType') as media_type:
             helper.return_value.get_services.return_value = {'Q4': service}
             media_type.TV.value = '电视剧'
+            media_type.MOVIE.value = '电影'
             self.assertEqual(self.enrichment.tv_libraries(), [
-                {'id': 'Q4::11', 'name': '电视剧', 'server': 'Q4'}])
+                {'id': 'Q4::11', 'name': '电视剧', 'server': 'Q4', 'type': 'Series'},
+                {'id': 'Q4::12', 'name': '电影', 'server': 'Q4', 'type': 'Movie'}])
 
     def test_batch_library_pages_all_series_without_first_page_limit(self):
         class FakeClient:
@@ -292,6 +343,22 @@ class EnrichmentTests(unittest.TestCase):
                 {'id': 'Q4::11', 'server': 'Q4'}]))
         self.assertEqual(len(ids), 1201)
         self.assertEqual(ids[-1], 'Q4::1200')
+
+    def test_movie_library_queries_movie_items_only(self):
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): pass
+
+        async def items(client, path, params):
+            self.assertEqual(params['IncludeItemTypes'], 'Movie')
+            return {'Items': [{'Id': 'movie1'}], 'TotalRecordCount': 1}
+
+        with patch.object(self.enrichment, '_server', return_value=FakeClient()), \
+             patch.object(self.enrichment, '_user_id', new=AsyncMock(return_value='user')), \
+             patch.object(self.enrichment, '_json', side_effect=items):
+            identifiers = asyncio.run(self.enrichment._library_series(
+                [{'id': 'Q4::12', 'type': 'Movie'}]))
+        self.assertEqual(identifiers, ['Q4::movie1'])
 
     def test_library_series_collects_titles_for_preview_logs(self):
         class FakeClient:

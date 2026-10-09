@@ -120,7 +120,7 @@ const enrichSettings = reactive({ open: false, ai_available: false, ai_model: ''
 const enrichLibraryMatches = computed(() => enrich.libraries.filter(item =>
   `${item.name} ${item.server}`.toLowerCase().includes(enrich.libraryQuery.toLowerCase())))
 function enrichLibraryLabel() {
-  if (!enrich.libraryIds.length) return '请选择电视剧媒体库'
+  if (!enrich.libraryIds.length) return '请选择电影或电视剧媒体库'
   const names = enrich.libraryIds.map(id => enrich.libraries.find(item => item.id === id)?.name || `${id}（已保存）`)
   return `已选 ${names.length} 个媒体库：${names.join('、')}`
 }
@@ -130,7 +130,7 @@ async function loadEnrichLibraries() {
     const result = await post('enrichment/action', { operation: 'tv_libraries' })
     enrich.libraries = result.items || []
     enrich.libraryIds = enrich.libraryIds.filter(id => enrich.libraries.some(item => item.id === id))
-  } catch (err) { error.value = err?.message || '读取电视剧媒体库失败' }
+  } catch (err) { error.value = err?.message || '读取媒体库失败' }
   finally { enrich.catalogLoading = false }
 }
 function toggleEnrichLibrary(id) {
@@ -166,12 +166,12 @@ async function saveEnrichSettings() {
 async function searchEnrichment(kind) {
   const preview = kind === 'preview'
   const keyword = (preview ? enrich.previewQuery : enrich.query).trim()
-  if (keyword.length < 2) { error.value = '请输入至少两个字搜索剧集'; return }
+  if (keyword.length < 2) { error.value = '请输入至少两个字搜索媒体'; return }
   enrich.searching = true
   try {
     const result = await post('enrichment/action', { operation: 'search', keyword })
     if (preview) enrich.previewItems = result.items || []
-    else enrich.items = result.items || []
+    else { enrich.items = result.items || []; enrich.selected = null }
   } catch (err) { error.value = err?.message || '搜索剧集失败' }
   finally { enrich.searching = false }
 }
@@ -197,7 +197,7 @@ function scheduleEnrichmentPoll() {
 async function enrichmentAction(operation, extra = {}) {
   await work(async () => {
     if (operation === 'mediainfo_fill' && !window.confirm('即将探测文件信息，并在 Emby 空闲时备份数据库、短暂停止 Emby 写入后重启。播放或 Emby 任务进行中会拒绝执行。确认开始？')) return
-    if (operation === 'batch_enrich' && !window.confirm(`将补全选中 ${extra.library_ids?.length || 0} 个电视剧媒体库的全部剧集及分集资料，可能调用 MoviePilot AI，耗时较长。确定开始？`)) return
+    if (operation === 'batch_enrich' && !window.confirm(`将补全选中 ${extra.library_ids?.length || 0} 个媒体库的电影或剧集资料，剧集包含分集；可能调用 MoviePilot AI，耗时较长。确定开始？`)) return
     if (operation === 'batch_preview' && !window.confirm('将扫描所有 Emby 电视剧媒体库中的剧集，并自动修复缺失或疑似偏色的分集图片；正常及已修复图片不会覆盖。任务可能耗时很长，确定开始？')) return
     const result = await post('enrichment/action', { operation, ...extra })
     if (operation === 'preview_scan') {
@@ -920,15 +920,15 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
       </template>
       <template v-if="active === 'enrichment'">
         <section class="eme-card">
-          <div class="eme-card-heading"><div><h3>搜索剧集</h3><p>搜索 MoviePilot 已连接的 Emby 剧集，从 TMDB 匹配资料并补全剧集及分集信息。</p></div><button class="eme-button secondary" type="button" :disabled="busy" @click="openEnrichSettings"><i class="mdi mdi-cog-outline" aria-hidden="true" /> 补全设置</button></div>
-          <div class="eme-enrich-search"><input v-model.trim="enrich.query" placeholder="输入剧集名称（至少两个字）" @keyup.enter="searchEnrichment('series')" /><button class="eme-button secondary" :disabled="enrich.searching" @click="searchEnrichment('series')">搜索剧集</button></div>
-          <div v-if="enrich.items.length" class="eme-enrich-results"><button v-for="item in enrich.items" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.selected?.id === item.id }" @click="enrich.selected = item">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.server }}</button></div>
+          <div class="eme-card-heading"><div><h3>搜索电影或剧集</h3><p>搜索 MoviePilot 已连接的 Emby 媒体，匹配 TMDB/豆瓣资料并补全中文简介与演职人员；剧集同时补全分集信息。</p></div><button class="eme-button secondary" type="button" :disabled="busy" @click="openEnrichSettings"><i class="mdi mdi-cog-outline" aria-hidden="true" /> 补全设置</button></div>
+          <div class="eme-enrich-search"><input v-model.trim="enrich.query" placeholder="输入电影或剧集名称（至少两个字）" @keyup.enter="searchEnrichment('series')" /><button class="eme-button secondary" :disabled="enrich.searching" @click="searchEnrichment('series')">搜索媒体</button></div>
+          <div v-if="enrich.items.length" class="eme-enrich-results"><button v-for="item in enrich.items" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.selected?.id === item.id }" @click="enrich.selected = item">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.type === 'Movie' ? '电影' : '剧集' }} · {{ item.server }}</button></div>
           <p v-if="enrich.selected" class="eme-hint">已选：{{ enrich.selected.name }} · {{ enrich.selected.server }}</p>
-          <div class="eme-inline eme-enrich-buttons"><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'all' })">补全剧集数据</button></div>
-          <p class="eme-hint">使用 MoviePilot 的 TMDB API Key 与 Emby 连接。请核对剧集匹配后再补全。</p>
+          <div class="eme-inline eme-enrich-buttons"><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'all' })">补全{{ enrich.selected?.type === 'Movie' ? '电影' : '剧集' }}数据</button></div>
+          <p class="eme-hint">使用 MoviePilot 的 TMDB API Key 与 Emby 连接。请核对媒体匹配后再补全。</p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>批量补全数据</h3><p>按电视剧媒体库补全库内全部剧集的资料、演职人员及分集信息；大量剧集可能需要较长时间。</p></div><button class="eme-button secondary" :disabled="busy || enrich.catalogLoading || enrich.status.running" @click="loadEnrichLibraries">{{ enrich.catalogLoading ? '读取中…' : '刷新媒体库' }}</button></div>
-          <div class="eme-enrich-library-row"><label class="eme-enrich-library-field">电视剧媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" :aria-expanded="enrich.libraryPicker" @click="enrich.libraryPicker = !enrich.libraryPicker; enrich.libraryQuery = ''"><span>{{ enrichLibraryLabel() }}</span><i class="mdi" :class="enrich.libraryPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="enrich.libraryPicker" class="eme-picker-menu"><input v-model="enrich.libraryQuery" class="eme-picker-search" placeholder="搜索服务器或媒体库" @click.stop /><button v-for="item in enrichLibraryMatches" :key="item.id" type="button" class="eme-picker-option" :class="{ selected: enrich.libraryIds.includes(item.id) }" @click="toggleEnrichLibrary(item.id)"><i class="mdi" :class="enrich.libraryIds.includes(item.id) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.name }} · {{ item.server }}</button><p v-if="!enrichLibraryMatches.length" class="eme-picker-empty">没有可用的电视剧媒体库</p></div></div></label><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.libraryIds.length" @click="enrichmentAction('batch_enrich', { library_ids: [...enrich.libraryIds] })">批量补全数据</button></div>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>批量补全数据</h3><p>按电影或电视剧媒体库补全资料、演职人员及中文简介；电视剧还会补全分集信息，耗时可能较长。</p></div><button class="eme-button secondary" :disabled="busy || enrich.catalogLoading || enrich.status.running" @click="loadEnrichLibraries">{{ enrich.catalogLoading ? '读取中…' : '刷新媒体库' }}</button></div>
+          <div class="eme-enrich-library-row"><label class="eme-enrich-library-field">媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" :aria-expanded="enrich.libraryPicker" @click="enrich.libraryPicker = !enrich.libraryPicker; enrich.libraryQuery = ''"><span>{{ enrichLibraryLabel() }}</span><i class="mdi" :class="enrich.libraryPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="enrich.libraryPicker" class="eme-picker-menu"><input v-model="enrich.libraryQuery" class="eme-picker-search" placeholder="搜索服务器或媒体库" @click.stop /><button v-for="item in enrichLibraryMatches" :key="item.id" type="button" class="eme-picker-option" :class="{ selected: enrich.libraryIds.includes(item.id) }" @click="toggleEnrichLibrary(item.id)"><i class="mdi" :class="enrich.libraryIds.includes(item.id) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.name }} · {{ item.type === 'Movie' ? '电影' : '剧集' }} · {{ item.server }}</button><p v-if="!enrichLibraryMatches.length" class="eme-picker-empty">没有可用的电影或电视剧媒体库</p></div></div></label><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.libraryIds.length" @click="enrichmentAction('batch_enrich', { library_ids: [...enrich.libraryIds] })">批量补全数据</button></div>
         </section>
         <section class="eme-card">
           <div class="eme-card-heading"><div><h3>媒体信息补全</h3><p>扫描 Emby 电影与分集的文件大小和时长；探测缺失信息后，在 Emby 空闲时备份数据库、停机写入并重启。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || enrich.status.running" @click="enrichmentAction('mediainfo_check')">开始检查</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.status.mediainfo?.incomplete_count" @click="enrichmentAction('mediainfo_fill')">开始补全</button></div></div>

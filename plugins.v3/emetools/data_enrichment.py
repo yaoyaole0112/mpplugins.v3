@@ -326,17 +326,17 @@ class DataEnrichment:
     def _select_chinese_title(cls, current, *candidates):
         return next((str(title).strip() for title in candidates if cls._is_chinese_title(title)), current)
 
-    async def _series_title(self, tmdb, tmdb_id, api_key, current, *candidates):
+    async def _series_title(self, tmdb, tmdb_id, api_key, current, *candidates, media_type="tv"):
         title = self._select_chinese_title(current, *candidates)
         if self._is_chinese_title(title):
             return title
         try:
-            result = await self._tmdb_json(tmdb, f"tv/{tmdb_id}/translations", {"api_key": api_key})
+            result = await self._tmdb_json(tmdb, f"{media_type}/{tmdb_id}/translations", {"api_key": api_key})
             translations = [entry for entry in result.get("translations", [])
                             if entry.get("iso_639_1") == "zh"]
             translations.sort(key=lambda entry: entry.get("iso_3166_1") not in ("CN", "SG"))
             title = self._select_chinese_title(current, *[
-                (entry.get("data") or {}).get("name") for entry in translations])
+                (entry.get("data") or {}).get("title" if media_type == "movie" else "name") for entry in translations])
         except ValueError:
             self.log("TMDB 中文剧名翻译读取失败，保留原有剧名")
         if not self._is_chinese_title(title):
@@ -736,10 +736,11 @@ class DataEnrichment:
             try:
                 async with self._server(name) as client:
                     user = await self._user_id(name, client)
-                    data = await self._json(client, f"Users/{user}/Items", {"IncludeItemTypes": "Series",
+                    data = await self._json(client, f"Users/{user}/Items", {"IncludeItemTypes": "Series,Movie",
                         "SearchTerm": keyword, "Recursive": "true", "Limit": 20})
                 results.extend({"id": f"{name}::{item['Id']}", "name": item.get("Name", ""),
-                    "year": item.get("ProductionYear") or "", "server": name}
+                    "year": item.get("ProductionYear") or "", "server": name,
+                    "type": item.get("Type") or "Series"}
                     for item in data.get("Items", []) if item.get("Id"))
             except Exception as error:
                 logger.warning("增强工具 数据补全：搜索服务器 %s 失败：%s", name, type(error).__name__)
@@ -754,12 +755,13 @@ class DataEnrichment:
                 offset = 0
                 while offset < 2000:
                     data = await self._json(client, f"Users/{user}/Items", {
-                        "IncludeItemTypes": "Series", "Recursive": "true",
+                        "IncludeItemTypes": "Series,Movie", "Recursive": "true",
                         "StartIndex": offset, "Limit": 500})
                     page = data.get("Items") or []
                     results.extend({"id": f"{name}::{item['Id']}",
                                     "name": item.get("Name") or "未命名",
-                                    "year": item.get("ProductionYear") or "", "server": name}
+                                    "year": item.get("ProductionYear") or "", "server": name,
+                                    "type": item.get("Type") or "Series"}
                                    for item in page if item.get("Id"))
                     offset += len(page)
                     if not page or offset >= int(data.get("TotalRecordCount", offset)):
@@ -767,7 +769,7 @@ class DataEnrichment:
         return results
 
     def tv_libraries(self):
-        """Only expose actual TV libraries, scoped by server and Emby view ID."""
+        """Expose TV and movie libraries, scoped by server and Emby view ID."""
         services = MediaServerHelper().get_services(type_filter="emby") or {}
         values = services.values() if isinstance(services, dict) else services
         result = []
@@ -776,9 +778,10 @@ class DataEnrichment:
                 continue
             server = str(service.config.name or "")
             for library in service.instance.get_librarys(hidden=False) or []:
-                if getattr(library, "type", None) == MediaType.TV.value and getattr(library, "id", None):
+                if getattr(library, "type", None) in (MediaType.TV.value, MediaType.MOVIE.value) and getattr(library, "id", None):
                     result.append({"id": f"{server}::{library.id}",
-                                   "name": str(library.name or "未命名"), "server": server})
+                                   "name": str(library.name or "未命名"), "server": server,
+                                   "type": "Movie" if library.type == MediaType.MOVIE.value else "Series"})
         return result
 
     async def _library_series(self, libraries, titles=None):
@@ -792,7 +795,7 @@ class DataEnrichment:
                 offset = 0
                 while True:
                     data = await self._json(client, f"Users/{user}/Items", {
-                        "ParentId": library_id, "IncludeItemTypes": "Series",
+                        "ParentId": library_id, "IncludeItemTypes": library.get("type", "Series"),
                         "Recursive": "true", "StartIndex": offset, "Limit": 500})
                     page = data.get("Items") or []
                     for item in page:
@@ -809,30 +812,31 @@ class DataEnrichment:
                         break
         return result
 
-    def _selected_tv_libraries(self, library_ids):
-        libraries = self.tv_libraries()
+    def _selected_tv_libraries(self, library_ids, tv_only=False):
+        libraries = [library for library in self.tv_libraries()
+                     if not tv_only or library.get("type", "Series") == "Series"]
         known = {library["id"]: library for library in libraries}
         if library_ids is None:
             if not libraries:
-                raise ValueError("没有可用的 Emby 电视剧媒体库")
+                raise ValueError("没有可用的 Emby 电视剧媒体库" if tv_only else "没有可用的 Emby 媒体库")
             return libraries
         if (not isinstance(library_ids, list) or not library_ids or
                 len(library_ids) > 200 or len(set(library_ids)) != len(library_ids) or
                 any(not isinstance(value, str) or value not in known for value in library_ids)):
-            raise ValueError("请选择有效的 Emby 电视剧媒体库并重试")
+            raise ValueError("请选择有效的 Emby 媒体库并重试")
         return [known[value] for value in library_ids]
 
     def start_library_enrich(self, library_ids):
         libraries = self._selected_tv_libraries(library_ids)
-        return self._begin("批量补全剧集数据", self._enrich_libraries, libraries, self.options())
+        return self._begin("批量补全媒体数据", self._enrich_libraries, libraries, self.options())
 
     async def _enrich_libraries(self, libraries, options):
         series_ids = await self._library_series(libraries)
-        self.log(f"已读取 {len(libraries)} 个电视剧媒体库，共 {len(series_ids)} 部剧集")
+        self.log(f"已读取 {len(libraries)} 个媒体库，共 {len(series_ids)} 部电影或剧集")
         await self._batch_enrich(series_ids, options)
 
     def start_all_preview(self):
-        libraries = self._selected_tv_libraries(None)
+        libraries = self._selected_tv_libraries(None, tv_only=True)
         return self._begin("批量扫描与修复分集图片", self._preview_libraries, libraries)
 
     async def _preview_libraries(self, libraries):
@@ -1045,7 +1049,104 @@ class DataEnrichment:
         name, identifier = self._split(series_id)
         if name not in self._services():
             raise ValueError("所选 Emby 服务器不可用")
-        return self._begin("剧集补全", self._enrich, name, identifier, mode, self.options())
+        return self._begin("媒体补全", self._enrich, name, identifier, mode, self.options())
+
+    async def _enrich_movie(self, emby, tmdb, identifier, item, mode, options, api_key):
+        provider = item.get("ProviderIds") or {}
+        tmdb_id = provider.get("Tmdb") or provider.get("TMDB")
+        if not tmdb_id:
+            search = await self._tmdb_json(tmdb, "search/movie", {"api_key": api_key,
+                "query": item.get("Name") or "", "language": "zh-CN", "page": 1})
+            candidates = search.get("results") or []
+            year = str(item.get("ProductionYear") or "")
+            matched = [entry for entry in candidates if entry.get("release_date", "")[:4] == year] if year else candidates
+            if len(matched) != 1:
+                raise ValueError("TMDB 电影匹配不唯一或年份不符，请先在 Emby 设置正确的 TMDB ID")
+            tmdb_id = matched[0].get("id")
+        if not tmdb_id:
+            raise ValueError("未找到对应的 TMDB 电影，不写入 Emby")
+        detail = await self._tmdb_json(tmdb, f"movie/{tmdb_id}", {"api_key": api_key,
+            "language": "zh-CN", "append_to_response": "credits,external_ids"})
+        douban = (await self._douban_data(item, include_cast=mode != "metadata")
+                  if options["metadata_source"] == "douban" and mode in ("all", "metadata", "credits") else {})
+        if mode != "credits" and not douban and (not self._is_chinese_title(detail.get("title")) or
+                self._needs_translation(detail.get("overview"))):
+            douban = await self._douban_data(item, include_cast=False)
+        update = dict(item)
+        if mode != "credits":
+            update["Name"] = await self._series_title(
+                tmdb, tmdb_id, api_key, item.get("Name"), douban.get("name"), detail.get("title"),
+                media_type="movie")
+            overview = douban.get("overview") or detail.get("overview")
+            if overview and (not self._needs_translation(overview) or
+                             options["ai_enabled"] and options["ai_overview"] or
+                             self._needs_translation(item.get("Overview"))):
+                update["Overview"] = overview
+            if detail.get("vote_average"):
+                update["CommunityRating"] = detail["vote_average"]
+            if detail.get("genres"):
+                update["Genres"] = [genre["name"] for genre in detail["genres"] if genre.get("name")]
+            studios = [company.get("name") for company in detail.get("production_companies") or []
+                       if isinstance(company, dict) and company.get("name")]
+            if studios:
+                update["Studios"] = list(dict.fromkeys(studios))[:30]
+            providers = dict(provider)
+            providers["Tmdb"] = str(tmdb_id)
+            imdb_id = (detail.get("external_ids") or {}).get("imdb_id") or detail.get("imdb_id")
+            if imdb_id:
+                providers["Imdb"] = imdb_id
+            update["ProviderIds"] = providers
+            if options["ai_enabled"]:
+                translations = {}
+                if options["ai_title"] and update.get("Name") and not self._is_chinese_title(update["Name"]):
+                    translations["Name"] = str(update.get("Name") or "")[:180]
+                if options["ai_overview"] and self._needs_translation(update.get("Overview")):
+                    translations["Overview"] = str(update["Overview"])[:900]
+                translated = await self._optional_ai_map(translations, "电影标题及剧情简介，译为简体中文，不编造事实")
+                update.update({key: value for key, value in translated.items()
+                               if self._is_chinese_title(value) and not re.search(r"[A-Za-z]", value)})
+        if mode != "metadata":
+            credits = detail.get("credits") or {}
+            cast = [{"name": actor["name"], "original_name": actor.get("original_name"),
+                     "role": actor.get("character") or "", "profile_path": actor.get("profile_path"),
+                     "order": actor.get("order")}
+                    for actor in credits.get("cast") or [] if actor.get("name")]
+            douban_cast = douban.get("casts") or []
+            if self._needs_chinese_cast(cast, options["max_actors"]) and not douban_cast:
+                douban_cast = (await self._douban_data(item, include_cast=True)).get("casts") or []
+            if douban_cast:
+                cast = self._merge_cast(douban_cast, cast)
+            people = [{"Name": actor["name"], "Type": "Actor", "Role": actor.get("role") or ""}
+                      for actor in cast if actor.get("name") and
+                      (not options["no_avatar"] or actor.get("profile_path"))][:options["max_actors"]]
+            directors = [{"Name": crew["name"], "Type": "Director", "Role": "导演"}
+                         for crew in credits.get("crew") or []
+                         if crew.get("job") == "Director" and crew.get("name")]
+            people = directors[:10] + people
+            if people and options["ai_enabled"] and options["ai_credits"]:
+                values = {}
+                for index, person in enumerate(people):
+                    if self._needs_translation(person["Name"]):
+                        values[f"n{index}"] = person["Name"][:130]
+                    if self._needs_translation(person["Role"]):
+                        values[f"r{index}"] = person["Role"][:130]
+                for start in range(0, len(values), 25):
+                    translated = await self._optional_ai_map(
+                        dict(list(values.items())[start:start + 25]),
+                        "电影演职人员姓名及角色，译为简体中文；不确定时保留原文，不编造")
+                    for key, value in translated.items():
+                        if self._is_chinese_title(value) and not re.search(r"[A-Za-z]", value):
+                            people[int(key[1:])]["Name" if key[0] == "n" else "Role"] = value
+            if options["role_prefix"]:
+                for person in people:
+                    if person["Type"] == "Actor" and person["Role"] and not person["Role"].startswith(("饰", "配")):
+                        person["Role"] = "饰 " + person["Role"]
+            if people:
+                update["People"] = people
+                update["LockedFields"] = [field for field in update.get("LockedFields") or [] if field != "Cast"]
+        response = await emby.post(f"Items/{identifier}", json={key: value for key, value in update.items() if value is not None})
+        response.raise_for_status()
+        self.log("电影资料及演职人员已更新" if mode == "all" else "电影资料已更新" if mode == "metadata" else "电影演职人员已更新")
 
     async def _sync_episode_people(self, emby, user, series_id, people):
         """Propagate the freshly saved series cast without changing episode metadata."""
@@ -1088,8 +1189,13 @@ class DataEnrichment:
         async with self._server(name) as emby, self._tmdb_client() as tmdb:
             user = await self._user_id(name, emby)
             item = await self._item(emby, user, identifier)
+            if item.get("Type") == "Movie":
+                if mode == "episodes":
+                    raise ValueError("电影没有分集信息")
+                await self._enrich_movie(emby, tmdb, identifier, item, mode, options, api_key)
+                return
             if item.get("Type") != "Series":
-                raise ValueError("选中项目不是 Emby 剧集")
+                raise ValueError("选中项目不是 Emby 电影或剧集")
             original_title = str(item.get("Name") or "").strip()
             enrichment_title = self._enrichment_title(item)
             if enrichment_title != item.get("Name"):
