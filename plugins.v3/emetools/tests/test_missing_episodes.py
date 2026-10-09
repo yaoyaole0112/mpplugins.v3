@@ -312,7 +312,36 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
         )
         self.assertIsNone(count)
 
+    def test_broadcast_status_uses_season_air_dates(self):
+        today = "2026-10-09"
+        airing = [{"episode_number": 1, "air_date": "2026-10-01"},
+                  {"episode_number": 2, "air_date": "2026-10-20"}]
+        self.assertEqual(MissingEpisodeDetector._broadcast_status({}, 10, airing, today, 2), "在播")
+        upcoming = [{"episode_number": 1, "air_date": "2026-11-01"}]
+        self.assertEqual(MissingEpisodeDetector._broadcast_status({}, 1, upcoming, today, 1), "待播")
+        ended = [{"episode_number": index, "air_date": "2026-01-01"} for index in range(1, 11)]
+        self.assertEqual(
+            MissingEpisodeDetector._broadcast_status({"status": "Returning Series"}, 1, ended, today, 10),
+            "完结",
+        )
+        partial = [{"episode_number": 1, "air_date": "2026-01-01"}, {"episode_number": 2}]
+        self.assertEqual(MissingEpisodeDetector._broadcast_status({}, 1, partial, today, 10), "在播")
+
+    def test_broadcast_status_uses_douban_progress_without_air_dates(self):
+        detector = object.__new__(MissingEpisodeDetector)
+        detector.plugin_name = "ME工具 缺集检测"
+        detector._request_json = MagicMock(return_value={
+            "is_tv": True, "episodes_count": "24", "episodes_info": "更新至12集", "is_released": True,
+        })
+        status = detector._season_airing_status(
+            {"Name": "喜剧之王", "ProviderIds": {"Douban": "36868927"}},
+            1, {}, [{"episode_number": 1}], "2026-10-09", 24, "2026",
+        )
+        self.assertEqual(status, "在播")
+        self.assertIn("/tv/36868927", detector._request_json.call_args.args[0])
+
     def test_auto_episode_correction_skips_animation_genre(self):
+
         detector = object.__new__(MissingEpisodeDetector)
         detector._auto_episode_correction = True
         detector._douban_episode_total = MagicMock(return_value=12)

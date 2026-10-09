@@ -236,6 +236,101 @@ class MissingEpisodeDetector:
             logger.debug(f"【{self.plugin_name}】豆瓣集数读取失败：{type(error).__name__}")
             return None
 
+    def _douban_subject_broadcast_status(self, subject_id):
+        """用豆瓣“更新至/完结”判断在播状态；电影或无资料时返回 None。"""
+        payload = self._request_json(
+            f"https://m.douban.com/rexxar/api/v2/tv/{subject_id}?for_mobile=1",
+            headers={"Referer": "https://m.douban.com/"},
+        )
+        if not isinstance(payload, dict) or payload.get("is_tv") is False:
+            return None
+        info = str(payload.get("episodes_info") or "")
+        total = self._explicit_episode_count(payload.get("episodes_count"))
+        if "完结" in info:
+            return "完结"
+        updated = re.search(r"更新至\s*(\d+)\s*集", info)
+        if updated:
+            current = int(updated.group(1))
+            if total and current >= total:
+                return "完结"
+            return "在播"
+        if payload.get("is_released") is False or str(payload.get("pre_release_desc") or "").strip():
+            return "待播"
+        if total and payload.get("is_released") is True and not info:
+            return "完结"
+        return None
+
+    def _douban_broadcast_status(self, series, season_number, season_year=None):
+        if season_number <= 0:
+            return None
+        provider_ids = series.get("ProviderIds") or {}
+        subject_id = ""
+        if season_number == 1:
+            subject_id = str(provider_ids.get("Douban") or provider_ids.get("douban") or
+                             provider_ids.get("DOUBAN") or "")
+        name = str(series.get("Name") or "")
+        base_name = re.sub(
+            r"\s*(?:第\s*[一二三四五六七八九十百\d]+\s*(?:季|期)|S\s*\d{1,2}|Season\s*\d{1,2})\s*$",
+            "", name, flags=re.I,
+        ).strip()
+        year = str(season_year or series.get("ProductionYear") or "")[:4]
+        try:
+            if subject_id.isdecimal():
+                status = self._douban_subject_broadcast_status(subject_id)
+                if status:
+                    return status
+            match = self._douban_suggest_match(base_name, year, season_number)
+            matched_id = str((match or {}).get("id") or "")
+            if matched_id.isdecimal() and matched_id != subject_id:
+                return self._douban_subject_broadcast_status(matched_id)
+        except Exception as error:  # noqa: BLE001 - 豆瓣不可用时继续使用 TMDB
+            logger.debug(f"【{self.plugin_name}】豆瓣在播状态读取失败：{type(error).__name__}")
+        return None
+
+    @staticmethod
+    def _broadcast_status(details, season_number, episodes, today, expected_total):
+        """按本季播出日期判断待播、在播或完结；日期不足时返回 None。"""
+        try:
+            current = datetime.strptime(str(today)[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            return None
+        aired = future = undated = 0
+        for episode in episodes or []:
+            if not isinstance(episode, dict):
+                continue
+            raw = str(episode.get("air_date") or "")
+            if not raw:
+                undated += 1
+                continue
+            try:
+                air_date = datetime.strptime(raw[:10], "%Y-%m-%d").date()
+            except ValueError:
+                undated += 1
+                continue
+            if air_date > current:
+                future += 1
+            else:
+                aired += 1
+        if aired or future:
+            if aired == 0:
+                return "待播"
+            if future or undated or (expected_total and aired < expected_total):
+                return "在播"
+            return "完结"
+        series_status = str((details or {}).get("status") or "")
+        next_episode = (details or {}).get("next_episode_to_air") or {}
+        if isinstance(next_episode, dict) and next_episode.get("season_number") == season_number:
+            return "待播"
+        if series_status in {"Ended", "Canceled"}:
+            return "完结"
+        return None
+
+    def _season_airing_status(self, series, season_number, details, episodes, today, expected_total, season_year):
+        status = self._broadcast_status(details, season_number, episodes, today, expected_total)
+        if status:
+            return status
+        return self._douban_broadcast_status(series, season_number, season_year) or "未知"
+
     def _auto_episode_total(self, series, season_number, tmdb_total, details=None, season_year=None):
         if not getattr(self, "_auto_episode_correction", False):
             return tmdb_total, "TMDB"
@@ -498,10 +593,11 @@ class MissingEpisodeDetector:
         return "、".join(ranges)
 
     @staticmethod
-    def _request_json(url: str) -> Any:
+    def _request_json(url: str, headers=None) -> Any:
         """请求 JSON，失败时返回空值并记录调试日志。"""
         try:
-            response = RequestUtils().get_res(url)
+            client = RequestUtils(headers=headers) if headers else RequestUtils()
+            response = client.get_res(url)
             if response and response.status_code == 200:
                 payload = response.json()
                 return payload if isinstance(payload, (dict, list)) else None
@@ -637,6 +733,9 @@ class MissingEpisodeDetector:
                     "MissingEpisodes": self._format_episode_ranges(missing),
                     "TotalEpisodes": expected_total or aired_total,
                     "TotalEpisodesSource": total_source,
+                    "AiringStatus": self._season_airing_status(
+                        series, season_number, details, episodes, today, expected_total, season_year
+                    ),
                     "ActionResult": "待处理",
                 }
             )

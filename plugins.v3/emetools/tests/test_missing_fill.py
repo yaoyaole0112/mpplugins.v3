@@ -141,6 +141,18 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(MODULE.message_resource_size(label, text), "455.03 GB")
         self.assertIsNone(MODULE.message_resource_size("4. 其他资源...", text))
 
+    def test_message_resource_size_reads_short_units_from_cost_line(self):
+        text = """1. S01-S11 1080P&4K WEB-DL AAC [115人解锁]
+💰 4积分 | 1.19TB | WEB-DL/WEBRip
+3. 明星大侦探 1-11季全 [61人解锁]
+💰 8积分 | 1.29T | 1080P | WEB-DL/WEBRip | 简中
+5. 大侦探·拾光季（第十季 25 集全）  [87人解锁]
+💰 2积分 | 128.43G | 4K | 简中
+"""
+        self.assertEqual(MODULE.message_resource_size("1. S01-S11 1080P&4K WEB-DL AAC [4积分]", text), "1.19TB")
+        self.assertEqual(MODULE.message_resource_size("3. 明星大侦探 1-11季全 [8积分]", text), "1.29T")
+        self.assertEqual(MODULE.message_resource_size("5. 大侦探·拾光季（第十季 25 集全） [2积分]", text), "128.43G")
+
     def test_url_buttons_are_not_clickable(self):
         message = SimpleNamespace(buttons=[[SimpleNamespace(text="URL", data=None),
                                             SimpleNamespace(text="115", data=b"callback")]])
@@ -267,6 +279,22 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         task = await self.ready()
         with self.assertRaises(ValueError):
             await self.fill.action(self.confirm(task, option_id=task["options"][2]["id"]))
+
+    async def test_clear_history_removes_finished_tasks_only(self):
+        self.fill.tasks = [
+            {"id": "done", "state": "complete"},
+            {"id": "cancelled", "state": "cancelled"},
+            {"id": "expired", "state": "expired"},
+            {"id": "failed", "state": "failed"},
+            {"id": "closed", "state": "closed"},
+            {"id": "pending", "state": "awaiting_verify"},
+            {"id": "active", "state": "resources"},
+        ]
+        self.fill.active = self.fill.tasks[-1]
+        await self.fill.action({"operation": "clear_history"})
+        self.assertEqual([task["id"] for task in self.fill.tasks], ["pending", "active"])
+        with self.assertRaises(ValueError):
+            await self.fill.action({"operation": "clear_history"})
 
     async def test_cancel_before_submit_does_not_spend(self):
         task = await self.ready()

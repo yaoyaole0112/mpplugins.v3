@@ -26,6 +26,10 @@ test('template exposes episode correction controls', () => {
   assert.ok(source.includes('{{ item.TotalEpisodes }} 集'))
   assert.equal(source.includes('TotalEpisodesSource'), false)
   assert.ok(source.includes('text-align:center;vertical-align:middle'))
+  assert.ok(source.includes('<th>剧集名称</th><th>在播状态</th><th>缺失季度</th>'))
+  assert.ok(source.includes('item.AiringStatus'))
+  assert.equal(source.includes('导出 CSV'), false)
+  assert.equal(source.includes('downloadMissingCsv'), true)
 })
 
 test('AppPage stays full-page while dialog layout is isolated', () => {

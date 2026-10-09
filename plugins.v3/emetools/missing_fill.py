@@ -96,7 +96,14 @@ def message_resource_size(label, text):
     normalize = lambda value: re.sub(r"\s+", "", value).upper()
     if not normalize(prefix) or not normalize(section).startswith(normalize(prefix)):
         return None
-    matches = re.findall(r"(?:大小\s*[:：]\s*|[|｜]\s*)(\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB|B))", section, re.I)
+    size = r"(\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB|TiB|GiB|MiB|T|G|M))\b"
+    pattern = rf"(?:大小\s*[:：]\s*|[|｜]\s*){size}"
+    costs = re.findall(r"(?m)^\s*💰[^\n]*", section)
+    if len(costs) == 1:
+        found = re.findall(pattern, costs[0], re.I)
+        if found:
+            return found[0]
+    matches = re.findall(pattern, section, re.I)
     return matches[-1] if matches else None
 
 
@@ -169,6 +176,13 @@ class MissingFill:
             if type(maximum) is not int or not 0 <= maximum <= 100:
                 raise ValueError("单次积分上限必须是 0–100 的整数")
             self.max_points = maximum
+            self._persist()
+        elif operation == "clear_history":
+            finished = {"cancelled", "complete", "expired", "failed", "closed"}
+            kept = [task for task in self.tasks if task is self.active or task.get("state") not in finished]
+            if len(kept) == len(self.tasks):
+                raise ValueError("没有可清除的历史任务")
+            self.tasks = kept
             self._persist()
         elif operation == "start":
             if not self.plugin._enabled or not self.plugin._tg_session or not self.plugin._tg_forward_token:
