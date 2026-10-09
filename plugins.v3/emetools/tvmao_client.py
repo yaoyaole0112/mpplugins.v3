@@ -16,8 +16,8 @@ import httpx
 _WORK_PATH = re.compile(r"^/(?:kanju|drama)/([A-Za-z0-9_-]{3,40})(?:/actors)?/?$")
 _YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 _CHINESE = re.compile(r"[\u3400-\u9fff]")
-_USER_AGENT = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-               "AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1")
+_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36")
 # User-provided actors page for the Emby/TMDB entry "征途" (336207). The
 # search endpoint can omit the series despite its actors page being available.
 # Never apply this direct link to another show sharing the same Chinese title.
@@ -122,7 +122,8 @@ async def fetch_tvmao_cast(title, year="", tmdb_id="", status=None):
     if not title or len(str(title)) > 80:
         return []
     direct = _KNOWN_WORKS.get((str(title).strip(), str(tmdb_id or "")))
-    async with httpx.AsyncClient(headers={"User-Agent": _USER_AGENT},
+    async with httpx.AsyncClient(headers={"User-Agent": _USER_AGENT,
+                                          "Referer": "https://www.tvmao.com/"},
                                  timeout=httpx.Timeout(12, connect=6),
                                  follow_redirects=True, trust_env=False) as client:
         path = ""

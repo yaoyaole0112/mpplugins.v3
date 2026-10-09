@@ -411,7 +411,8 @@ class PluginTests(unittest.TestCase):
         with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()):
             self.plugin.init_plugin({"eme_url": "http://nonexistent:7077", "strm_root": self.directory.name})
         self.assertNotIn("eme_url", str(self.run_async(self.plugin.status())))
-        self.assertEqual(self.plugin.get_service(), [])
+        self.assertEqual([job["id"] for job in self.plugin.get_service()],
+                         ["EmeTools_enrichment_import_poll"])
 
     def test_monitor_defaults_off_and_secrets_are_not_exposed(self):
         with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()):

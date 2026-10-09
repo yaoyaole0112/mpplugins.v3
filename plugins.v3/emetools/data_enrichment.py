@@ -229,12 +229,56 @@ class DataEnrichment:
             self.owner.save_data("enrichment_import_pending", dict(self._import_pending))
             timer.start()
 
-    def queue_import(self, series_id):
+    def queue_import(self, series_id, delay=300):
         name, _ = self._split(series_id)
         if name not in self._services():
             return
-        self._queue_import(series_id, time.time() + 300)
-        logger.info("增强工具 数据补全：%s 新分集入库，5 分钟后合并补全", _log_series(series_id))
+        delay = max(30, min(int(delay), 300))
+        self._queue_import(series_id, time.time() + delay)
+        logger.info("增强工具 数据补全：%s 新分集入库，%d 秒后合并补全", _log_series(series_id), delay)
+
+    def poll_recent_imports(self):
+        """Fallback for missed Emby webhooks and missing MoviePilot transfer events."""
+        if self._closed or not self.owner._enabled or not self.options()["auto_on_import"]:
+            return
+        previous = self.owner.get_data("enrichment_import_poll_after")
+        try:
+            after = float(previous)
+        except (TypeError, ValueError):
+            after = time.time() - 900
+        checked_at = time.time()
+
+        async def scan():
+            queued = set()
+            for server in self._services():
+                async with self._server(server) as client:
+                    user = await self._user_id(server, client)
+                    response = await self._json(client, f"Users/{user}/Items", {
+                        "Recursive": "true", "IncludeItemTypes": "Episode",
+                        "SortBy": "DateCreated", "SortOrder": "Descending",
+                        "Fields": "SeriesId,DateCreated", "Limit": 100})
+                for episode in response.get("Items") or []:
+                    created = str(episode.get("DateCreated") or "").strip()
+                    try:
+                        created_at = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+                    except ValueError:
+                        continue
+                    if created_at <= after:
+                        continue
+                    identifier = str(episode.get("SeriesId") or "")
+                    if re.fullmatch(r"[a-zA-Z0-9-]{1,64}", identifier):
+                        queued.add(f"{server}::{identifier}")
+            for series_id in queued:
+                self.queue_import(series_id, delay=30)
+            return len(queued)
+
+        try:
+            count = asyncio.run(scan())
+            self.owner.save_data("enrichment_import_poll_after", checked_at)
+            if count:
+                logger.info("增强工具 数据补全：最近入库轮询发现 %d 部剧集，已安排兜底补全", count)
+        except Exception as exc:
+            logger.info("增强工具 数据补全：最近入库轮询失败：%s", type(exc).__name__)
 
     def queue_import_by_tmdb(self, tmdb_id):
         """Fallback for successful MoviePilot transfers when Emby Webhook is unavailable."""
@@ -546,6 +590,7 @@ class DataEnrichment:
                 response.raise_for_status()
                 data = response.json()
                 casts = data.get("casts") or []
+                directors = []
                 cast_needs_mobile = include_cast and (
                     not casts or any(
                         not re.search(r"[\u3400-\u9fff]", str(actor.get("name") or "")) or
@@ -560,19 +605,28 @@ class DataEnrichment:
                             params={"start": 0, "count": 100},
                             headers={"Referer": "https://m.douban.com/"})
                         mobile.raise_for_status()
-                        celebrities = mobile.json().get("actors") or []
+                        mobile_data = mobile.json()
+                        celebrities = mobile_data.get("actors") or []
                         mobile_cast = [{"name": actor.get("name"), "role": actor.get("character"),
+                                        "original_name": actor.get("latin_name"),
                                         "img": (actor.get("avatar") or {}).get("large") or
                                                (actor.get("avatar") or {}).get("normal") or
                                                (actor.get("avatar") or {}).get("small")}
                                        for actor in celebrities if isinstance(actor, dict)]
                         if mobile_cast:
                             casts = mobile_cast
+                        directors = [{"name": person.get("name"), "role": "导演",
+                                      "original_name": person.get("latin_name"),
+                                      "img": (person.get("avatar") or {}).get("large") or
+                                             (person.get("avatar") or {}).get("normal")}
+                                     for person in mobile_data.get("directors") or []
+                                     if isinstance(person, dict) and person.get("name")]
                     except (httpx.HTTPError, ValueError, AttributeError, TypeError):
                         self.log("豆瓣移动端演职人员不可用，使用 TMDB 补全演员")
                 self.log(f"已匹配《{name}》· 豆瓣 {subject_id}（缺失字段回退 TMDB）")
                 return {"name": str(data.get("title") or ""), "overview": str(data.get("intro") or ""),
-                        "casts": casts if isinstance(casts, list) else []}
+                        "casts": casts if isinstance(casts, list) else [],
+                        "directors": directors if cast_needs_mobile else []}
         except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError) as error:
             self.log(f"豆瓣数据不可用（{type(error).__name__}），使用 TMDB")
             return {}
@@ -640,6 +694,16 @@ class DataEnrichment:
                     re.search(r"[A-Za-z]", role)):
                 return True
         return False
+
+    @staticmethod
+    def _localized_role(role):
+        value = str(role or "").strip()
+        prefix = "配" if value.startswith("配") else "饰" if value.startswith("饰") else ""
+        value = re.sub(r"^\s*[饰配]\s*", "", value)
+        if re.search(r"[\u3400-\u9fff]", value) and re.search(r"[A-Za-z]", value):
+            value = re.sub(r"[A-Za-z][A-Za-z0-9 .,'\"-]*(?:\s*/\s*[A-Za-z][A-Za-z0-9 .,'\"-]*)*\s*$", "", value)
+            value = value.rstrip(" /｜|,，;；-").strip()
+        return f"{prefix} {value}".strip() if prefix and value else value
 
     @staticmethod
     def _merge_tvmao_cast(cast, web_cast):
@@ -1132,9 +1196,15 @@ class DataEnrichment:
                       for actor in cast if actor.get("name") and
                       (not options["no_avatar"] or actor.get("profile_path") or
                        re.search(r"[\u3400-\u9fff]", actor["name"]))][:options["max_actors"]]
-            directors = [{"Name": crew["name"], "Type": "Director", "Role": "导演"}
-                         for crew in credits.get("crew") or []
-                         if crew.get("job") == "Director" and crew.get("name")]
+            tmdb_directors = [{"name": crew["name"], "original_name": crew.get("original_name"),
+                               "role": "导演", "profile_path": crew.get("profile_path")}
+                              for crew in credits.get("crew") or []
+                              if crew.get("job") == "Director" and crew.get("name")]
+            douban_directors = douban.get("directors") or []
+            if douban_directors:
+                tmdb_directors = self._merge_cast(douban_directors, tmdb_directors)
+            directors = [{"Name": person["name"], "Type": "Director", "Role": "导演"}
+                         for person in tmdb_directors if person.get("name")]
             people = directors[:10] + people
             if people and options["ai_enabled"] and options["ai_credits"]:
                 values = {}
@@ -1152,8 +1222,10 @@ class DataEnrichment:
                             people[int(key[1:])]["Name" if key[0] == "n" else "Role"] = value
             if options["role_prefix"]:
                 for person in people:
-                    if person["Type"] == "Actor" and person["Role"] and not person["Role"].startswith(("饰", "配")):
-                        person["Role"] = "饰 " + person["Role"]
+                    if person["Type"] == "Actor" and person["Role"]:
+                        person["Role"] = self._localized_role(person["Role"])
+                        if not person["Role"].startswith(("饰", "配")):
+                            person["Role"] = "饰 " + person["Role"]
             if people:
                 update["People"] = people
                 update["LockedFields"] = [field for field in update.get("LockedFields") or [] if field != "Cast"]

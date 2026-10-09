@@ -35,6 +35,7 @@ class TvmaoTests(unittest.TestCase):
 
     def test_fetch_rejects_wrong_page_title_and_uses_only_tvmao(self):
         requested = []
+        client_options = []
 
         def handler(request):
             requested.append(str(request.url))
@@ -45,6 +46,7 @@ class TvmaoTests(unittest.TestCase):
 
         original = httpx.AsyncClient
         def client(**kwargs):
+            client_options.append(kwargs)
             return original(transport=httpx.MockTransport(handler), **kwargs)
 
         with patch('emetools.tvmao_client.httpx.AsyncClient', side_effect=client):
@@ -52,6 +54,8 @@ class TvmaoTests(unittest.TestCase):
         self.assertEqual(cast[0]['name'], '李健')
         self.assertEqual([httpx.URL(url).host for url in requested], ['www.tvmao.com'] * 2)
         self.assertEqual(httpx.URL(requested[1]).path, '/kanju/YXAhXWhl/actors')
+        self.assertIn('Windows NT', client_options[0]['headers']['User-Agent'])
+        self.assertEqual(client_options[0]['headers']['Referer'], 'https://www.tvmao.com/')
 
         def wrong_page(request):
             if request.url.path == '/query.jsp':

@@ -96,12 +96,15 @@ class EnrichmentTests(unittest.TestCase):
              patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
              patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user'), \
              patch.object(self.enrichment, '_douban_data', new_callable=AsyncMock,
-                          return_value={'casts': [{'name': '汤姆·赫兰德', 'role': '彼得·帕克／蜘蛛侠', 'img': ''}]}), \
+                          return_value={'casts': [{'name': '汤姆·赫兰德', 'original_name': 'Tom Holland',
+                                                  'role': '饰 彼得·帕克／蜘蛛侠 Peter Parker / Spider-Man',
+                                                  'img': ''}]}), \
              patch.object(self.enrichment, '_tvmao_cast', new_callable=AsyncMock, return_value=[]), \
              patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
             asyncio.run(self.enrichment._enrich('Q4', 'movie1', 'credits', DEFAULT_ENRICH_CONFIG))
         self.assertEqual(saved[0]['People'][0]['Name'], '汤姆·赫兰德')
         self.assertEqual(saved[0]['People'][0]['Role'], '饰 彼得·帕克／蜘蛛侠')
+        self.assertEqual(len(saved[0]['People']), 1)
 
     def test_douban_mobile_replaces_english_movie_cast(self):
         paths = []
@@ -113,7 +116,10 @@ class EnrichmentTests(unittest.TestCase):
                     'casts': [{'name': 'Tom Holland', 'role': 'Peter Parker', 'img': ''}]})
             if request.url.path.endswith('/celebrities'):
                 return httpx.Response(200, json={'actors': [
-                    {'name': '汤姆·赫兰德', 'character': '彼得·帕克／蜘蛛侠', 'avatar': {}}]})
+                    {'name': '汤姆·赫兰德', 'latin_name': 'Tom Holland',
+                     'character': '彼得·帕克／蜘蛛侠', 'avatar': {}}],
+                    'directors': [{'name': '德斯汀·克里顿', 'latin_name': 'Destin Daniel Cretton',
+                                   'avatar': {}}]})
             return httpx.Response(404)
 
         real_client = httpx.AsyncClient
@@ -122,7 +128,9 @@ class EnrichmentTests(unittest.TestCase):
             result = asyncio.run(self.enrichment._douban_data(
                 {'Name': '蜘蛛侠：崭新之日', 'ProviderIds': {'Douban': '18'}}, include_cast=True))
         self.assertEqual(result['casts'][0]['name'], '汤姆·赫兰德')
+        self.assertEqual(result['casts'][0]['original_name'], 'Tom Holland')
         self.assertEqual(result['casts'][0]['role'], '彼得·帕克／蜘蛛侠')
+        self.assertEqual(result['directors'][0]['name'], '德斯汀·克里顿')
         self.assertEqual(paths, ['/j/subject/18', '/rexxar/api/v2/movie/18/celebrities'])
 
     def test_chinese_title_selection_rejects_foreign_scripts(self):
@@ -332,6 +340,30 @@ class EnrichmentTests(unittest.TestCase):
             self.enrichment._run_import('Q4::123', 400)
         self.assertEqual(self.storage['enrichment_import_pending'], {'Q4::123': 130})
         self.assertEqual(timer.call_count, 2)
+
+    def test_recent_import_poll_queues_series_when_events_are_missing(self):
+        self.enrichment.owner._enabled = True
+        self.enrichment.owner._enrichment_config = dict(DEFAULT_ENRICH_CONFIG)
+        self.storage['enrichment_import_poll_after'] = 800
+
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): pass
+
+        response = {'Items': [
+            {'Id': 'ep-new', 'SeriesId': 'series-new', 'DateCreated': '1970-01-01T00:15:00Z'},
+            {'Id': 'ep-old', 'SeriesId': 'series-old', 'DateCreated': '1970-01-01T00:10:00Z'}]}
+        with patch.object(self.enrichment, '_services', return_value={'Q4': object()}), \
+             patch.object(self.enrichment, '_server', return_value=FakeClient()), \
+             patch.object(self.enrichment, '_user_id', new=AsyncMock(return_value='user')), \
+             patch.object(self.enrichment, '_json', new=AsyncMock(return_value=response)) as fetch, \
+             patch.object(self.enrichment, 'queue_import') as queued, \
+             patch('emetools.data_enrichment.time.time', return_value=1000):
+            self.enrichment.poll_recent_imports()
+        queued.assert_called_once_with('Q4::series-new', delay=30)
+        self.assertEqual(self.storage['enrichment_import_poll_after'], 1000)
+        self.assertEqual(fetch.call_args.args[1], 'Users/user/Items')
+        self.assertEqual(fetch.call_args.args[2]['IncludeItemTypes'], 'Episode')
 
     def test_batch_enrich_continues_after_failure(self):
         async def enrich(name, identifier, mode, options):

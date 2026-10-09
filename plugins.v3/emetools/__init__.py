@@ -105,7 +105,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.64"
+    plugin_version = "2.9.65"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -468,6 +468,11 @@ class EmeTools(_PluginBase):
                                  "trigger": trigger, "func": self._run_media_scheduled, "kwargs": {}})
             except ValueError as error:
                 logger.error("媒体增强 媒体清理周期无效：%s", error)
+        if self._enrichment_config["auto_on_import"]:
+            services.append({"id": "EmeTools_enrichment_import_poll",
+                             "name": "媒体增强 入库补全兜底检查",
+                             "trigger": "interval", "func": self._enrichment.poll_recent_imports,
+                             "kwargs": {"seconds": 300}})
         return services
 
     def _run_media_scheduled(self) -> None:
