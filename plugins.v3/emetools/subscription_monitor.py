@@ -33,9 +33,20 @@ def matches_subscription(text, sub):
     title = re.split(r"\n\s*\n", text.strip(), maxsplit=1)[0][:120]
     name = (sub.get("name") or "").strip()
     media_id = str(sub.get("media_id") or "") if str(sub.get("media_source") or "").lower().endswith(("tmdb", "themoviedb")) else ""
-    named = bool(name and re.search(re.escape(name), title if len(name) <= 3 else text, re.I))
+    named = bool(name and re.search(re.escape(name), text, re.I))
     if named and len(name) <= 3:
-        named = bool(re.search(rf"《\s*{re.escape(name)}\s*》|(?<![\w\u3400-\u9fff]){re.escape(name)}(?![\w\u3400-\u9fff]).{{0,30}}(?:[Ss]\d+|第\s*\d+\s*[季集])", title, re.I))
+        named = bool(
+            re.search(
+                rf"《\s*{re.escape(name)}\s*》|"
+                rf"(?<![\w\u3400-\u9fff]){re.escape(name)}"
+                rf"(?![\w\u3400-\u9fff]).{{0,30}}(?:[Ss]\d+|第\s*\d+\s*[季集])",
+                title, re.I,
+            ) or re.search(
+                rf"(?:影视|剧名|片名|标题)\s*[:：]\s*《?\s*{re.escape(name)}\s*》?"
+                rf"(?![\w\u3400-\u9fff])",
+                text, re.I,
+            )
+        )
     id_hit = bool(media_id and re.search(
         rf"(?:(?:tmdb|themoviedb)\s*(?:id)?\s*[:：#]?\s*|themoviedb\.org/(?:tv|movie)/){re.escape(media_id)}\b",
         text, re.I))
@@ -59,7 +70,7 @@ def matches_subscription(text, sub):
             number = int(season)
         except (TypeError, ValueError):
             return False
-        check = title if len(name) <= 3 else text
+        check = text
         if not re.search(rf"\b[Ss]0*{number}(?!\d)|第\s*{number}\s*季", check):
             return False
     return True

@@ -23,7 +23,7 @@
     "name": "媒体增强",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.61",
+    "version": "2.9.62",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -31,6 +31,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.62": "修复 Telegram 订阅监控短剧名与季集信息分行时的漏匹配；支持影视、剧名等明确标签，仍校验订阅季号以减少误转发。",
       "v2.9.61": "修复插件弹窗缺集检测页面右侧内容无法滚动的问题；恢复弹窗主内容区的独立纵向滚动，缺集结果及下面内容可完整浏览。",
       "v2.9.60": "修复插件弹窗内容未铺满宿主高度导致底部出现不同背景色区域的问题；统一弹窗根节点、宿主容器和媒体增强背景，并保持弹窗内部滚动策略不变。",
       "v2.9.59": "修复 MoviePilot 左侧栏进入媒体增强 AppPage 时仍继承宿主全局滚动的问题；仅锁定完整页面宿主滚动，由主内容区承担必要的长页面滚动，不影响插件弹窗入口。",

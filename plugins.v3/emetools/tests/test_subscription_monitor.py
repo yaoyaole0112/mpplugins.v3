@@ -165,6 +165,19 @@ class MatchingTests(unittest.TestCase):
         self.assertFalse(matches_subscription("其他电影 S01\n\n简介：醒来之后…", sub))
         self.assertTrue(matches_subscription("《醒来》 S01E02", sub))
 
+    def test_short_name_and_season_can_be_on_separate_labeled_lines(self):
+        sub = {"name": "征途", "year": "2026", "type": "剧集", "season": 1}
+        text = """✅少爷：请您检阅
+文件数 28 ｜ 体积 129.9GB
+
+🎬 影视：征途
+📺 季集：S01E01-28
+📅 年份：2026
+🎭 类型：剧集
+
+https://115.com/s/example?password=r3f3"""
+        self.assertTrue(matches_subscription(text, sub))
+
     def test_tmdb_link_can_match_an_alternate_channel_title(self):
         sub = {"name": "长剧名", "media_source": "tmdb", "media_id": "12345",
                "type": "电视剧", "season": 2}
