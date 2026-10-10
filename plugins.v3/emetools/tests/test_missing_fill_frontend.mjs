@@ -88,6 +88,8 @@ test('template blocks unknown cost, excess cost, wrong coverage and repeated res
 })
 
 test('missing results and fill task history use horizontal pagination', () => {
+  assert.ok(source.includes('.eme-missing-results table{table-layout:fixed}'))
+  assert.ok(source.includes('.eme-missing-results th:nth-child(3){width:20%}'))
   assert.ok(source.includes('const missingResultsPageSize = 6'))
   assert.ok(source.includes('missing.results.slice('))
   assert.ok(source.includes('v-for="item in missingResultsPageItems"'))

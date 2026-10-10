@@ -1207,6 +1207,17 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-enrich-preview-heading>div:first-child{min-width:0;flex:1}
 .eme-enrich-preview-actions{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:nowrap;max-width:100%;overflow-x:auto}
 .eme-enrich-preview-actions .eme-button{flex:none}
+.eme-missing-results table{table-layout:fixed}
+.eme-missing-results th:nth-child(1){width:8%}
+.eme-missing-results th:nth-child(2){width:10%}
+.eme-missing-results th:nth-child(3){width:20%}
+.eme-missing-results th:nth-child(4){width:10%}
+.eme-missing-results th:nth-child(5){width:9%}
+.eme-missing-results th:nth-child(6){width:10%}
+.eme-missing-results th:nth-child(7){width:8%}
+.eme-missing-results th:nth-child(8){width:15%}
+.eme-missing-results th:nth-child(9){width:10%}
+.eme-missing-results td{overflow-wrap:anywhere}
 .eme-app-page-host,.eme-dialog-page-root{box-sizing:border-box;width:100%;height:100%;min-width:0;min-height:100%;background:rgb(var(--v-theme-background))}
 .eme-shell--app{box-sizing:border-box;gap:22px;padding:18px 22px 22px;min-height:0;width:100%;max-width:100%;overflow:hidden}
 .eme-shell--app .eme-sidebar{width:260px;padding:0;overflow:visible;border-right:0}
