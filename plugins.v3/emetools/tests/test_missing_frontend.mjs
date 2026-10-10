@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
+import { computed, reactive, ref } from 'vue'
 
 const source = readFileSync(new URL('../src/Workbench.vue', import.meta.url), 'utf8')
 const loading = source.slice(source.indexOf('async function loadMissing()'), source.indexOf('function scheduleMissingPoll()'))
@@ -35,7 +36,7 @@ test('template exposes episode correction controls', () => {
 test('AppPage stays full-page while dialog layout is isolated', () => {
   assert.ok(source.includes('.eme-shell--app{box-sizing:border-box;gap:22px;padding:18px 22px 22px;min-height:0;width:100%;max-width:100%;overflow:hidden}'))
   assert.ok(source.includes('.eme-shell--dialog{box-sizing:border-box;gap:22px;padding:22px 28px 26px;min-height:100%;width:100%;height:100%;overflow:hidden;background:rgb(var(--v-theme-background))}'))
-  assert.ok(source.includes('.eme-shell--app .eme-main{padding:44px 0 20px}'))
+  assert.ok(source.includes('.eme-shell--app .eme-main{padding:44px 16px 20px 0;scrollbar-gutter:stable}'))
   assert.ok(source.includes('.eme-shell.eme-shell--app{height:calc(100dvh - 88px);min-height:0'))
   assert.ok(source.includes('.eme-shell--app .eme-main{min-height:0;overflow-y:auto'))
   assert.ok(source.includes('html:has(.eme-shell--app)),:global(body:has(.eme-shell--app)),:global(.v-application:has(.eme-shell--app)),:global(.v-layout:has(.eme-shell--app)),:global(.v-main:has(.eme-shell--app)){overflow:hidden'))
@@ -56,19 +57,35 @@ function fixture() {
   const saved = config()
   const context = vm.createContext({
     missing: { config: config() }, active: { value: 'subscription' },
-    notice: { value: '' }, missingConfigInitialized: false, missingSavedConfig: '',
+    notice: { value: '' }, missingConfigInitialized: { value: false }, missingSavedConfig: { value: '' },
     missingScanPendingId: 0, missingResultsPage: { value: 1 }, scheduleMissingPoll() {},
     get: async () => ({ config: structuredClone(saved), scanning: false, results: [] }),
     post: async (path, payload) => {
       calls.push(structuredClone(payload))
       if (payload.config) Object.assign(saved, structuredClone(payload.config))
-      return { message: 'ok', scan_id: 1 }
+      return { message: 'ok', scan_id: 1, config: structuredClone(saved) }
     },
     work: async callback => callback(),
   })
   vm.runInContext(`${loading}\n${command}`, context)
   return { context, calls, saved }
 }
+
+test('unsaved configuration warning reacts to edits and successful saves', () => {
+  const missing = reactive({ config: { cron: '35 3 * * *' } })
+  const missingConfigInitialized = ref(false)
+  const missingSavedConfig = ref('')
+  const context = vm.createContext({ missing, missingConfigInitialized, missingSavedConfig, computed })
+  vm.runInContext(source.match(/^const missingConfigDirty = .*$/m)[0], context)
+  assert.equal(vm.runInContext('missingConfigDirty.value', context), false)
+  missingSavedConfig.value = JSON.stringify(missing.config)
+  missingConfigInitialized.value = true
+  assert.equal(vm.runInContext('missingConfigDirty.value', context), false)
+  missing.config.cron = '0 4 * * *'
+  assert.equal(vm.runInContext('missingConfigDirty.value', context), true)
+  missingSavedConfig.value = JSON.stringify(missing.config)
+  assert.equal(vm.runInContext('missingConfigDirty.value', context), false)
+})
 
 test('switching pages and refreshing preserve library selections and toggle', async () => {
   const { context } = fixture()

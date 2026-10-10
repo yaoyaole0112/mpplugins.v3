@@ -105,7 +105,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.73"
+    plugin_version = "2.9.74"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -566,7 +566,7 @@ class EmeTools(_PluginBase):
             self._media._snapshot = {}
             self._persist()
             Scheduler().update_plugin_job(self.__class__.__name__)
-            return {"message": "媒体清理配置已保存；定时删除仅在启用时运行"}
+            return {"message": "媒体清理配置已保存；定时删除仅在启用时运行", "config": copy.deepcopy(updated)}
         if operation == "scan":
             if self._media.running or self._media.lock.locked():
                 raise HTTPException(status_code=409, detail="媒体清理正在执行")
@@ -897,7 +897,7 @@ class EmeTools(_PluginBase):
             self._persist()
             logger.info("ME工具 Telegram：%s 配置已保存，频道=%d，关键词=%d，黑名单=%d",
                         scope, len(channels), len(keywords), len(blacklist))
-            return {"ok": True}
+            return {"ok": True, "config": copy.deepcopy(self._monitor_config[scope])}
         elif operation in ("start", "stop"):
             if operation == "start" and not self._enabled:
                 raise HTTPException(status_code=400, detail="请先启用插件")
@@ -976,7 +976,8 @@ class EmeTools(_PluginBase):
         logger.info("ME工具 %s：运行配置已保存，启用=%s，目录/规则=%d",
                     SECTION_NAMES[section], updated["enabled"],
                     len(updated.get("dir_ids") or updated.get("rules") or []))
-        return {"saved": True, "message": "配置已保存，定时任务由 MoviePilot 执行"}
+        return {"saved": True, "message": "配置已保存，定时任务由 MoviePilot 执行",
+                "config": copy.deepcopy(updated)}
 
     def _p115_dirs(self, cid: str):
         with self._client() as client:

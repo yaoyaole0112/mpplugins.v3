@@ -308,7 +308,8 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(self.plugin.update_config.call_args.args[0]["media_cleanup"]["library_ids"], ["scheduled::1"])
         self.plugin._media.running = False
         with patch("emetools.Scheduler"):
-            self.run_async(self.plugin.media_action({"operation": "save", "config": {"library_ids": ["scheduled::3"]}}))
+            response = self.run_async(self.plugin.media_action({"operation": "save", "config": {"library_ids": ["scheduled::3"]}}))
+        self.assertEqual(response["config"]["library_ids"], ["scheduled::3"])
         self.assertEqual(self.plugin._media_scan_library_ids, ["manual::2"])
         self.assertEqual(self.run_async(self.plugin.media_status())["config"]["library_ids"], ["scheduled::3"])
 
@@ -472,10 +473,13 @@ class PluginTests(unittest.TestCase):
 
     def test_monitor_save_and_validation(self):
         from emetools import MonitorChange
-        self.run_async(self.plugin.monitor_action(MonitorChange(
+        response = self.run_async(self.plugin.monitor_action(MonitorChange(
             operation="save", scope="kw", channels=["@channelname", "https://t.me/channelname"],
             keywords=["Movie.*2026"], blacklist=["camrip"])))
         self.assertEqual(self.plugin._monitor_config["kw"]["channels"], ["channelname"])
+        self.assertEqual(response["config"]["channels"], ["channelname"])
+        self.assertEqual(response["config"]["keywords"], ["Movie.*2026"])
+        self.assertEqual(self.plugin.update_config.call_args.args[0]["monitor"]["kw"]["channels"], ["channelname"])
         with self.assertRaises(HTTPException):
             self.run_async(self.plugin.monitor_action(MonitorChange(
                 operation="save", scope="sub", channels=["https://other.host/bad"])))
@@ -516,6 +520,13 @@ class PluginTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             self.run_async(self.plugin.save_schedule(ScheduleChange(
                 section="p115_trash", settings={"enabled": True})))
+
+    def test_schedule_save_returns_normalized_persisted_config(self):
+        with patch("emetools.Scheduler"):
+            response = self.run_async(self.plugin.save_schedule(ScheduleChange(
+                section="p115_move", settings={"enabled": False, "check_interval": 30, "rules": []})))
+        self.assertEqual(response["config"]["check_interval"], 60)
+        self.assertEqual(self.plugin.update_config.call_args.args[0]["schedule"]["p115_move"]["check_interval"], 60)
 
     def test_helper_cookie_is_read_fresh_for_each_operation(self):
         self.plugin.get_config.side_effect = [{"cookies": "first"}, {"cookies": "second"}]

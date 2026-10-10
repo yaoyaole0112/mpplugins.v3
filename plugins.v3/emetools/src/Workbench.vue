@@ -22,6 +22,7 @@ const sections = [
 const active = ref('subscription')
 const busy = ref(false)
 const loading = ref(true)
+const settingsLoaded = ref(false)
 const error = ref('')
 const notice = ref('')
 const toast = reactive({ visible: false, text: '', kind: 'success' })
@@ -45,6 +46,17 @@ const schedule = reactive({
   p115_move: { enabled: false, check_interval: 120, rules: [] },
 })
 const savedStrmRoot = ref('/strm')
+const savedBasicSettings = ref('')
+const basicSettingsDirty = computed(() => !!savedBasicSettings.value && JSON.stringify({
+  enabled: settings.enabled, show_sidebar_nav: settings.show_sidebar_nav, strm_root: settings.strm_root,
+}) !== savedBasicSettings.value || !!settings.rb_password)
+const savedTelegramApiId = ref('')
+const telegramSettingsDirty = computed(() => settingsLoaded.value &&
+  (String(telegram.api_id || '') !== savedTelegramApiId.value || !!telegram.api_hash || !!telegram.forward_token))
+const savedSchedule = reactive({ tools: '', p115_cleanup: '', p115_trash: '' })
+function scheduleDirty(section) {
+  return !!savedSchedule[section] && JSON.stringify(schedule[section]) !== savedSchedule[section]
+}
 const scan = ref(null)
 const selected = ref([])
 const preview = ref(null)
@@ -58,9 +70,14 @@ const base = computed(() => `plugin/${props.pluginId}`)
 const current = computed(() => sections.find(section => section.key === active.value))
 const rules = computed(() => schedule.p115_move.rules || [])
 const cleanupDirs = ref([])
+const savedCleanupDirs = ref('[]')
+const cleanupDirsDirty = computed(() => settingsLoaded.value && JSON.stringify(cleanupDirs.value) !== savedCleanupDirs.value)
+const savedMoveConfig = ref('')
+const moveConfigDirty = computed(() => !!savedMoveConfig.value && JSON.stringify(schedule.p115_move) !== savedMoveConfig.value)
 const monitor = reactive({ configured: false, logged_in: false, dependency_ready: false, hits: [], last_error: '', poll_warnings: {}, last_event: '', listening_channels: {}, channel_titles: {}, subscription_count: 0,
   sub: { enabled: false, channels: [], keywords: [], blacklist: [] }, kw: { enabled: false, channels: [], keywords: [], blacklist: [] } })
 const drafts = reactive({ sub: { channels: [], keywords: [], blacklist: [] }, kw: { channels: [], keywords: [], blacklist: [] } })
+const monitorLoaded = ref(false)
 const entry = reactive({ sub: { channels: '' }, kw: { channels: '', keywords: '', blacklist: '' } })
 const telegram = reactive({ api_id: '', api_hash: '', forward_token: '', phone: '', code: '', password: '', password_required: false })
 const missing = reactive({ config: { enabled: false, cron: '35 3 * * *', only_existing_seasons: true,
@@ -89,12 +106,14 @@ watch(missingResultsPageCount, pageCount => { missingResultsPage.value = Math.mi
 watch(fillTasksPageCount, pageCount => { fillTasksPage.value = Math.min(fillTasksPage.value, pageCount) })
 const fillMaxPoints = ref(4)
 const fillLoaded = ref(false)
+const fillMaxPointsDirty = computed(() => fillLoaded.value && Number(fillMaxPoints.value) !== Number(fill.max_points))
 let fillPollTimer = null
 const fillStateLabels = { searching: '搜索中', choose_series: '待选剧', resources: '待确认资源',
   submitting: '提交中', awaiting_verify: '等待入库', uncertain: '待人工核实', verifying: '复查中',
   complete: '已补全', failed: '操作失败', cancelled: '已取消', expired: '已过期', closed: '人工关闭' }
-let missingConfigInitialized = false
-let missingSavedConfig = ''
+const missingConfigInitialized = ref(false)
+const missingSavedConfig = ref('')
+const missingConfigDirty = computed(() => missingConfigInitialized.value && JSON.stringify(missing.config) !== missingSavedConfig.value)
 const missingPicker = reactive({ open: '', query: '' })
 const missingActionPicker = ref(false)
 const missingActionOptions = ['仅检查记录', '添加到订阅', '标记为存在']
@@ -234,6 +253,8 @@ const mediaScanLibraryIds = ref([])
 const mediaRulesOpen = ref(false)
 const mediaScanPending = ref(false)
 let mediaLoaded = false
+const savedMediaConfig = ref('')
+const mediaConfigDirty = computed(() => !!savedMediaConfig.value && JSON.stringify(media.config) !== savedMediaConfig.value)
 let mediaPollTimer = null
 const draggedMediaRank = ref(null)
 function mediaPickerLabel(kind = 'scan') {
@@ -285,6 +306,7 @@ function applyMediaStatus(status) {
   Object.assign(media, state)
   if (!mediaLoaded) {
     media.config = config
+    savedMediaConfig.value = JSON.stringify(config)
     mediaScanLibraryIds.value = [...(scan_library_ids || [])]
     mediaLoaded = true
   }
@@ -320,8 +342,17 @@ async function startMediaScan() {
 }
 async function mediaCommand(operation, extra = {}) {
   await work(async () => {
+    if (operation === 'save' && !savedMediaConfig.value) throw new Error('媒体清理配置尚未加载，请稍后重试')
+    const submittedConfig = operation === 'save' ? JSON.parse(JSON.stringify(extra.config)) : null
     const response = await post('media-cleanup/action', { operation, ...extra })
     if (response?.ok === false) throw new Error(response.failures?.map(item => item.error).join('；') || '清理未完成')
+    if (submittedConfig) {
+      const saved = response.config || { ...JSON.parse(savedMediaConfig.value), ...submittedConfig }
+      savedMediaConfig.value = JSON.stringify(saved)
+      for (const key of Object.keys(submittedConfig)) {
+        if (JSON.stringify(media.config[key]) === JSON.stringify(submittedConfig[key])) media.config[key] = saved[key]
+      }
+    }
     if (operation === 'scan') {
       mediaScanPending.value = true
       // Status polling must not depend on the slower Emby library-options API.
@@ -394,6 +425,13 @@ function applyStatus(data) {
     cid, name: schedule.p115_cleanup.dir_names?.[index] || '',
   }))
   schedule.p115_move.rules = (schedule.p115_move.rules || []).map(rule => ({ ...rule }))
+  savedCleanupDirs.value = JSON.stringify(cleanupDirs.value)
+  savedMoveConfig.value = JSON.stringify(schedule.p115_move)
+  savedBasicSettings.value = JSON.stringify({ enabled: settings.enabled,
+    show_sidebar_nav: settings.show_sidebar_nav, strm_root: settings.strm_root })
+  savedTelegramApiId.value = String(telegram.api_id || '')
+  for (const section of Object.keys(savedSchedule)) savedSchedule[section] = JSON.stringify(schedule[section])
+  settingsLoaded.value = true
 }
 async function load() {
   loading.value = true
@@ -405,18 +443,27 @@ async function getPending() {
   pendingJobs.value = result.pending || []
 }
 async function saveBasicSettings() {
+  if (!settingsLoaded.value) { error.value = '插件配置尚未加载，请刷新后重试'; return }
   await work(async () => {
     const { enabled, show_sidebar_nav, strm_root, rb_password } = settings
     const result = await post('settings', { enabled, show_sidebar_nav, strm_root, rb_password })
     Object.assign(settings, result.settings)
     savedStrmRoot.value = result.settings.strm_root
     settings.rb_password = ''
-    const status = await get('status')
-    schedule.tools.path = status.schedule?.tools?.path || strm_root
+    savedBasicSettings.value = JSON.stringify({ enabled: settings.enabled,
+      show_sidebar_nav: settings.show_sidebar_nav, strm_root: settings.strm_root })
     notice.value = '基础设置已保存'
+    try {
+      const status = await get('status')
+      schedule.tools.path = status.schedule?.tools?.path || strm_root
+      savedSchedule.tools = JSON.stringify({ ...JSON.parse(savedSchedule.tools), path: schedule.tools.path })
+    } catch {
+      notice.value = '基础设置已保存；定时清理状态未能刷新，请重新打开页面核对'
+    }
   })
 }
 async function saveTelegramSettings() {
+  if (!settingsLoaded.value) { error.value = '插件配置尚未加载，请刷新后重试'; return }
   await work(async () => {
     const result = await post('settings', {
       tg_api_id: telegram.api_id, tg_api_hash: telegram.api_hash,
@@ -427,13 +474,16 @@ async function saveTelegramSettings() {
     settings.tg_forward_token_configured = result.settings.tg_forward_token_configured
     telegram.api_hash = ''
     telegram.forward_token = ''
+    savedTelegramApiId.value = String(telegram.api_id || '')
     notice.value = 'Telegram 账号设置已保存'
   })
 }
-async function loadMonitor() {
+async function loadMonitor(refreshDrafts = ['sub', 'kw']) {
   const status = await get('monitor/status')
+  if (!status?.sub || !status?.kw) throw new Error('监控配置读取未完成，请稍后刷新页面')
   Object.assign(monitor, status)
-  for (const scope of ['sub', 'kw']) {
+  monitorLoaded.value = true
+  for (const scope of refreshDrafts) {
     drafts[scope].channels = [...(status[scope]?.channels || [])]
     drafts[scope].keywords = [...(status[scope]?.keywords || [])]
     drafts[scope].blacklist = [...(status[scope]?.blacklist || [])]
@@ -442,10 +492,10 @@ async function loadMonitor() {
 async function loadMissing() {
   const draft = JSON.stringify(missing.config)
   const status = await get('missing/status')
-  const initialize = !missingConfigInitialized
+  const initialize = !missingConfigInitialized.value
   if (initialize) {
-    missingConfigInitialized = true
-    missingSavedConfig = JSON.stringify(status.config)
+    missingConfigInitialized.value = true
+    missingSavedConfig.value = JSON.stringify(status.config)
   }
   applyMissingStatus(status, initialize && draft === JSON.stringify(missing.config))
 }
@@ -511,12 +561,12 @@ function episodeOverrideTitle(tmdbId) {
   return missingOptions.series.find(item => item.value === tmdbId)?.title || `TMDB ${tmdbId}`
 }
 async function saveEpisodeOverrides(overrides, message) {
-  if (busy.value || missing.scanning || !missingConfigInitialized) return
+  if (busy.value || missing.scanning || !missingConfigInitialized.value) return
   await work(async () => {
     const result = await post('missing/action', { operation: 'save', config: { episode_overrides: overrides } })
     const savedOverrides = result.config.episode_overrides
     missing.config.episode_overrides = savedOverrides.map(item => ({ ...item }))
-    missingSavedConfig = JSON.stringify({ ...JSON.parse(missingSavedConfig), episode_overrides: savedOverrides })
+    missingSavedConfig.value = JSON.stringify({ ...JSON.parse(missingSavedConfig.value), episode_overrides: savedOverrides })
     notice.value = message
   })
 }
@@ -527,7 +577,7 @@ async function addEpisodeOverride() {
   if (!tmdbId) { error.value = '请选择需要修正集数的剧集'; return }
   if (!Number.isInteger(season) || season < 0 || season > 99) { error.value = '季号应为 0–99 的整数'; return }
   if (!Number.isInteger(totalEpisodes) || totalEpisodes < 1 || totalEpisodes > 999) { error.value = '正确总集数应为 1–999 的整数'; return }
-  if (busy.value || missing.scanning || !missingConfigInitialized) return
+  if (busy.value || missing.scanning || !missingConfigInitialized.value) return
   const overrides = (missing.config.episode_overrides || []).map(item => ({ ...item }))
   const existing = overrides.find(item => item.tmdb_id === tmdbId && Number(item.season) === season)
   if (existing) existing.total_episodes = totalEpisodes
@@ -540,7 +590,7 @@ async function addEpisodeOverride() {
   }
 }
 async function removeEpisodeOverride(index) {
-  if (busy.value || missing.scanning || !missingConfigInitialized) return
+  if (busy.value || missing.scanning || !missingConfigInitialized.value) return
   const overrides = (missing.config.episode_overrides || []).map(item => ({ ...item }))
   if (index < 0 || index >= overrides.length) return
   overrides.splice(index, 1)
@@ -561,15 +611,19 @@ function confirmModeLabel() {
 async function missingCommand(operation) {
   if (operation === 'scan') missingResultsPage.value = 1
   await work(async () => {
-    if (!missingConfigInitialized) await loadMissing()
-    if (operation === 'scan' && missingSavedConfig !== JSON.stringify(missing.config)) {
+    if (!missingConfigInitialized.value) await loadMissing()
+    if (operation === 'scan' && missingSavedConfig.value !== JSON.stringify(missing.config)) {
       const config = JSON.parse(JSON.stringify(missing.config))
-      await post('missing/action', { operation: 'save', config })
-      missingSavedConfig = JSON.stringify(config)
+      const saved = await post('missing/action', { operation: 'save', config })
+      missingSavedConfig.value = JSON.stringify(saved.config)
+      if (JSON.stringify(missing.config) === JSON.stringify(config)) missing.config = saved.config
     }
     const config = operation === 'save' ? JSON.parse(JSON.stringify(missing.config)) : null
     const result = await post('missing/action', { operation, ...(config ? { config } : {}) })
-    if (config) missingSavedConfig = JSON.stringify(config)
+    if (config) {
+      missingSavedConfig.value = JSON.stringify(result.config)
+      if (JSON.stringify(missing.config) === JSON.stringify(config)) missing.config = result.config
+    }
     if (operation === 'scan') missingScanPendingId = result.scan_id
     notice.value = result.message
     await loadMissing()
@@ -613,7 +667,7 @@ async function skipMissingSeries(item) {
     notice.value = result.message
     await loadMissing()
     missing.config.skip_series_ids = [...new Set([...missing.config.skip_series_ids, String(item.TmdbId)])]
-    missingSavedConfig = JSON.stringify(result.config)
+    missingSavedConfig.value = JSON.stringify(result.config)
     missingResultsPage.value = Math.max(1, Math.min(missingResultsPage.value, missingResultsPageCount.value))
   })
 }
@@ -640,6 +694,10 @@ async function loadFill() {
   }
 }
 async function fillCommand(operation, extra = {}) {
+  if (['start', 'confirm'].includes(operation) && fillMaxPointsDirty.value) {
+    error.value = '积分上限有未保存的修改，请先保存上限再选择资源'
+    return
+  }
   if (operation === 'start') fillTasksPage.value = 1
   await work(async () => {
     Object.assign(fill, await post('missing/fill/action', { operation, ...extra }))
@@ -666,22 +724,57 @@ function closeFill(task) {
   }
 }
 async function monitorCommand(operation, scope = 'sub', extra = {}) {
+  if (!monitorLoaded.value) { error.value = '监控配置尚未加载，请刷新后重试'; return }
   await work(async () => {
     const result = await post('monitor/action', { operation, scope, ...extra })
     if (result.password_required) telegram.password_required = true
+    if (operation === 'save' && result.config) {
+      for (const field of ['channels', 'keywords', 'blacklist']) {
+        drafts[scope][field] = [...result.config[field]]
+        monitor[scope][field] = [...result.config[field]]
+      }
+    }
     notice.value = result.message || (operation === 'save' ? '监控设置已保存' : '操作成功')
-    await loadMonitor()
+    if (operation !== 'save') await loadMonitor([])
   })
 }
-function addEntry(scope, field) {
+async function persistMonitorEntries(scope, values, onSaved = () => {}) {
+  if (busy.value || loading.value || !monitorLoaded.value || monitor[scope].enabled) return
+  await work(async () => {
+    const result = await post('monitor/action', { operation: 'save', scope, ...values })
+    for (const field of ['channels', 'keywords', 'blacklist']) {
+      drafts[scope][field] = [...result.config[field]]
+      monitor[scope][field] = [...result.config[field]]
+    }
+    onSaved()
+    notice.value = '监控配置已保存'
+  })
+}
+async function addEntry(scope, field) {
   const value = (entry[scope][field] || '').trim()
-  if (value && !drafts[scope][field].includes(value)) drafts[scope][field].push(value)
-  entry[scope][field] = ''
+  if (!value || drafts[scope][field].includes(value)) return
+  const values = { channels: [...drafts[scope].channels], keywords: [...drafts[scope].keywords], blacklist: [...drafts[scope].blacklist] }
+  values[field].push(value)
+  await persistMonitorEntries(scope, values, () => { if (entry[scope][field] === value) entry[scope][field] = '' })
+}
+async function removeEntry(scope, field, index) {
+  const values = { channels: [...drafts[scope].channels], keywords: [...drafts[scope].keywords], blacklist: [...drafts[scope].blacklist] }
+  if (index < 0 || index >= values[field].length) return
+  values[field].splice(index, 1)
+  await persistMonitorEntries(scope, values)
 }
 async function saveMonitor(scope) {
+  if (Object.values(entry[scope]).some(value => String(value || '').trim())) {
+    error.value = '输入框里还有未添加的内容，请先点击“添加”（会立即保存）'
+    return
+  }
   await monitorCommand('save', scope, { channels: drafts[scope].channels, keywords: drafts[scope].keywords, blacklist: drafts[scope].blacklist })
 }
 async function toggleMonitor(scope) {
+  if (!monitor[scope].enabled && Object.values(entry[scope]).some(value => String(value || '').trim())) {
+    error.value = '输入框里还有未添加的内容，请先点击“添加”再启动监控'
+    return
+  }
   if (!monitor[scope].enabled && (JSON.stringify(drafts[scope].channels) !== JSON.stringify(monitor[scope].channels) ||
     JSON.stringify(drafts[scope].keywords) !== JSON.stringify(monitor[scope].keywords) ||
     JSON.stringify(drafts[scope].blacklist) !== JSON.stringify(monitor[scope].blacklist))) {
@@ -694,23 +787,38 @@ function logoutTelegram() {
   if (window.confirm('退出 Telegram 并停止两种监控？')) monitorCommand('logout')
 }
 async function saveSchedule(section) {
+  if (!settingsLoaded.value) { error.value = '插件配置尚未加载，请刷新后重试'; return }
   await work(async () => {
-    let value = { ...schedule[section] }
+    let value = JSON.parse(JSON.stringify(schedule[section]))
+    const originalMoveInterval = schedule.p115_move.check_interval
     if (section === 'tools') value = { enabled: value.enabled, cron: value.cron, path: savedStrmRoot.value,
       auto_delete: value.auto_delete, confirm_cleanup: value.confirm_mode !== 'none', confirm_mode: value.confirm_mode }
     if (section === 'p115_cleanup') {
-      const dirs = cleanupDirs.value.filter(item => String(item.cid || '').trim())
+      if (cleanupDirs.value.some(item => !String(item.cid || '').trim())) throw new Error('请先选择清理目录或移除空白项，再保存配置')
+      const dirs = cleanupDirs.value.map(item => ({ ...item }))
       value = { enabled: value.enabled, cron: value.cron, dir_ids: dirs.map(item => item.cid), dir_names: dirs.map(item => item.name) }
     }
     if (section === 'p115_trash') value = { enabled: value.enabled, cron: value.cron }
     if (section === 'p115_move') {
-      if (rules.value.some(rule => !String(rule.src_id || '').trim() || !String(rule.dst_id || '').trim())) throw new Error('请填写每条转存规则的源目录与目标目录')
-      value = { enabled: value.enabled, check_interval: Math.max(60, Number(value.check_interval) || 120), rules: rules.value }
+      if (value.rules.some(rule => !String(rule.src_id || '').trim() || !String(rule.dst_id || '').trim())) throw new Error('请填写每条转存规则的源目录与目标目录')
+      value = { enabled: value.enabled, check_interval: Math.max(60, Number(value.check_interval) || 120), rules: value.rules }
     }
     const result = await post('schedule', { section, settings: value })
-    if (section === 'tools') { schedule.tools.path = savedStrmRoot.value; schedule.tools.confirm_cleanup = value.confirm_cleanup }
-    if (section === 'p115_cleanup') { preview.value = null; cleanupToken.value = '' }
-    if (section === 'p115_move') moveInfo.value = null
+    const saved = result.config || value
+    if (section === 'tools') { schedule.tools.path = value.path; schedule.tools.confirm_cleanup = value.confirm_cleanup }
+    if (section === 'p115_cleanup') {
+      schedule.p115_cleanup.dir_ids = saved.dir_ids
+      schedule.p115_cleanup.dir_names = saved.dir_names
+      savedCleanupDirs.value = JSON.stringify(saved.dir_ids.map((cid, index) => ({ cid, name: saved.dir_names[index] })))
+      preview.value = null
+      cleanupToken.value = ''
+    }
+    if (section === 'p115_move') {
+      if (Number(schedule.p115_move.check_interval) === Number(originalMoveInterval)) schedule.p115_move.check_interval = saved.check_interval
+      savedMoveConfig.value = JSON.stringify(saved)
+      moveInfo.value = null
+    }
+    if (section in savedSchedule) savedSchedule[section] = JSON.stringify(saved)
     notice.value = result.message || '配置已保存'
   })
 }
@@ -756,10 +864,13 @@ async function confirmScheduled(token) {
   })
 }
 async function getPreview() {
+  if (!settingsLoaded.value) { error.value = '清理目录尚未加载，请刷新后重试'; return }
+  if (cleanupDirsDirty.value) { error.value = '清理目录有未保存的修改，请先保存配置后再预览'; return }
   cleanupToken.value = ''
   await work(async () => { preview.value = await execute('cleanup_preview') })
 }
 async function requestCleanup() {
+  if (cleanupDirsDirty.value) { error.value = '请先保存清理目录再生成清理确认'; return }
   if (!preview.value) return
   await work(async () => {
     const result = await execute('cleanup_request')
@@ -768,6 +879,7 @@ async function requestCleanup() {
   })
 }
 async function confirmCleanup() {
+  if (cleanupDirsDirty.value) { error.value = '请先保存清理目录再确认清理'; return }
   if (!window.confirm('确认删除预览中的 115 文件和文件夹？删除后会进入 115 回收站。')) return
   await work(async () => {
     const result = await execute('cleanup_confirm', { token: cleanupToken.value })
@@ -788,9 +900,13 @@ async function clearTrash() {
   })
 }
 async function getMove() {
+  if (!settingsLoaded.value) { error.value = '转存规则尚未加载，请刷新后重试'; return }
+  if (moveConfigDirty.value) { error.value = '转存规则有未保存的修改，请先保存后再查看'; return }
   await work(async () => { moveInfo.value = await execute('move_info') })
 }
 async function runMove() {
+  if (!settingsLoaded.value) { error.value = '转存规则尚未加载，请刷新后重试'; return }
+  if (moveConfigDirty.value) { error.value = '转存规则有未保存的修改，请先保存后再执行'; return }
   if (!window.confirm('按插件中已保存的转存规则立即移动源目录内容？未保存的修改不会生效。')) return
   await work(async () => {
     const result = await execute('move_run')
@@ -887,7 +1003,8 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
       <div v-if="loading" class="eme-message">正在加载插件配置…</div>
       <template v-if="active === 'missing'">
         <section class="eme-card">
-          <div class="eme-card-heading"><div><h3>运行配置</h3><p>扫描 Emby 电视剧媒体库，对照 TMDB 检测缺集；可记录或按季订阅。</p></div><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('save')">保存配置</button></div>
+          <div class="eme-card-heading"><div><h3>运行配置</h3><p>扫描 Emby 电视剧媒体库，对照 TMDB 检测缺集；可记录或按季订阅。</p></div><button class="eme-button primary" :disabled="busy || missing.scanning || !missingConfigInitialized" @click="missingCommand('save')">保存配置</button></div>
+          <p v-if="missingConfigDirty" class="eme-message eme-warning">运行配置或检测范围有未保存的修改；请点击“保存配置”，或通过“立即检测”先保存再扫描。集数修正与结果中的“跳过检测”会单独保存。</p>
           <p v-if="missing.legacy_enabled" class="eme-message eme-error">原「剧集缺集检测订阅」插件仍启用。配置与历史结果已复制到这里；请先停用原插件，再开启此处定时任务或执行自动订阅扫描，避免重复订阅。原插件数据不会被删除。</p>
           <div class="eme-options eme-settings-switches">
             <label class="eme-switch-label"><input v-model="missing.config.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时检测</span></label>
@@ -901,7 +1018,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div class="eme-fields"><label>执行周期（cron表达式）<input v-model.trim="missing.config.cron" placeholder="35 3 * * *" /></label><label>缺集处理方式<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" aria-label="缺集处理方式" :aria-expanded="missingActionPicker" @click="missingPicker.open = ''; missingActionPicker = !missingActionPicker"><span>{{ missing.config.missing_action }}</span><i class="mdi" :class="missingActionPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingActionPicker" class="eme-picker-menu" role="listbox" aria-label="缺集处理方式"><button v-for="item in missingActionOptions" :key="item" type="button" role="option" :aria-selected="missing.config.missing_action === item" class="eme-picker-option" :class="{ selected: missing.config.missing_action === item }" @click="selectMissingAction(item)"><i class="mdi" :class="missing.config.missing_action === item ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item }}</button></div></div></label></div>
           <p class="eme-hint">“标记为存在”仅记录处理结果；在检测范围新增跳过剧集并保存时，会取消该剧集已有的季度订阅；在检测结果中点击“跳过检测”只跳过扫描，不取消订阅。自动取消始终要求本地对应季度全集齐全，包括洗版订阅。整剧完结要求 TMDB 状态为 Ended；季度播完要求总集数与连续集号一致、播出日期完整、末集播出满 7 天且无本季待播集（不含特别篇）。选择“整剧完结或季度播完”时满足任一规则即可；关闭总开关后两种规则均不执行。季度模式依据 TMDB 当前资料推断，无法保证其后续不追加分集。</p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><div class="eme-inline"><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('scan')">立即检测</button><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新选项' }}</button></div></div>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><div class="eme-inline"><button class="eme-button primary" :disabled="busy || missing.scanning || !missingConfigInitialized" @click="missingCommand('scan')">立即检测</button><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新选项' }}</button></div></div>
           <div class="eme-missing-selects">
             <label>Emby 服务器（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('servers')"><span>{{ missingSelectedLabel('servers') }}</span><i class="mdi" :class="missingPicker.open === 'servers' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'servers'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索服务器" @click.stop /><button v-for="item in missingOptionItems('servers')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.server_names.includes(item.value) }" @click="toggleMissingOption('servers', item.value)"><i class="mdi" :class="missing.config.server_names.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('servers').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
             <label>电视剧媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('libraries')"><span>{{ missingSelectedLabel('libraries') }}</span><i class="mdi" :class="missingPicker.open === 'libraries' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'libraries'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索媒体库" @click.stop /><button v-for="item in missingOptionItems('libraries')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: missing.config.library_names.includes(item.value) }" @click="toggleMissingOption('libraries', item.value)"><i class="mdi" :class="missing.config.library_names.includes(item.value) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.title }}</button><p v-if="!missingOptionItems('libraries').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
@@ -931,6 +1048,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div class="eme-card-heading"><div><h3>缺集补全</h3><p>复用通用设置中的用户登录与转发 Bot，自动搜索、选剧、选择 115；点击资源前必须确认。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !fillHistoryCount" @click="clearFillHistory">清除历史任务</button><button class="eme-button secondary" :disabled="busy" @click="loadFill">刷新任务</button></div></div>
           <label for="eme-fill-max-points">单次积分上限</label>
           <div class="eme-inline eme-fill-limit-row"><input id="eme-fill-max-points" v-model.number="fillMaxPoints" type="number" min="0" max="100" aria-label="TG 补全单次积分上限" /><button class="eme-button primary" :disabled="busy || !fillLoaded" @click="fillCommand('save', { max_points: fillMaxPoints })">保存上限</button><span class="eme-hint">已保存：{{ fill.max_points }} 积分 · 未知积分禁止点击</span></div>
+          <p v-if="fillMaxPointsDirty" class="eme-message eme-warning">积分上限尚未保存，请点击“保存上限”。</p>
           <p class="eme-hint eme-fill-limit-hint">Bot 交互串行执行，期间频道转发暂缓；请勿同时手动操作此 Bot。转存依赖现有 Bot 与 MP 整理配置，不保证仅转存缺失集。</p>
           <p v-if="!fill.tasks.length" class="eme-hint">从缺集记录点击「搜索补全」开始。</p>
           <article v-for="task in fillTasksPageItems" :key="task.id" class="eme-fill-task">
@@ -949,7 +1067,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div class="eme-media-scan-grid"><div class="eme-media-library-field"><label>Emby 媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" :aria-expanded="mediaPicker.open" @click="mediaPicker.open = !mediaPicker.open; mediaPicker.query = ''"><span>{{ mediaPickerLabel() }}</span><i class="mdi" :class="mediaPicker.open ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="mediaPicker.open" class="eme-picker-menu"><input v-model="mediaPicker.query" class="eme-picker-search" placeholder="搜索服务器或媒体库" @click.stop /><button v-for="library in mediaLibraryOptions()" :key="library.id" type="button" class="eme-picker-option" :class="{ selected: mediaScanLibraryIds.includes(library.id) }" @click="toggleMediaLibrary(library.id)"><i class="mdi" :class="mediaScanLibraryIds.includes(library.id) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ library.title }}</button><p v-if="!mediaLibraryOptions().length" class="eme-picker-empty">没有匹配项</p></div></div></label></div><button class="eme-button primary" :disabled="busy || media.running || mediaScanPending" @click="startMediaScan">开始扫描</button></div>
           <div class="eme-media-scan-actions"><span class="eme-hint eme-media-scan-status">{{ media.running || mediaScanPending ? '扫描中：' + (media.progress || `正在扫描 STRM 目录（${mediaScanScopeLabel()}）`) : '上次扫描：' + (media.last_scan || '从未扫描') }}</span></div><p v-if="media.last_error" class="eme-message eme-error">扫描失败：{{ media.last_error }}</p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>定时清理</h3><p>启用后将按保存的媒体库和规则自动清理低质版本。</p></div><button class="eme-button primary" :disabled="busy || media.running" @click="mediaCommand('save', { config: media.config })">保存配置</button></div><label class="eme-switch-label"><input v-model="media.config.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清理</span></label>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>定时清理</h3><p>启用后将按保存的媒体库和规则自动清理低质版本。</p></div><button class="eme-button primary" :disabled="busy || media.running || !savedMediaConfig" @click="mediaCommand('save', { config: media.config })">保存配置</button></div><p v-if="mediaConfigDirty" class="eme-message eme-warning">媒体库、定时任务或清理规则有未保存的修改；请点击“保存配置”或在规则弹窗中点击“保存规则”。</p><label class="eme-switch-label"><input v-model="media.config.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清理</span></label>
           <div class="eme-media-schedule-grid"><div class="eme-media-library-field"><label>定时清理媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" :aria-expanded="mediaSchedulePicker.open" @click="mediaSchedulePicker.open = !mediaSchedulePicker.open; mediaSchedulePicker.query = ''"><span>{{ mediaPickerLabel('schedule') }}</span><i class="mdi" :class="mediaSchedulePicker.open ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="mediaSchedulePicker.open" class="eme-picker-menu"><input v-model="mediaSchedulePicker.query" class="eme-picker-search" placeholder="搜索服务器或媒体库" @click.stop /><button v-for="library in mediaLibraryOptions('schedule')" :key="library.id" type="button" class="eme-picker-option" :class="{ selected: media.config.library_ids.includes(library.id) }" @click="toggleMediaLibrary(library.id, 'schedule')"><i class="mdi" :class="media.config.library_ids.includes(library.id) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ library.title }}</button><p v-if="!mediaLibraryOptions('schedule').length" class="eme-picker-empty">没有匹配项</p></div></div></label></div>
           <div class="eme-media-cron-field"><label>执行周期（cron表达式）<input v-model.trim="media.config.cron" placeholder="0 3 * * *" /></label></div></div></section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>扫描结果</h3><p>已扫描 {{ media.result?.total_scanned || 0 }} 项 · 重复 {{ media.result?.duplicate_groups || 0 }} 组 · 低质版本 {{ media.result?.total_inferior || 0 }} 个</p></div><div class="eme-inline"><span v-if="mediaSelection.length" class="eme-hint">已选 {{ mediaSelection.length }} 个</span><button class="eme-button secondary" type="button" :disabled="busy || media.running || !mediaInferiorPaths.length" @click="toggleAllInferior">{{ mediaAllInferiorSelected ? '取消全选' : '全选低质' }}</button><button class="eme-button danger" :disabled="busy || media.running || !mediaSelection.length" @click="deleteMedia">删除所选（{{ mediaSelection.length }}）</button></div></div><p class="eme-hint">删除将同时操作 115 云端文件及本地 STRM；无法解析文件 ID 或缺少 Cookie 时不会删除。所有删除不可恢复。</p>
@@ -988,7 +1106,8 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         </section>
       </template>
       <section v-if="active === 'settings'" class="eme-card">
-        <div class="eme-card-heading"><h3>基础设置</h3><button class="eme-button primary" :disabled="busy" @click="saveBasicSettings">保存设置</button></div>
+        <div class="eme-card-heading"><h3>基础设置</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveBasicSettings">保存设置</button></div>
+        <p v-if="basicSettingsDirty" class="eme-message eme-warning">基础设置有未保存的修改；请点击“保存设置”。</p>
         <div class="eme-options eme-settings-switches">
           <label class="eme-switch-label"><input v-model="settings.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用插件</span></label>
           <label class="eme-switch-label"><input v-model="settings.show_sidebar_nav" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>显示 MoviePilot 侧栏入口</span></label>
@@ -997,7 +1116,8 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         <p class="eme-hint">115 Cookie：{{ settings.cookie_configured ? '已从 115 网盘 STRM 助手读取，更新后自动同步' : '未读取到，请先在 115 网盘 STRM 助手中配置 Cookie' }}。115 连接沿用 MoviePilot 容器的网络环境。</p>
       </section>
       <section v-if="active === 'settings'" class="eme-card">
-        <div class="eme-card-heading"><h3>Telegram 账号</h3><button class="eme-button primary" :disabled="busy" @click="saveTelegramSettings">保存设置</button></div>
+        <div class="eme-card-heading"><h3>Telegram 账号</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveTelegramSettings">保存设置</button></div>
+        <p v-if="telegramSettingsDirty" class="eme-message eme-warning">Telegram 凭据有未保存的修改；请点击“保存设置”后再登录或使用转发 Bot。</p>
         <p class="eme-hint">使用你自己的 Telegram 账号监听频道。请从 my.telegram.org 的 API development tools 获取 API ID 和 API Hash。</p>
         <div class="eme-settings-fields"><label>API ID<input v-model.trim="telegram.api_id" inputmode="numeric" placeholder="Telegram API ID" /></label>
           <label>API Hash<input v-model.trim="telegram.api_hash" type="password" autocomplete="new-password" :placeholder="settings.tg_api_hash_configured ? '已配置；留空保持不变' : '32 位字符串'" /></label>
@@ -1009,13 +1129,14 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <button v-else class="eme-button danger" :disabled="busy" @click="logoutTelegram">退出登录</button></div>
       </section>
       <template v-if="active === 'subscription'">
-        <section v-for="scope in ['sub', 'kw']" :key="scope" class="eme-card"><div class="eme-card-heading"><div><h3>{{ scope === 'sub' ? '订阅监控' : '关键词监控' }}</h3><p>{{ scope === 'sub' ? '按订阅名称、TMDB ID、年份、类型和季号校验频道消息。' : '按自定义关键词及黑名单筛选频道消息。' }}命中后原样转发给设置中的 Bot。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || monitor[scope].enabled" @click="saveMonitor(scope)">保存</button><button class="eme-button primary" :disabled="busy || (!monitor.logged_in && !monitor[scope].enabled)" @click="toggleMonitor(scope)">{{ monitor[scope].enabled ? '停止监控' : '启动监控' }}</button></div></div>
+        <section v-for="scope in ['sub', 'kw']" :key="scope" class="eme-card"><div class="eme-card-heading"><div><h3>{{ scope === 'sub' ? '订阅监控' : '关键词监控' }}</h3><p>{{ scope === 'sub' ? '按订阅名称、TMDB ID、年份、类型和季号校验频道消息。' : '按自定义关键词及黑名单筛选频道消息。' }}命中后原样转发给设置中的 Bot。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !monitorLoaded || monitor[scope].enabled" @click="saveMonitor(scope)">保存</button><button class="eme-button primary" :disabled="busy || !monitorLoaded || (!monitor.logged_in && !monitor[scope].enabled)" @click="toggleMonitor(scope)">{{ monitor[scope].enabled ? '停止监控' : '启动监控' }}</button></div></div>
           <p class="eme-hint">状态：{{ monitor[scope].enabled ? (monitor.logged_in && monitor.listening_channels?.[scope] ? '运行中' : '等待连接') : '已停止' }} · 已监听 {{ monitor.listening_channels?.[scope] || 0 }} / {{ drafts[scope].channels.length }} 个频道<span v-if="scope === 'sub'"> · 已读取 {{ monitor.subscription_count || 0 }} 条 MoviePilot 订阅</span><span v-if="monitor.last_poll"> · 最近检查频道 {{ monitor.last_poll }}</span><span v-if="monitor.last_event"> · 最近收到消息 {{ monitor.last_event }}</span></p>
           <p v-if="monitor.last_error" class="eme-message eme-error">{{ monitor.last_error }}</p>
           <p v-if="monitor.poll_warnings?.[scope]" class="eme-message eme-warning">{{ monitor.poll_warnings[scope] }}</p>
-          <label>监控频道（公开频道 @用户名或 t.me/链接）<div class="eme-inline"><input v-model.trim="entry[scope].channels" :disabled="monitor[scope].enabled" placeholder="@channelname" @keyup.enter="addEntry(scope, 'channels')" /><button class="eme-button secondary" :disabled="monitor[scope].enabled" @click="addEntry(scope, 'channels')">添加</button></div></label>
-          <div class="eme-chips"><span v-for="(value, index) in drafts[scope].channels" :key="value" class="eme-chip">{{ monitor.channel_titles?.[scope]?.[value] || value }}<button :disabled="monitor[scope].enabled" @click="drafts[scope].channels.splice(index, 1)">×</button></span></div>
-          <template v-if="scope === 'kw'"><div v-for="field in ['keywords', 'blacklist']" :key="field"><label>{{ field === 'keywords' ? '匹配关键词' : '排除关键词（黑名单）' }}（支持正则）<div class="eme-inline"><input v-model.trim="entry.kw[field]" :disabled="monitor.kw.enabled" :placeholder="field === 'keywords' ? '添加匹配关键词' : '添加排除关键词'" @keyup.enter="addEntry('kw', field)" /><button class="eme-button secondary" :disabled="monitor.kw.enabled" @click="addEntry('kw', field)">添加</button></div></label><div class="eme-chips"><span v-for="(value, index) in drafts.kw[field]" :key="value" class="eme-chip">{{ value }}<button :disabled="monitor.kw.enabled" @click="drafts.kw[field].splice(index, 1)">×</button></span></div></div></template>
+          <label>监控频道（公开频道 @用户名或 t.me/链接）<div class="eme-inline"><input v-model.trim="entry[scope].channels" :disabled="busy || loading || !monitorLoaded || monitor[scope].enabled" placeholder="@channelname" @keyup.enter="addEntry(scope, 'channels')" /><button class="eme-button secondary" :disabled="busy || loading || !monitorLoaded || monitor[scope].enabled" @click="addEntry(scope, 'channels')">添加</button></div></label>
+          <div class="eme-chips"><span v-for="(value, index) in drafts[scope].channels" :key="value" class="eme-chip">{{ monitor.channel_titles?.[scope]?.[value] || value }}<button :disabled="busy || loading || !monitorLoaded || monitor[scope].enabled" @click="removeEntry(scope, 'channels', index)">×</button></span></div>
+          <template v-if="scope === 'kw'"><div v-for="field in ['keywords', 'blacklist']" :key="field"><label>{{ field === 'keywords' ? '匹配关键词' : '排除关键词（黑名单）' }}（支持正则）<div class="eme-inline"><input v-model.trim="entry.kw[field]" :disabled="busy || loading || !monitorLoaded || monitor.kw.enabled" :placeholder="field === 'keywords' ? '添加匹配关键词' : '添加排除关键词'" @keyup.enter="addEntry('kw', field)" /><button class="eme-button secondary" :disabled="busy || loading || !monitorLoaded || monitor.kw.enabled" @click="addEntry('kw', field)">添加</button></div></label><div class="eme-chips"><span v-for="(value, index) in drafts.kw[field]" :key="value" class="eme-chip">{{ value }}<button :disabled="busy || loading || !monitorLoaded || monitor.kw.enabled" @click="removeEntry('kw', field, index)">×</button></span></div></div></template>
+          <p v-if="scope === 'kw'" class="eme-hint">添加或移除频道、关键词会立即保存；运行中的监控请先停止再修改。</p>
           <p v-else class="eme-hint">订阅名称和媒体资料自动从 MoviePilot「我的订阅」读取，每 5 分钟更新一次；订阅列表请在 MoviePilot 中查看。</p>
         </section>
         <section v-if="monitor.hits?.length" class="eme-card"><h3>最近命中</h3><div v-for="(hit, index) in monitor.hits" :key="index" class="eme-result">{{ hit.time }} · {{ hit.channel }} · {{ hit.matches?.join('、') }}</div></section>
@@ -1029,7 +1150,8 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
             <div class="eme-actions"><button class="eme-button danger" :disabled="busy || !selected.length || !!pendingDeleteToken" @click="deleteSelected">清理选中 {{ selected.length }} 项</button><button v-if="pendingDeleteToken" class="eme-button danger" :disabled="busy" @click="confirmDelete">确认隔离选中项目</button></div>
           </template>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>定时清理</h3><p>需要确认时先生成待办并发送 MoviePilot 通知，不直接清理。</p></div><button class="eme-button primary" :disabled="busy" @click="saveSchedule('tools')">保存任务</button></div>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>定时清理</h3><p>需要确认时先生成待办并发送 MoviePilot 通知，不直接清理。</p></div><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('tools')">保存任务</button></div>
+          <p v-if="scheduleDirty('tools')" class="eme-message eme-warning">定时清理任务有未保存的修改；请点击“保存任务”。</p>
           <label class="eme-switch-label"><input v-model="schedule.tools.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清理</span></label>
           <label>执行周期（cron表达式）<input v-model.trim="schedule.tools.cron" placeholder="0 3 * * *" /></label>
           <p class="eme-hint">保存后定时扫描目录：{{ savedStrmRoot }}（在“设置”页面更改）</p>
@@ -1040,24 +1162,26 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         </section>
       </template>
       <template v-if="active === 'cleanup'">
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>115 清理目录</h3><p>目录内的文件与子文件夹删除后进入 115 回收站。</p></div><div class="eme-inline"><button class="eme-button secondary" @click="cleanupDirs.push({ cid: '', name: '' })">添加目录</button><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_cleanup')">保存配置</button></div></div>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>115 清理目录</h3><p>目录内的文件与子文件夹删除后进入 115 回收站。</p></div><div class="eme-inline"><button class="eme-button secondary" @click="cleanupDirs.push({ cid: '', name: '' })">添加目录</button><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_cleanup')">保存配置</button></div></div>
+          <p v-if="cleanupDirsDirty" class="eme-message eme-warning">清理目录有未保存的修改；选择目录后请点击“保存配置”，未保存前不能预览或确认清理。</p>
           <div class="eme-cleanup-grid"><div v-for="(item, index) in cleanupDirs" :key="index" class="eme-cleanup-item"><button class="eme-button secondary eme-folder-choice" type="button" :title="item.name || '选择清理目录'" @click="browse('cleanup', index)">{{ item.name || '选择清理目录' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`移除清理目录 ${item.name || index + 1}`" @click="cleanupDirs.splice(index, 1)">✕</button></div></div><p v-if="!cleanupDirs.length" class="eme-hint">还没有清理目录。请添加并保存后再预览。</p>
-          <div class="eme-actions"><button class="eme-button secondary" :disabled="busy" @click="getPreview">预览待清理内容</button><template v-if="preview"><span>文件 {{ preview.file_count || 0 }} 个 · 文件夹 {{ preview.dir_count || 0 }} 个</span><button class="eme-button danger" :disabled="busy || !!cleanupToken || !(preview.file_count || preview.dir_count)" @click="requestCleanup">生成清理确认</button><button v-if="cleanupToken" class="eme-button danger" :disabled="busy" @click="confirmCleanup">确认清理文件</button></template></div>
+          <div class="eme-actions"><button class="eme-button secondary" :disabled="busy || !settingsLoaded || cleanupDirsDirty" @click="getPreview">预览待清理内容</button><template v-if="preview"><span>文件 {{ preview.file_count || 0 }} 个 · 文件夹 {{ preview.dir_count || 0 }} 个</span><button class="eme-button danger" :disabled="busy || !settingsLoaded || cleanupDirsDirty || !!cleanupToken || !(preview.file_count || preview.dir_count)" @click="requestCleanup">生成清理确认</button><button v-if="cleanupToken" class="eme-button danger" :disabled="busy || !settingsLoaded || cleanupDirsDirty" @click="confirmCleanup">确认清理文件</button></template></div>
           <p class="eme-hint">预览与清理仅针对已保存的目录，确认时将重新检查目录内容。</p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><h3>定时清理</h3><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_cleanup')">保存任务</button></div><div class="eme-options"><label class="eme-switch-label"><input v-model="schedule.p115_cleanup.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清理</span></label></div><label>执行周期（cron表达式）<input v-model.trim="schedule.p115_cleanup.cron" placeholder="0 */2 * * *" /></label></section>
+        <section class="eme-card"><div class="eme-card-heading"><h3>定时清理</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_cleanup')">保存任务</button></div><p v-if="scheduleDirty('p115_cleanup')" class="eme-message eme-warning">定时清理配置有未保存的修改；请点击“保存任务”。</p><div class="eme-options"><label class="eme-switch-label"><input v-model="schedule.p115_cleanup.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清理</span></label></div><label>执行周期（cron表达式）<input v-model.trim="schedule.p115_cleanup.cron" placeholder="0 */2 * * *" /></label></section>
       </template>
       <template v-if="active === 'trash'">
         <section class="eme-card"><div class="eme-card-heading"><div><h3>115 回收站</h3><p>清空是彻底删除，不能恢复。执行前必须核对当前数量。</p></div><button class="eme-button secondary" :disabled="busy" @click="getTrash">查询状态</button></div><div v-if="trash" class="eme-stat">当前 {{ trash.count || 0 }} 个文件 <button class="eme-button danger" :disabled="busy || !trash.count" @click="clearTrash">立即清空</button></div><p v-else class="eme-hint">请先查询回收站状态。</p></section>
-        <section class="eme-card"><div class="eme-card-heading"><h3>定时清空</h3><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_trash')">保存任务</button></div><label class="eme-switch-label"><input v-model="schedule.p115_trash.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清空（⚠️彻底删除，无法恢复）</span></label><label>执行周期（cron表达式）<input v-model.trim="schedule.p115_trash.cron" placeholder="0 3 * * *" /></label></section>
+        <section class="eme-card"><div class="eme-card-heading"><h3>定时清空</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_trash')">保存任务</button></div><p v-if="scheduleDirty('p115_trash')" class="eme-message eme-warning">回收站定时清空任务有未保存的修改；请点击“保存任务”。</p><label class="eme-switch-label"><input v-model="schedule.p115_trash.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清空（⚠️彻底删除，无法恢复）</span></label><label>执行周期（cron表达式）<input v-model.trim="schedule.p115_trash.cron" placeholder="0 3 * * *" /></label></section>
       </template>
       <template v-if="active === 'move'">
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>文件转存规则</h3><p>每条规则分别将源目录中的文件及子文件夹移动到对应目标目录。</p></div><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_move')">保存规则</button></div>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>文件转存规则</h3><p>每条规则分别将源目录中的文件及子文件夹移动到对应目标目录。</p></div><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存规则</button></div>
+          <p v-if="moveConfigDirty" class="eme-message eme-warning">转存规则或监控配置有未保存的修改；请选择完整的源和目标目录并点击“保存规则”，才能查看或执行新规则。</p>
           <div v-for="(rule, index) in rules" :key="index" class="eme-move-row"><span class="eme-move-label">源</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.src_name || '选择源目录'" @click="browse('src', index)">{{ rule.src_name || '选择源目录' }}</button><span class="eme-move-arrow" aria-hidden="true">→</span><span class="eme-move-label">目标</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.dst_name || '选择目标目录'" @click="browse('dst', index)">{{ rule.dst_name || '选择目标目录' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`移除转存规则 ${index + 1}`" @click="rules.splice(index, 1)">✕</button></div>
-          <div class="eme-actions"><button class="eme-button secondary" @click="rules.push({ src_id: '', src_name: '', dst_id: '', dst_name: '' })">添加规则</button><button class="eme-button secondary" :disabled="busy" @click="getMove">查看待转存</button><button class="eme-button secondary" :disabled="busy || !rules.length" @click="runMove">立即执行已保存规则</button></div>
+          <div class="eme-actions"><button class="eme-button secondary" @click="rules.push({ src_id: '', src_name: '', dst_id: '', dst_name: '' })">添加规则</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty" @click="getMove">查看待转存</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !rules.length" @click="runMove">立即执行已保存规则</button></div>
           <p v-if="moveInfo" class="eme-hint">上次执行：{{ moveInfo.last_run || '暂无' }}；<span v-for="(item, key) in moveInfo.pending || {}" :key="key">{{ item.name }}：{{ item.count < 0 ? item.error : `${item.count} 项` }}；</span></p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><h3>实时监控</h3><button class="eme-button primary" :disabled="busy" @click="saveSchedule('p115_move')">保存监控</button></div><label class="eme-switch-label"><input v-model="schedule.p115_move.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label>检查间隔（秒，最少 60）<input v-model.number="schedule.p115_move.check_interval" type="number" min="60" step="60" /></label></section>
+        <section class="eme-card"><div class="eme-card-heading"><h3>实时监控</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存监控</button></div><label class="eme-switch-label"><input v-model="schedule.p115_move.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label>检查间隔（秒，最少 60）<input v-model.number="schedule.p115_move.check_interval" type="number" min="60" step="60" /></label></section>
       </template>
     </main>
       <div v-if="enrichSettings.open" class="eme-overlay" @click.self="enrichSettings.open = false">
@@ -1083,7 +1207,8 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         <div class="eme-dialog eme-media-rule-dialog" role="dialog" aria-modal="true" aria-label="清理规则">
           <div class="eme-card-heading"><div><h3>清理规则</h3><p>从上到下比较规则；标签从左到右优先级递减。</p></div><button class="eme-button text" @click="mediaRulesOpen = false">关闭</button></div>
           <div class="eme-media-rule-list"><div v-for="(rule, index) in media.config.rules" :key="rule.id" class="eme-media-rule"><div class="eme-media-rule-head"><strong>{{ rule.name }}</strong><div class="eme-media-rule-arrows"><button type="button" :disabled="index === 0" title="上移规则" :aria-label="`${rule.name}上移`" @click="shiftMediaRule(index, -1)">↑</button><button type="button" :disabled="index === media.config.rules.length - 1" title="下移规则" :aria-label="`${rule.name}下移`" @click="shiftMediaRule(index, 1)">↓</button></div></div><div v-if="rule.type === 'list'" class="eme-media-options"><span v-for="(entry, rank) in rule.order" :key="entry" class="eme-media-tag" role="button" tabindex="0" draggable="true" :aria-label="`${mediaLabel(rule, entry)}，优先级 ${rank + 1}，拖动或按左右方向键调整`" title="拖动调整优先级；键盘可使用左右方向键" @dragstart="draggedMediaRank = { rule: rule.id, index: rank }" @dragend="draggedMediaRank = null" @dragover.prevent @drop.prevent="dropMediaOption(rule, rank)" @keydown.left.prevent="shiftMediaRule(rank, -1, rule.id)" @keydown.right.prevent="shiftMediaRule(rank, 1, rule.id)"><span class="eme-media-tag-rank">{{ rank + 1 }}</span>{{ mediaLabel(rule, entry) }}</span></div><div v-else class="eme-media-directions"><button type="button" :class="{ selected: rule.direction === 'desc' }" @click="rule.direction = 'desc'">{{ rule.id === 'size' ? '大文件优先' : '高码率优先' }}</button><button type="button" :class="{ selected: rule.direction === 'asc' }" @click="rule.direction = 'asc'">{{ rule.id === 'size' ? '小文件优先' : '低码率优先' }}</button></div></div></div>
-          <div class="eme-media-rule-footer"><button class="eme-button secondary" :disabled="busy || media.running" @click="mediaCommand('reset_rules')">恢复默认</button><button class="eme-button primary" :disabled="busy || media.running" @click="mediaCommand('save', { config: { rules: media.config.rules } })">保存规则</button></div>
+          <p class="eme-hint">排序、方向和“恢复默认”只更新草稿；点击“保存规则”后才会写入插件配置。</p>
+          <div class="eme-media-rule-footer"><button class="eme-button secondary" :disabled="busy || media.running || !savedMediaConfig" @click="mediaCommand('reset_rules')">恢复默认</button><button class="eme-button primary" :disabled="busy || media.running || !savedMediaConfig" @click="mediaCommand('save', { config: { rules: media.config.rules } })">保存规则</button></div>
         </div>
       </div>
       <div v-if="folder.open" class="eme-overlay" @click.self="folder.open = false">

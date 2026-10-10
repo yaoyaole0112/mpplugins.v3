@@ -26,7 +26,7 @@ function fixture() {
       try { await callback() } catch (error) { context.error.value = error.message }
     },
   })
-  vm.runInContext(`let missingConfigInitialized = true; let missingSavedConfig = ${JSON.stringify(JSON.stringify(stored))}; ${functions}`, context)
+  vm.runInContext(`const missingConfigInitialized = { value: true }; const missingSavedConfig = { value: ${JSON.stringify(JSON.stringify(stored))} }; ${functions}`, context)
   return { context, missing, draft, stored, calls, fail: () => { failSave = true } }
 }
 
@@ -38,7 +38,7 @@ test('adding and updating an override saves immediately without saving other dra
   assert.equal(missing.config.cron, '0 4 * * *')
   assert.equal(calls[0].path, 'missing/action')
   assert.deepEqual(Object.keys(calls[0].body.config), ['episode_overrides'])
-  assert.equal(JSON.parse(vm.runInContext('missingSavedConfig', context)).cron, '35 3 * * *')
+  assert.equal(JSON.parse(vm.runInContext('missingSavedConfig.value', context)).cron, '35 3 * * *')
   assert.deepEqual(structuredClone(missing.config.episode_overrides), stored.episode_overrides)
   draft.tmdb_id = '12345'
   draft.season = 3

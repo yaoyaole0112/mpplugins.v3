@@ -11,6 +11,7 @@ function fixture(accepted = true) {
   const prompts = []
   const context = vm.createContext({
     fill: { tasks: [], max_points: 4 }, fillLoaded: { value: true }, fillMaxPoints: { value: 4 },
+    fillMaxPointsDirty: { value: false },
     active: { value: 'subscription' }, error: { value: '' }, notice: { value: '' },
     fillPollTimer: null, setTimeout() {}, clearTimeout() {}, loadMissing: async () => {},
     get: async () => ({ tasks: [], busy: false, max_points: 4 }), work: async callback => callback(),
@@ -45,6 +46,15 @@ test('free resource confirmation keeps zero cost and explicit consent', async ()
   assert.match(prompts[0], /扣除 0 积分/)
   assert.equal(calls[0].option_id, 'free')
   assert.equal(calls[0].confirmed, true)
+})
+
+test('unsaved point limit blocks resource submission', async () => {
+  const { context, calls } = fixture()
+  context.fillMaxPointsDirty.value = true
+  await context.fillCommand('start', { record })
+  await context.fillCommand('confirm', { task_id: 'task', option_id: 'option', confirmed: true })
+  assert.equal(calls.length, 0)
+  assert.match(context.error.value, /先保存上限/)
 })
 
 test('limit label sits outside the centered controls row', () => {
