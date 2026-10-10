@@ -213,6 +213,17 @@ class PluginTests(unittest.TestCase):
             self.run_async(self.plugin.missing_action({"operation": "skip_series", "tmdb_id": "123"}))
         self.assertEqual(error.exception.status_code, 409)
 
+    def test_partial_episode_override_save_persists_without_overwriting_other_settings(self):
+        self.plugin._missing_config["cron"] = "5 4 * * *"
+        override = {"tmdb_id": "12345", "season": 3, "total_episodes": 41}
+        with patch("emetools.Scheduler"):
+            response = self.run_async(self.plugin.missing_action({
+                "operation": "save", "config": {"episode_overrides": [override]},
+            }))
+        self.assertEqual(response["config"]["episode_overrides"], [override])
+        self.assertEqual(self.plugin.update_config.call_args.args[0]["missing"]["cron"], "5 4 * * *")
+        self.assertEqual(self.plugin._missing._episode_overrides[("12345", 3)]["total_episodes"], 41)
+
     def test_missing_auto_cancel_setting_is_persisted(self):
         with patch("emetools.Scheduler"):
             self.run_async(self.plugin.missing_action({

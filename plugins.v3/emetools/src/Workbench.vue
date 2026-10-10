@@ -510,23 +510,41 @@ function openMissingPicker(type) {
 function episodeOverrideTitle(tmdbId) {
   return missingOptions.series.find(item => item.value === tmdbId)?.title || `TMDB ${tmdbId}`
 }
-function addEpisodeOverride() {
+async function saveEpisodeOverrides(overrides, message) {
+  if (busy.value || missing.scanning || !missingConfigInitialized) return
+  await work(async () => {
+    const result = await post('missing/action', { operation: 'save', config: { episode_overrides: overrides } })
+    const savedOverrides = result.config.episode_overrides
+    missing.config.episode_overrides = savedOverrides.map(item => ({ ...item }))
+    missingSavedConfig = JSON.stringify({ ...JSON.parse(missingSavedConfig), episode_overrides: savedOverrides })
+    notice.value = message
+  })
+}
+async function addEpisodeOverride() {
   const tmdbId = String(episodeOverrideDraft.tmdb_id || '').trim()
   const season = Number(episodeOverrideDraft.season)
   const totalEpisodes = Number(episodeOverrideDraft.total_episodes)
   if (!tmdbId) { error.value = '请选择需要修正集数的剧集'; return }
   if (!Number.isInteger(season) || season < 0 || season > 99) { error.value = '季号应为 0–99 的整数'; return }
   if (!Number.isInteger(totalEpisodes) || totalEpisodes < 1 || totalEpisodes > 999) { error.value = '正确总集数应为 1–999 的整数'; return }
-  const overrides = missing.config.episode_overrides || (missing.config.episode_overrides = [])
+  if (busy.value || missing.scanning || !missingConfigInitialized) return
+  const overrides = (missing.config.episode_overrides || []).map(item => ({ ...item }))
   const existing = overrides.find(item => item.tmdb_id === tmdbId && Number(item.season) === season)
   if (existing) existing.total_episodes = totalEpisodes
   else overrides.push({ tmdb_id: tmdbId, season, total_episodes: totalEpisodes })
-  episodeOverrideDraft.tmdb_id = ''
-  episodeOverrideDraft.season = 1
-  episodeOverrideDraft.total_episodes = 1
+  await saveEpisodeOverrides(overrides, '集数修正已保存，重新检测后生效')
+  if (!error.value) {
+    episodeOverrideDraft.tmdb_id = ''
+    episodeOverrideDraft.season = 1
+    episodeOverrideDraft.total_episodes = 1
+  }
 }
-function removeEpisodeOverride(index) {
-  missing.config.episode_overrides.splice(index, 1)
+async function removeEpisodeOverride(index) {
+  if (busy.value || missing.scanning || !missingConfigInitialized) return
+  const overrides = (missing.config.episode_overrides || []).map(item => ({ ...item }))
+  if (index < 0 || index >= overrides.length) return
+  overrides.splice(index, 1)
+  await saveEpisodeOverrides(overrides, '集数修正已删除，重新检测后生效')
 }
 function selectMissingAction(value) {
   missing.config.missing_action = value
@@ -895,12 +913,12 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
               <label>剧集<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="openMissingPicker('override-series')"><span>{{ episodeOverrideDraft.tmdb_id ? episodeOverrideTitle(episodeOverrideDraft.tmdb_id) : '请选择剧集' }}</span><i class="mdi" :class="missingPicker.open === 'override-series' ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingPicker.open === 'override-series'" class="eme-picker-menu"><input v-model="missingPicker.query" class="eme-picker-search" placeholder="搜索剧集名称或 TMDB ID" @click.stop /><button v-for="item in missingOptionItems('series')" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: episodeOverrideDraft.tmdb_id === item.value }" @click="episodeOverrideDraft.tmdb_id = item.value; missingPicker.open = ''"><i class="mdi" :class="episodeOverrideDraft.tmdb_id === item.value ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item.title }}</button><p v-if="!missingOptionItems('series').length" class="eme-picker-empty">没有匹配项</p></div></div></label>
               <label>季号<input v-model.number="episodeOverrideDraft.season" type="number" min="0" max="99" step="1" /></label>
               <label>正确总集数<input v-model.number="episodeOverrideDraft.total_episodes" type="number" min="1" max="999" step="1" /></label>
-              <button type="button" class="eme-button secondary" @click="addEpisodeOverride">添加修正</button>
+              <button type="button" class="eme-button secondary" :disabled="busy || missing.scanning || !missingConfigInitialized" @click="addEpisodeOverride">添加修正</button>
             </div>
             <div v-if="missing.config.episode_overrides.length" class="eme-episode-override-list">
-              <div v-for="(item, index) in missing.config.episode_overrides" :key="`${item.tmdb_id}-${item.season}`" class="eme-episode-override-row"><span>{{ episodeOverrideTitle(item.tmdb_id) }} · S{{ String(item.season).padStart(2, '0') }} · 正确 {{ item.total_episodes }} 集</span><button type="button" class="eme-remove" @click="removeEpisodeOverride(index)"><i class="mdi mdi-close" />删除</button></div>
+              <div v-for="(item, index) in missing.config.episode_overrides" :key="`${item.tmdb_id}-${item.season}`" class="eme-episode-override-row"><span>{{ episodeOverrideTitle(item.tmdb_id) }} · S{{ String(item.season).padStart(2, '0') }} · 正确 {{ item.total_episodes }} 集</span><button type="button" class="eme-remove" :disabled="busy || missing.scanning || !missingConfigInitialized" @click="removeEpisodeOverride(index)"><i class="mdi mdi-close" />删除</button></div>
             </div>
-            <p class="eme-hint">例如《半熟恋人》第五季实际为 28 集，可设置为 S05、28；保存后重新检测生效，也会用于按季订阅的总集数。</p>
+            <p class="eme-hint">例如《半熟恋人》第五季实际为 28 集，可设置为 S05、28；添加或删除修正会立即保存，重新检测后生效，也会用于按季订阅的总集数。</p>
             <p v-if="missing.config.auto_episode_correction" class="eme-hint">参考 ETK 的豆瓣集数查询思路：非首季单独按季匹配，优先读取豆瓣明确总集数；仅在可靠匹配且豆瓣集数低于 TMDB 时自动下修。高于 TMDB、动画类型或数据不可用时保留 TMDB，避免误判缺集。媒体库集号只参与比对；手动修正优先级最高。</p>
           </div>
         </section>
