@@ -188,6 +188,31 @@ class PluginTests(unittest.TestCase):
         self.plugin._missing.scan_missing_episodes.assert_called_once()
         self.assertEqual(self.run_async(self.plugin.missing_status())["finished_scan_id"], 1)
 
+    def test_skip_detected_series_persists_and_removes_all_its_seasons(self):
+        self.plugin._missing._results = [
+            {"TmdbId": "123", "SeasonNum": 1}, {"TmdbId": "123", "SeasonNum": 2},
+            {"TmdbId": "456", "SeasonNum": 1},
+        ]
+        with patch("emetools.Scheduler"), patch.object(
+            self.plugin._missing, "_cancel_skipped_subscriptions"
+        ) as cancel:
+            result = self.run_async(self.plugin.missing_action({"operation": "skip_series", "tmdb_id": "123"}))
+        self.assertEqual(result["config"]["skip_series_ids"], ["123"])
+        self.assertEqual(self.plugin._missing._results, [{"TmdbId": "456", "SeasonNum": 1}])
+        self.plugin.save_data.assert_any_call("missing_episodes", [{"TmdbId": "456", "SeasonNum": 1}])
+        self.assertEqual(self.plugin.update_config.call_args.args[0]["missing"]["skip_series_ids"], ["123"])
+        cancel.assert_not_called()
+
+    def test_skip_series_rejects_missing_id_and_active_scan(self):
+        self.plugin._missing._results = [{"TmdbId": "123"}]
+        with self.assertRaises(HTTPException) as error:
+            self.run_async(self.plugin.missing_action({"operation": "skip_series", "tmdb_id": "456"}))
+        self.assertEqual(error.exception.status_code, 400)
+        self.plugin._missing._is_scanning = True
+        with self.assertRaises(HTTPException) as error:
+            self.run_async(self.plugin.missing_action({"operation": "skip_series", "tmdb_id": "123"}))
+        self.assertEqual(error.exception.status_code, 409)
+
     def test_missing_auto_cancel_setting_is_persisted(self):
         with patch("emetools.Scheduler"):
             self.run_async(self.plugin.missing_action({

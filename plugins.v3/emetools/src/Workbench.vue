@@ -588,6 +588,17 @@ function clearFillHistory() {
 function changeMissingResultsPage(delta) {
   missingResultsPage.value = Math.max(1, Math.min(missingResultsPageCount.value, missingResultsPage.value + delta))
 }
+async function skipMissingSeries(item) {
+  if (!window.confirm(`跳过《${item.SeriesName}》的缺集检测？该剧集所有季度将不再检测。`)) return
+  await work(async () => {
+    const result = await post('missing/action', { operation: 'skip_series', tmdb_id: String(item.TmdbId) })
+    notice.value = result.message
+    await loadMissing()
+    missing.config.skip_series_ids = [...new Set([...missing.config.skip_series_ids, String(item.TmdbId)])]
+    missingSavedConfig = JSON.stringify(result.config)
+    missingResultsPage.value = Math.max(1, Math.min(missingResultsPage.value, missingResultsPageCount.value))
+  })
+}
 function changeFillTasksPage(delta) {
   fillTasksPage.value = Math.max(1, Math.min(fillTasksPageCount.value, fillTasksPage.value + delta))
 }
@@ -870,7 +881,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           </div>
           <div v-if="missing.config.auto_cancel_enabled" class="eme-fields"><label>自动取消判定方式<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" aria-label="自动取消判定方式" :aria-expanded="missingCancelPicker" @click="missingCancelPicker = !missingCancelPicker"><span>{{ missingCancelLabel }}</span><i class="mdi" :class="missingCancelPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingCancelPicker" class="eme-picker-menu" role="listbox" aria-label="自动取消判定方式"><button v-for="item in missingCancelModes" :key="item.value" type="button" role="option" :aria-selected="missing.config.auto_cancel_mode === item.value" class="eme-picker-option" :class="{ selected: missing.config.auto_cancel_mode === item.value }" @click="missing.config.auto_cancel_mode = item.value; missingCancelPicker = false"><i class="mdi" :class="missing.config.auto_cancel_mode === item.value ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item.title }}</button></div></div></label></div>
           <div class="eme-fields"><label>执行周期（cron表达式）<input v-model.trim="missing.config.cron" placeholder="35 3 * * *" /></label><label>缺集处理方式<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" aria-label="缺集处理方式" :aria-expanded="missingActionPicker" @click="missingPicker.open = ''; missingActionPicker = !missingActionPicker"><span>{{ missing.config.missing_action }}</span><i class="mdi" :class="missingActionPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="missingActionPicker" class="eme-picker-menu" role="listbox" aria-label="缺集处理方式"><button v-for="item in missingActionOptions" :key="item" type="button" role="option" :aria-selected="missing.config.missing_action === item" class="eme-picker-option" :class="{ selected: missing.config.missing_action === item }" @click="selectMissingAction(item)"><i class="mdi" :class="missing.config.missing_action === item ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item }}</button></div></div></label></div>
-          <p class="eme-hint">“标记为存在”仅记录处理结果；新增跳过剧集并保存时，会取消该剧集已有的季度订阅。自动取消始终要求本地对应季度全集齐全，包括洗版订阅。整剧完结要求 TMDB 状态为 Ended；季度播完要求总集数与连续集号一致、播出日期完整、末集播出满 7 天且无本季待播集（不含特别篇）。选择“整剧完结或季度播完”时满足任一规则即可；关闭总开关后两种规则均不执行。季度模式依据 TMDB 当前资料推断，无法保证其后续不追加分集。</p>
+          <p class="eme-hint">“标记为存在”仅记录处理结果；在检测范围新增跳过剧集并保存时，会取消该剧集已有的季度订阅；在检测结果中点击“跳过检测”只跳过扫描，不取消订阅。自动取消始终要求本地对应季度全集齐全，包括洗版订阅。整剧完结要求 TMDB 状态为 Ended；季度播完要求总集数与连续集号一致、播出日期完整、末集播出满 7 天且无本季待播集（不含特别篇）。选择“整剧完结或季度播完”时满足任一规则即可；关闭总开关后两种规则均不执行。季度模式依据 TMDB 当前资料推断，无法保证其后续不追加分集。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测范围</h3><p>服务器、媒体库不选即检测所有可用的 Emby 电视剧媒体库。</p></div><div class="eme-inline"><button class="eme-button primary" :disabled="busy || missing.scanning" @click="missingCommand('scan')">立即检测</button><button class="eme-button secondary" :disabled="missingOptionsLoading" @click="loadMissingOptions">{{ missingOptionsLoading ? '读取中…' : '刷新选项' }}</button></div></div>
           <div class="eme-missing-selects">
@@ -894,7 +905,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           </div>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测结果</h3><p>{{ missing.scanning ? '后台扫描中' : `上次扫描：${missing.last_scan_time}` }} · {{ missing.results.length }} 条缺失季 · 自动取消 {{ missing.cancelled_subscriptions.length }} 个订阅</p></div><div class="eme-inline"><button class="eme-button danger" :disabled="busy || missing.scanning || !missing.results.length" @click="clearMissing">清理检查记录</button><button class="eme-button secondary" :disabled="busy" @click="loadMissing">刷新结果</button></div></div>
-          <div v-if="missing.results.length" class="eme-missing-results"><table><thead><tr><th>服务器</th><th>媒体库</th><th>剧集名称</th><th>在播状态</th><th>缺失季度</th><th>缺失集号</th><th>总集数</th><th>处理结果</th><th>资源补全</th></tr></thead><tbody><tr v-for="item in missingResultsPageItems" :key="fillKey(item).join(':')"><td>{{ item.ServerName }}</td><td>{{ item.LibraryName }}</td><td>{{ item.SeriesName }}</td><td><span class="eme-air-status" :class="airingClass(item.AiringStatus)">{{ item.AiringStatus || '未知' }}</span></td><td>{{ item.SeasonFormatted }}</td><td>{{ item.MissingEpisodes }}</td><td>{{ item.TotalEpisodes }} 集</td><td>{{ item.ActionResult }}</td><td><button class="eme-button secondary" :disabled="busy || !fillLoaded || fill.busy || missing.scanning || fillBlocked(item)" @click="fillCommand('start', { key: fillKey(item) })">{{ fillBlocked(item) ? '已执行' : '搜索补全' }}</button></td></tr></tbody></table>
+          <div v-if="missing.results.length" class="eme-missing-results"><table><thead><tr><th>服务器</th><th>媒体库</th><th>剧集名称</th><th>在播状态</th><th>缺失季度</th><th>缺失集号</th><th>总集数</th><th>资源补全</th><th>跳过检测</th></tr></thead><tbody><tr v-for="item in missingResultsPageItems" :key="fillKey(item).join(':')"><td>{{ item.ServerName }}</td><td>{{ item.LibraryName }}</td><td>{{ item.SeriesName }}</td><td><span class="eme-air-status" :class="airingClass(item.AiringStatus)">{{ item.AiringStatus || '未知' }}</span></td><td>{{ item.SeasonFormatted }}</td><td>{{ item.MissingEpisodes }}</td><td>{{ item.TotalEpisodes }} 集</td><td><button class="eme-button secondary" :disabled="busy || !fillLoaded || fill.busy || missing.scanning || fillBlocked(item)" @click="fillCommand('start', { key: fillKey(item) })">{{ fillBlocked(item) ? '已执行' : '搜索补全' }}</button></td><td><button class="eme-button secondary" :disabled="busy || missing.scanning || !item.TmdbId" @click="skipMissingSeries(item)">跳过检测</button></td></tr></tbody></table>
             <nav v-if="missingResultsPageCount > 1" class="eme-pagination" aria-label="检测结果分页"><button class="eme-button secondary" :disabled="missingResultsPage <= 1" @click="changeMissingResultsPage(-1)"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ missingResultsPage }} / {{ missingResultsPageCount }} 页 · 共 {{ missing.results.length }} 条</span><button class="eme-button secondary" :disabled="missingResultsPage >= missingResultsPageCount" @click="changeMissingResultsPage(1)">下一页<i class="mdi mdi-chevron-right" /></button></nav>
           </div><p v-else class="eme-hint">暂无缺失数据或尚未运行扫描。</p>
         </section>
@@ -1215,14 +1226,14 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-missing-results th:nth-child(5){width:9%}
 .eme-missing-results th:nth-child(6){width:10%}
 .eme-missing-results th:nth-child(7){width:8%}
-.eme-missing-results th:nth-child(8){width:15%}
-.eme-missing-results th:nth-child(9){width:10%}
+.eme-missing-results th:nth-child(8){width:12%}
+.eme-missing-results th:nth-child(9){width:13%}
 .eme-missing-results td{overflow-wrap:anywhere}
 .eme-app-page-host,.eme-dialog-page-root{box-sizing:border-box;width:100%;height:100%;min-width:0;min-height:100%;background:rgb(var(--v-theme-background))}
 .eme-shell--app{box-sizing:border-box;gap:22px;padding:18px 22px 22px;min-height:0;width:100%;max-width:100%;overflow:hidden}
 .eme-shell--app .eme-sidebar{width:260px;padding:0;overflow:visible;border-right:0}
 .eme-shell--app .eme-brand{padding:0 12px 16px;margin-bottom:0}
-.eme-shell--app .eme-main{padding:44px 0 20px}
+.eme-shell--app .eme-main{padding:44px 16px 20px 0;scrollbar-gutter:stable}
 .eme-shell--app .eme-sidebar-card{overflow:visible}
 .eme-shell--dialog{box-sizing:border-box;gap:22px;padding:22px 28px 26px;min-height:100%;width:100%;height:100%;overflow:hidden;background:rgb(var(--v-theme-background))}
 .eme-shell--dialog .eme-sidebar{width:260px;padding:0;overflow:visible;border-right:0}

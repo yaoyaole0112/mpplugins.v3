@@ -88,6 +88,11 @@ test('template blocks unknown cost, excess cost, wrong coverage and repeated res
 })
 
 test('missing results and fill task history use horizontal pagination', () => {
+  assert.ok(source.includes('<th>资源补全</th><th>跳过检测</th>'))
+  assert.ok(!source.includes('<th>处理结果</th>'))
+  assert.ok(source.includes('@click="skipMissingSeries(item)"'))
+  assert.ok(source.includes("operation: 'skip_series'"))
+  assert.ok(source.includes('.eme-shell--app .eme-main{padding:44px 16px 20px 0;scrollbar-gutter:stable}'))
   assert.ok(source.includes('.eme-missing-results table{table-layout:fixed}'))
   assert.ok(source.includes('.eme-missing-results th:nth-child(3){width:20%}'))
   assert.ok(source.includes('const missingResultsPageSize = 6'))
