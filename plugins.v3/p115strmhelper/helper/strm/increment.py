@@ -1,6 +1,5 @@
 from sys import platform as sys_platform
 from collections import deque
-from functools import partial
 from itertools import batched
 from os import close, O_CREAT, O_RDWR, open as os_open
 from pathlib import Path
@@ -11,12 +10,12 @@ from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Tup
 from urllib.error import HTTPError
 
 from p115client import P115Client
-from p115client.exception import P115OSError
+from p115client.exception import P115FileTooBig, P115OSError
 from p115client.tool.attr import normalize_attr
 from p115client.tool.export_dir import (
     export_dir_start,
     export_dir_status,
-    export_dir_parse_iter,
+    export_dir_iter_line,
     export_dir_parse_iter_path,
 )
 from p115client.tool.fs_files import fs_files_iter
@@ -229,11 +228,12 @@ class IncrementSyncStrmHelper:
 
         return _tick
 
-    def __wait_export_dir(self, export_id: int | str) -> None:
+    def __wait_export_dir(self, export_id: int | str) -> int:
         """
         轮询等待 115 云端导出目录树任务完成
 
         :param export_id: 导出目录树任务 id
+        :return: 导出文件 ID
         :raises TimeoutError: 超过配置的超时时间仍未完成
         """
         timeout = configer.increment_sync_itertree_timeout_seconds
@@ -247,11 +247,38 @@ class IncrementSyncStrmHelper:
             )
             self.api_count += 1
             if status.get("file_id"):
-                return
+                return int(status["file_id"])
             if expired_t is not None and perf_counter() >= expired_t:
                 raise TimeoutError(export_id)
             wait_logger()
             sleep(1)
+
+    def __iter_export_dir_paths(
+        self, export_id: int | str, escape: Callable[[str], str]
+    ) -> Iterator[str]:
+        file_id = self.__wait_export_dir(export_id)
+        try:
+            try:
+                url = self.client.download_url(file_id, app="web")
+            except P115FileTooBig:
+                url = self.client.download_url(file_id, app="android")
+            self.api_count += 1
+            export_file = self.client.open(url)
+            try:
+                yield from export_dir_parse_iter_path(
+                    export_dir_iter_line(export_file), escape=escape
+                )
+            finally:
+                try:
+                    export_file.close()
+                except Exception as e:
+                    logger.warning(f"【增量STRM生成】关闭导出文件 {file_id} 失败: {e}")
+        finally:
+            try:
+                self.client.fs_delete(file_id, **configer.get_ios_ua_app(app=False))
+                self.api_count += 1
+            except Exception as e:
+                logger.warning(f"【增量STRM生成】清理导出文件 {file_id} 失败: {e}")
 
     def __itertree(
         self, pan_path: str, local_path: str
@@ -269,6 +296,7 @@ class IncrementSyncStrmHelper:
 
         lock_path = configer.PLUGIN_TEMP_PATH / "export_dir.lock"
         lock_fd = os_open(str(lock_path), O_CREAT | O_RDWR)
+        items_iterator = None
 
         try:
             _flock_ex(lock_fd)
@@ -300,15 +328,7 @@ class IncrementSyncStrmHelper:
             )
             self.api_count += 1
 
-            self.__wait_export_dir(export_id)
-
-            items_iterator = export_dir_parse_iter(
-                self.client,
-                export_id,
-                parse_iter=partial(export_dir_parse_iter_path, escape=custom_escape),
-                delete=True,
-                **configer.get_ios_ua_app(app=False),
-            )
+            items_iterator = self.__iter_export_dir_paths(export_id, custom_escape)
             try:
                 next(items_iterator)
                 relative_path = next(items_iterator)
@@ -352,8 +372,12 @@ class IncrementSyncStrmHelper:
             if previous_item is not None:
                 yield from process_file_item(previous_item)
         finally:
-            _flock_un(lock_fd)
-            close(lock_fd)
+            try:
+                if items_iterator is not None:
+                    items_iterator.close()
+            finally:
+                _flock_un(lock_fd)
+                close(lock_fd)
 
     def __iterdir(self, cid: int, path: str) -> Iterator[Dict[str, Any]]:
         """
@@ -667,7 +691,7 @@ class IncrementSyncStrmHelper:
                     self.pan_to_local_tree.switch_storage("txt")
                     self.pan_to_local_strm_tree.switch_storage("txt")
                 else:
-                    logger.error(
+                    logger.exception(
                         f"【增量STRM生成】网盘目录树生成 {pan_media_dir} 错误: {e}"
                     )
                     raise ItertreeInternalError(
