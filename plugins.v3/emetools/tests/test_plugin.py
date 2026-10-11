@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from emetools import EmeTools, ScheduleChange, ToolAction, _log_label
+from emetools import EmeTools, ScheduleChange, ToolAction, EnrichmentAction, _log_label
 from emetools.invalid_data import InvalidDataCleaner, QUARANTINE
 from emetools.p115 import P115Client
 from emetools.subscription_monitor import matches_subscription, matches_keyword, normalize_channel
@@ -121,6 +121,25 @@ class P115ParseTests(unittest.TestCase):
 
 
 class PluginTests(unittest.TestCase):
+    def test_preview_preference_persists_and_survives_other_settings(self):
+        result = self.run_async(self.plugin.enrichment_action(
+            EnrichmentAction(operation='preview_preferences', force=True)))
+        self.assertTrue(result['preview_force'])
+        self.assertTrue(self.run_async(self.plugin.enrichment_status())['preview_force'])
+        self.run_async(self.plugin.save_enrichment_config({'max_actors': 12}))
+        persisted = self.plugin.update_config.call_args.args[0]['enrichment']
+        self.assertTrue(persisted['preview_force'])
+        with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()):
+            self.plugin.init_plugin({'strm_root': self.directory.name, 'enrichment': persisted})
+        self.assertTrue(self.run_async(self.plugin.enrichment_status())['preview_force'])
+
+    def test_preview_preference_rolls_back_if_persistence_fails(self):
+        with patch.object(self.plugin, '_persist', side_effect=RuntimeError('save failed')):
+            with self.assertRaises(HTTPException):
+                self.run_async(self.plugin.enrichment_action(
+                    EnrichmentAction(operation='preview_preferences', force=True)))
+        self.assertFalse(self.plugin._enrichment_config['preview_force'])
+
     def test_enrichment_settings_are_validated_and_persisted(self):
         response = self.run_async(self.plugin.save_enrichment_config({"max_actors": 12, "no_avatar": False}))
         self.assertEqual(response["config"]["max_actors"], 12)

@@ -12,11 +12,33 @@ test('manual force can select an existing DoVi thumbnail missed by automatic det
   assert.equal(disabled(episode, false), true)
   assert.equal(disabled(episode, true), false)
   assert.equal(disabled({ ...episode, status: 'candidate' }, false), false)
-  assert.equal(disabled({ ...episode, status: 'missing', has_thumb: false }, true), true)
+  assert.equal(disabled({ ...episode, status: 'missing', has_thumb: false }, false), false)
   assert.equal(disabled({ ...episode, dovi: false }, true), true)
 })
 
 test('preview UI does not equate a negative heuristic result with guaranteed normal color', () => {
   assert.ok(source.includes("keep: '未检出明显偏色'"))
   assert.ok(source.includes('偏色检测为启发式判断，可能漏检'))
+})
+
+test('force preference saves remotely and rolls back checkbox on failure', async () => {
+  const body = source.match(/async function savePreviewForce\(event\) \{([\s\S]*?)\n\}/)[1]
+  const context = {
+    enrich: { force: false, forceSaving: false }, enrichSettings: { draft: {} },
+    notice: { value: '' }, error: { value: '' },
+    post: async (path, payload) => {
+      assert.equal(path, 'enrichment/action')
+      assert.equal(payload.operation, 'preview_preferences')
+      return { preview_force: payload.force }
+    },
+  }
+  const save = vm.runInNewContext(`(async function(event) {${body}})`, context)
+  await save({ target: { checked: true } })
+  assert.equal(context.enrich.force, true)
+  context.post = async () => { throw new Error('save failed') }
+  const event = { target: { checked: false } }
+  await save(event)
+  assert.equal(event.target.checked, true)
+  assert.equal(context.enrich.forceSaving, false)
+  assert.equal(context.error.value, 'save failed')
 })

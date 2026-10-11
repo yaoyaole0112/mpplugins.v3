@@ -476,7 +476,7 @@ class EnrichmentTests(unittest.TestCase):
             asyncio.run(self.enrichment._trigger_keeper_thumbnails(client))
         self.assertEqual(client.path, 'ScheduledTasks/Running/keeper-task')
 
-    def test_batch_preview_only_repairs_existing_suspected_images(self):
+    def test_batch_preview_repairs_missing_and_suspected_images(self):
         async def scan(series_id):
             self.enrichment._preview_selection = {
                 f'{series_id}::ep1': {'path': str(self.strm)},
@@ -485,7 +485,7 @@ class EnrichmentTests(unittest.TestCase):
                     {'id': f'{series_id}::ep2', 'status': 'candidate'}]
 
         async def repair(series_id, targets, force):
-            self.assertEqual([key for key, _ in targets], [f'{series_id}::ep2'])
+            self.assertEqual([key for key, _ in targets], [f'{series_id}::ep1', f'{series_id}::ep2'])
             self.assertFalse(force)
             self.enrichment.state['preview_result'] = {'ok': 1, 'fail': 0}
 
@@ -1081,7 +1081,7 @@ class EnrichmentTests(unittest.TestCase):
         image.save(thumb)
         self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), '')
 
-    def test_manual_force_allows_existing_dovi_image_but_not_missing_image(self):
+    def test_manual_force_allows_existing_dovi_and_missing_needs_no_force(self):
         from PIL import Image
         thumb = str(self.strm)[:-5] + '-thumb.jpg'
         Image.new('RGB', (200, 200), (100, 100, 100)).save(thumb)
@@ -1094,8 +1094,22 @@ class EnrichmentTests(unittest.TestCase):
             self.enrichment.start_preview_repair('Q4::series', ['Q4::ep1'], force=True)
             begin.assert_called_once()
             os.unlink(thumb)
-            with self.assertRaisesRegex(ValueError, '没有检测到'):
-                self.enrichment.start_preview_repair('Q4::series', ['Q4::ep1'], force=True)
+            self.enrichment.start_preview_repair('Q4::series', ['Q4::ep1'], force=False)
+            self.assertFalse(begin.call_args.args[-1])
+
+    def test_missing_thumbnail_created_while_queued_is_not_overwritten(self):
+        from PIL import Image
+        thumb = self.strm.with_name(self.strm.stem + '-thumb.jpg')
+        Image.new('RGB', (200, 200), (50, 180, 50)).save(thumb)
+        original = thumb.read_bytes()
+        with patch('emetools.data_enrichment._frame_host_root', return_value=self.temp.name), \
+             patch('emetools.data_enrichment._docker', return_value=SimpleNamespace()), \
+             patch('emetools.data_enrichment._docker_job') as job, \
+             patch.object(self.enrichment, 'scan_preview', new_callable=AsyncMock):
+            asyncio.run(self.enrichment._repair_preview('Q4::series', [
+                ('Q4::ep1', {'path': str(self.strm), 'status': 'missing'})], force=True))
+        job.assert_not_called()
+        self.assertEqual(thumb.read_bytes(), original)
 
     def test_server_image_detection_is_not_discarded_by_local_thumbnail_recheck(self):
         from PIL import Image
@@ -1241,7 +1255,7 @@ class EnrichmentTests(unittest.TestCase):
              patch.object(self.enrichment, 'scan_preview', new_callable=AsyncMock), \
              patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock) as sleep:
             asyncio.run(self.enrichment._repair_preview('Q4::series', [
-                ('Q4::ep1', {'path': str(self.strm)})], force=True))
+                ('Q4::ep1', {'path': str(self.strm), 'status': 'missing'})], force=False))
             sleep.assert_not_awaited()
         self.assertTrue(saved)
         self.assertIn('Emby 分集 ID ep1', self.enrichment.status()['preview_repaired'][0])

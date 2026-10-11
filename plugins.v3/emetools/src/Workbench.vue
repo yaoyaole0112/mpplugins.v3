@@ -127,7 +127,7 @@ const missingCancelLabel = computed(() => missingCancelModes.find(item => item.v
 const enrich = reactive({ query: '', items: [], selected: null, searching: false,
   libraries: [], catalogLoading: false, libraryIds: [], libraryPicker: false, libraryQuery: '',
   previewQuery: '', previewItems: [], previewSelected: null, previewEpisodes: [],
-  previewChecked: [], force: false,
+  previewChecked: [], force: false, forceLoaded: false, forceSaving: false,
   status: { running: false, task: '', done: false, error: '', log: [], mediainfo: null, preview_result: null, batch_result: null, preview_repaired: [] } })
 const enrichSettings = reactive({ open: false, ai_available: false, ai_model: '', draft: {
   metadata_source: 'tmdb',
@@ -198,9 +198,31 @@ async function searchEnrichment(kind) {
 async function refreshEnrichment() {
   const status = await get('enrichment/status')
   Object.assign(enrich.status, status)
+  if (!enrich.forceLoaded && !enrich.forceSaving) {
+    enrich.force = status.preview_force === true
+    enrich.forceLoaded = true
+  }
   if (active.value === 'enrichment' && status.running) scheduleEnrichmentPoll()
   if (active.value === 'enrichment' && !status.running && status.done && status.task === '分集图片修复' && enrich.previewSelected) {
     enrich.previewEpisodes = status.preview || enrich.previewEpisodes
+  }
+}
+
+async function savePreviewForce(event) {
+  const previous = enrich.force
+  const value = event.target.checked
+  enrich.forceSaving = true
+  try {
+    const result = await post('enrichment/action', { operation: 'preview_preferences', force: value })
+    enrich.force = result.preview_force === true
+    enrichSettings.draft.preview_force = enrich.force
+    notice.value = '图片覆盖偏好已保存'
+  } catch (err) {
+    enrich.force = previous
+    error.value = err?.message || '保存图片覆盖偏好失败'
+  } finally {
+    event.target.checked = enrich.force
+    enrich.forceSaving = false
   }
 }
 
@@ -221,7 +243,7 @@ async function enrichmentAction(operation, extra = {}) {
     const result = await post('enrichment/action', { operation, ...extra })
     if (operation === 'preview_scan') {
       enrich.previewEpisodes = result.episodes || []
-      enrich.previewChecked = enrich.previewEpisodes.filter(item => item.status === 'candidate').map(item => item.id)
+      enrich.previewChecked = enrich.previewEpisodes.filter(item => ['candidate', 'missing'].includes(item.status)).map(item => item.id)
     } else {
       notice.value = result.message || '操作已完成'
       await refreshEnrichment()
@@ -1092,12 +1114,12 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <p class="eme-hint">开始补全会暂时停止 Emby；正在播放或有运行中的 Emby 任务时不会停机。数据库备份与源库保存在同一目录。</p>
         </section>
         <section class="eme-card">
-          <div class="eme-card-heading eme-enrich-preview-heading"><div><h3>分集图片修复</h3><p>仅检测已有缩略图的 DoVi 分集，将发绿或发紫的图片通过独立截帧容器转成 SDR；缺少缩略图的分集由 Emby 或神医助手处理。批量修复会检查所有电视剧媒体库。</p></div><div class="eme-enrich-preview-actions"><button class="eme-button secondary" :disabled="busy || !enrich.previewSelected" @click="enrichmentAction('preview_scan', { series_id: enrich.previewSelected.id })">扫描分集</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.previewChecked.length" @click="enrichmentAction('preview_repair', { series_id: enrich.previewSelected.id, episode_ids: [...enrich.previewChecked], force: enrich.force })">修复图片</button><button class="eme-button secondary" :disabled="busy || enrich.status.running" @click="enrichmentAction('batch_preview')">批量修复</button></div></div>
+          <div class="eme-card-heading eme-enrich-preview-heading"><div><h3>分集图片修复</h3><p>通过独立截帧容器补全缺失缩略图，并将疑似偏色的分集图片转换为 SDR。批量修复会检查所有电视剧媒体库，不覆盖正常或已修复图片。</p></div><div class="eme-enrich-preview-actions"><button class="eme-button secondary" :disabled="busy || !enrich.previewSelected" @click="enrichmentAction('preview_scan', { series_id: enrich.previewSelected.id })">扫描分集</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.forceLoaded || enrich.forceSaving || !enrich.previewChecked.length" @click="enrichmentAction('preview_repair', { series_id: enrich.previewSelected.id, episode_ids: [...enrich.previewChecked], force: enrich.force })">修复图片</button><button class="eme-button secondary" :disabled="busy || enrich.status.running" @click="enrichmentAction('batch_preview')">批量修复</button></div></div>
           <div class="eme-enrich-search"><input v-model.trim="enrich.previewQuery" placeholder="输入要修复的剧集名称" @keyup.enter="searchEnrichment('preview')" /><button class="eme-button secondary" :disabled="enrich.searching" @click="searchEnrichment('preview')">搜索剧集</button></div>
           <div v-if="enrich.previewItems.length" class="eme-enrich-results"><button v-for="item in enrich.previewItems" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.previewSelected?.id === item.id }" @click="enrich.previewSelected = item; enrich.previewEpisodes = []; enrich.previewChecked = []">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.server }}</button></div>
-          <label class="eme-switch-label"><input v-model="enrich.force" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>强制覆盖已有预览图</span></label>
-          <p class="eme-hint">偏色检测为启发式判断，可能漏检。人工确认仍有偏色时，可开启“强制覆盖已有预览图”，再勾选已有图片的 DoVi 分集修复；不会自动覆盖所有分集。</p>
-          <div v-if="enrich.previewEpisodes.length" class="eme-enrich-episodes"><label v-for="episode in enrich.previewEpisodes" :key="episode.id" class="eme-enrich-episode"><input type="checkbox" :disabled="episode.status !== 'candidate' && !(enrich.force && episode.dovi && episode.has_thumb)" :checked="enrich.previewChecked.includes(episode.id)" @change="togglePreviewEpisode(episode.id)" /><span>S{{ String(episode.season).padStart(2, '0') }}E{{ String(episode.episode).padStart(2, '0') }} · {{ episode.name || '未命名' }}</span><small>{{ episode.dovi ? 'DoVi · ' : '' }}{{ { missing: '缺少缩略图（由 Emby/神医助手处理）', candidate: '疑似偏色，可修复', fixed: '已修复', keep: '未检出明显偏色' }[episode.status] || '待核实' }}</small></label></div>
+          <label class="eme-switch-label"><input  :checked="enrich.force" :disabled="!enrich.forceLoaded || enrich.forceSaving" @change="savePreviewForce" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>强制覆盖已有预览图</span></label>
+          <p class="eme-hint">偏色检测为启发式判断，可能漏检。人工确认仍有偏色时，可开启“强制覆盖已有预览图”，再勾选已有图片的 DoVi 分集修复；不会自动覆盖所有分集。开关切换后立即保存；缺图补全无需开启此开关。</p>
+          <div v-if="enrich.previewEpisodes.length" class="eme-enrich-episodes"><label v-for="episode in enrich.previewEpisodes" :key="episode.id" class="eme-enrich-episode"><input type="checkbox" :disabled="!['candidate', 'missing'].includes(episode.status) && !(enrich.force && episode.dovi && episode.has_thumb)" :checked="enrich.previewChecked.includes(episode.id)" @change="togglePreviewEpisode(episode.id)" /><span>S{{ String(episode.season).padStart(2, '0') }}E{{ String(episode.episode).padStart(2, '0') }} · {{ episode.name || '未命名' }}</span><small>{{ episode.dovi ? 'DoVi · ' : '' }}{{ { missing: '缺少缩略图，可补全', candidate: '疑似偏色，可修复', fixed: '已修复', keep: '未检出明显偏色' }[episode.status] || '待核实' }}</small></label></div>
           <p v-if="enrich.status.preview_result" class="eme-hint">上次修复：成功 {{ enrich.status.preview_result.ok }} 集，失败 {{ enrich.status.preview_result.fail }} 集。</p>
         </section>
         <section v-if="enrich.status.running || enrich.status.log?.length || enrich.status.error || enrich.status.batch_result" class="eme-card">

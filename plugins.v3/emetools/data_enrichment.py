@@ -39,6 +39,7 @@ DOCKER_SOCKET = "/var/run/docker.sock"
 SHENYI_EXTRACT = "f84e5d989aa8a8b6ab1a3a8c0848faab"
 SHENYI_PERSIST = "f98bb72fe87c19265e4550abc2cad64f"
 DEFAULT_ENRICH_CONFIG = {
+    "preview_force": False,
     "metadata_source": "tmdb",
     "auto_on_import": True,
     "ai_enabled": False, "no_avatar": True, "episode_cast": False,
@@ -1769,16 +1770,14 @@ class DataEnrichment:
                        if key.startswith(name + "::") and key in self._preview_selection]
         if len(targets) != len(episode_ids) or len(set(episode_ids)) != len(episode_ids):
             raise ValueError("所选分集已失效，请重新扫描")
-        # Missing thumbnails are handled by Emby/Shenyi; this tool only
-        # repairs an existing thumbnail when its pixels show a color cast.
         targets = [(key, target) for key, target in targets
                    if target.get("series_id", series_id) == series_id
-                   and os.path.isfile(target.get("thumb", ""))
-                   and (target.get("status") == "candidate" or
+                   and (self._preview_status(key, target.get("thumb", "")) == "missing" or
+                        target.get("status") == "candidate" or
                         self._preview_status(key, target.get("thumb", "")) == "candidate" or
                         force and target.get("dovi"))]
         if not targets:
-            raise ValueError("没有检测到发绿或发紫的已有分集图片")
+            raise ValueError("没有检测到缺失或疑似偏色的分集图片")
         return self._begin("分集图片修复", self._repair_preview, series_id, targets, force)
 
     def start_batch_preview(self, series_ids):
@@ -1804,8 +1803,8 @@ class DataEnrichment:
                     target["series"] = title if title != "未命名剧集" else target.get("series") or title
                 scanned += len(episodes)
                 targets = [(entry["id"], self._preview_selection[entry["id"]])
-                           for entry in episodes if entry["status"] == "candidate"]
-                self.log(f"[{index}/{len(series_ids)}] 共 {len(episodes)} 集，检测到偏色图片 {len(targets)} 集（缺少缩略图跳过）")
+                           for entry in episodes if entry["status"] in ("candidate", "missing")]
+                self.log(f"[{index}/{len(series_ids)}] 共 {len(episodes)} 集，缺失或疑似偏色图片 {len(targets)} 集")
                 # Prevent a large library from silently launching hundreds of
                 # network FFmpeg jobs; the user can rerun a narrower selection.
                 if len(targets) > 300:
@@ -1847,6 +1846,9 @@ class DataEnrichment:
             path = self._safe_strm(target["path"])
             thumb = path[:-5] + "-thumb.jpg"
             status = self._preview_status(key, thumb)
+            if target.get("status") == "missing" and status != "missing":
+                self.log(f"[{position}/{len(targets)}] 缩略图已由其他任务生成，跳过覆盖")
+                continue
             if not force and (status == "fixed" or status == "keep" and target.get("status") != "candidate"):
                 self.log(f"[{position}/{len(targets)}] 已修复或无需修复，跳过")
                 continue

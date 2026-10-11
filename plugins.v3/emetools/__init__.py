@@ -105,7 +105,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.77"
+    plugin_version = "2.9.78"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1518,7 +1518,7 @@ class EmeTools(_PluginBase):
             return {"ok": False, "message": str(error)}
 
     async def enrichment_status(self) -> dict:
-        return self._enrichment.status()
+        return {**self._enrichment.status(), "preview_force": self._enrichment_config.get("preview_force", False)}
 
     async def enrichment_config(self) -> dict:
         return {"config": copy.deepcopy(self._enrichment_config),
@@ -1535,6 +1535,7 @@ class EmeTools(_PluginBase):
             raise HTTPException(status_code=409, detail="数据补全运行中，请完成后再保存设置")
         try:
             config = validate_enrich_config(values)
+            config["preview_force"] = self._enrichment_config.get("preview_force", False)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if config["ai_enabled"] and not (getattr(mp_settings, "LLM_API_KEY", "") and
@@ -1550,6 +1551,15 @@ class EmeTools(_PluginBase):
         if not self._enabled:
             raise HTTPException(status_code=409, detail="请先启用插件")
         try:
+            if action.operation == "preview_preferences":
+                previous = dict(self._enrichment_config)
+                self._enrichment_config = {**previous, "preview_force": action.force}
+                try:
+                    self._persist()
+                except Exception:
+                    self._enrichment_config = previous
+                    raise
+                return {"preview_force": action.force}
             if action.operation == "search":
                 return {"items": await self._enrichment.search(action.keyword)}
             if action.operation == "series_list":
