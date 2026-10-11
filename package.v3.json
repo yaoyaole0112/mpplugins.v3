@@ -23,7 +23,7 @@
     "name": "媒体增强",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.76",
+    "version": "2.9.77",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -31,6 +31,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.77": "优化分集图片偏色检测：增加低饱和度绿紫混合偏色识别，修复《无可替代》第11集等场景漏检；移除分集修复之间的额外等待，保留单容器串行处理以避免高分辨率 DoVi 并发导致内存不足。",
       "v2.9.76": "修复 DoVi 分集绿紫混合偏色漏检，允许强制覆盖时人工选择疑似漏检分集；截帧限制线程、输出1280×720以内并显式初始化Vulkan，内存上限调整为1.5GiB；区分OOM与其他退出原因，保留服务端图片检测结果。",
       "v2.9.75": "修复频道禁止转发导致 ChatForwardsRestrictedError：自动改发正文与原链接实体，不复制媒体附件；显示实际投递方式，发送失败保留补漏机会，并防止实时与补漏并发重复投递。",
       "v2.9.74": "全面检查配置草稿：频道和关键词添加/删除立即保存；未保存的清理目录、转存规则、缺集与定时配置明确提示并防止误执行；修复加载未完成及保存响应规范化时的状态误判。",

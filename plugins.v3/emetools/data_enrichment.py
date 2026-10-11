@@ -996,6 +996,7 @@ class DataEnrichment:
                 pixels = rgb.load()
                 step = max(8, min(width, height) // 64)
                 total = green = purple = green_tint = purple_tint = 0
+                faint_green = faint_purple = 0
                 green_strength = purple_strength = 0.0
                 mean_r = mean_g = mean_b = 0.0
                 sampled = 0
@@ -1006,6 +1007,10 @@ class DataEnrichment:
                         mean_g += g
                         mean_b += blue
                         sampled += 1
+                        if g > red + 6 and g > blue + 6:
+                            faint_green += 1
+                        elif red > g + 6 and blue > g + 6:
+                            faint_purple += 1
                         if g > red + 10 and g > blue + 10:
                             green_tint += 1
                         elif red > g + 10 and blue > g + 8:
@@ -1049,6 +1054,9 @@ class DataEnrichment:
                     return "purple"
                 if (dovi and green_tint_ratio >= .15 and purple_tint_ratio >= .05 and
                         green_tint_ratio + purple_tint_ratio >= .23):
+                    return "mixed"
+                if (dovi and faint_green / sampled >= .06 and faint_purple / sampled >= .045
+                        and (faint_green + faint_purple) / sampled >= .12):
                     return "mixed"
         except (OSError, ValueError):
             pass
@@ -1843,6 +1851,8 @@ class DataEnrichment:
                 self.log(f"[{position}/{len(targets)}] 已修复或无需修复，跳过")
                 continue
             try:
+                started = time.monotonic()
+                self.log(f"[{position}/{len(targets)}] 正在截帧并转换杜比色彩")
                 url = self._video_url(path)
                 with tempfile.TemporaryDirectory(prefix="emetools-frame-", dir="/config") as frame_dir:
                     output_bind = f"{host_root}/{Path(frame_dir).name}:/out:rw"
@@ -1889,12 +1899,10 @@ class DataEnrichment:
                 detail = f"《{series_title}》 {code}{' · ' + episode_title if episode_title else ''}（服务器 {name}，Emby 分集 ID {episode_id}）"
                 with self.lock:
                     self.state["preview_repaired"].append(detail)
-                self.log(f"[{position}/{len(targets)}] 已修复并刷新 Emby：{detail}")
+                self.log(f"[{position}/{len(targets)}] 已修复并刷新 Emby：{detail}，耗时 {time.monotonic() - started:.1f} 秒")
             except Exception as error:
                 failed += 1
                 self.log(f"[{position}/{len(targets)}] 修复失败：{type(error).__name__}：{str(error)[:100]}")
-            if position % 3 == 0: await asyncio.sleep(8)
-            else: await asyncio.sleep(2)
         with self.lock:
             self.state["preview_result"] = {"ok": completed, "fail": failed}
         self.log(f"预览图修复完成：成功 {completed} 集，失败 {failed} 集")

@@ -1065,6 +1065,22 @@ class EnrichmentTests(unittest.TestCase):
             Image.new('RGB', (400, 240), color).save(thumb)
             self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), '')
 
+    def test_dovi_faint_mixed_cast_requires_both_colors_and_coverage(self):
+        from PIL import Image
+        thumb = str(self.strm)[:-5] + '-thumb.png'
+        image = Image.new('RGB', (800, 480), (150, 150, 145))
+        image.paste((100, 108, 100), (0, 0, 64, 480))
+        image.paste((108, 100, 108), (64, 0, 112, 480))
+        image.save(thumb)
+        self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), 'mixed')
+        self.assertEqual(self.enrichment._color_cast(thumb), '')
+        image.paste((150, 150, 145), (64, 0, 112, 480))
+        image.save(thumb)
+        self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), '')
+        image.paste((108, 100, 108), (64, 0, 80, 480))
+        image.save(thumb)
+        self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), '')
+
     def test_manual_force_allows_existing_dovi_image_but_not_missing_image(self):
         from PIL import Image
         thumb = str(self.strm)[:-5] + '-thumb.jpg'
@@ -1223,9 +1239,10 @@ class EnrichmentTests(unittest.TestCase):
                    side_effect=lambda **kw: real_tempdir(prefix=kw['prefix'], dir=self.temp.name)), \
              patch.object(self.enrichment, '_server', return_value=emby), \
              patch.object(self.enrichment, 'scan_preview', new_callable=AsyncMock), \
-             patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock):
+             patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock) as sleep:
             asyncio.run(self.enrichment._repair_preview('Q4::series', [
                 ('Q4::ep1', {'path': str(self.strm)})], force=True))
+            sleep.assert_not_awaited()
         self.assertTrue(saved)
         self.assertIn('Emby 分集 ID ep1', self.enrichment.status()['preview_repaired'][0])
         with Image.open(temporary) as image:
