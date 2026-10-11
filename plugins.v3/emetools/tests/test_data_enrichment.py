@@ -1050,6 +1050,49 @@ class EnrichmentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.enrichment._safe_strm('/etc/passwd')
 
+    def test_dovi_mixed_and_mild_casts_are_detected_without_a_dominant_channel(self):
+        from PIL import Image
+        thumb = str(self.strm)[:-5] + '-thumb.png'
+        image = Image.new('RGB', (400, 240), (100, 100, 100))
+        image.paste((80, 95, 80), (0, 0, 100, 240))
+        image.paste((110, 95, 105), (100, 0, 160, 240))
+        image.save(thumb)
+        self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), 'mixed')
+        self.assertEqual(self.enrichment._color_cast(thumb), '')
+        Image.new('RGB', (400, 240), (80, 95, 80)).save(thumb)
+        self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), 'green')
+        for color in [(100, 100, 100), (125, 115, 105), (60, 80, 110)]:
+            Image.new('RGB', (400, 240), color).save(thumb)
+            self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), '')
+
+    def test_manual_force_allows_existing_dovi_image_but_not_missing_image(self):
+        from PIL import Image
+        thumb = str(self.strm)[:-5] + '-thumb.jpg'
+        Image.new('RGB', (200, 200), (100, 100, 100)).save(thumb)
+        self.enrichment._preview_selection = {'Q4::ep1': {
+            'path': str(self.strm), 'thumb': thumb, 'status': 'keep',
+            'dovi': True, 'series_id': 'Q4::series'}}
+        with patch.object(self.enrichment, '_begin', return_value={'started': True}) as begin:
+            with self.assertRaisesRegex(ValueError, '没有检测到'):
+                self.enrichment.start_preview_repair('Q4::series', ['Q4::ep1'])
+            self.enrichment.start_preview_repair('Q4::series', ['Q4::ep1'], force=True)
+            begin.assert_called_once()
+            os.unlink(thumb)
+            with self.assertRaisesRegex(ValueError, '没有检测到'):
+                self.enrichment.start_preview_repair('Q4::series', ['Q4::ep1'], force=True)
+
+    def test_server_image_detection_is_not_discarded_by_local_thumbnail_recheck(self):
+        from PIL import Image
+        thumb = str(self.strm)[:-5] + '-thumb.jpg'
+        Image.new('RGB', (200, 200), (100, 100, 100)).save(thumb)
+        self.enrichment._preview_selection = {'Q4::ep1': {
+            'path': str(self.strm), 'thumb': thumb, 'status': 'candidate',
+            'dovi': True, 'series_id': 'Q4::series'}}
+        with patch.object(self.enrichment, '_begin', return_value={'started': True}) as begin:
+            self.enrichment.start_preview_repair('Q4::series', ['Q4::ep1'])
+            begin.assert_called_once()
+            self.assertEqual(begin.call_args.args[3][0][0], 'Q4::ep1')
+
     def test_mediainfo_check_excludes_iso_with_only_missing_runtime(self):
         root = Path(self.temp.name)
         iso = root / 'movie.iso.strm'
@@ -1133,6 +1176,25 @@ class EnrichmentTests(unittest.TestCase):
         self.assertNotIn('secret', str(error.exception))
         self.assertEqual(docker.call_args.args, ('DELETE', '/containers/cid'))
 
+    def test_frame_137_checks_docker_oom_state_before_reporting_memory_failure(self):
+        for oom in (True, False):
+            responses = [SimpleNamespace(json=lambda: {'Id': 'cid'}), SimpleNamespace(),
+                         SimpleNamespace(json=lambda: {'StatusCode': 137}),
+                         SimpleNamespace(content=b''), SimpleNamespace(content=b''),
+                         SimpleNamespace(json=lambda: {'State': {'OOMKilled': oom}}), SimpleNamespace()]
+            with patch('emetools.data_enrichment._docker', side_effect=responses) as docker:
+                with self.assertRaisesRegex(ValueError, '内存超限' if oom else '未确认 OOM'):
+                    _docker_job('image', {})
+            self.assertEqual(docker.call_args.args, ('DELETE', '/containers/cid'))
+
+    def test_frame_187_without_diagnostics_does_not_guess_gpu_failure(self):
+        responses = [SimpleNamespace(json=lambda: {'Id': 'cid'}), SimpleNamespace(),
+                     SimpleNamespace(json=lambda: {'StatusCode': 187}),
+                     SimpleNamespace(content=b''), SimpleNamespace(content=b''), SimpleNamespace()]
+        with patch('emetools.data_enrichment._docker', side_effect=responses):
+            with self.assertRaisesRegex(ValueError, '不能仅凭退出码认定'):
+                _docker_job('image', {})
+
     def test_preview_repair_maps_gpu_and_reads_png_file_not_docker_logs(self):
         from PIL import Image
         real_tempdir = tempfile.TemporaryDirectory
@@ -1143,6 +1205,12 @@ class EnrichmentTests(unittest.TestCase):
             saved.append(config)
             self.assertEqual(config['HostConfig']['Devices'][0]['PathOnHost'], '/dev/dri')
             self.assertEqual(config['HostConfig']['Binds'][0].split(':')[1], '/out')
+            self.assertEqual(config['HostConfig']['Memory'], 1610612736)
+            self.assertIn('vulkan=vk:0', config['Cmd'])
+            self.assertEqual(config['Cmd'][config['Cmd'].index('-threads') + 1], '1')
+            self.assertEqual(config['Cmd'][config['Cmd'].index('-filter_threads') + 1], '1')
+            self.assertIn('apply_dolbyvision=true', config['Cmd'][config['Cmd'].index('-vf') + 1])
+            self.assertIn('w=1280:h=720', config['Cmd'][config['Cmd'].index('-vf') + 1])
             Image.new('RGB', (200, 120), (50, 60, 70)).save(
                 Path(self.temp.name) / config['HostConfig']['Binds'][0].split(':')[0].rsplit('/', 1)[-1] / 'frame.png')
 

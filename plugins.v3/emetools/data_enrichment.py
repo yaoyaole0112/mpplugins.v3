@@ -30,7 +30,9 @@ from app.runtime.settings import get_runtime_setting
 from .tvmao_client import fetch_tvmao_cast
 
 
-FRAME_FILTER = "libplacebo=tonemapping=bt.2390:color_primaries=bt709:color_trc=bt709:colorspace=bt709:format=yuv420p"
+FRAME_FILTER = ("libplacebo=w=1280:h=720:force_original_aspect_ratio=decrease:force_divisible_by=2:"
+                "apply_dolbyvision=true:tonemapping=bt.2390:color_primaries=bt709:"
+                "color_trc=bt709:colorspace=bt709:format=yuv420p")
 FRAME_IMAGE = "jellyfin/jellyfin:latest"
 FRAME_EXECUTABLE = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
 DOCKER_SOCKET = "/var/run/docker.sock"
@@ -141,12 +143,29 @@ def _docker_job(image, config, *, timeout=240, binary=False):
             stderr = _docker("GET", f"/containers/{container_id}/logs",
                              params={"stdout": "0", "stderr": "1", "tail": "20"}, timeout=20).content
             diagnostics = stderr.decode("utf-8", errors="replace")
-            if "VK_ERROR" in diagnostics or "Vulkan device" in diagnostics:
+            oom_killed = False
+            if status.get("StatusCode") == 137:
+                try:
+                    details = _docker("GET", f"/containers/{container_id}/json").json()
+                    oom_killed = details.get("State", {}).get("OOMKilled") is True
+                except (httpx.HTTPError, ValueError, TypeError):
+                    pass
+            if oom_killed:
+                hint = "容器内存超限（OOM），请释放宿主机内存后重试"
+            elif "VK_ERROR" in diagnostics or "Vulkan device" in diagnostics:
                 hint = "Vulkan 不可用，请检查宿主机 /dev/dri 设备映射"
             elif re.search(r"(?:HTTP|Server returned).*?(?:401|403)", diagnostics, re.I):
                 hint = "远程视频链接拒绝访问（HTTP 401/403）"
             elif "No such filter" in diagnostics:
                 hint = "截帧镜像缺少所需 FFmpeg 滤镜"
+            elif re.search(r"Invalid (?:color|data)|Error (?:while|during) decoding|corrupt", diagnostics, re.I):
+                hint = "视频解码或色彩信息异常，请检查视频源是否完整"
+            elif re.search(r"Cannot allocate memory|out of memory", diagnostics, re.I):
+                hint = "解码或滤镜内存分配失败，请释放宿主机内存后重试"
+            elif status.get("StatusCode") == 137:
+                hint = "截帧进程被强制终止，未确认 OOM；请检查宿主机资源与容器状态"
+            elif status.get("StatusCode") == 187:
+                hint = "解码或滤镜处理失败，不能仅凭退出码认定为显卡故障"
             else:
                 hint = "请检查视频链接、设备及截帧容器日志"
             raise ValueError(f"独立截帧容器退出码 {status.get('StatusCode')}：{hint}")
@@ -965,8 +984,8 @@ class DataEnrichment:
             return {}
 
     @staticmethod
-    def _color_cast(thumb):
-        """Use MediaEnhance's conservative green/purple threshold."""
+    def _color_cast(thumb, *, dovi=False):
+        """Detect dominant casts and mixed green/magenta casts in DoVi frames."""
         try:
             source = BytesIO(thumb) if isinstance(thumb, (bytes, bytearray)) else thumb
             with Image.open(source) as image:
@@ -976,7 +995,7 @@ class DataEnrichment:
                     return ""
                 pixels = rgb.load()
                 step = max(8, min(width, height) // 64)
-                total = green = purple = 0
+                total = green = purple = green_tint = purple_tint = 0
                 green_strength = purple_strength = 0.0
                 mean_r = mean_g = mean_b = 0.0
                 sampled = 0
@@ -987,6 +1006,10 @@ class DataEnrichment:
                         mean_g += g
                         mean_b += blue
                         sampled += 1
+                        if g > red + 10 and g > blue + 10:
+                            green_tint += 1
+                        elif red > g + 10 and blue > g + 8:
+                            purple_tint += 1
                         if max(red, g, blue) - min(red, g, blue) < 35:
                             continue
                         total += 1
@@ -998,24 +1021,35 @@ class DataEnrichment:
                         elif red > g + 20 and blue > g + 15:
                             purple += 1
                             purple_strength += ((red + blue) / 2 - g) / 255.0
-                if total < 80 or not sampled:
+                if sampled < 80:
                     return ""
                 mean_r /= sampled
                 mean_g /= sampled
                 mean_b /= sampled
-                green_ratio = green / total
-                purple_ratio = purple / total
+                green_ratio = green / max(total, 1)
+                purple_ratio = purple / max(total, 1)
                 # 增加整图平均通道偏移作为补充，解决偏色集中在主体区域时漏检。
                 green_mean_cast = mean_g - max(mean_r, mean_b)
                 purple_mean_cast = (mean_r + mean_b) / 2 - mean_g
-                if (green_ratio >= .18 and green_strength / max(green, 1) >= .04
+                green_tint_ratio = green_tint / max(sampled, 1)
+                purple_tint_ratio = purple_tint / max(sampled, 1)
+                if (total >= 80 and green_ratio >= .18 and green_strength / max(green, 1) >= .04
                         and green >= purple + .04 * total
                         and (green_mean_cast >= 3 or green_ratio >= .28)):
                     return "green"
-                if (purple_ratio >= .18 and purple_strength / max(purple, 1) >= .035
+                if (dovi and green_tint_ratio >= .34 and green_mean_cast >= 2.0 and
+                        green_tint_ratio >= purple_tint_ratio + .08):
+                    return "green"
+                if (total >= 80 and purple_ratio >= .18 and purple_strength / max(purple, 1) >= .035
                         and purple >= green + .04 * total
                         and (purple_mean_cast >= 3 or purple_ratio >= .28)):
                     return "purple"
+                if (dovi and purple_tint_ratio >= .34 and purple_mean_cast >= 2.0 and
+                        purple_tint_ratio >= green_tint_ratio + .08):
+                    return "purple"
+                if (dovi and green_tint_ratio >= .15 and purple_tint_ratio >= .05 and
+                        green_tint_ratio + purple_tint_ratio >= .23):
+                    return "mixed"
         except (OSError, ValueError):
             pass
         return ""
@@ -1030,7 +1064,8 @@ class DataEnrichment:
                 return "fixed"
         except OSError:
             return "missing"
-        return "candidate" if self._color_cast(thumb) else "keep"
+        dovi = bool(re.search(r"dovi|dolby[ -]?vision|\.dv[.\-_ ]", thumb, re.I))
+        return "candidate" if self._color_cast(thumb, dovi=dovi) else "keep"
 
     @staticmethod
     def _video_url(path):
@@ -1072,7 +1107,7 @@ class DataEnrichment:
                         )
                         content_type = str(image_response.headers.get("content-type") or "")
                         if image_response.is_success and content_type.lower().startswith("image/"):
-                            if self._color_cast(image_response.content):
+                            if self._color_cast(image_response.content, dovi=dovi):
                                 status = "candidate"
                     except (httpx.HTTPError, OSError, ValueError):
                         # Local STRM thumbnail detection remains the fallback.
@@ -1083,6 +1118,7 @@ class DataEnrichment:
                     "dovi": dovi, "has_thumb": os.path.isfile(thumb), "status": status}
                 results.append(result)
                 selected[result["id"]] = {"path": fs_path, "thumb": thumb,
+                    "status": status, "dovi": dovi, "series_id": series_id,
                     "series": str(item.get("SeriesName") or "").replace("\n", " ")[:90],
                     "season": result["season"], "episode": result["episode"], "name": result["name"]}
         with self.lock:
@@ -1728,7 +1764,11 @@ class DataEnrichment:
         # Missing thumbnails are handled by Emby/Shenyi; this tool only
         # repairs an existing thumbnail when its pixels show a color cast.
         targets = [(key, target) for key, target in targets
-                   if self._preview_status(key, target.get("thumb", "")) == "candidate"]
+                   if target.get("series_id", series_id) == series_id
+                   and os.path.isfile(target.get("thumb", ""))
+                   and (target.get("status") == "candidate" or
+                        self._preview_status(key, target.get("thumb", "")) == "candidate" or
+                        force and target.get("dovi"))]
         if not targets:
             raise ValueError("没有检测到发绿或发紫的已有分集图片")
         return self._begin("分集图片修复", self._repair_preview, series_id, targets, force)
@@ -1798,18 +1838,22 @@ class DataEnrichment:
         for position, (key, target) in enumerate(targets, 1):
             path = self._safe_strm(target["path"])
             thumb = path[:-5] + "-thumb.jpg"
-            if self._preview_status(key, thumb) in ("fixed", "keep") and not force:
+            status = self._preview_status(key, thumb)
+            if not force and (status == "fixed" or status == "keep" and target.get("status") != "candidate"):
                 self.log(f"[{position}/{len(targets)}] 已修复或无需修复，跳过")
                 continue
             try:
                 url = self._video_url(path)
                 with tempfile.TemporaryDirectory(prefix="emetools-frame-", dir="/config") as frame_dir:
-                    command = ["-v", "error", "-ss", "00:05:00", "-i", url,
-                        "-frames:v", "1", "-vf", FRAME_FILTER, "-f", "image2", "-update", "1",
+                    output_bind = f"{host_root}/{Path(frame_dir).name}:/out:rw"
+                    command = ["-v", "error", "-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk",
+                        "-threads", "1", "-filter_threads", "1", "-rw_timeout", "20000000",
+                        "-ss", "00:05:00", "-i", url, "-an", "-sn", "-frames:v", "1",
+                        "-vf", FRAME_FILTER, "-threads", "1", "-f", "image2", "-update", "1",
                         "-y", "/out/frame.png"]
                     config = {"Entrypoint": [FRAME_EXECUTABLE], "Cmd": command,
-                              "HostConfig": {"NetworkMode": "bridge", "Memory": 536870912,
-                                             "Binds": [f"{host_root}/{Path(frame_dir).name}:/out:rw"],
+                              "HostConfig": {"NetworkMode": "bridge", "Memory": 1610612736,
+                                             "Binds": [output_bind],
                                              "Devices": [{"PathOnHost": "/dev/dri",
                                                           "PathInContainer": "/dev/dri",
                                                           "CgroupPermissions": "rwm"}]}}
