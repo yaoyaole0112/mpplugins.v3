@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from uuid import uuid4
 from urllib.parse import quote
 from datetime import datetime
 from pathlib import Path
@@ -119,12 +120,23 @@ def _docker(method, path, *, payload=None, timeout=30, params=None):
 def _docker_job(image, config, *, timeout=240, binary=False):
     """Run and clean up a short-lived container; return captured stdout only."""
     container_id = None
+    container_name = "emetools-job-" + uuid4().hex
+    phase = "创建截帧容器"
     try:
-        result = _docker("POST", "/containers/create", payload={"Image": image, **config})
+        result = _docker("POST", "/containers/create", payload={"Image": image, **config},
+                         params={"name": container_name}, timeout=120)
         container_id = result.json()["Id"]
-        _docker("POST", f"/containers/{container_id}/start")
+        phase = "启动截帧容器"
+        try:
+            _docker("POST", f"/containers/{container_id}/start", timeout=120)
+        except httpx.ReadTimeout:
+            details = _docker("GET", f"/containers/{container_id}/json", timeout=30).json()
+            if details.get("State", {}).get("Status") not in ("running", "exited"):
+                raise
+        phase = "等待视频截帧完成"
         status = _docker("POST", f"/containers/{container_id}/wait",
                          params={"condition": "not-running"}, timeout=timeout).json()
+        phase = "读取截帧容器日志"
         output = _docker("GET", f"/containers/{container_id}/logs",
                          params={"stdout": "1", "stderr": "0"}, timeout=45).content
         # Non-TTY Docker log frames: 1-byte channel + 3-byte padding + 4-byte length.
@@ -171,12 +183,16 @@ def _docker_job(image, config, *, timeout=240, binary=False):
                 hint = "请检查视频链接、设备及截帧容器日志"
             raise ValueError(f"独立截帧容器退出码 {status.get('StatusCode')}：{hint}")
         return stdout if binary else stdout.decode("utf-8").strip()
+    except httpx.TimeoutException as error:
+        raise ValueError(f"{phase}超时；请检查 Docker 响应、宿主机负载及远程视频连接") from error
     finally:
-        if container_id:
-            try:
-                _docker("DELETE", f"/containers/{container_id}", params={"force": "1"})
-            except httpx.HTTPError:
+        try:
+            _docker("DELETE", f"/containers/{container_id or container_name}", params={"force": "1"})
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code != 404:
                 logger.warning("增强工具 数据补全：临时容器清理失败")
+        except httpx.HTTPError:
+            logger.warning("增强工具 数据补全：临时容器清理失败")
 
 
 def _frame_host_root():
@@ -1853,6 +1869,7 @@ class DataEnrichment:
                 self.log(f"[{position}/{len(targets)}] 已修复或无需修复，跳过")
                 continue
             try:
+                phase = "读取视频链接"
                 started = time.monotonic()
                 self.log(f"[{position}/{len(targets)}] 正在截帧并转换杜比色彩")
                 url = self._video_url(path)
@@ -1869,7 +1886,9 @@ class DataEnrichment:
                                              "Devices": [{"PathOnHost": "/dev/dri",
                                                           "PathInContainer": "/dev/dri",
                                                           "CgroupPermissions": "rwm"}]}}
+                    phase = "独立容器截帧"
                     await asyncio.to_thread(_docker_job, FRAME_IMAGE, config, timeout=240)
+                    phase = "写入缩略图"
                     frame = Path(frame_dir) / "frame.png"
                     if not frame.is_file() or frame.stat().st_size > 32 * 1024 * 1024:
                         raise ValueError("独立截帧容器未生成有效图片")
@@ -1882,10 +1901,13 @@ class DataEnrichment:
                             os.replace(temporary, thumb)
                         finally:
                             if os.path.exists(temporary): os.unlink(temporary)
+                phase = "刷新 Emby 分集"
+                self.log(f"[{position}/{len(targets)}] 缩略图已生成，正在刷新 Emby")
                 async with self._server(name) as emby:
                     response = await emby.post(f"Items/{key.split('::', 1)[1]}/Refresh",
                                                params={"replaceAllMetadata": "false"})
                     response.raise_for_status()
+                phase = "保存图片修复记录"
                 cache = self._preview_cache()
                 stat = os.stat(thumb)
                 cache[key] = {"thumb": thumb, "mtime": int(stat.st_mtime), "size": stat.st_size}
@@ -1904,7 +1926,7 @@ class DataEnrichment:
                 self.log(f"[{position}/{len(targets)}] 已修复并刷新 Emby：{detail}，耗时 {time.monotonic() - started:.1f} 秒")
             except Exception as error:
                 failed += 1
-                self.log(f"[{position}/{len(targets)}] 修复失败：{type(error).__name__}：{str(error)[:100]}")
+                self.log(f"[{position}/{len(targets)}] {phase}失败：{type(error).__name__}：{str(error)[:100]}")
         with self.lock:
             self.state["preview_result"] = {"ok": completed, "fail": failed}
         self.log(f"预览图修复完成：成功 {completed} 集，失败 {failed} 集")

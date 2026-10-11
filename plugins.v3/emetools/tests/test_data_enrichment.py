@@ -1176,6 +1176,35 @@ class EnrichmentTests(unittest.TestCase):
                 _docker_job('test-image', {})
             self.assertEqual(docker.call_args.args, ('DELETE', '/containers/abc'))
 
+    def test_sidecar_start_timeout_recovers_already_running_container(self):
+        responses = [SimpleNamespace(json=lambda: {'Id': 'abc'}), httpx.ReadTimeout('timed out'),
+                     SimpleNamespace(json=lambda: {'State': {'Status': 'running'}}),
+                     SimpleNamespace(json=lambda: {'StatusCode': 0}),
+                     SimpleNamespace(content=b''), SimpleNamespace()]
+        with patch('emetools.data_enrichment._docker', side_effect=responses) as docker:
+            self.assertEqual(_docker_job('test-image', {}), '')
+            self.assertEqual(docker.call_args_list[0].kwargs['timeout'], 120)
+            self.assertEqual(docker.call_args_list[1].kwargs['timeout'], 120)
+            self.assertEqual(sum(call.args[1].endswith('/start') for call in docker.call_args_list), 1)
+            self.assertEqual(docker.call_args.args, ('DELETE', '/containers/abc'))
+
+    def test_sidecar_create_timeout_cleans_up_by_unique_name(self):
+        with patch('emetools.data_enrichment._docker', side_effect=[httpx.ReadTimeout('secret-url'),
+                                                                  SimpleNamespace()]) as docker:
+            with self.assertRaisesRegex(ValueError, '创建截帧容器超时') as error:
+                _docker_job('test-image', {})
+            self.assertNotIn('secret-url', str(error.exception))
+            name = docker.call_args_list[0].kwargs['params']['name']
+            self.assertEqual(docker.call_args.args, ('DELETE', '/containers/' + name))
+
+    def test_sidecar_start_timeout_does_not_retry_unstarted_container(self):
+        responses = [SimpleNamespace(json=lambda: {'Id': 'abc'}), httpx.ReadTimeout('timed out'),
+                     SimpleNamespace(json=lambda: {'State': {'Status': 'created'}}), SimpleNamespace()]
+        with patch('emetools.data_enrichment._docker', side_effect=responses) as docker:
+            with self.assertRaisesRegex(ValueError, '启动截帧容器超时'):
+                _docker_job('test-image', {})
+            self.assertEqual(docker.call_args.args, ('DELETE', '/containers/abc'))
+
     def test_frame_mount_resolves_only_config_bind(self):
         details = {'Mounts': [{'Destination': '/config', 'Source': '/host/moviepilot-config',
                                'Type': 'bind'}]}
