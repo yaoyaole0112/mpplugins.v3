@@ -240,5 +240,84 @@ https://115.com/s/example?password=r3f3"""
         self.assertNotIn((event.chat_id, event.id), monitor._seen)
 
 
+class ForwardingTests(unittest.TestCase):
+    def setUp(self):
+        self.plugin = MagicMock()
+        self.plugin.get_data.return_value = None
+        self.plugin._monitor_config = {
+            "sub": {"enabled": False, "channels": []},
+            "kw": {"enabled": True, "channels": ["sample"], "keywords": ["资源"], "blacklist": []},
+        }
+        self.monitor = SubscriptionMonitor(self.plugin)
+        self.monitor.channel_ids["kw"] = {12345}
+        self.monitor.resolve_forward_bot = AsyncMock(return_value="destination")
+        self.monitor.client = MagicMock()
+        self.monitor.client.forward_messages = AsyncMock()
+        self.monitor.client.send_message = AsyncMock()
+        self.event = SimpleNamespace(chat_id=-10012345, id=17, raw_text="资源 🎬 下载链接 提取码：1234",
+                                     message=SimpleNamespace(entities=[object()], noforwards=False))
+
+    def test_restricted_forward_falls_back_to_text_with_original_entities_once(self):
+        from telethon.errors import ChatForwardsRestrictedError
+        self.monitor.client.forward_messages.side_effect = ChatForwardsRestrictedError(request=None)
+        self.monitor.last_error = "转发失败：ChatForwardsRestrictedError"
+        asyncio.run(self.monitor._on_message(self.event))
+        asyncio.run(self.monitor._on_message(self.event))
+        self.monitor.client.forward_messages.assert_awaited_once()
+        self.monitor.client.send_message.assert_awaited_once_with(
+            "destination", self.event.raw_text, formatting_entities=self.event.message.entities,
+            parse_mode=None, link_preview=False)
+        self.assertEqual(self.monitor.last_error, "")
+        self.assertIn("已发送正文与链接", self.monitor.hits[0]["delivery"])
+        self.assertEqual(self.monitor._last_msg_ids["12345"], 17)
+
+    def test_known_protection_uses_text_without_failed_forward_rpc(self):
+        self.monitor._channel_entities[12345] = SimpleNamespace(noforwards=True)
+        asyncio.run(self.monitor._on_message(self.event))
+        self.monitor.client.forward_messages.assert_not_awaited()
+        self.monitor.client.send_message.assert_awaited_once()
+
+    def test_unrelated_failure_does_not_copy_or_advance_checkpoint(self):
+        self.monitor.client.forward_messages.side_effect = RuntimeError("private details")
+        self.assertIs(asyncio.run(self.monitor._on_message(self.event)), False)
+        self.monitor.client.send_message.assert_not_awaited()
+        self.assertNotIn((12345, 17), self.monitor._seen)
+        self.assertNotIn("12345", self.monitor._last_msg_ids)
+        self.assertNotIn("private details", self.monitor.last_error)
+        self.assertFalse(self.monitor._forwarding)
+
+    def test_failed_text_delivery_remains_retryable_without_false_success(self):
+        self.event.message.noforwards = True
+        self.monitor.client.send_message.side_effect = [RuntimeError(), None]
+        self.assertIs(asyncio.run(self.monitor._on_message(self.event)), False)
+        self.assertFalse(self.monitor.hits)
+        self.assertNotIn((12345, 17), self.monitor._seen)
+        self.assertNotIn("12345", self.monitor._last_msg_ids)
+        asyncio.run(self.monitor._on_message(self.event))
+        self.assertEqual(len(self.monitor.hits), 1)
+        self.assertEqual(self.monitor.last_error, "")
+
+    def test_concurrent_live_and_poll_delivery_only_send_once(self):
+        async def run():
+            started = asyncio.Event()
+            release = asyncio.Event()
+
+            async def forward(*args):
+                started.set()
+                await release.wait()
+
+            self.monitor.client.forward_messages.side_effect = forward
+            first = asyncio.create_task(self.monitor._on_message(self.event))
+            await started.wait()
+            self.assertIs(await self.monitor._on_message(self.event), False)
+            release.set()
+            await first
+
+        asyncio.run(run())
+        self.monitor.client.forward_messages.assert_awaited_once()
+        self.assertEqual(len(self.monitor.hits), 1)
+        self.assertFalse(self.monitor._forwarding)
+
+
 if __name__ == "__main__":
     unittest.main()

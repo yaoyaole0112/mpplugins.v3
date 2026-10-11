@@ -13,10 +13,11 @@ from app.runtime.settings import get_runtime_setting
 
 try:
     from telethon import TelegramClient, events
-    from telethon.errors import SessionPasswordNeededError
+    from telethon.errors import ChatForwardsRestrictedError, SessionPasswordNeededError
     from telethon.sessions import StringSession
 except ImportError:
     TelegramClient = events = StringSession = SessionPasswordNeededError = None
+    ChatForwardsRestrictedError = None
 
 
 def normalize_channel(value):
@@ -108,6 +109,7 @@ class SubscriptionMonitor:
         # peer id rather than the raw ``chat_id`` representation.
         self._seen = set()
         self._seen_order = deque()
+        self._forwarding = set()
         self._load_seen()
         self._last_msg_ids = {}
         self._load_checkpoints()
@@ -487,6 +489,22 @@ class SubscriptionMonitor:
             logger.info("ME工具 Telegram：已按 MP 网络配置解析转发 Bot（代理=%s）", bool(proxy))
         return await self.client.get_entity(self._forward_bot_username)
 
+    async def _deliver_message(self, bot, event, peer_id):
+        entity = self._channel_entities.get(peer_id)
+        restricted = (getattr(event.message, "noforwards", False) is True or
+                      getattr(entity, "noforwards", False) is True)
+        if not restricted:
+            try:
+                await self.client.forward_messages(bot, event.message)
+                return "原消息转发"
+            except Exception as exc:
+                if ChatForwardsRestrictedError is None or not isinstance(exc, ChatForwardsRestrictedError):
+                    raise
+        await self.client.send_message(bot, event.raw_text,
+                                       formatting_entities=getattr(event.message, "entities", None),
+                                       parse_mode=None, link_preview=False)
+        return "频道限制转发，已发送正文与链接（不含附件）"
+
     async def _on_message(self, event):
         fill = getattr(self.plugin, "_fill", None)
         if fill and fill.busy is True:
@@ -499,6 +517,8 @@ class SubscriptionMonitor:
         key = self._message_key(event.chat_id, event.id)
         if key in self._seen:
             return
+        if key in self._forwarding:
+            return False
         text = event.raw_text
         # Never log full posts: they can contain private links, credentials or user data.
         logger.info("ME工具 Telegram：收到频道消息，频道ID=%s，消息ID=%s，监控=%s，正文=%d 字",
@@ -521,20 +541,29 @@ class SubscriptionMonitor:
         logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 命中 %d 项：%s，开始转发",
                     event.chat_id, event.id, len(names), ", ".join(re.sub(r"[\r\n\x00-\x1f]", " ", str(name))[:55]
                                                              for name in names[:5]))
+        if key in self._seen:
+            return
+        if key in self._forwarding:
+            return False
+        self._forwarding.add(key)
         try:
             bot = await self.resolve_forward_bot()
             fill = getattr(self.plugin, "_fill", None)
             if fill and fill.busy is True:
                 logger.info("ME工具 Telegram：补全交互期间暂缓频道转发，保留未处理记录")
                 return False
-            await self.client.forward_messages(bot, event.message)
+            delivery = await self._deliver_message(bot, event, peer_id)
             self._mark_seen(key)
             self._advance_checkpoint(event.chat_id, event.id)
             self.hits.appendleft({"time": datetime.now().strftime("%m-%d %H:%M:%S"),
-                                  "channel": self._channel_display_name(peer_id), "matches": names})
+                                  "channel": self._channel_display_name(peer_id), "matches": names,
+                                  "delivery": delivery})
             self.last_error = ""
-            logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 已转发到指定 Bot", event.chat_id, event.id)
+            logger.info("ME工具 Telegram：频道ID=%s 消息ID=%s 已转发到指定 Bot，方式=%s", event.chat_id, event.id, delivery)
         except Exception as exc:
             self.last_error = f"转发失败：{type(exc).__name__}"
             logger.warning("ME工具 Telegram：频道ID=%s 消息ID=%s 转发失败：%s（不记录 Bot Token）",
                            event.chat_id, event.id, type(exc).__name__)
+            return False
+        finally:
+            self._forwarding.discard(key)
