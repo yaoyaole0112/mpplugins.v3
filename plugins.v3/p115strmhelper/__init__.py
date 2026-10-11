@@ -1882,7 +1882,7 @@ class P115StrmHelper(_PluginBase):
                     [(_data_dict["sha1"], _data_dict["size"])]
                 )
                 _media_info = RenameDictUtils.emby_mediainfo_to_rename_fields(
-                    _resp[_data_dict["sha1"].upper()]
+                    _resp.get(_data_dict["sha1"].upper())
                 )
                 if _media_info:
                     logger.info(f"【媒体数据补充】中心化获取媒体信息: {url}")
@@ -1915,7 +1915,7 @@ class P115StrmHelper(_PluginBase):
                             [(data_dict["sha1"], data_dict["size"])]
                         )
                         resolved_info = RenameDictUtils.emby_mediainfo_to_rename_fields(
-                            resp[data_dict["sha1"].upper()]
+                            resp.get(data_dict["sha1"].upper())
                         )
                         pantransfercacher.file_item_dict.pop(media_item.fileid)
                         if resolved_info:
@@ -1924,8 +1924,8 @@ class P115StrmHelper(_PluginBase):
                             )
                             need_ffprobe = False
                         else:
-                            logger.warning(
-                                f"【媒体数据补充】{media_path} 中心化获取媒体信息为空"
+                            logger.debug(
+                                f"【媒体数据补充】{media_path} 中心库未命中可用媒体信息，回退 ffprobe 探测"
                             )
                     except Exception as e:
                         logger.warning(
@@ -1948,8 +1948,11 @@ class P115StrmHelper(_PluginBase):
                     **params
                 )
                 if not resolved_info:
-                    logger.error(f"【媒体数据补充】获取媒体信息失败: {error_message}")
+                    logger.error(
+                        f"【媒体数据补充】{media_path} ffprobe 补充失败，保留原有命名字段: {error_message}"
+                    )
                     return {}
+                logger.debug(f"【媒体数据补充】ffprobe 补充媒体信息成功: {media_path}")
             return resolved_info
 
         relation_key = RenameDictUtils.get_media_relation_key(
