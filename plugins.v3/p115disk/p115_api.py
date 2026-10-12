@@ -269,6 +269,16 @@ class P115Api:
         :return List: 文件项列表，如果是文件则返回包含该文件的列表，如果是目录则返回目录下的所有文件和子目录
         """
         self._list_rate_limiter.acquire()
+        try:
+            open_items = U115Pan().list(
+                fileitem.model_copy(update={"storage": "u115"})
+            )
+            return [
+                item.model_copy(update={"storage": self._disk_name})
+                for item in open_items
+            ]
+        except Exception as e:
+            logger.warning(f"【P115Disk】Open 接口浏览失败，回退 Cookie 接口: {e}")
         if fileitem.type == "file":
             item = self.detail(fileitem)
             if item:

@@ -6,7 +6,9 @@
 - `fs_search` 不再强制 `webapi.115.com`
 - 全通道 405 时短冷却，避免 get_file_item 递归打爆日志
 
-安装：插件市场添加 `https://github.com/yaoyaole0112/mpplugins.v3` 后搜索「115网盘储存」，源码安装 3.0.4。
+安装：插件市场添加 `https://github.com/yaoyaole0112/mpplugins.v3` 后搜索「115网盘储存」，源码安装 3.0.5。
+
+3.0.5 侧栏目录浏览优先调用 MoviePilot 内置 U115 Open 接口，并将返回项目转换为 115网盘Plus 存储标识；Open 接口异常时才回退旧 Cookie 接口。
 
 3.0.4 整理目标优先使用 MoviePilot 内置 U115Pan 的 Open 严格查询契约，不受 Cookie 路径查询冷却影响，也不经过 STRM 助手的非严格 get_item 补丁。确认不存在与请求失败分别处理；Open 不可用时才回退 Cookie 有限重试。需在 MoviePilot 设置中完成 115 Open 授权。
 
