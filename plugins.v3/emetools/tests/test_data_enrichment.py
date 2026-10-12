@@ -171,6 +171,23 @@ class EnrichmentTests(unittest.TestCase):
         asyncio.run(emby.aclose())
         asyncio.run(tmdb.aclose())
 
+    def test_movie_and_series_share_ai_retry_and_scope_settings(self):
+        for media_type in ('电影', '剧集'):
+            people = [{'Name': 'English Name', 'Type': 'Actor', 'Role': '饰 English Role'}]
+            with patch.object(self.enrichment, '_optional_ai_map', new_callable=AsyncMock,
+                              side_effect=[{'n0': '中文 / English', 'r0': '中文 / Role'},
+                                           {'n0': '中文姓名', 'r0': '中文角色'}]) as translate:
+                asyncio.run(self.enrichment._translate_people(people,
+                    {**DEFAULT_ENRICH_CONFIG, 'ai_enabled': True}, '测试媒体', media_type))
+                self.assertEqual(translate.await_count, 2)
+                self.assertIn(media_type + '：测试媒体', translate.call_args.args[1])
+            self.assertEqual(people[0]['Name'], '中文姓名')
+            self.assertEqual(people[0]['Role'], '中文角色')
+            with patch.object(self.enrichment, '_optional_ai_map', new_callable=AsyncMock) as translate:
+                asyncio.run(self.enrichment._translate_people(people,
+                    {**DEFAULT_ENRICH_CONFIG, 'ai_enabled': True, 'ai_credits': False}, '测试媒体', media_type))
+                translate.assert_not_awaited()
+
     def test_douban_mobile_replaces_english_movie_cast(self):
         paths = []
 

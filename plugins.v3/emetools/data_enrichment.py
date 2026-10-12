@@ -464,6 +464,49 @@ class DataEnrichment:
             self.log(f"AI 翻译不可用（{error}），保留原始资料继续补全")
             return {}
 
+    async def _translate_people(self, people, options, title, media_type):
+        if not people or not options["ai_enabled"] or not options["ai_credits"]:
+            return
+        translations = {}
+        translated_names = translated_roles = 0
+        for index, person in enumerate(people):
+            if re.search(r"[A-Za-z]", person["Name"]):
+                translations[f"n{index}"] = person["Name"][:130]
+            if re.search(r"[A-Za-z]", person["Role"]):
+                translations[f"r{index}"] = person["Role"][:130]
+            elif not person["Role"] and options["resolve_role"] and person["Type"] == "Actor":
+                translations[f"r{index}"] = f"{person['Name']} 的角色名（若无法确定保持空字符串）"
+        pending = translations
+        context = (f"{media_type}：{str(title or '')[:70]}。"
+                   "将英文演员姓名翻译或音译成简体中文，将英文角色名翻译或音译成简体中文；"
+                   "结果不得保留英文字母。保留已有中文及人物身份，不得编造角色或演员。"
+                   "不确定时返回原文。")
+        for _ in range(2):
+            if not pending:
+                break
+            unresolved = {}
+            for start in range(0, len(pending), 25):
+                chunk = dict(list(pending.items())[start:start + 25])
+                translated = await self._optional_ai_map(chunk, context)
+                for key_name, original in chunk.items():
+                    value = translated.get(key_name, "")
+                    if (value and value != original and
+                            re.search(r"[\u3400-\u9fff]", value) and
+                            not re.search(r"[A-Za-z]", value)):
+                        person = people[int(key_name[1:])]
+                        person["Name" if key_name.startswith("n") else "Role"] = value
+                        if key_name.startswith("n"):
+                            translated_names += 1
+                        else:
+                            translated_roles += 1
+                    elif re.search(r"[A-Za-z]", original):
+                        unresolved[key_name] = original
+            pending = unresolved
+        remaining_names = sum(key.startswith("n") for key in pending)
+        remaining_roles = sum(key.startswith("r") for key in pending)
+        self.log(f"AI 演职人员汉化：姓名 {translated_names} 个、角色 {translated_roles} 个；"
+                 f"仍含英文姓名 {remaining_names} 个、角色 {remaining_roles} 个（未确认译名，保留原文）")
+
     def log(self, message):
         text = str(message).replace("\n", " ")[:250]
         with self.lock:
@@ -1303,20 +1346,7 @@ class DataEnrichment:
             directors = [{"Name": person["name"], "Type": "Director", "Role": "导演"}
                          for person in tmdb_directors if person.get("name")]
             people = directors[:10] + people
-            if people and options["ai_enabled"] and options["ai_credits"]:
-                values = {}
-                for index, person in enumerate(people):
-                    if re.search(r"[A-Za-z]", person["Name"]):
-                        values[f"n{index}"] = person["Name"][:130]
-                    if re.search(r"[A-Za-z]", person["Role"]):
-                        values[f"r{index}"] = person["Role"][:130]
-                for start in range(0, len(values), 25):
-                    translated = await self._optional_ai_map(
-                        dict(list(values.items())[start:start + 25]),
-                        "电影演职人员姓名及角色，译为简体中文；不确定时保留原文，不编造")
-                    for key, value in translated.items():
-                        if self._is_chinese_title(value) and not re.search(r"[A-Za-z]", value):
-                            people[int(key[1:])]["Name" if key[0] == "n" else "Role"] = value
+            await self._translate_people(people, options, item.get("Name"), "电影")
             if options["role_prefix"]:
                 for person in people:
                     if person["Type"] == "Actor" and person["Role"]:
@@ -1328,7 +1358,13 @@ class DataEnrichment:
                 update["LockedFields"] = [field for field in update.get("LockedFields") or [] if field != "Cast"]
                 unresolved = [person for person in people if re.search(r"[A-Za-z]", person["Name"] + " " + person["Role"])]
                 if unresolved:
-                    self.log(f"仍有 {len(unresolved)} 位演职的姓名或角色含外文；中文来源未覆盖，不猜译。请在补全设置启用 AI 及演职翻译并配置 MoviePilot LLM")
+                    if options["ai_enabled"] and options["ai_credits"]:
+                        hint = "AI 演职翻译已开启并执行；部分字段未取得可用中文结果，请检查上方 AI 请求或翻译日志。保留原文，不代表完整汉化"
+                    elif options["ai_enabled"]:
+                        hint = "AI 已开启，但演职翻译范围未开启"
+                    else:
+                        hint = "AI 智能补齐未开启，可靠中文资料不足时保留原文"
+                    self.log(f"仍有 {len(unresolved)} 位演职的姓名或角色含外文；{hint}")
         response = await emby.post(f"Items/{identifier}", json={key: value for key, value in update.items() if value is not None})
         response.raise_for_status()
         self.log("电影资料及演职人员已更新" if mode == "all" else "电影资料已更新" if mode == "metadata" else "电影演职人员已更新")
@@ -1473,51 +1509,7 @@ class DataEnrichment:
                     people = [{"Name": p["name"], "Type": "Actor",
                                "Role": p.get("role") or ""}
                               for p in cast[:options["max_actors"]]]
-                    if people and options["ai_enabled"] and options["ai_credits"]:
-                        translations = {}
-                        translated_names = translated_roles = 0
-                        for index, person in enumerate(people):
-                            if re.search(r"[A-Za-z]", person["Name"]):
-                                translations[f"n{index}"] = person["Name"][:130]
-                            # A Chinese prefix (e.g. "饰 Shen Run") must not
-                            # suppress translation of the remaining English.
-                            if re.search(r"[A-Za-z]", person["Role"]):
-                                translations[f"r{index}"] = person["Role"][:130]
-                            elif not person["Role"] and options["resolve_role"]:
-                                translations[f"r{index}"] = f"{person['Name']} 的角色名（若无法确定保持空字符串）"
-                        # A partially translated name (e.g. 中文 / English) is
-                        # still English. Retry only untranslated fields once;
-                        # never replace an actor with an invented or Latin name.
-                        pending = translations
-                        context = (f"剧集：{str(item.get('Name') or '')[:70]}。"
-                                   "将英文演员姓名翻译或音译成简体中文，将英文角色名翻译或音译成简体中文；"
-                                   "结果不得保留英文字母。保留已有中文及人物身份，不得编造角色或演员。"
-                                   "不确定时返回原文。")
-                        for _ in range(2):
-                            if not pending:
-                                break
-                            unresolved = {}
-                            for start in range(0, len(pending), 25):
-                                chunk = dict(list(pending.items())[start:start + 25])
-                                translated = await self._optional_ai_map(chunk, context)
-                                for key_name, original in chunk.items():
-                                    value = translated.get(key_name, "")
-                                    if (value and value != original and
-                                            re.search(r"[\u3400-\u9fff]", value) and
-                                            not re.search(r"[A-Za-z]", value)):
-                                        person = people[int(key_name[1:])]
-                                        person["Name" if key_name.startswith("n") else "Role"] = value
-                                        if key_name.startswith("n"):
-                                            translated_names += 1
-                                        else:
-                                            translated_roles += 1
-                                    elif re.search(r"[A-Za-z]", original):
-                                        unresolved[key_name] = original
-                            pending = unresolved
-                        remaining_names = sum(key.startswith("n") for key in pending)
-                        remaining_roles = sum(key.startswith("r") for key in pending)
-                        self.log(f"AI 演职人员汉化：姓名 {translated_names} 个、角色 {translated_roles} 个；"
-                                 f"仍含英文姓名 {remaining_names} 个、角色 {remaining_roles} 个（未确认译名，保留原文）")
+                    await self._translate_people(people, options, item.get("Name"), "剧集")
                     if people:
                         if options["role_prefix"]:
                             for person in people:
