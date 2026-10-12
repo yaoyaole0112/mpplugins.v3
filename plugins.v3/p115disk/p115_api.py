@@ -19,6 +19,7 @@ from p115client.tool.iterdir import iter_files_with_path_skim
 
 from app.chain.storage import StorageChain
 from app.modules.filemanager.storages import transfer_process
+from app.modules.filemanager.storages.u115 import U115Pan
 from app.schemas import FileItem, StorageUsage
 from app.schemas.exception import StorageQueryError
 from app.sdk.config import global_vars, settings
@@ -647,6 +648,12 @@ class P115Api:
         if not self._strict_query_lock.acquire(timeout=65):
             raise StorageQueryError("【P115Disk】等待目标状态查询超时，无法确认文件状态")
         try:
+            try:
+                return self._get_u115_item(path, strict=True)
+            except FileNotFoundError:
+                return None
+            except StorageQueryError as error:
+                logger.debug(f"【P115Disk】Open 严格查询不可用，回退 Cookie 查询: {error}")
             for attempt in range(2):
                 while monotonic() < self._all_channel_cooldown_until:
                     remaining = self._all_channel_cooldown_until - monotonic()
@@ -703,7 +710,9 @@ class P115Api:
             except FileNotFoundError:
                 return None
             try:
-                file_item = self._get_u115_item(path)
+                file_item = self._get_u115_item(path, strict=True)
+            except FileNotFoundError:
+                return None
             except Exception as fallback_error:
                 raise StorageQueryError(
                     f"【P115Disk】查询文件信息失败: {path} - {e}; "
@@ -718,7 +727,7 @@ class P115Api:
                 f"【P115Disk】查询文件信息失败: {path} - {e}"
             ) from e
 
-    def _get_u115_item(self, path: Path) -> Optional[FileItem]:
+    def _get_u115_item(self, path: Path, strict: bool = False) -> Optional[FileItem]:
         """
         通过 u115 存储降级查询文件项并更新正缓存
 
@@ -726,7 +735,12 @@ class P115Api:
 
         :return FileItem: 文件项，未查询到时返回 None
         """
-        file_item = StorageChain().get_file_item(storage="u115", path=path)
+        if strict:
+            file_item = U115Pan().get_item_strict(path)
+            if file_item is None:
+                raise FileNotFoundError(path)
+        else:
+            file_item = StorageChain().get_file_item(storage="u115", path=path)
         if not file_item:
             return None
 

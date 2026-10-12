@@ -38,7 +38,7 @@ class TestStorageStrictCooldown(TestCase):
             _set_all_channel_cooldown=Mock(side_effect=self.cooldown),
             _get_item_rate_limiter=Mock(), _query_item=Mock(),
             _note_405=Mock(), _fs_search_fallback=Mock(return_value=None),
-            _get_u115_item=Mock(return_value=None),
+            _get_u115_item=Mock(side_effect=StorageQueryError("Open unavailable")),
         )
         self.path = Path("/target/episode.mp4")
 
@@ -121,3 +121,38 @@ class TestStorageStrictCooldown(TestCase):
         with self.assertRaises(StorageQueryError):
             self.strict(self.api, self.path)
         self.api._strict_query_lock.release.assert_called_once()
+
+    def test_open_success_bypasses_cookie_cooldown(self):
+        self.cooldown()
+        self.api._get_u115_item.side_effect = None
+        self.api._get_u115_item.return_value = "open-target"
+        self.assertEqual(self.strict(self.api, self.path), "open-target")
+        self.api._get_u115_item.assert_called_once_with(self.path, strict=True)
+        self.sleep.assert_not_called()
+        self.api._get_item_strict_once.assert_not_called()
+
+    def test_open_confirmed_absence_bypasses_cookie_cooldown(self):
+        self.cooldown()
+        self.api._get_u115_item.side_effect = FileNotFoundError(self.path)
+        self.assertIsNone(self.strict(self.api, self.path))
+        self.sleep.assert_not_called()
+        self.api._get_item_strict_once.assert_not_called()
+
+    def test_actual_strict_helper_uses_provider_strict_contract(self):
+        source = Path(__file__).resolve().parents[2] / "p115disk/p115_api.py"
+        method = next(node for node in ast.walk(ast.parse(source.read_text()))
+                      if isinstance(node, ast.FunctionDef) and node.name == "_get_u115_item")
+        provider = Mock()
+        namespace = {"Path": Path, "Optional": Optional, "FileItem": object,
+                     "U115Pan": lambda: provider, "StorageChain": Mock()}
+        module = ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[]))
+        exec(compile(module, str(source), "exec"), namespace)
+        helper = namespace["_get_u115_item"]
+        provider.get_item_strict.return_value = None
+        with self.assertRaises(FileNotFoundError):
+            helper(self.api, self.path, strict=True)
+        provider.get_item_strict.assert_called_once_with(self.path)
+        namespace["StorageChain"].assert_not_called()
+        provider.get_item_strict.side_effect = StorageQueryError("network")
+        with self.assertRaises(StorageQueryError):
+            helper(self.api, self.path, strict=True)
