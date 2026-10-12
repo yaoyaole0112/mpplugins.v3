@@ -23,7 +23,7 @@
     "name": "媒体增强",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.9.81",
+    "version": "2.9.82",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -31,6 +31,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.9.82": "仅手机窄屏将功能导航卡片改为单行下拉选择，减少顶部占用；电脑端保留原导航及布局，功能切换沿用原加载和轮询流程。",
       "v2.9.81": "电影和剧集共用AI演职翻译流程、开关和未翻译字段重试；修复AI已开启仍提示开启的误导日志，区分翻译未完成与未启用。",
       "v2.9.80": "修复电影TMDB演员阵容被中文补缺重排及无头像过滤漏演员；保留主源顺序，补充TMDB人物中文别名，来源切换立即保存，明确显示未完成角色汉化。",
       "v2.9.79": "修复分集截帧容器创建/启动默认30秒超时：等待上限调整为120秒，启动超时后核查状态而非重复提交；按唯一容器名称清理创建超时任务，明确记录截帧、写图和Emby刷新失败阶段。",
