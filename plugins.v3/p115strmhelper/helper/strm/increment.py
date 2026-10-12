@@ -5,6 +5,7 @@ from os import close, O_CREAT, O_RDWR, open as os_open
 from pathlib import Path
 from posixpath import join as posix_join
 from threading import Thread
+from traceback import format_exc
 from time import perf_counter, sleep
 from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Tuple
 from urllib.error import HTTPError
@@ -691,8 +692,8 @@ class IncrementSyncStrmHelper:
                     self.pan_to_local_tree.switch_storage("txt")
                     self.pan_to_local_strm_tree.switch_storage("txt")
                 else:
-                    logger.exception(
-                        f"【增量STRM生成】网盘目录树生成 {pan_media_dir} 错误: {e}"
+                    logger.error(
+                        f"【增量STRM生成】网盘目录树生成 {pan_media_dir} 错误: {e}\n{format_exc()}"
                     )
                     raise ItertreeInternalError(
                         f"网盘目录树生成失败: {pan_media_dir}"

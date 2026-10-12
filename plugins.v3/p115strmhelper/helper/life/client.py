@@ -352,14 +352,7 @@ class MonitorLife:
                     pantransfercacher.delete_pan_transfer_list.append(
                         str(event["file_id"])
                     )
-                for item in iter_files_with_path(
-                    self._client,
-                    cid=int(file_id),
-                    with_ancestors=True,
-                    cooldown=2,
-                    use_media_api=False,
-                    **configer.get_ios_ua_app(),
-                ):
+                for item in self._iter_transfer_files(int(file_id)):
                     try:
                         check_iter_path_data(item)
                     except FileItemKeyMiss as e:
@@ -2098,6 +2091,34 @@ class MonitorLife:
             for origin in self.LIFE_WEB_ORIGINS:
                 add("web", origin)
         return attempts
+
+    def _iter_transfer_files(self, cid: int):
+        seen_ids = set()
+        attempts = [{"app": "android"}, configer.get_ios_ua_app()]
+        for index, kwargs in enumerate(attempts):
+            try:
+                for item in iter_files_with_path(
+                    self._client,
+                    cid=cid,
+                    with_ancestors=True,
+                    cooldown=2,
+                    max_workers=0,
+                    use_media_api=False,
+                    **kwargs,
+                ):
+                    item_id = str(item["id"])
+                    if item_id not in seen_ids:
+                        seen_ids.add(item_id)
+                        yield item
+                return
+            except Exception as error:
+                if not self._is_405_error(error) or index == len(attempts) - 1:
+                    raise
+                logger.warning(
+                    f"【网盘整理】目录 {cid} 的 {kwargs['app']} 接口返回 405，等待 5 秒后尝试备用接口"
+                )
+                if self._wait_or_stop(5):
+                    raise
 
     def _wait_or_stop(self, seconds: int) -> bool:
         """
