@@ -15,7 +15,8 @@ test('mobile dropdown lists the same sections and uses the existing switching ha
 
 test('desktop keeps the original navigation and only mobile hides it', () => {
   const additions = source.slice(source.lastIndexOf('.eme-mobile-navigation{display:none}'))
-  assert.ok(additions.startsWith('.eme-mobile-navigation{display:none}\n@media(max-width:760px){'))
+  assert.ok(additions.startsWith('.eme-mobile-navigation{display:none}'))
+  assert.ok(additions.includes('@media(max-width:760px){'))
   assert.ok(additions.includes('.eme-sidebar .eme-sidebar-card{display:none}'))
   assert.ok(additions.includes('.eme-mobile-navigation{display:block;'))
   assert.ok(source.includes('@click="chooseSection(section.key)"'))

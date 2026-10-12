@@ -1436,6 +1436,13 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 @media(max-height:690px) and (min-width:761px){.eme-shell--app .eme-sidebar{overflow:visible}}
 @media(max-width:760px){.eme-sidebar,.eme-shell--app .eme-sidebar,.eme-shell--dialog .eme-sidebar{display:flex;flex-direction:column;width:100%;padding:16px 18px 0;overflow:visible;border:0}.eme-brand,.eme-shell--app .eme-brand,.eme-shell--dialog .eme-brand{display:flex;margin-bottom:12px}.eme-sidebar-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));max-height:220px;padding:8px}.eme-sidebar-card .eme-nav{min-width:0}.eme-main,.eme-shell--app .eme-main,.eme-shell--dialog .eme-main{min-height:0;padding-top:18px}.eme-shell--app{gap:0;padding:12px}.eme-shell--dialog{gap:0;padding:12px}}
 .eme-mobile-navigation{display:none}
+@media(min-width:761px){
+  :global(.eme-app-host-lock){padding-right:0!important}
+  .eme-shell.eme-shell--app{padding-right:0}
+  .eme-shell--app .eme-main{padding-right:28px}
+  .eme-shell.eme-shell--dialog{padding-right:0}
+  .eme-shell--dialog .eme-main{padding-right:28px}
+}
 @media(max-width:760px){
   .eme-sidebar .eme-sidebar-card{display:none}
   .eme-mobile-navigation{display:block;position:relative;width:100%}
