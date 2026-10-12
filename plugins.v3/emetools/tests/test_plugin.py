@@ -121,6 +121,15 @@ class P115ParseTests(unittest.TestCase):
 
 
 class PluginTests(unittest.TestCase):
+    def test_metadata_source_selection_is_persisted_without_changing_other_settings(self):
+        self.plugin._enrichment_config['max_actors'] = 42
+        result = self.run_async(self.plugin.enrichment_action(
+            EnrichmentAction(operation='metadata_source', metadata_source='tmdb')))
+        self.assertEqual(result['metadata_source'], 'tmdb')
+        persisted = self.plugin.update_config.call_args.args[0]['enrichment']
+        self.assertEqual(persisted['metadata_source'], 'tmdb')
+        self.assertEqual(persisted['max_actors'], 42)
+
     def test_preview_preference_persists_and_survives_other_settings(self):
         result = self.run_async(self.plugin.enrichment_action(
             EnrichmentAction(operation='preview_preferences', force=True)))

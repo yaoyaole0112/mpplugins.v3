@@ -106,6 +106,71 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(saved[0]['People'][0]['Role'], '饰 彼得·帕克／蜘蛛侠')
         self.assertEqual(len(saved[0]['People']), 1)
 
+    def test_tmdb_movie_keeps_primary_cast_when_secondary_translation_lacks_avatar(self):
+        saved = []
+        def emby_handler(request):
+            if request.method == 'POST':
+                saved.append(json.loads(request.content))
+                return httpx.Response(204)
+            return httpx.Response(200, json={'Id': 'movie1', 'Type': 'Movie',
+                'Name': '蜘蛛侠：崭新之日', 'ProductionYear': 2026,
+                'ProviderIds': {'Tmdb': '12345'}})
+        emby = httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={'title': '蜘蛛侠：崭新之日', 'overview': '简介',
+                'credits': {'cast': [
+                    {'name': 'Tom Holland', 'character': 'Peter Parker / Spider-Man', 'order': 0,
+                     'profile_path': '/tom.jpg'},
+                    {'name': 'Billy Clements', 'character': 'Additional Crew', 'order': 1},
+                ], 'crew': []}})))
+        with patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user'), \
+             patch.object(self.enrichment, '_douban_data', new_callable=AsyncMock,
+                          return_value={'casts': [{'name': '汤姆·赫兰德', 'original_name': 'Tom Holland',
+                                                  'role': '饰 彼得·帕克／蜘蛛侠', 'img': ''}]}), \
+             patch.object(self.enrichment, '_tvmao_cast', new_callable=AsyncMock, return_value=[]), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', 'movie1', 'credits', DEFAULT_ENRICH_CONFIG))
+        names = [person['Name'] for person in saved[0]['People']]
+        self.assertIn('汤姆·赫兰德', names)
+        self.assertIn('Billy Clements', names)
+        tom = next(person for person in saved[0]['People'] if person['Name'] == '汤姆·赫兰德')
+        self.assertEqual(tom['Role'], '饰 彼得·帕克／蜘蛛侠')
+
+    def test_movie_secondary_translation_preserves_primary_order_and_excludes_other_actors(self):
+        primary = [{'name': 'Tom Holland', 'original_name': 'Tom Holland', 'role': 'Peter Parker', 'id': 1},
+                   {'name': 'Billy Clements', 'role': 'Officer', 'id': 2}]
+        secondary = [{'name': '比利', 'original_name': 'Billy Clements', 'role': '警员'},
+                     {'name': '汤姆·赫兰德', 'original_name': 'Tom Holland', 'role': '彼得·帕克'},
+                     {'name': '其他演员', 'role': '其他角色'}]
+        result = self.enrichment._localize_primary_cast(primary, secondary)
+        self.assertEqual([actor['id'] for actor in result], [1, 2])
+        self.assertEqual([actor['role'] for actor in result], ['彼得·帕克', '警员'])
+        self.assertEqual(primary[0]['name'], 'Tom Holland')
+
+    def test_movie_ai_translates_roles_and_keeps_primary_cast(self):
+        saved = []
+        def handler(request):
+            saved.append(json.loads(request.content))
+            return httpx.Response(204)
+        emby = httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/')
+        detail = {'credits': {'cast': [
+            {'name': '比利·克莱门茨', 'character': 'Officer'},
+            {'name': '扎布丽娜·格瓦拉', 'character': 'School Principal'}]}}
+        with patch.object(self.enrichment, '_tmdb_json', new_callable=AsyncMock, return_value=detail), \
+             patch.object(self.enrichment, '_douban_data', new_callable=AsyncMock, return_value={}), \
+             patch.object(self.enrichment, '_tvmao_cast', new_callable=AsyncMock, return_value=[]), \
+             patch.object(self.enrichment, '_optional_ai_map', new_callable=AsyncMock,
+                          return_value={'r0': '警员', 'r1': '校长'}):
+            asyncio.run(self.enrichment._enrich_movie(emby, tmdb, 'movie1',
+                {'Type': 'Movie', 'ProviderIds': {'Tmdb': '123'}}, 'credits',
+                {**DEFAULT_ENRICH_CONFIG, 'ai_enabled': True}, 'key'))
+        self.assertEqual([person['Role'] for person in saved[0]['People']], ['饰 警员', '饰 校长'])
+        asyncio.run(emby.aclose())
+        asyncio.run(tmdb.aclose())
+
     def test_douban_mobile_replaces_english_movie_cast(self):
         paths = []
 

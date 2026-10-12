@@ -718,6 +718,26 @@ class DataEnrichment:
         return merged
 
     @staticmethod
+    def _localize_primary_cast(cast, secondary):
+        result = []
+        for actor in cast:
+            matches = []
+            for candidate in secondary:
+                merged = DataEnrichment._merge_cast([candidate], [actor])
+                if len(merged) == 1:
+                    matches.append(merged[0])
+            localized = dict(actor)
+            if len(matches) == 1:
+                matched = matches[0]
+                if re.search(r"[\u3400-\u9fff]", matched.get("name") or ""):
+                    localized["name"] = matched["name"]
+                role = matched.get("role") or ""
+                if re.search(r"[\u3400-\u9fff]", role):
+                    localized["role"] = role
+            result.append(localized)
+        return result
+
+    @staticmethod
     def _needs_chinese_cast(cast, limit):
         if not cast:
             return True
@@ -1184,6 +1204,7 @@ class DataEnrichment:
         return self._begin("媒体补全", self._enrich, name, identifier, mode, self.options())
 
     async def _enrich_movie(self, emby, tmdb, identifier, item, mode, options, api_key):
+        self.log(f"电影主数据源：{'TMDB' if options['metadata_source'] == 'tmdb' else '豆瓣优先'}；演职上限 {options['max_actors']} 人")
         provider = item.get("ProviderIds") or {}
         tmdb_id = provider.get("Tmdb") or provider.get("TMDB")
         if not tmdb_id:
@@ -1201,9 +1222,6 @@ class DataEnrichment:
             "language": "zh-CN", "append_to_response": "credits,external_ids"})
         douban = (await self._douban_data(item, include_cast=mode != "metadata")
                   if options["metadata_source"] == "douban" and mode in ("all", "metadata", "credits") else {})
-        if mode != "credits" and not douban and (not self._is_chinese_title(detail.get("title")) or
-                self._needs_translation(detail.get("overview"))):
-            douban = await self._douban_data(item, include_cast=False)
         update = dict(item)
         if mode != "credits":
             update["Name"] = await self._series_title(
@@ -1240,23 +1258,41 @@ class DataEnrichment:
         if mode != "metadata":
             credits = detail.get("credits") or {}
             cast = [{"name": actor["name"], "original_name": actor.get("original_name"),
+                     "id": actor.get("id"),
                      "role": actor.get("character") or "", "profile_path": actor.get("profile_path"),
                      "order": actor.get("order")}
                     for actor in credits.get("cast") or [] if actor.get("name")]
             douban_cast = douban.get("casts") or []
             if self._needs_chinese_cast(cast, options["max_actors"]) and not douban_cast:
-                douban_cast = (await self._douban_data(item, include_cast=True)).get("casts") or []
+                secondary = await self._douban_data(item, include_cast=True)
+                douban_cast = secondary.get("casts") or []
+                if douban_cast and options["metadata_source"] == "tmdb":
+                    self.log("TMDB 作为电影主数据源，豆瓣仅补充中文演职与角色")
             if douban_cast:
-                cast = self._merge_cast(douban_cast, cast)
+                cast = (self._localize_primary_cast(cast, douban_cast)
+                        if options["metadata_source"] == "tmdb" else self._merge_cast(douban_cast, cast))
             if self._needs_chinese_cast(cast, options["max_actors"]):
                 tvmao_cast = await self._tvmao_cast(item)
                 if tvmao_cast:
-                    cast, replaced, added = self._merge_tvmao_cast(cast, tvmao_cast)
-                    self.log(f"电影电视猫中文演职补缺：汉化姓名 {replaced} 人，新增 {added} 人")
+                    if options["metadata_source"] == "tmdb":
+                        cast = self._localize_primary_cast(cast, tvmao_cast)
+                    else:
+                        cast, replaced, added = self._merge_tvmao_cast(cast, tvmao_cast)
+                        self.log(f"电影电视猫中文演职补缺：汉化姓名 {replaced} 人，新增 {added} 人")
+            for actor in cast[:options["max_actors"]]:
+                if actor.get("id") and self._needs_translation(actor.get("name")):
+                    try:
+                        person = await self._tmdb_json(tmdb, f"person/{actor['id']}",
+                            {"api_key": api_key, "language": "zh-CN"})
+                        names = [person.get("name"), *(person.get("also_known_as") or [])]
+                        chinese = next((value for value in names if self._is_chinese_title(value)
+                                        and not re.search(r"[A-Za-z]", value)), None)
+                        if chinese:
+                            actor["name"] = chinese
+                    except ValueError:
+                        self.log("TMDB 人物中文别名读取失败，保留姓名继续补全")
             people = [{"Name": actor["name"], "Type": "Actor", "Role": actor.get("role") or ""}
-                      for actor in cast if actor.get("name") and
-                      (not options["no_avatar"] or actor.get("profile_path") or
-                       re.search(r"[\u3400-\u9fff]", actor["name"]))][:options["max_actors"]]
+                      for actor in cast if actor.get("name")][:options["max_actors"]]
             tmdb_directors = [{"name": crew["name"], "original_name": crew.get("original_name"),
                                "role": "导演", "profile_path": crew.get("profile_path")}
                               for crew in credits.get("crew") or []
@@ -1290,6 +1326,9 @@ class DataEnrichment:
             if people:
                 update["People"] = people
                 update["LockedFields"] = [field for field in update.get("LockedFields") or [] if field != "Cast"]
+                unresolved = [person for person in people if re.search(r"[A-Za-z]", person["Name"] + " " + person["Role"])]
+                if unresolved:
+                    self.log(f"仍有 {len(unresolved)} 位演职的姓名或角色含外文；中文来源未覆盖，不猜译。请在补全设置启用 AI 及演职翻译并配置 MoviePilot LLM")
         response = await emby.post(f"Items/{identifier}", json={key: value for key, value in update.items() if value is not None})
         response.raise_for_status()
         self.log("电影资料及演职人员已更新" if mode == "all" else "电影资料已更新" if mode == "metadata" else "电影演职人员已更新")

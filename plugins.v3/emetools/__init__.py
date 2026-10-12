@@ -99,13 +99,14 @@ class EnrichmentAction(BaseModel):
     series_ids: List[str] = Field(default_factory=list)
     library_ids: List[str] = Field(default_factory=list)
     force: bool = False
+    metadata_source: str = ""
 
 
 class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.79"
+    plugin_version = "2.9.80"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1551,6 +1552,19 @@ class EmeTools(_PluginBase):
         if not self._enabled:
             raise HTTPException(status_code=409, detail="请先启用插件")
         try:
+            if action.operation == "metadata_source":
+                if action.metadata_source not in ("tmdb", "douban"):
+                    raise ValueError("元数据来源仅支持 TMDB 或豆瓣")
+                if self._enrichment.status()["running"]:
+                    raise ValueError("请等待当前数据补全任务结束再切换来源")
+                previous = dict(self._enrichment_config)
+                self._enrichment_config = {**previous, "metadata_source": action.metadata_source}
+                try:
+                    self._persist()
+                except Exception:
+                    self._enrichment_config = previous
+                    raise
+                return {"metadata_source": action.metadata_source}
             if action.operation == "preview_preferences":
                 previous = dict(self._enrichment_config)
                 self._enrichment_config = {**previous, "preview_force": action.force}

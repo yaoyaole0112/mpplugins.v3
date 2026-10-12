@@ -182,6 +182,21 @@ async function saveEnrichSettings() {
   })
 }
 
+async function saveMetadataSource(event) {
+  await work(async () => {
+    const value = event.target.value
+    try {
+      const result = await post('enrichment/action', { operation: 'metadata_source', metadata_source: value })
+      enrichSettings.draft.metadata_source = result.metadata_source
+      notice.value = '元数据来源已保存'
+    } catch (err) {
+      const result = await get('enrichment/config')
+      enrichSettings.draft.metadata_source = result.config.metadata_source
+      throw err
+    }
+  })
+}
+
 async function searchEnrichment(kind) {
   const preview = kind === 'preview'
   const keyword = (preview ? enrich.previewQuery : enrich.query).trim()
@@ -1214,13 +1229,13 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div class="eme-enrich-settings-body">
             <label class="eme-switch-label"><input v-model="enrichSettings.draft.auto_on_import" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>Emby 分集入库后自动补全整剧</span></label>
             <p class="eme-hint">同一部剧最近一次分集入库后静默 5 分钟再执行一次（不是指剧集的最终集数）；需将 Emby 新入库事件接入 MoviePilot Webhook。启用 AI 后一并翻译演职员、标题和简介。</p>
-            <div class="eme-enrich-source"><strong>元数据来源</strong><div class="eme-enrich-source-options"><label v-for="source in [{ value: 'tmdb', label: 'TMDB' }, { value: 'douban', label: '豆瓣优先' }]" :key="source.value"><input v-model="enrichSettings.draft.metadata_source" type="radio" name="enrich-metadata-source" :value="source.value" />{{ source.label }}</label></div></div>
-            <p class="eme-hint">演职人员中文资料不足时，依次尝试豆瓣、电视猫演员表；仅使用能确认属于该剧的中文姓名及角色。仍缺少中文角色名时，可启用 AI 智能补齐及演职人员汉化。</p>
+            <div class="eme-enrich-source"><strong>元数据来源</strong><div class="eme-enrich-source-options"><label v-for="source in [{ value: 'tmdb', label: 'TMDB' }, { value: 'douban', label: '豆瓣优先' }]" :key="source.value"><input :checked="enrichSettings.draft.metadata_source === source.value" :disabled="busy || enrich.status.running" @change="saveMetadataSource" type="radio" name="enrich-metadata-source" :value="source.value" />{{ source.label }}</label></div></div>
+            <p class="eme-hint">来源切换立即保存。电影选择 TMDB 时保留其演员阵容与顺序，豆瓣、电视猫仅补充中文资料；仅使用能确认属于该剧的中文姓名及角色。仍缺少中文角色名时，可启用 AI 智能补齐及演职人员汉化。</p>
             <label class="eme-switch-label"><input v-model="enrichSettings.draft.ai_enabled" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.ai_available" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 AI 智能补齐</span></label>
             <p class="eme-enrich-model">当前 MoviePilot AI 模型：<strong>{{ enrichSettings.ai_model || '未配置' }}</strong><span v-if="!enrichSettings.ai_available">（LLM 服务尚未配置完整或接口不兼容）</span></p>
             <p v-if="!enrichSettings.ai_available" class="eme-hint">请先在 MoviePilot 中配置 LLM API Key、地址和模型，再启用 AI。</p>
             <div class="eme-enrich-settings-group"><strong>AI 翻译范围</strong><label v-for="option in [{ key: 'ai_title', label: '标题汉化' }, { key: 'ai_credits', label: '演职人员姓名和角色汉化' }, { key: 'ai_overview', label: '分集／剧集简介汉化' }, { key: 'resolve_role', label: '补全占位角色名' }]" :key="option.key" class="eme-switch-label"><input v-model="enrichSettings.draft[option.key]" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.draft.ai_enabled" /><span class="eme-switch-track" aria-hidden="true" /><span>{{ option.label }}</span></label></div>
-            <div class="eme-enrich-settings-group"><strong>演职人员处理</strong><label class="eme-switch-label"><input v-model="enrichSettings.draft.no_avatar" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>过滤无头像演员</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.episode_cast" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>分集写入演职员</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.role_prefix" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>角色名前加“饰/配”</span></label></div>
+            <div class="eme-enrich-settings-group"><strong>演职人员处理</strong><label class="eme-switch-label"><input v-model="enrichSettings.draft.no_avatar" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>过滤无头像演员（仅剧集，电影保留演员阵容）</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.episode_cast" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>分集写入演职员</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.role_prefix" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>角色名前加“饰/配”</span></label></div>
             <div class="eme-enrich-settings-numbers"><label>每部作品写入演员数<input v-model.number="enrichSettings.draft.max_actors" type="number" min="1" max="200" /></label><label>锁定所需最低演员数<input v-model.number="enrichSettings.draft.cast_lock_min" type="number" min="1" max="200" /></label></div>
             <p class="eme-hint">仅当演员人数达到阈值且姓名已是中文时，才锁定 Emby 演职人员；AI 默认关闭，只有开启相应选项后才会产生 LLM 请求。</p>
           </div>
