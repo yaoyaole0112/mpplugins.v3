@@ -60,6 +60,7 @@ class P115Api:
         self._id_cache: IdPathCache = IdPathCache(maxsize=4096)
         self._id_item_cache: ItemIdCache = ItemIdCache(maxsize=4096)
         self._folder_lock = RLock()
+        self._strict_query_lock = RLock()
         self.transtype = {"move": "移动", "copy": "复制"}
 
         self._rename_call_counter = 0
@@ -638,6 +639,36 @@ class P115Api:
             return None
 
     def get_item_strict(self, path: Path) -> Optional[FileItem]:
+        """冷却结束后有限复核；状态未知时仍拒绝覆盖。"""
+        cached_item = self._get_cached_item(path)
+        if cached_item:
+            return cached_item
+        deadline = monotonic() + 65
+        if not self._strict_query_lock.acquire(timeout=65):
+            raise StorageQueryError("【P115Disk】等待目标状态查询超时，无法确认文件状态")
+        try:
+            for attempt in range(2):
+                while monotonic() < self._all_channel_cooldown_until:
+                    remaining = self._all_channel_cooldown_until - monotonic()
+                    budget = deadline - monotonic()
+                    if remaining > budget or budget <= 0:
+                        raise StorageQueryError("【P115Disk】查询冷却超出等待上限，无法确认文件状态")
+                    logger.info(f"【P115Disk】等待查询冷却 {remaining:.1f} 秒后复核目标: {path}")
+                    sleep(remaining)
+                try:
+                    return self._get_item_strict_once(path)
+                except StorageQueryError as error:
+                    if attempt or monotonic() >= deadline:
+                        raise
+                    if monotonic() >= self._all_channel_cooldown_until:
+                        if not self._is_405(error):
+                            raise
+                        self._set_all_channel_cooldown()
+            raise StorageQueryError("【P115Disk】无法确认文件状态")
+        finally:
+            self._strict_query_lock.release()
+
+    def _get_item_strict_once(self, path: Path) -> Optional[FileItem]:
         """
         严格获取文件或目录，无法确认状态时抛出存储查询异常
 

@@ -217,7 +217,7 @@
     "name": "115网盘储存",
     "description": "更快更强的115网盘存储模块（V3 适配：proapi 优先，修复 webapi 405 导致的目录查询失败）",
     "labels": "云盘",
-    "version": "3.0.2",
+    "version": "3.0.3",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
     "author": "DDSRem / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -225,6 +225,7 @@
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
+      "v3.0.3": "目标状态严格查询串行复核：冷却期间最多等待 65 秒，405 有限重试一次，持续异常仍拒绝误覆盖",
       "v3.0.2": "修复 webapi 405：路径查询改走 proapi android/ios，fs_search 不再强制 webapi.115.com，并避免 405 递归刷日志",
       "v3.0.1": "MoviePilot V3 运行版同步"
     }
