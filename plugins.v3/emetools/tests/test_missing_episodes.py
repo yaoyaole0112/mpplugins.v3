@@ -150,7 +150,8 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
         self.detector._auto_cancel_completed = False
         self.detector._auto_cancel_aired_season = True
         self.assertEqual(self.process(status="Returning Series", local={1})[1], set())
-        self.assertEqual(self.process(status="Returning Series", episode_count=3)[1], set())
+        with self.assertRaisesRegex(ValueError, "分集清单不完整"):
+            self.process(status="Returning Series", episode_count=3)
 
     def setUp(self):
         self.detector = object.__new__(MissingEpisodeDetector)
@@ -214,15 +215,16 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
         details = {"status": "Returning Series", "seasons": [{"season_number": 1, "episode_count": 2}]}
         season = {"episodes": [{"episode_number": 1, "air_date": "2026-01-01"},
                                 {"episode_number": 1, "air_date": "2026-01-02"}]}
-        with patch.object(self.detector, "_request_json", side_effect=[details, season]):
-            _, completed = self.detector._process_series(
+        with patch.object(self.detector, "_request_json", side_effect=[details, season]), \
+             self.assertRaisesRegex(ValueError, "分集清单不完整"):
+            self.detector._process_series(
                 {"Id": "series-1", "Name": "重复集号", "ProviderIds": {"Tmdb": "123"}},
                 {"series-1": {1: {1, 2}}}, "key", "tmdb.example", "2026-10-01", "Q4", "电视剧",
             )
-        self.assertEqual(completed, set())
 
     def test_partial_tmdb_response_is_not_cancel_candidate(self):
-        self.assertEqual(self.process(episode_count=3)[1], set())
+        with self.assertRaisesRegex(ValueError, "分集清单不完整"):
+            self.process(episode_count=3)
 
     def test_episode_override_limits_missing_and_subscription_total(self):
         self.detector._episode_overrides = {("123", 1): {"tmdb_id": "123", "season": 1, "total_episodes": 1}}

@@ -193,6 +193,8 @@ class MissingFill:
                            if record_key(item) == action.get("key")), None)
             if not record or not record.get("MissingEpisodeNumbers"):
                 raise ValueError("缺集记录已变化，请刷新检测结果")
+            if record.get("PendingReview"):
+                raise ValueError("该缺集记录检测未完成，请重新扫描确认后再搜索补全")
             if any(record_key(task["record"]) == record_key(record)
                    and task["state"] in INTERACTIVE | PENDING for task in self.tasks):
                 raise ValueError("该缺失季已有未核实的任务，请先复查或人工核实关闭")

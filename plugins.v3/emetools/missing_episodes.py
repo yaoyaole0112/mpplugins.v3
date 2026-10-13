@@ -1,6 +1,7 @@
 """Independent Emby/TMDB missing-episode detector for ME tools."""
 
 import concurrent.futures
+import copy
 import re
 import threading
 from collections import defaultdict
@@ -58,6 +59,7 @@ class MissingEpisodeDetector:
     _DATA_KEY = "missing_episodes"
     _TIME_KEY = "last_scan_time"
     _CANCELLED_KEY = "missing_cancelled_subscriptions"
+    _SCAN_KEY = "missing_scan_status"
 
     def __init__(self, owner, config):
         self.owner = owner
@@ -68,6 +70,8 @@ class MissingEpisodeDetector:
         self._results = []
         self._cancelled_subscriptions = []
         self._last_scan_time = "从未扫描"
+        self._scan_status = {}
+        self._scan_issues = []
         self.configure(config)
         self._load_saved_data()
 
@@ -413,6 +417,8 @@ class MissingEpisodeDetector:
         self._results = results if isinstance(results, list) else []
         self._cancelled_subscriptions = cancelled if isinstance(cancelled, list) else []
         self._last_scan_time = str(timestamp) if timestamp else "从未扫描"
+        status = self.owner.get_data(self._SCAN_KEY)
+        self._scan_status = status if isinstance(status, dict) else {}
 
     def save_data(self, key, value):
         self.owner.save_data(key, value)
@@ -676,8 +682,9 @@ class MissingEpisodeDetector:
         details = self._request_json(
             f"https://{tmdb_domain}/3/tv/{tmdb_id}?language=zh-CN&api_key={tmdb_key}"
         )
-        if not details:
-            return [], set()
+        if (not isinstance(details, dict) or not isinstance(details.get("seasons"), list)
+                or not details["seasons"]):
+            raise ValueError("TMDB 剧集信息读取失败或缺少季度列表")
 
         local_inventory = inventory.get(series_id, {})
         results: List[Dict[str, Any]] = []
@@ -700,8 +707,10 @@ class MissingEpisodeDetector:
             season_details = self._request_json(
                 f"https://{tmdb_domain}/3/tv/{tmdb_id}/season/{season_number}?language=zh-CN&api_key={tmdb_key}"
             )
-            if not season_details:
-                continue
+            if (not isinstance(season_details, dict) or
+                    not isinstance(season_details.get("episodes"), list) or
+                    not season_details["episodes"]):
+                raise ValueError(f"TMDB S{season_number:02d} 分集信息读取失败或为空")
 
             override = self._episode_override(tmdb_id, season_number)
             tmdb_total = int(season.get("episode_count") or 0)
@@ -722,6 +731,9 @@ class MissingEpisodeDetector:
                 (override["total_episodes"], "手动修正") if override else
                 self._auto_episode_total(series, season_number, tmdb_total, details, season_year)
             )
+            available = {int(episode.get("episode_number") or 0) for episode in episodes}
+            if season_number > 0 and not set(range(1, min(tmdb_total, expected_total) + 1)).issubset(available):
+                raise ValueError(f"TMDB S{season_number:02d} 分集清单不完整，总集数与分集列表不一致")
             episodes = [episode for episode in episodes
                         if int(episode.get("episode_number") or 0) <= expected_total]
 
@@ -794,7 +806,9 @@ class MissingEpisodeDetector:
         payload = self._request_json(
             f"{host}/emby/Users/{user_id}/Views?api_key={api_key}"
         )
-        libraries = payload.get("Items", []) if payload else []
+        if not isinstance(payload, dict) or not isinstance(payload.get("Items"), list):
+            raise ValueError("Emby 媒体库列表读取失败或返回不完整")
+        libraries = payload["Items"]
         selected = []
         for library in libraries:
             name = str(library.get("Name") or "")
@@ -856,6 +870,9 @@ class MissingEpisodeDetector:
         provider_ids = series.get("ProviderIds") or {}
         tmdb_id = provider_ids.get("Tmdb") or provider_ids.get("tmdb") or provider_ids.get("TMDB")
         if not series.get("Id") or not tmdb_id or str(tmdb_id) in self._skip_series_ids:
+            if not tmdb_id and any(str(row.get("SeriesId")) == str(series.get("Id"))
+                                   for row in getattr(self, "_results", [])):
+                raise ValueError("原缺集剧集暂时缺少 TMDB ID，无法确认已补齐")
             return [], set()
         episodes = self._emby_items(host, api_key, user_id, "Episode", series_id=series["Id"])
         inventory = {str(series["Id"]): self._emby_episode_inventory(episodes, series)}
@@ -883,7 +900,7 @@ class MissingEpisodeDetector:
         results: List[Dict[str, Any]] = []
         completed: Set[Tuple[str, int, str]] = set()
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [
+            futures = {
                 executor.submit(
                     self._scan_series,
                     host,
@@ -895,17 +912,39 @@ class MissingEpisodeDetector:
                     today,
                     server_name,
                     library_name,
-                )
+                ): series
                 for series in series_items
-            ]
+            }
             for future in concurrent.futures.as_completed(futures):
                 try:
                     series_results, series_completed = future.result()
                     results.extend(series_results)
                     completed.update(series_completed)
                 except Exception as error:  # noqa: BLE001 - 单剧失败不影响其他剧集
-                    logger.error(f"【{self.plugin_name}】单部剧集检测失败：{error}")
+                    series = futures[future]
+                    self._retain_failed_series(results, server_name, library_name, series, error)
         return results, completed
+
+    def _retain_failed_series(self, results, server_name, library_name, series, error):
+        reason = str(error)[:180] if isinstance(error, ValueError) else type(error).__name__
+        issue = {"server": server_name, "library": library_name,
+                 "series": str(series.get("Name") or series.get("Id") or "未知剧集"), "reason": reason}
+        if not hasattr(self, "_scan_issues"):
+            self._scan_issues = []
+        self._scan_issues.append(issue)
+        provider = series.get("ProviderIds") or {}
+        tmdb_id = next((str(value) for key, value in provider.items() if key.lower() == "tmdb"), "")
+        retained = 0
+        for previous in getattr(self, "_results", []):
+            same_series = (str(previous.get("SeriesId")) == str(series.get("Id"))
+                           if previous.get("SeriesId") else tmdb_id and str(previous.get("TmdbId")) == tmdb_id)
+            if (previous.get("ServerName") == server_name and
+                    previous.get("LibraryName") == library_name and same_series and
+                    str(previous.get("TmdbId")) not in self._skip_series_ids):
+                results.append({**copy.deepcopy(previous), "PendingReview": True, "ReviewReason": reason})
+                retained += 1
+        logger.warning(f"【{self.plugin_name}】{server_name}/{library_name}/{issue['series']} 检测未完成："
+                       f"{reason}；保留 {retained} 条上次缺集记录待复查")
 
     def _handle_missing(self, result: Dict[str, Any]) -> None:
         """按配置处理一条缺失季记录。"""
@@ -996,22 +1035,21 @@ class MissingEpisodeDetector:
             return
         self._is_scanning = True
         started_at = datetime.now()
+        self._scan_issues = []
+        previous_results = copy.deepcopy(self._results)
         try:
             tmdb_key = str(getattr(settings, "TMDB_API_KEY", "") or "")
             if not tmdb_key:
-                logger.error(f"【{self.plugin_name}】系统未配置 TMDB API Key")
-                return
+                raise ValueError("系统未配置 TMDB API Key")
             if not self._mediaserver_helper:
-                logger.error(f"【{self.plugin_name}】媒体服务器服务未初始化")
-                return
+                raise ValueError("媒体服务器服务未初始化")
 
             name_filters = self._server_names or None
             services = self._mediaserver_helper.get_services(
                 name_filters=name_filters, type_filter="emby"
             )
             if not services:
-                logger.error(f"【{self.plugin_name}】未找到符合条件的 Emby 服务器")
-                return
+                raise ValueError("未找到符合条件的 Emby 服务器")
 
             tmdb_domain = str(
                 getattr(settings, "TMDB_API_DOMAIN", "api.themoviedb.org")
@@ -1030,9 +1068,12 @@ class MissingEpisodeDetector:
                 api_key = str(raw_config.get("apikey") or "")
                 user_id = str(service.instance.get_user() or "")
                 if not host or not api_key or not user_id:
-                    logger.error(f"【{self.plugin_name}】{server_name} 的连接信息不完整")
-                    continue
+                    raise ValueError(f"{server_name} 的连接信息不完整")
                 libraries = self._selected_libraries(host, api_key, user_id)
+                if not libraries and any(row.get("ServerName") == server_name and
+                        (not self._library_names or row.get("LibraryName") in self._library_names)
+                        for row in previous_results):
+                    raise ValueError(f"{server_name} 未返回原检测范围的媒体库，不能确认缺集已消失")
                 logger.info(
                     f"【{self.plugin_name}】{server_name} 将扫描 {len(libraries)} 个媒体库："
                     f"{'、'.join(str(library.get('Name') or library.get('Id')) for library in libraries)}；"
@@ -1067,7 +1108,8 @@ class MissingEpisodeDetector:
                 )
             )
             for result in results:
-                self._handle_missing(result)
+                if not result.get("PendingReview"):
+                    self._handle_missing(result)
 
             self._results = results
             self._last_scan_time = datetime.now(tz=pytz.timezone(settings.TZ)).strftime(
@@ -1076,12 +1118,39 @@ class MissingEpisodeDetector:
             self.save_data(self._DATA_KEY, results)
             self.save_data(self._TIME_KEY, self._last_scan_time)
             self.save_data(self._CANCELLED_KEY, self._cancelled_subscriptions)
+            self._scan_status = {"complete": not bool(self._scan_issues),
+                "attempted_at": self._last_scan_time, "failed_count": len(self._scan_issues),
+                "retained_count": sum(bool(row.get("PendingReview")) for row in results),
+                "issues": self._scan_issues[:100]}
+            self.save_data(self._SCAN_KEY, self._scan_status)
+            def record_key(row):
+                return tuple(str(row.get(key) or "") for key in
+                             ("ServerName", "LibraryName", "TmdbId", "SeasonNum"))
+            previous_keys = {record_key(row) for row in previous_results}
+            current_keys = {record_key(row) for row in results}
+            for row in results:
+                if record_key(row) not in previous_keys and not row.get("PendingReview"):
+                    logger.info(f"【{self.plugin_name}】新增缺集：{row.get('SeriesName')} {row.get('SeasonFormatted')}")
+            for row in previous_results:
+                if record_key(row) not in current_keys:
+                    logger.info(f"【{self.plugin_name}】移除上次记录：{row.get('SeriesName')} {row.get('SeasonFormatted')}；"
+                                "本次未再检出缺集或已不在当前检测范围")
             elapsed = (datetime.now() - started_at).total_seconds()
             logger.info(
-                f"【{self.plugin_name}】扫描完成，发现 {len(results)} 条缺失季记录，"
+                f"【{self.plugin_name}】{'扫描未完整完成' if self._scan_issues else '扫描完成'}，"
+                f"发现/保留 {len(results)} 条缺失季记录，{len(self._scan_issues)} 部待复查，"
                 f"自动取消 {len(self._cancelled_subscriptions)} 个完整完结订阅，耗时 {elapsed:.1f} 秒"
             )
         except Exception as error:  # noqa: BLE001 - 扫描任务必须自行收口
+            self._results = [{**row, "PendingReview": True,
+                              "ReviewReason": "本次扫描未完成，请重新扫描"} for row in previous_results]
+            self._scan_status = {"complete": False,
+                "attempted_at": datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d %H:%M:%S"),
+                "failed_count": max(1, len(self._scan_issues)), "retained_count": len(self._results),
+                "issues": self._scan_issues[:100],
+                "error": str(error)[:180] if isinstance(error, ValueError) else type(error).__name__}
+            self.save_data(self._DATA_KEY, self._results)
+            self.save_data(self._SCAN_KEY, self._scan_status)
             logger.error(f"【{self.plugin_name}】扫描失败：{error}", exc_info=True)
         finally:
             self._is_scanning = False

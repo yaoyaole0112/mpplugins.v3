@@ -179,6 +179,13 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self.fill.worker
         return self.fill.tasks[-1]
 
+    async def test_pending_review_record_cannot_start_bot_search(self):
+        self.plugin._missing._results[0]['PendingReview'] = True
+        with self.assertRaisesRegex(ValueError, '检测未完成'):
+            await self.fill.action({'operation': 'start', 'key': record_key(RECORD)})
+        self.assertEqual(self.fill.tasks, [])
+        self.assertEqual(self.client.commands, [])
+
     def confirm(self, task, **changes):
         return {"operation": "confirm", "task_id": task["id"], "option_id": task["options"][0]["id"],
                 "confirmed": True, **changes}

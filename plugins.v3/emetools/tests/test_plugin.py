@@ -235,6 +235,18 @@ class PluginTests(unittest.TestCase):
         self.plugin._missing.scan_missing_episodes.assert_called_once()
         self.assertEqual(self.run_async(self.plugin.missing_status())["finished_scan_id"], 1)
 
+    def test_missing_status_reports_persisted_incomplete_scan(self):
+        status = {'complete': False, 'failed_count': 1, 'retained_count': 0, 'issues': []}
+        self.plugin.get_data.side_effect = lambda key: status if key == 'missing_scan_status' else None
+        result = self.run_async(self.plugin.missing_status())
+        self.assertEqual(result['scan_status'], status)
+
+    def test_clearing_missing_results_also_clears_scan_failure_status(self):
+        self.plugin.save_data('missing_scan_status', {'complete': False})
+        self.run_async(self.plugin.missing_action({'operation': 'clear'}))
+        self.plugin.save_data.assert_any_call('missing_scan_status', {})
+        self.assertEqual(self.plugin._missing._scan_status, {})
+
     def test_skip_detected_series_persists_and_removes_all_its_seasons(self):
         self.plugin._missing._results = [
             {"TmdbId": "123", "SeasonNum": 1}, {"TmdbId": "123", "SeasonNum": 2},

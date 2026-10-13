@@ -106,7 +106,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.88"
+    plugin_version = "2.9.89"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -675,6 +675,7 @@ class EmeTools(_PluginBase):
                 "manual_scan_id": self._missing_manual_scan_id,
                 "finished_scan_id": self._missing_finished_scan_id,
                 "last_scan_time": self._missing._last_scan_time,
+                "scan_status": copy.deepcopy(self._missing._scan_status),
                 "cancelled_subscriptions": copy.deepcopy(self._missing._cancelled_subscriptions),
                 "results": copy.deepcopy(self._missing._results)}
 
@@ -803,9 +804,11 @@ class EmeTools(_PluginBase):
             self._missing._results = []
             self._missing._cancelled_subscriptions = []
             self._missing._last_scan_time = "从未扫描"
+            self._missing._scan_status = {}
             self.save_data("missing_episodes", [])
             self.save_data("missing_cancelled_subscriptions", [])
             self.save_data("last_scan_time", "从未扫描")
+            self.save_data("missing_scan_status", {})
             return {"message": "检测记录已清空（原插件记录仍保留）"}
         raise HTTPException(status_code=400, detail="未知缺集检测操作")
 
