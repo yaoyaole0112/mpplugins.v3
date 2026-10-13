@@ -8,6 +8,35 @@ from emetools.missing_episodes import DEFAULT_MISSING, MissingEpisodeDetector
 
 
 class ScanReliabilityTests(unittest.TestCase):
+    def test_tmdb_request_uses_proxy_and_retries_transient_failure(self):
+        response = SimpleNamespace(status_code=200, json=lambda: {'seasons': []})
+        with patch('emetools.missing_episodes.RequestUtils') as client, \
+             patch('emetools.missing_episodes.time.sleep'), \
+             patch('emetools.missing_episodes.settings', SimpleNamespace(
+                 PROXY={'https': 'http://proxy'}, TMDB_API_DOMAIN='api.themoviedb.org')):
+            client.return_value.get_res.side_effect = [None, response]
+            result = self.detector._request_json('https://api.themoviedb.org/3/tv/1?api_key=test')
+            self.assertEqual(result, {'seasons': []})
+            self.assertEqual(client.call_count, 2)
+            self.assertEqual(client.call_args.kwargs['proxies'], {'https': 'http://proxy'})
+
+    def test_emby_request_does_not_use_tmdb_proxy(self):
+        response = SimpleNamespace(status_code=200, json=lambda: {'Items': []})
+        with patch('emetools.missing_episodes.RequestUtils') as client:
+            client.return_value.get_res.return_value = response
+            self.detector._request_json('http://emby/emby/Items')
+            self.assertIsNone(client.call_args.kwargs['proxies'])
+
+    def test_non_contiguous_tmdb_episode_numbers_are_compared_without_aborting(self):
+        payloads = [{'seasons': [{'season_number': 1, 'episode_count': 2}]},
+                    {'episodes': [{'episode_number': 1, 'air_date': '2026-01-01'},
+                                  {'episode_number': 3, 'air_date': '2026-01-01'}]}]
+        with patch.object(self.detector, '_request_json', side_effect=payloads):
+            results, completed = self.detector._process_series(self.series[0], {'failed': {1: {1}}},
+                'test', 'tmdb', '2026-10-13', 'Q4', '剧集')
+        self.assertEqual(results[0]['MissingEpisodeNumbers'], [3])
+        self.assertEqual(completed, set())
+
     def setUp(self):
         self.storage = {}
         self.detector = object.__new__(MissingEpisodeDetector)
@@ -100,8 +129,7 @@ class ScanReliabilityTests(unittest.TestCase):
         for payloads in ([None], [{'seasons': [{'season_number': 1, 'episode_count': 2}]}, None],
                          [{'seasons': [{'season_number': 1, 'episode_count': 2}]}, {'episodes': []}],
                          [{'seasons': []}],
-                         [{'seasons': [{'season_number': 1, 'episode_count': 2}]},
-                          {'episodes': [{'episode_number': 1, 'air_date': '2026-10-01'}]}]):
+                         [{'seasons': [{'season_number': 1, 'episode_count': 2}]}, {'episodes': []}]):
             with self.subTest(payloads=payloads), patch.object(self.detector, '_request_json', side_effect=payloads):
                 with self.assertRaises(ValueError):
                     self.detector._process_series(self.series[0], {'failed': {1: {1}}},

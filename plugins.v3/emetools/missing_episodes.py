@@ -4,11 +4,12 @@ import concurrent.futures
 import copy
 import re
 import threading
+import time
 from collections import defaultdict
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import pytz
 from pypinyin import lazy_pinyin
@@ -647,14 +648,21 @@ class MissingEpisodeDetector:
     @staticmethod
     def _request_json(url: str, headers=None) -> Any:
         """请求 JSON，失败时返回空值并记录调试日志。"""
-        try:
-            client = RequestUtils(headers=headers) if headers else RequestUtils()
-            response = client.get_res(url)
-            if response and response.status_code == 200:
-                payload = response.json()
-                return payload if isinstance(payload, (dict, list)) else None
-        except Exception as error:  # noqa: BLE001 - 外部服务错误不能中断整次扫描
-            logger.debug(f"请求失败 {url.split('?')[0]}：{error}")
+        for attempt in range(1, 4):
+            try:
+                domain = str(getattr(settings, 'TMDB_API_DOMAIN', '') or 'api.themoviedb.org')
+                tmdb_host = urlsplit(domain if '://' in domain else 'https://' + domain).hostname
+                proxy = settings.PROXY if urlsplit(url).hostname == tmdb_host else None
+                client = RequestUtils(headers=headers, proxies=proxy, timeout=30)
+                response = client.get_res(url)
+                if response and response.status_code == 200:
+                    payload = response.json()
+                    return payload if isinstance(payload, (dict, list)) else None
+                logger.debug(f"请求返回 HTTP {response.status_code if response else '无响应'}：{url.split('?')[0]}")
+            except Exception as error:  # noqa: BLE001 - 外部服务错误不能中断整次扫描
+                logger.debug(f"请求第 {attempt} 次失败 {url.split('?')[0]}：{type(error).__name__}")
+            if attempt < 3:
+                time.sleep(attempt)
         return None
 
     def _process_series(
@@ -724,18 +732,18 @@ class MissingEpisodeDetector:
                     episode_number = int(episode.get("episode_number") or 0)
                 except (TypeError, ValueError):
                     continue
-                if episode_number <= tmdb_total:
+                if episode_number > 0:
                     episodes.append(episode)
 
             expected_total, total_source = (
                 (override["total_episodes"], "手动修正") if override else
                 self._auto_episode_total(series, season_number, tmdb_total, details, season_year)
             )
-            available = {int(episode.get("episode_number") or 0) for episode in episodes}
-            if season_number > 0 and not set(range(1, min(tmdb_total, expected_total) + 1)).issubset(available):
-                raise ValueError(f"TMDB S{season_number:02d} 分集清单不完整，总集数与分集列表不一致")
-            episodes = [episode for episode in episodes
-                        if int(episode.get("episode_number") or 0) <= expected_total]
+            if expected_total >= tmdb_total and len({int(episode['episode_number']) for episode in episodes}) < tmdb_total:
+                raise ValueError(f"TMDB S{season_number:02d} 分集清单不完整，实际返回条目数少于总集数")
+            if override or expected_total < tmdb_total:
+                episodes = [episode for episode in episodes
+                            if int(episode.get("episode_number") or 0) <= expected_total]
 
             missing: Set[int] = set()
             expected: Set[int] = set()
@@ -899,7 +907,7 @@ class MissingEpisodeDetector:
 
         results: List[Dict[str, Any]] = []
         completed: Set[Tuple[str, int, str]] = set()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
                 executor.submit(
                     self._scan_series,
