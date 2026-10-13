@@ -16,7 +16,12 @@ from app.sdk.logging import logger
 from app.sdk.services import MediaServerHelper
 from pypinyin import lazy_pinyin
 
+from .emby_guard import emby_request
 from .p115 import P115Client
+
+
+REFRESH_LOCK = threading.Lock()
+REFRESH_PENDING = {}
 
 
 DEFAULT_RULES = [
@@ -447,9 +452,30 @@ class MediaCleanup:
         try:
             helper = MediaServerHelper()
             services = helper.get_services(type_filter="emby") or {}
-            values = services.values() if isinstance(services, dict) else services
-            for service in values:
-                if not service.instance.refresh_root_library():
+            values = services.items() if isinstance(services, dict) else enumerate(services)
+            for key, service in values:
+                with REFRESH_LOCK:
+                    if key in REFRESH_PENDING:
+                        continue
+                    timer = threading.Timer(30, self._refresh_server, (key, service.instance))
+                    timer.daemon = True
+                    REFRESH_PENDING[key] = timer
+                    try:
+                        timer.start()
+                    except BaseException:
+                        REFRESH_PENDING.pop(key, None)
+                        raise
+        except Exception as error:
+            logger.warning("增强工具 媒体清理：Emby 媒体库刷新失败：%s", type(error).__name__)
+
+    @staticmethod
+    def _refresh_server(key, instance):
+        try:
+            with emby_request():
+                if not instance.refresh_root_library():
                     logger.warning("增强工具 媒体清理：Emby 媒体库刷新未成功")
         except Exception as error:
             logger.warning("增强工具 媒体清理：Emby 媒体库刷新失败：%s", type(error).__name__)
+        finally:
+            with REFRESH_LOCK:
+                REFRESH_PENDING.pop(key, None)

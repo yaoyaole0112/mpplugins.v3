@@ -76,7 +76,7 @@ class EnrichmentTests(unittest.TestCase):
              patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user'), \
              patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
             asyncio.run(self.enrichment._enrich('Q4', 'movie1', 'metadata', DEFAULT_ENRICH_CONFIG))
-        self.assertEqual(saved[0]['Overview'], '已有中文简介')
+        self.assertEqual(saved, [])
 
     def test_movie_uses_tvmao_cast_and_prefixes_actor_roles(self):
         saved = []

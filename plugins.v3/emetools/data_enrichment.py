@@ -29,6 +29,7 @@ from app.sdk.services import MediaServerHelper
 from app.schemas.types import MediaType
 from app.runtime.settings import get_runtime_setting
 from .tvmao_client import fetch_tvmao_cast
+from .emby_guard import EmbyClient, ENRICHMENT_SLOT, RESOLVE_SLOTS
 
 
 FRAME_FILTER = ("libplacebo=w=1280:h=720:force_original_aspect_ratio=decrease:force_divisible_by=2:"
@@ -225,6 +226,11 @@ class DataEnrichment:
         self._import_timers = {}
         self._import_pending = {}
         self._closed = False
+        self._resolve_recent = {}
+
+    def _ensure_active(self):
+        if self._closed:
+            raise asyncio.CancelledError("插件已停止，取消旧补全任务")
 
     def resume_imports(self):
         pending = self.owner.get_data("enrichment_import_pending") or {}
@@ -313,6 +319,8 @@ class DataEnrichment:
             self.owner.save_data("enrichment_import_poll_after", checked_at)
             if count:
                 logger.info("增强工具 数据补全：最近入库轮询发现 %d 部电影／剧集，已安排兜底补全", count)
+        except asyncio.CancelledError:
+            return
         except Exception as exc:
             logger.info("增强工具 数据补全：最近入库轮询失败：%s", type(exc).__name__)
 
@@ -321,8 +329,30 @@ class DataEnrichment:
         value = str(tmdb_id or "").strip()
         if not value.isdigit() or media_type not in ("Movie", "Series"):
             return False
-        thread = threading.Thread(target=self._resolve_tmdb_import, args=(value, media_type), daemon=True)
-        thread.start()
+        with self.lock:
+            now = time.monotonic()
+            key = (value, media_type)
+            if self._closed or now - self._resolve_recent.get(key, -60) < 60:
+                return False
+            if not RESOLVE_SLOTS.acquire(blocking=False):
+                return False
+            self._resolve_recent = {entry: stamp for entry, stamp in self._resolve_recent.items()
+                                    if now - stamp < 60}
+            self._resolve_recent[key] = now
+
+        def resolve():
+            try:
+                self._resolve_tmdb_import(value, media_type)
+            except asyncio.CancelledError:
+                return
+            finally:
+                RESOLVE_SLOTS.release()
+
+        try:
+            threading.Thread(target=resolve, daemon=True).start()
+        except BaseException:
+            RESOLVE_SLOTS.release()
+            raise
         return True
 
     def _resolve_tmdb_import(self, tmdb_id, media_type="Series"):
@@ -533,7 +563,7 @@ class DataEnrichment:
         if not host or not key:
             raise ValueError("Emby 连接信息不完整")
         url = host if host.lower().endswith("/emby") else host + "/emby"
-        return httpx.AsyncClient(base_url=url + "/", headers={"X-Emby-Token": key},
+        return EmbyClient(base_url=url + "/", headers={"X-Emby-Token": key}, active=self._ensure_active,
                                  timeout=httpx.Timeout(90, connect=10), follow_redirects=True)
 
     @staticmethod
@@ -1037,6 +1067,7 @@ class DataEnrichment:
     async def _batch_enrich(self, series_ids, options):
         ok = failed = 0
         for index, series_id in enumerate(series_ids, 1):
+            self._ensure_active()
             name, identifier = self._split(series_id)
             self.log(f"[{index}/{len(series_ids)}] 开始补全 {_log_series(series_id)}")
             try:
@@ -1219,7 +1250,9 @@ class DataEnrichment:
 
     def _begin(self, task, target, *args):
         with self.lock:
-            if self.state["running"]:
+            if self._closed:
+                raise ValueError("插件已停止，请刷新页面")
+            if self.state["running"] or not ENRICHMENT_SLOT.acquire(blocking=False):
                 raise ValueError("已有数据补全任务正在运行，请等待完成")
             self.state.update(running=True, done=False, task=task, error="", log=[])
             if task in ("分集图片修复", "批量扫描与修复分集图片"):
@@ -1227,7 +1260,10 @@ class DataEnrichment:
 
         def worker():
             try:
+                self._ensure_active()
                 asyncio.run(target(*args))
+            except asyncio.CancelledError:
+                self.log("插件停止或重载，旧任务已取消；已完成的写入保留")
             except Exception as error:
                 with self.lock:
                     self.state["error"] = f"{type(error).__name__}：{str(error)[:160]}"
@@ -1237,8 +1273,15 @@ class DataEnrichment:
                 with self.lock:
                     self.state["running"] = False
                     self.state["done"] = True
+                ENRICHMENT_SLOT.release()
 
-        threading.Thread(target=worker, name=f"eme-enrich-{task}", daemon=True).start()
+        try:
+            threading.Thread(target=worker, name=f"eme-enrich-{task}", daemon=True).start()
+        except BaseException:
+            with self.lock:
+                self.state["running"] = False
+            ENRICHMENT_SLOT.release()
+            raise
         return {"started": True, "message": f"{task}已开始，可在页面查看进度"}
 
     def start_enrich(self, series_id, mode="all"):
@@ -1379,8 +1422,9 @@ class DataEnrichment:
                     else:
                         hint = "AI 智能补齐未开启，可靠中文资料不足时保留原文"
                     self.log(f"仍有 {len(unresolved)} 位演职的姓名或角色含外文；{hint}")
-        response = await emby.post(f"Items/{identifier}", json={key: value for key, value in update.items() if value is not None})
-        response.raise_for_status()
+        if not await self._save_item(emby, identifier, item, update):
+            self.log("电影资料未变化，跳过重复写入")
+            return
         self.log("电影资料及演职人员已更新" if mode == "all" else "电影资料已更新" if mode == "metadata" else "电影演职人员已更新")
 
     async def _sync_episode_people(self, emby, user, series_id, people):
@@ -1399,17 +1443,33 @@ class DataEnrichment:
                 if not episode_id:
                     continue
                 full = await self._item(emby, user, episode_id)
-                full["People"] = people
-                response = await emby.post(f"Items/{episode_id}", json={
-                    key: value for key, value in full.items() if value is not None})
-                response.raise_for_status()
-                changed += 1
+                changed += await self._save_item(emby, episode_id, full, {**full, "People": people})
                 if changed % 20 == 0:
                     self.log(f"已同步 {changed} 集演职人员")
             offset += len(page)
             if not page or offset >= int(data.get("TotalRecordCount", offset)):
                 break
         self.log(f"分集演职人员同步完成：{changed} 集")
+
+    @staticmethod
+    def _metadata_value(field, value):
+        if field == "People":
+            return [{key: person.get(key) or "" for key in ("Name", "Type", "Role")}
+                    for person in value or []]
+        return value
+
+    async def _save_item(self, emby, identifier, original, update):
+        self._ensure_active()
+        changed = any(self._metadata_value(field, original.get(field)) !=
+                      self._metadata_value(field, value)
+                      for field, value in update.items() if value is not None)
+        if not changed:
+            return False
+        response = await emby.post(f"Items/{identifier}", json={
+            key: value for key, value in update.items() if value is not None})
+        response.raise_for_status()
+        await asyncio.sleep(0.5)
+        return True
 
     async def _enrich(self, name, identifier, mode, options=None):
         options = validate_enrich_config(options or self.options())
@@ -1424,6 +1484,7 @@ class DataEnrichment:
         async with self._server(name) as emby, self._tmdb_client() as tmdb:
             user = await self._user_id(name, emby)
             item = await self._item(emby, user, identifier)
+            original_item = dict(item)
             if item.get("Type") == "Movie":
                 if mode == "episodes":
                     raise ValueError("电影没有分集信息")
@@ -1538,15 +1599,23 @@ class DataEnrichment:
                                     person["Role"].startswith(("饰", "配")) for person in people))):
                             locked.append("Cast")
                         update["LockedFields"] = locked
-                response = await emby.post(f"Items/{identifier}", json={k: v for k, v in update.items() if v is not None})
-                response.raise_for_status()
+                saved = await self._save_item(emby, identifier, original_item, update)
                 self.log({"all": "剧集元数据及演职人员已更新", "metadata": "剧集资料已更新",
-                          "credits": "剧集演职人员已更新"}[mode])
+                          "credits": "剧集演职人员已更新"}[mode] if saved else "剧集资料未变化，跳过重复写入")
                 if mode == "credits" and options["episode_cast"]:
                     await self._sync_episode_people(emby, user, identifier, people)
             if mode in ("all", "episodes"):
-                episodes = await self._json(emby, f"Users/{user}/Items", {"ParentId": identifier,
-                    "Recursive": "true", "IncludeItemTypes": "Episode", "Limit": 5000})
+                episodes = {"Items": []}
+                offset = 0
+                while True:
+                    page = await self._json(emby, f"Users/{user}/Items", {"ParentId": identifier,
+                        "Recursive": "true", "IncludeItemTypes": "Episode", "Limit": 300,
+                        "StartIndex": offset})
+                    items = page.get("Items") or []
+                    episodes["Items"].extend(items)
+                    offset += len(items)
+                    if not items or offset >= int(page.get("TotalRecordCount", offset)):
+                        break
                 seasons = {}
                 translated_seasons = {}
                 series_people = (update.get("People") if mode == "all" else item.get("People")) or []
@@ -1586,6 +1655,7 @@ class DataEnrichment:
                     if not tmdb_episode.get("name") and not tmdb_episode.get("overview") and not (options["episode_cast"] and series_people):
                         continue
                     full = await self._item(emby, user, episode["Id"])
+                    original_episode = dict(full)
                     translated = translated_seasons.get(season, {})
                     if tmdb_episode.get("name"):
                         full["Name"] = self._select_chinese_title(
@@ -1593,10 +1663,9 @@ class DataEnrichment:
                     if tmdb_episode.get("overview"): full["Overview"] = translated.get(f"o{number}", tmdb_episode["overview"])
                     if options["episode_cast"] and series_people:
                         full["People"] = series_people
-                    response = await emby.post(f"Items/{episode['Id']}", json={k: v for k, v in full.items() if v is not None})
-                    response.raise_for_status()
-                    changed += 1
-                    if changed % 20 == 0: self.log(f"已补全 {changed} 集")
+                    saved = await self._save_item(emby, episode["Id"], original_episode, full)
+                    changed += saved
+                    if saved and changed % 20 == 0: self.log(f"已补全 {changed} 集")
                 self.log(f"分集信息补全完成：{changed} 集")
 
     def start_mediainfo_check(self):
@@ -1828,6 +1897,7 @@ class DataEnrichment:
             async with self._server(name) as emby:
                 await self._scheduled_task(emby, SHENYI_EXTRACT, "Extract")
         for index, item in enumerate(self._mi_selection, 1):
+            self._ensure_active()
             try:
                 self.log(f"[{index}/{len(self._mi_selection)}] 正在读取 {os.path.basename(item['path'])[:120]}；缺失：" +
                          "、".join(label for key, label in (("missing_size", "大小"), ("missing_runtime", "时长"))
@@ -1864,7 +1934,8 @@ class DataEnrichment:
             tasks = await self._json(emby, "ScheduledTasks")
             if any(task.get("State") == "Running" for task in tasks):
                 raise ValueError("Emby 当前有计划任务运行，已取消停机写库")
-        self.log(f"已探测 {sum(map(len, updates.values()))} 项；检查 Emby 空闲，准备备份并写库")
+        self._ensure_active()
+        self.log(f"已探测 {sum(map(len, updates.values()))} 项；即将暂时停止 Emby、备份写库并重启，此期间网页无法访问")
         changed, backup = await asyncio.to_thread(self._write_emby_database, updates[name])
         self.log(f"数据库已备份：{backup}；已更新 {changed} 项")
         ready = False
@@ -2014,6 +2085,7 @@ class DataEnrichment:
                                     params={"fromImage": "jellyfin/jellyfin", "tag": "latest"}, timeout=900)
         completed, failed = 0, 0
         for position, (key, target) in enumerate(targets, 1):
+            self._ensure_active()
             path = self._safe_strm(target["path"])
             thumb = path[:-5] + "-thumb.jpg"
             status = self._preview_status(key, thumb)
@@ -2037,6 +2109,7 @@ class DataEnrichment:
                         "-y", "/out/frame.png"]
                     config = {"Entrypoint": [FRAME_EXECUTABLE], "Cmd": command,
                               "HostConfig": {"NetworkMode": "bridge", "Memory": 1610612736,
+                                             "CpuPeriod": 100000, "CpuQuota": 100000,
                                              "Binds": [output_bind],
                                              "Devices": [{"PathOnHost": "/dev/dri",
                                                           "PathInContainer": "/dev/dri",
@@ -2060,7 +2133,9 @@ class DataEnrichment:
                 self.log(f"[{position}/{len(targets)}] 缩略图已生成，正在刷新 Emby")
                 async with self._server(name) as emby:
                     response = await emby.post(f"Items/{key.split('::', 1)[1]}/Refresh",
-                                               params={"replaceAllMetadata": "false"})
+                                               params={"replaceAllMetadata": "false", "Recursive": "false",
+                                                       "MetadataRefreshMode": "None", "ImageRefreshMode": "Default",
+                                                       "ReplaceAllImages": "false"})
                     response.raise_for_status()
                 phase = "保存图片修复记录"
                 cache = self._preview_cache()

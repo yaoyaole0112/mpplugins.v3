@@ -20,6 +20,7 @@ from app.sdk.config import settings
 from app.sdk.logging import logger
 from app.sdk.network import RequestUtils
 from app.sdk.services import MediaServerHelper
+from .emby_guard import emby_request
 
 
 class MissingAction(str, Enum):
@@ -53,6 +54,9 @@ def normalize_cancel_config(config):
     return updated
 
 
+MISSING_SCAN_LOCK = threading.Lock()
+
+
 class MissingEpisodeDetector:
     """Runs locally under the ME plugin identity and owns its scan data."""
 
@@ -66,7 +70,7 @@ class MissingEpisodeDetector:
         self.owner = owner
         self._mediaserver_helper = MediaServerHelper()
         self._subscribe_chain = SubscribeChain()
-        self._scan_lock = threading.Lock()
+        self._scan_lock = MISSING_SCAN_LOCK
         self._is_scanning = False
         self._results = []
         self._cancelled_subscriptions = []
@@ -654,7 +658,11 @@ class MissingEpisodeDetector:
                 tmdb_host = urlsplit(domain if '://' in domain else 'https://' + domain).hostname
                 proxy = settings.PROXY if urlsplit(url).hostname == tmdb_host else None
                 client = RequestUtils(headers=headers, proxies=proxy, timeout=30)
-                response = client.get_res(url)
+                if "/emby/" in urlsplit(url).path.lower():
+                    with emby_request():
+                        response = client.get_res(url)
+                else:
+                    response = client.get_res(url)
                 if response and response.status_code == 200:
                     payload = response.json()
                     return payload if isinstance(payload, (dict, list)) else None
