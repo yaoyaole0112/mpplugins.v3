@@ -21,7 +21,7 @@ class TransferFailureCleaner(_PluginBase):
     plugin_name = "失败整理记录清理"
     plugin_desc = "按失败提示定时清理整理记录，支持与 MP 删除弹窗一致的四种删除方式"
     plugin_icon = "Eraser.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "transferfailurecleaner_"
@@ -216,28 +216,45 @@ class TransferFailureCleaner(_PluginBase):
             warning = "暂时无法读取失败提示，请稍后重新打开配置页面。"
         options = [{"title": f"{error_type}（{counts[error_type]} 条）", "value": error_type}
                    for error_type in sorted(set(counts) | set(self._error_types))]
-        return [{"component": "VForm", "content": [
+        return [{"component": "VForm", "props": {"class": "pa-2"}, "content": [
             {"component": "VAlert", "props": {"type": "warning", "variant": "tonal",
-                "text": "删除方式与 MP 删除整理记录弹窗一致。选择源文件或全部删除时，MP 会联动删除对应下载任务（任务删除不额外删除文件）；选择媒体库文件时会删除目标媒体。文件删除不可恢复，请先预览。"}},
-            {"component": "VSwitch", "props": {"model": "enabled", "label": "启用定时清理"}},
-            {"component": "VSelect", "props": {"model": "delete_mode", "label": "删除方式（与 MP 弹窗一致）",
-                "items": [{"title": mode[0], "value": key} for key, mode in self._DELETE_MODES.items()],
-                "item-title": "title", "item-value": "value",
-                "hint": "默认仅删除转移记录；保存后手动和定时清理均使用此方式。未选中的文件不会删除。",
-                "persistent-hint": True}},
-            {"component": "VTextField", "props": {"model": "cron", "label": "执行周期（Cron）",
-                "hint": "默认每天 03:00，使用 MoviePilot 时区；例如 0 */6 * * * 为每 6 小时",
-                "persistent-hint": True}},
-            {"component": "VSelect", "props": {"model": "error_types", "label": "勾选要清理的错误提示类型",
-                "items": options, "item-title": "title", "item-value": "value", "multiple": True,
-                "chips": True, "closable-chips": True,
-                "hint": warning or "按页面提示精确匹配；选项来自当前失败记录，重新打开配置可刷新。未勾选时不清理。",
-                "persistent-hint": True}},
-            {"component": "VTextField", "props": {"model": "retain_hours", "label": "保留最近多少小时",
-                "type": "number", "min": 0, "hint": "0 表示不限制；大于 0 时跳过时间缺失或无效的记录",
-                "persistent-hint": True}},
+                "class": "mb-5", "style": "line-height: 1.7;",
+                "text": "文件删除不可恢复，请先预览。删除源文件会联动删除对应下载任务。"}},
+            {"component": "VCard", "props": {"variant": "outlined", "class": "mb-5"}, "content": [
+                {"component": "VCardText", "props": {"class": "pa-4"}, "content": [
+                    {"component": "div", "props": {"class": "text-subtitle-1 font-weight-medium mb-4"},
+                        "text": "清理规则"},
+                    {"component": "VSelect", "props": {"model": "delete_mode", "label": "删除方式",
+                        "class": "mb-6", "density": "comfortable",
+                        "items": [{"title": mode[0], "value": key} for key, mode in self._DELETE_MODES.items()],
+                        "item-title": "title", "item-value": "value",
+                        "hint": "与 MP 删除弹窗一致；默认仅删记录。", "persistent-hint": True}},
+                    {"component": "VSelect", "props": {"model": "error_types", "label": "要清理的错误类型",
+                        "class": "mb-6", "density": "comfortable",
+                        "items": options, "item-title": "title", "item-value": "value", "multiple": True,
+                        "chips": True, "closable-chips": True,
+                        "hint": "按提示精确匹配，未勾选时不清理。", "persistent-hint": True}},
+                    {"component": "VTextField", "props": {"model": "retain_hours", "label": "保留最近多少小时",
+                        "density": "comfortable", "type": "number", "min": 0,
+                        "hint": "0 不限制；设置保留时间后，时间无效的记录会跳过。", "persistent-hint": True}},
+                ]},
+            ]},
+            {"component": "VCard", "props": {"variant": "outlined", "class": "mb-5"}, "content": [
+                {"component": "VCardText", "props": {"class": "pa-4"}, "content": [
+                    {"component": "div", "props": {"class": "text-subtitle-1 font-weight-medium mb-2"},
+                        "text": "定时设置"},
+                    {"component": "VSwitch", "props": {"model": "enabled", "label": "启用定时清理",
+                        "class": "mb-4", "hide-details": True}},
+                    {"component": "VTextField", "props": {"model": "cron", "label": "执行周期（Cron）",
+                        "density": "comfortable", "hint": "默认每天 03:00，使用 MP 时区。", "persistent-hint": True}},
+                ]},
+            ]},
+            {"component": "VAlert", "props": {"type": "warning" if warning else "info", "variant": "tonal",
+                "class": "mb-4", "style": "line-height: 1.7;",
+                "text": warning or "错误类型来自当前失败记录，重新打开设置可刷新选项。"}},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                "text": "先保存配置，再到“查看数据”页面预览或立即清理。手动清理不要求启用定时开关。"}},
+                "style": "line-height: 1.7;",
+                "text": "保存后到“查看数据”预览或清理。手动清理无需开启定时开关，也使用已保存的删除方式。"}},
         ]}], {"enabled": False, "cron": "0 3 * * *", "error_types": [], "retain_hours": 0,
               "delete_mode": "record"}
 

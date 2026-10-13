@@ -335,7 +335,7 @@
     "name": "失败整理记录清理",
     "description": "按失败提示勾选类型定时清理，支持与 MP 删除弹窗一致的四种删除方式",
     "labels": "整理,清理,工具",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "icon": "Eraser.png",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -343,6 +343,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.1.1": "优化设置窗口：清理规则和定时设置分组，增加控件间距与提示行距，缩短字段说明。",
       "v1.1.0": "支持 MP 弹窗一致的四种删除方式，源文件删除联动下载任务；提供错误类型多选、定时清理、保留时间、只读预览及管理员手动清理。"
     }
   },

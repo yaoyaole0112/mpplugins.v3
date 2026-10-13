@@ -62,6 +62,12 @@ class TransferFailureCleanerTests(unittest.TestCase):
         return types.SimpleNamespace(id=record_id, errmsg=error, status=status,
                                      date=date, transfer_task_id=task_id)
 
+    @classmethod
+    def form_components(cls, components):
+        for component in components:
+            yield component
+            yield from cls.form_components(component.get("content", []))
+
     def test_empty_selection_never_deletes(self):
         self.plugin.init_plugin({"enabled": True})
         with patch.object(self.plugin, "_delete_record") as delete:
@@ -141,7 +147,7 @@ class TransferFailureCleanerTests(unittest.TestCase):
     def test_form_keeps_saved_types_without_current_records(self):
         with patch.object(self.plugin, "_failed_records", return_value=[]):
             form, defaults = self.plugin.get_form()
-        select = next(item for item in form[0]["content"] if item.get("props", {}).get("model") == "error_types")
+        select = next(item for item in self.form_components(form) if item.get("props", {}).get("model") == "error_types")
         self.assertEqual(select["props"]["items"][0]["value"], "质量更好")
         self.assertEqual(defaults["error_types"], [])
 
@@ -213,6 +219,25 @@ class TransferFailureCleanerTests(unittest.TestCase):
                 patch.object(self.plugin, "_delete_record", return_value="deleted") as delete:
             self.assertTrue(self.plugin.run_now()["success"])
         delete.assert_called_once_with(1, ("质量更好",), None, "source")
+
+    def test_form_groups_fields_with_spacing_and_preserves_config_models(self):
+        with patch.object(self.plugin, "_failed_records", return_value=[]):
+            form, defaults = self.plugin.get_form()
+        components = list(self.form_components(form))
+        fields = {item["props"]["model"]: item for item in components if "model" in item.get("props", {})}
+        self.assertEqual(set(fields), set(defaults))
+        self.assertEqual(sum(item["component"] == "VCard" for item in components), 2)
+        for field in ("delete_mode", "error_types"):
+            self.assertEqual(fields[field]["props"]["class"], "mb-6")
+        self.assertEqual(fields["error_types"]["props"]["multiple"], True)
+        self.assertEqual(len(fields["delete_mode"]["props"]["items"]), 4)
+
+    def test_form_displays_read_failure_separately(self):
+        with patch.object(self.plugin, "_failed_records", side_effect=RuntimeError("unavailable")):
+            form, _defaults = self.plugin.get_form()
+        components = list(self.form_components(form))
+        self.assertTrue(any(item["component"] == "VAlert"
+                            and "暂时无法读取" in item["props"].get("text", "") for item in components))
 
 
 if __name__ == "__main__":
