@@ -1219,13 +1219,25 @@ class EnrichmentTests(unittest.TestCase):
 
     def test_probe_timeout_still_fetches_http_size_without_downloading_body(self):
         item = {'path': str(self.strm), 'missing_size': True, 'missing_runtime': True}
-        client = httpx.AsyncClient(transport=httpx.MockTransport(
-            lambda request: httpx.Response(206, headers={'Content-Range': 'bytes 0-0/123456'})))
+        factory = httpx.AsyncClient
+        def client_factory(**kwargs):
+            return factory(transport=httpx.MockTransport(
+                lambda request: httpx.Response(206, headers={'Content-Range': 'bytes 0-0/123456'})))
         with patch('emetools.data_enrichment.subprocess.run', side_effect=subprocess.TimeoutExpired('ffprobe', 90)), \
-             patch('emetools.data_enrichment.httpx.AsyncClient', return_value=client), \
+             patch('emetools.data_enrichment.httpx.AsyncClient', side_effect=client_factory), \
              patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock):
             result = asyncio.run(self.enrichment._probe(item))
         self.assertEqual(result, {'Size': 123456})
+
+    def test_probe_reads_stream_duration_when_container_duration_missing(self):
+        item = {'path': str(self.strm), 'missing_size': False, 'missing_runtime': True}
+        process = SimpleNamespace(returncode=0, stdout=json.dumps({'streams': [
+            {'codec_type': 'video', 'duration': '12.5'},
+            {'codec_type': 'audio', 'duration': '13'},
+            {'codec_type': 'subtitle', 'duration': '1000'}]}).encode())
+        with patch('emetools.data_enrichment.subprocess.run', return_value=process):
+            result = asyncio.run(self.enrichment._probe(item))
+        self.assertEqual(result, {'RunTimeTicks': 130000000})
 
     def test_successful_mediainfo_write_is_not_failed_by_recheck_500(self):
         self.enrichment._mi_selection = [{'server': 'Q4', 'id': '1', 'path': str(self.strm),
@@ -1239,6 +1251,7 @@ class EnrichmentTests(unittest.TestCase):
         def server(name):
             return httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(handler))
         with patch.object(self.enrichment, '_server', side_effect=server), \
+             patch.object(self.enrichment, '_existing_mediainfo', new_callable=AsyncMock, return_value={}), \
              patch.object(self.enrichment, '_probe', new_callable=AsyncMock, return_value={'Size': 100}), \
              patch.object(self.enrichment, '_verify_local_emby', new_callable=AsyncMock), \
              patch.object(self.enrichment, '_scheduled_task', new_callable=AsyncMock), \
@@ -1263,6 +1276,7 @@ class EnrichmentTests(unittest.TestCase):
         def server(name):
             return httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(handler))
         with patch.object(self.enrichment, '_server', side_effect=server), \
+             patch.object(self.enrichment, '_existing_mediainfo', new_callable=AsyncMock, return_value={}), \
              patch.object(self.enrichment, '_probe', new_callable=AsyncMock, return_value={'Size': 100}), \
              patch.object(self.enrichment, '_verify_local_emby', new_callable=AsyncMock), \
              patch.object(self.enrichment, '_write_emby_database', return_value=(1, 'backup')) as write, \
@@ -1279,9 +1293,34 @@ class EnrichmentTests(unittest.TestCase):
                                          'missing_size': True, 'missing_runtime': False}]
         with patch.object(self.enrichment, '_probe', new_callable=AsyncMock,
                           return_value={'Width': 1920, 'Container': 'mov'}), \
+             patch.object(self.enrichment, '_existing_mediainfo', new_callable=AsyncMock, return_value={}), \
              patch.object(self.enrichment, '_write_emby_database') as write:
             asyncio.run(self.enrichment._fill_mediainfo())
         write.assert_not_called()
+
+    def test_existing_mediainfo_uses_only_same_file_sources(self):
+        item = {'server': 'Q4', 'id': '1', 'path': str(self.strm),
+                'missing_size': True, 'missing_runtime': True}
+        detail = {'Path': str(self.strm), 'MediaSources': [
+            {'Path': '/other/video.mkv', 'Size': 999, 'RunTimeTicks': 999},
+            {'Path': str(self.strm), 'Size': 100, 'RunTimeTicks': 125000000}]}
+        emby = httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=detail)))
+        with patch.object(self.enrichment, '_server', return_value=emby):
+            result = asyncio.run(self.enrichment._existing_mediainfo(item))
+        self.assertEqual(result, {'Size': 100, 'RunTimeTicks': 125000000})
+
+    def test_failed_probe_diagnoses_archive_without_inventing_runtime(self):
+        item = {'path': str(self.strm), 'missing_size': False, 'missing_runtime': True}
+        process = SimpleNamespace(returncode=1, stdout=b'{}', stderr=b'EBML header parsing failed')
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request:
+            httpx.Response(206, content=b"7z\xbc\xaf\x27\x1c" + bytes(250))))
+        with patch('emetools.data_enrichment.subprocess.run', return_value=process), \
+             patch('emetools.data_enrichment.httpx.AsyncClient', return_value=client), \
+             patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock):
+            result = asyncio.run(self.enrichment._probe(item))
+        self.assertEqual(result, {})
+        self.assertTrue(any('7z 压缩包' in line for line in self.enrichment.status()['log']))
 
     def test_mediainfo_check_excludes_iso_with_only_missing_runtime(self):
         root = Path(self.temp.name)

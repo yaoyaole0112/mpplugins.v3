@@ -1696,11 +1696,18 @@ class DataEnrichment:
             try:
                 process = await asyncio.to_thread(subprocess.run,
                     ["/usr/local/bin/ffprobe", "-v", "error", "-rw_timeout", "30000000",
-                     "-show_entries", "format=duration,size,bit_rate,format_name:stream=codec_type,width,height",
+                     "-show_entries", "format=duration,size,bit_rate,format_name:stream=codec_type,width,height,duration",
                      "-of", "json", url], capture_output=True, timeout=timeout)
                 if process.returncode == 0:
                     break
-                self.log(f"视频探测第 {attempt} 次未成功；不记录含签名链接的原始输出")
+                error = (process.stderr or b"").decode("utf-8", errors="replace").lower()
+                reason = "视频格式或文件头无效" if any(text in error for text in
+                    ("invalid data found", "ebml header parsing failed")) else "探测程序返回错误"
+                if "403" in error or "401" in error:
+                    reason = "视频链接鉴权失败"
+                elif "404" in error:
+                    reason = "视频源不存在"
+                self.log(f"视频探测第 {attempt} 次未成功：{reason}（退出码 {process.returncode}）")
             except subprocess.TimeoutExpired:
                 self.log(f"视频探测第 {attempt} 次超时（{timeout} 秒）")
             if attempt == 1:
@@ -1721,6 +1728,20 @@ class DataEnrichment:
             if item["missing_runtime"]:
                 try: fields["RunTimeTicks"] = int(float(info.get("duration") or 0) * 10_000_000)
                 except (TypeError, ValueError, OverflowError): pass
+                if not fields.get("RunTimeTicks"):
+                    durations = []
+                    for stream in data.get("streams") or []:
+                        if stream.get("codec_type") not in ("video", "audio"):
+                            continue
+                        try:
+                            ticks = int(float(stream.get("duration") or 0) * 10_000_000)
+                            if ticks > 0:
+                                durations.append(ticks)
+                        except (TypeError, ValueError, OverflowError):
+                            continue
+                    if durations:
+                        fields["RunTimeTicks"] = max(durations)
+                        self.log("容器未返回总时长，使用视频／音频流中的实际时长")
             if info.get("bit_rate") and str(info["bit_rate"]).isdigit():
                 fields["TotalBitrate"] = int(info["bit_rate"])
             container = str(info.get("format_name") or "").split(",")[0]
@@ -1742,7 +1763,45 @@ class DataEnrichment:
                         if str(length).isdigit(): fields["Size"] = int(length)
             except httpx.HTTPError:
                 pass
+        if item["missing_runtime"] and not fields.get("RunTimeTicks"):
+            try:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+                    async with client.stream("GET", url, headers={"Range": "bytes=0-255"}) as response:
+                        response.raise_for_status()
+                        header = b""
+                        async for block in response.aiter_bytes(256):
+                            header = block
+                            break
+                        if header.startswith(b"7z\xbc\xaf\x27\x1c"):
+                            self.log("源文件实际为 7z 压缩包，非可直接播放视频；请解压真实视频或更换资源后重建 STRM")
+                        elif len(header) >= 32 and not any(header):
+                            self.log("源文件开头为全零数据，疑似损坏或错误文件；请核对网盘原文件并更换可播放资源")
+                        elif header.lstrip().lower().startswith((b"<!doctype html", b"<html")):
+                            self.log("视频链接返回 HTML 页面而非视频；请检查链接鉴权或重定向配置")
+            except httpx.HTTPError as error:
+                self.log(f"读取视频文件头失败：{type(error).__name__}")
         return {key: value for key, value in fields.items() if isinstance(value, str) or value > 0}
+
+    async def _existing_mediainfo(self, item):
+        fields = {}
+        try:
+            async with self._server(item["server"]) as emby:
+                detail = await self._json(emby, f"Items/{item['id']}", {"Fields": "Path,Size,MediaSources"})
+            sources = [source for source in detail.get("MediaSources") or []
+                       if source.get("Path") == item["path"]]
+            if detail.get("Path") == item["path"]:
+                sources.insert(0, detail)
+            for key, missing in (("Size", "missing_size"), ("RunTimeTicks", "missing_runtime")):
+                if item[missing]:
+                    value = next((source.get(key) for source in sources
+                                  if type(source.get(key)) is int and source[key] > 0), None)
+                    if value:
+                        fields[key] = value
+            if fields:
+                self.log("从同一文件的 Emby／神医已提取信息取得缺失字段")
+        except httpx.HTTPError as error:
+            self.log(f"读取 Emby 已有媒体信息失败：{type(error).__name__}，继续视频探测")
+        return fields
 
     async def _fill_mediainfo(self):
         # Collect probe data before interrupting Emby. Never guess a database path.
@@ -1756,7 +1815,14 @@ class DataEnrichment:
                 await self._scheduled_task(emby, SHENYI_EXTRACT, "Extract")
         for index, item in enumerate(self._mi_selection, 1):
             try:
-                fields = await self._probe(item)
+                self.log(f"[{index}/{len(self._mi_selection)}] 正在读取 {os.path.basename(item['path'])[:120]}；缺失：" +
+                         "、".join(label for key, label in (("missing_size", "大小"), ("missing_runtime", "时长"))
+                                   if item[key]))
+                fields = await self._existing_mediainfo(item)
+                pending = {**item, "missing_size": item["missing_size"] and not fields.get("Size"),
+                           "missing_runtime": item["missing_runtime"] and not fields.get("RunTimeTicks")}
+                if pending["missing_size"] or pending["missing_runtime"]:
+                    fields.update(await self._probe(pending))
                 if (item["missing_size"] and fields.get("Size") or
                         item["missing_runtime"] and fields.get("RunTimeTicks")):
                     updates.setdefault(item["server"], {})[item["id"]] = fields
