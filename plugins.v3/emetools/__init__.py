@@ -106,7 +106,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.87"
+    plugin_version = "2.9.88"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -198,7 +198,7 @@ class EmeTools(_PluginBase):
 
     @eventmanager.register(EventType.WebhookMessage)
     def on_series_import(self, event: Event):
-        """Debounce only actual Emby Episode library additions by series ID."""
+        """Debounce Emby movie additions and episode additions by parent series."""
         if not getattr(self, "_enabled", False) or not self._enrichment_config["auto_on_import"]:
             return
         data = getattr(event, "event_data", None)
@@ -218,7 +218,8 @@ class EmeTools(_PluginBase):
         # includes webhook URLs, tokens, paths, or message bodies.
         if event_name not in ("library.new", "ItemAdded"):
             return
-        if str(media_type).lower() not in ("episode", "剧集"):
+        movie = str(media_type).lower() in ("movie", "电影")
+        if not movie and str(media_type).lower() not in ("episode", "剧集"):
             return
         if channel and "emby" not in channel.lower():
             source_name = raw.get("Server", {}).get("Name") if isinstance(raw, dict) and isinstance(raw.get("Server"), dict) else ""
@@ -241,8 +242,10 @@ class EmeTools(_PluginBase):
         # Episode and silently fails the "Type == Series" validation.
         identifier = str(item.get("SeriesId") or item.get("SeriesIdStr") or
                          ((item.get("Series") or {}).get("Id") if isinstance(item.get("Series"), dict) else "") or "")
+        if movie:
+            identifier = str(item.get("Id") or getattr(data, "item_id", "") or "")
         if not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", identifier) or not server:
-            logger.warning("媒体增强 数据补全：Emby 入库事件缺少剧集 SeriesId 或媒体服务器，已跳过自动补全")
+            logger.warning("媒体增强 数据补全：Emby 入库事件缺少电影 ID／剧集 SeriesId 或媒体服务器，已跳过自动补全")
             return
         try:
             self._enrichment.queue_import(f"{server}::{identifier}")
@@ -264,8 +267,13 @@ class EmeTools(_PluginBase):
             meta = data.get("meta") or {}
             tmdb_id = meta.get("tmdb_id") if isinstance(meta, dict) else getattr(meta, "tmdb_id", None)
         if str(tmdb_id).isdigit():
+            media_type = media.get("type") if isinstance(media, dict) else getattr(media, "type", None)
+            if not media_type:
+                meta = data.get("meta") or {}
+                media_type = meta.get("type") if isinstance(meta, dict) else getattr(meta, "type", None)
+            media_type = str(getattr(media_type, "value", media_type) or "").lower()
             logger.info("媒体增强 数据补全：整理完成事件触发入库兜底（TMDB=%s）", str(tmdb_id)[:20])
-            self._enrichment.queue_import_by_tmdb(tmdb_id)
+            self._enrichment.queue_import_by_tmdb(tmdb_id, "Movie" if media_type in ("movie", "电影") else "Series")
 
     def get_state(self) -> bool:
         return self._enabled

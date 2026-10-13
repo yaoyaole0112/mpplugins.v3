@@ -134,7 +134,7 @@ class EnrichmentTests(unittest.TestCase):
             asyncio.run(self.enrichment._enrich('Q4', 'movie1', 'credits', DEFAULT_ENRICH_CONFIG))
         names = [person['Name'] for person in saved[0]['People']]
         self.assertIn('汤姆·赫兰德', names)
-        self.assertIn('Billy Clements', names)
+        self.assertNotIn('Billy Clements', names)
         tom = next(person for person in saved[0]['People'] if person['Name'] == '汤姆·赫兰德')
         self.assertEqual(tom['Role'], '饰 彼得·帕克／蜘蛛侠')
 
@@ -149,6 +149,40 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual([actor['role'] for actor in result], ['彼得·帕克', '警员'])
         self.assertEqual(primary[0]['name'], 'Tom Holland')
 
+    def test_movie_uses_tmdb_person_identity_avatar_filter_and_cast_lock(self):
+        saved = []
+        emby = httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(
+            lambda request: (saved.append(json.loads(request.content)) or httpx.Response(204))))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/')
+        detail = {'credits': {'cast': [
+            {'id': 1136406, 'name': 'Tom Holland', 'original_name': 'Tom Holland',
+             'character': '蜘蛛侠', 'profile_path': '/tom.jpg'},
+            {'id': 2, 'name': '演员乙', 'character': '警员'},
+            {'name': '无头像演员', 'character': '其他角色'}]}}
+        async def fetch(client, endpoint, params):
+            if endpoint.startswith('movie/'):
+                return detail
+            if endpoint == 'person/1136406':
+                return {'name': '汤姆·赫兰德', 'profile_path': '/tom.jpg'}
+            return {'name': '演员乙', 'profile_path': '/other.jpg'}
+        with patch.object(self.enrichment, '_tmdb_json', side_effect=fetch), \
+             patch.object(self.enrichment, '_douban_data', new_callable=AsyncMock,
+                          return_value={'casts': [{'name': '汤姆·霍兰德', 'original_name': 'Tom Holland',
+                                                   'role': '蜘蛛侠'}]}), \
+             patch.object(self.enrichment, '_tvmao_cast', new_callable=AsyncMock, return_value=[]):
+            asyncio.run(self.enrichment._enrich_movie(emby, tmdb, 'movie1',
+                {'Type': 'Movie', 'ProviderIds': {'Tmdb': '969681'}}, 'credits',
+                {**DEFAULT_ENRICH_CONFIG, 'max_actors': 3, 'cast_lock_min': 2}, 'key'))
+            asyncio.run(self.enrichment._enrich_movie(emby, tmdb, 'movie1',
+                {'Type': 'Movie', 'ProviderIds': {'Tmdb': '969681'}}, 'credits',
+                {**DEFAULT_ENRICH_CONFIG, 'no_avatar': False, 'max_actors': 3, 'cast_lock_min': 2}, 'key'))
+        self.assertEqual([person['Name'] for person in saved[0]['People']], ['汤姆·赫兰德', '演员乙'])
+        self.assertIn('Cast', saved[0]['LockedFields'])
+        self.assertEqual([person['Name'] for person in saved[1]['People']],
+                         ['汤姆·赫兰德', '演员乙', '无头像演员'])
+        asyncio.run(emby.aclose())
+        asyncio.run(tmdb.aclose())
+
     def test_movie_ai_translates_roles_and_keeps_primary_cast(self):
         saved = []
         def handler(request):
@@ -157,8 +191,8 @@ class EnrichmentTests(unittest.TestCase):
         emby = httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(handler))
         tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/')
         detail = {'credits': {'cast': [
-            {'name': '比利·克莱门茨', 'character': 'Officer'},
-            {'name': '扎布丽娜·格瓦拉', 'character': 'School Principal'}]}}
+            {'name': '比利·克莱门茨', 'character': 'Officer', 'profile_path': '/b.jpg'},
+            {'name': '扎布丽娜·格瓦拉', 'character': 'School Principal', 'profile_path': '/z.jpg'}]}}
         with patch.object(self.enrichment, '_tmdb_json', new_callable=AsyncMock, return_value=detail), \
              patch.object(self.enrichment, '_douban_data', new_callable=AsyncMock, return_value={}), \
              patch.object(self.enrichment, '_tvmao_cast', new_callable=AsyncMock, return_value=[]), \
@@ -434,6 +468,7 @@ class EnrichmentTests(unittest.TestCase):
 
         response = {'Items': [
             {'Id': 'ep-new', 'SeriesId': 'series-new', 'DateCreated': '1970-01-01T00:15:00Z'},
+            {'Id': 'movie-new', 'Type': 'Movie', 'DateCreated': '1970-01-01T00:15:00Z'},
             {'Id': 'ep-old', 'SeriesId': 'series-old', 'DateCreated': '1970-01-01T00:10:00Z'}]}
         with patch.object(self.enrichment, '_services', return_value={'Q4': object()}), \
              patch.object(self.enrichment, '_server', return_value=FakeClient()), \
@@ -442,10 +477,25 @@ class EnrichmentTests(unittest.TestCase):
              patch.object(self.enrichment, 'queue_import') as queued, \
              patch('emetools.data_enrichment.time.time', return_value=1000):
             self.enrichment.poll_recent_imports()
-        queued.assert_called_once_with('Q4::series-new', delay=30)
+        self.assertEqual({entry.args[0] for entry in queued.call_args_list},
+                         {'Q4::series-new', 'Q4::movie-new'})
         self.assertEqual(self.storage['enrichment_import_poll_after'], 1000)
         self.assertEqual(fetch.call_args.args[1], 'Users/user/Items')
-        self.assertEqual(fetch.call_args.args[2]['IncludeItemTypes'], 'Episode')
+        self.assertEqual(fetch.call_args.args[2]['IncludeItemTypes'], 'Episode,Movie')
+
+    def test_tmdb_import_resolution_filters_movie_namespace(self):
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): pass
+        with patch.object(self.enrichment, '_services', return_value={'Q4': object()}), \
+             patch.object(self.enrichment, '_server', return_value=FakeClient()), \
+             patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user'), \
+             patch.object(self.enrichment, '_json', new_callable=AsyncMock,
+                          return_value={'Items': [{'Id': 'movie1'}]}) as fetch, \
+             patch.object(self.enrichment, 'queue_import') as queued:
+            self.enrichment._resolve_tmdb_import('969681', 'Movie')
+        self.assertEqual(fetch.call_args.args[2]['IncludeItemTypes'], 'Movie')
+        queued.assert_called_once_with('Q4::movie1')
 
     def test_batch_enrich_continues_after_failure(self):
         async def enrich(name, identifier, mode, options):

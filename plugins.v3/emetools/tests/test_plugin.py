@@ -171,7 +171,7 @@ class PluginTests(unittest.TestCase):
         with patch.object(self.plugin._enrichment, 'queue_import') as queued:
             self.plugin.on_series_import(event(**data))
             queued.assert_called_once_with('Q4::series-678')
-            self.plugin.on_series_import(event(**{**data, 'media_type': 'Movie'}))
+            self.plugin.on_series_import(event(**{**data, 'media_type': 'Audio'}))
             self.plugin.on_series_import(event(**{**data, 'event': 'item.updated'}))
             self.plugin.on_series_import(event(**{**data, 'channel': 'jellyfin'}))
             self.assertEqual(queued.call_count, 1)
@@ -190,6 +190,25 @@ class PluginTests(unittest.TestCase):
         with patch.object(self.plugin._enrichment, 'queue_import') as queued:
             self.plugin.on_series_import(event)
         queued.assert_not_called()
+
+    def test_emby_movie_webhook_queues_movie_id_and_respects_switch(self):
+        from types import SimpleNamespace
+        event = SimpleNamespace(event_data=SimpleNamespace(
+            event='ItemAdded', channel='emby', media_type='Movie', server_name='Q4',
+            json_object={'Item': {'Id': 'movie-123', 'Type': 'Movie'}}))
+        with patch.object(self.plugin._enrichment, 'queue_import') as queued:
+            self.plugin.on_series_import(event)
+            queued.assert_called_once_with('Q4::movie-123')
+            self.plugin._enrichment_config['auto_on_import'] = False
+            self.plugin.on_series_import(event)
+            self.assertEqual(queued.call_count, 1)
+
+    def test_movie_transfer_uses_movie_tmdb_namespace(self):
+        from types import SimpleNamespace
+        event = SimpleNamespace(event_data={'mediainfo': {'tmdb_id': 969681, 'type': '电影'}})
+        with patch.object(self.plugin._enrichment, 'queue_import_by_tmdb') as queued:
+            self.plugin.on_transfer_complete(event)
+        queued.assert_called_once_with(969681, 'Movie')
 
     def test_emby_episode_webhook_accepts_item_type_without_normalized_media_fields(self):
         from types import SimpleNamespace

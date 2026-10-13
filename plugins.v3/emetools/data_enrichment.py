@@ -290,7 +290,7 @@ class DataEnrichment:
                 async with self._server(server) as client:
                     user = await self._user_id(server, client)
                     response = await self._json(client, f"Users/{user}/Items", {
-                        "Recursive": "true", "IncludeItemTypes": "Episode",
+                        "Recursive": "true", "IncludeItemTypes": "Episode,Movie",
                         "SortBy": "DateCreated", "SortOrder": "Descending",
                         "Fields": "SeriesId,DateCreated", "Limit": 100})
                 for episode in response.get("Items") or []:
@@ -301,7 +301,7 @@ class DataEnrichment:
                         continue
                     if created_at <= after:
                         continue
-                    identifier = str(episode.get("SeriesId") or "")
+                    identifier = str(episode.get("Id") if episode.get("Type") == "Movie" else episode.get("SeriesId") or "")
                     if re.fullmatch(r"[a-zA-Z0-9-]{1,64}", identifier):
                         queued.add(f"{server}::{identifier}")
             for series_id in queued:
@@ -312,27 +312,27 @@ class DataEnrichment:
             count = asyncio.run(scan())
             self.owner.save_data("enrichment_import_poll_after", checked_at)
             if count:
-                logger.info("增强工具 数据补全：最近入库轮询发现 %d 部剧集，已安排兜底补全", count)
+                logger.info("增强工具 数据补全：最近入库轮询发现 %d 部电影／剧集，已安排兜底补全", count)
         except Exception as exc:
             logger.info("增强工具 数据补全：最近入库轮询失败：%s", type(exc).__name__)
 
-    def queue_import_by_tmdb(self, tmdb_id):
+    def queue_import_by_tmdb(self, tmdb_id, media_type="Series"):
         """Fallback for successful MoviePilot transfers when Emby Webhook is unavailable."""
         value = str(tmdb_id or "").strip()
-        if not value.isdigit():
+        if not value.isdigit() or media_type not in ("Movie", "Series"):
             return False
-        thread = threading.Thread(target=self._resolve_tmdb_import, args=(value,), daemon=True)
+        thread = threading.Thread(target=self._resolve_tmdb_import, args=(value, media_type), daemon=True)
         thread.start()
         return True
 
-    def _resolve_tmdb_import(self, tmdb_id):
+    def _resolve_tmdb_import(self, tmdb_id, media_type="Series"):
         async def resolve():
             for server in self._services():
                 try:
                     async with self._server(server) as client:
                         user = await self._user_id(server, client)
                         response = await self._json(client, f"Users/{user}/Items", {
-                            "Recursive": "true", "IncludeItemTypes": "Series",
+                            "Recursive": "true", "IncludeItemTypes": media_type,
                             "AnyProviderIdEquals": f"tmdb.{tmdb_id}",
                             "Fields": "ProviderIds,ProductionYear", "Limit": 20})
                     items = response.get("Items") if isinstance(response, dict) else []
@@ -772,11 +772,14 @@ class DataEnrichment:
             localized = dict(actor)
             if len(matches) == 1:
                 matched = matches[0]
-                if re.search(r"[\u3400-\u9fff]", matched.get("name") or ""):
+                if (not DataEnrichment._is_chinese_title(actor.get("name")) and
+                        re.search(r"[\u3400-\u9fff]", matched.get("name") or "")):
                     localized["name"] = matched["name"]
                 role = matched.get("role") or ""
                 if re.search(r"[\u3400-\u9fff]", role):
                     localized["role"] = role
+                if not localized.get("profile_path") and matched.get("profile_path"):
+                    localized["profile_path"] = matched["profile_path"]
             result.append(localized)
         return result
 
@@ -1323,7 +1326,7 @@ class DataEnrichment:
                         cast, replaced, added = self._merge_tvmao_cast(cast, tvmao_cast)
                         self.log(f"电影电视猫中文演职补缺：汉化姓名 {replaced} 人，新增 {added} 人")
             for actor in cast[:options["max_actors"]]:
-                if actor.get("id") and self._needs_translation(actor.get("name")):
+                if actor.get("id"):
                     try:
                         person = await self._tmdb_json(tmdb, f"person/{actor['id']}",
                             {"api_key": api_key, "language": "zh-CN"})
@@ -1332,8 +1335,12 @@ class DataEnrichment:
                                         and not re.search(r"[A-Za-z]", value)), None)
                         if chinese:
                             actor["name"] = chinese
+                        if not actor.get("profile_path") and person.get("profile_path"):
+                            actor["profile_path"] = person["profile_path"]
                     except ValueError:
                         self.log("TMDB 人物中文别名读取失败，保留姓名继续补全")
+            cast = [actor for actor in cast if actor.get("name") and
+                    (not options["no_avatar"] or actor.get("profile_path"))]
             people = [{"Name": actor["name"], "Type": "Actor", "Role": actor.get("role") or ""}
                       for actor in cast if actor.get("name")][:options["max_actors"]]
             tmdb_directors = [{"name": crew["name"], "original_name": crew.get("original_name"),
@@ -1355,7 +1362,14 @@ class DataEnrichment:
                             person["Role"] = "饰 " + person["Role"]
             if people:
                 update["People"] = people
-                update["LockedFields"] = [field for field in update.get("LockedFields") or [] if field != "Cast"]
+                locked = [field for field in update.get("LockedFields") or [] if field != "Cast"]
+                actors = [person for person in people if person["Type"] == "Actor"]
+                if (len(actors) >= options["cast_lock_min"] and
+                        all(not self._needs_translation(person["Name"]) for person in actors) and
+                        (not options["role_prefix"] or all(
+                            person["Role"].startswith(("饰", "配")) for person in actors))):
+                    locked.append("Cast")
+                update["LockedFields"] = locked
                 unresolved = [person for person in people if re.search(r"[A-Za-z]", person["Name"] + " " + person["Role"])]
                 if unresolved:
                     if options["ai_enabled"] and options["ai_credits"]:
