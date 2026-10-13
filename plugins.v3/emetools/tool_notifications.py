@@ -60,9 +60,9 @@ def format_bytes(value):
         return "—"
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if size < 1024:
-            return f"{size:.1f} {unit}"
+            return f"{size:.2f} {unit}"
         size /= 1024
-    return f"{size:.1f} PB"
+    return f"{size:.2f} PB"
 
 
 def invalid_cleanup(result, root):

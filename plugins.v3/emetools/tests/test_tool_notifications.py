@@ -27,18 +27,25 @@ class NotificationTemplateTests(unittest.TestCase):
             {"deleted": 2, "dir_count": 1, "folders": [{"name": "电影", "files": 2, "dirs": 1, "size": 1024, "error": ""}]},
             {"folders": [{"name": "电影", "error": ""}]})
         self.assertEqual(title, "🗑 清理文件")
-        self.assertEqual(text, "━━━━━━━━━━━━━━━\n✅已删除：2 个文件 + 1 个文件夹（1.0 KB）\n\n📁电影：2 个文件 + 1 个文件夹（1.0 KB）")
+        self.assertEqual(text, "━━━━━━━━━━━━━━━\n✅已删除：2 个文件 + 1 个文件夹（1.00 KB）\n\n📁电影：2 个文件 + 1 个文件夹（1.00 KB）")
         self.assertIn("📁坏目录：读取失败", notices.file_cleanup({}, {"folders": [{"name": "坏目录", "error": "读取失败"}]})[1])
 
     def test_trash_and_move_templates(self):
         self.assertIsNone(notices.empty_trash({"count": 0}))
         self.assertEqual(notices.empty_trash({"count": 3, "size_bytes": 2048}),
-                         ("🧹 清空115 回收站", "━━━━━━━━━━━━━━━\n📁 已清空 3 个文件 · 💾 已释放 2.0 KB\n⚠️ 彻底删除不可恢复！"))
+                         ("🧹 清空115 回收站", "━━━━━━━━━━━━━━━\n📁 已清空 3 个文件 · 💾 已释放 2.00 KB\n⚠️ 彻底删除不可恢复！"))
         self.assertIsNone(notices.file_move({"moved": 0, "errors": []}))
         title, text = notices.file_move({"moved": 1, "errors": ["失败"], "details": [
             {"status": "success", "src_name": "源目录", "dst_name": "目标目录", "file_count": 3, "total_bytes": 512}]})
         self.assertEqual(title, "📁 文件转存")
-        self.assertEqual(text, "━━━━━━━━━━━━━━━\n🎯[源] 源目录 → [目标] 目标目录\n📚数量：3 个 · 💾大小：512.0 B\n\n⚠️ 转存失败：1 个目录，请查看日志")
+        self.assertEqual(text, "━━━━━━━━━━━━━━━\n🎯[源] 源目录 → [目标] 目标目录\n📚数量：3 个 · 💾大小：512.00 B\n\n⚠️ 转存失败：1 个目录，请查看日志")
+
+    def test_notification_size_formatter_keeps_two_decimals_for_all_units(self):
+        self.assertEqual(notices.format_bytes(0), '—')
+        for power, unit in enumerate(('B', 'KB', 'MB', 'GB', 'TB', 'PB')):
+            with self.subTest(unit=unit):
+                self.assertEqual(notices.format_bytes(49 * 1024 ** power), '49.00 ' + unit)
+        self.assertEqual(notices.format_bytes(24.126 * 1024 ** 3), '24.13 GB')
 
 
 class ScheduledNotificationTests(unittest.TestCase):
