@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import Workbench from './Workbench.vue'
 defineProps({ api: { type: Object, default: () => ({}) } })
+const emit = defineEmits(['close'])
 const pageRoot = ref(null)
 onMounted(() => {
   let node = pageRoot.value?.parentElement
@@ -19,10 +20,18 @@ onMounted(() => {
 })
 </script>
 
-<template><div ref="pageRoot" class="eme-dialog-page-root"><Workbench :api="api" dialog-page /></div></template>
+<template>
+  <div ref="pageRoot" class="eme-dialog-page-root">
+    <Workbench :api="api" dialog-page @close="emit('close')" />
+    <button type="button" class="eme-dialog-page-close" aria-label="关闭窗口" title="关闭窗口" @click="emit('close')">
+      <span aria-hidden="true">×</span>
+    </button>
+  </div>
+</template>
 
 <style>
 .eme-dialog-page-root {
+  position: relative;
   box-sizing: border-box;
   display: flex;
   width: 100%;
@@ -30,5 +39,32 @@ onMounted(() => {
   min-height: 100%;
   overflow: hidden;
   background: rgb(var(--v-theme-background));
+}
+.eme-dialog-page-close {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: rgb(var(--v-theme-surface));
+  color: rgb(var(--v-theme-on-surface));
+  font-size: 28px;
+  line-height: 1;
+  cursor: pointer;
+}
+.eme-dialog-page-close:hover {
+  background: rgba(var(--v-theme-primary), .15);
+  color: rgb(var(--v-theme-primary));
+}
+.eme-dialog-page-close:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: 2px;
 }
 </style>
