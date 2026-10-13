@@ -1691,17 +1691,36 @@ class DataEnrichment:
     async def _probe(self, item):
         url = self._video_url(item["path"])
         fields = {}
-        process = await asyncio.to_thread(subprocess.run,
-            ["/usr/local/bin/ffprobe", "-v", "error", "-show_entries",
-             "format=duration,size,bit_rate,format_name:stream=codec_type,width,height",
-             "-of", "json", url], capture_output=True, timeout=90)
-        if process.returncode == 0:
-            data = json.loads(process.stdout or b"{}"); info = data.get("format") or {}
+        process = None
+        for attempt, timeout in enumerate((90, 150), 1):
+            try:
+                process = await asyncio.to_thread(subprocess.run,
+                    ["/usr/local/bin/ffprobe", "-v", "error", "-rw_timeout", "30000000",
+                     "-show_entries", "format=duration,size,bit_rate,format_name:stream=codec_type,width,height",
+                     "-of", "json", url], capture_output=True, timeout=timeout)
+                if process.returncode == 0:
+                    break
+                self.log(f"视频探测第 {attempt} 次未成功；不记录含签名链接的原始输出")
+            except subprocess.TimeoutExpired:
+                self.log(f"视频探测第 {attempt} 次超时（{timeout} 秒）")
+            if attempt == 1:
+                self.log("重新读取 STRM 链接后重试视频探测")
+                url = self._video_url(item["path"])
+                await asyncio.sleep(2)
+        if process is not None and process.returncode == 0:
+            try:
+                data = json.loads(process.stdout or b"{}")
+                if not isinstance(data, dict):
+                    data = {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.log("视频探测返回无效 JSON，继续尝试 HTTP 文件大小")
+                data = {}
+            info = data.get("format") or {}
             if item["missing_size"] and str(info.get("size") or "").isdigit():
                 fields["Size"] = int(info["size"])
             if item["missing_runtime"]:
                 try: fields["RunTimeTicks"] = int(float(info.get("duration") or 0) * 10_000_000)
-                except (TypeError, ValueError): pass
+                except (TypeError, ValueError, OverflowError): pass
             if info.get("bit_rate") and str(info["bit_rate"]).isdigit():
                 fields["TotalBitrate"] = int(info["bit_rate"])
             container = str(info.get("format_name") or "").split(",")[0]
@@ -1738,8 +1757,18 @@ class DataEnrichment:
         for index, item in enumerate(self._mi_selection, 1):
             try:
                 fields = await self._probe(item)
-                if fields:
+                if (item["missing_size"] and fields.get("Size") or
+                        item["missing_runtime"] and fields.get("RunTimeTicks")):
                     updates.setdefault(item["server"], {})[item["id"]] = fields
+                    remaining = []
+                    if item["missing_size"] and not fields.get("Size"):
+                        remaining.append("大小")
+                    if item["missing_runtime"] and not fields.get("RunTimeTicks"):
+                        remaining.append("时长")
+                    self.log(f"[{index}/{len(self._mi_selection)}] 探测成功" +
+                             (f"，仍缺{'、'.join(remaining)}" if remaining else ""))
+                else:
+                    self.log(f"[{index}/{len(self._mi_selection)}] 未获取到缺失的大小或时长，跳过写库")
             except (ValueError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
                 self.log(f"[{index}/{len(self._mi_selection)}] 探测失败：{type(error).__name__}")
             if index % 20 == 0: self.log(f"已探测 {index}/{len(self._mi_selection)} 项")
@@ -1758,17 +1787,32 @@ class DataEnrichment:
         self.log(f"已探测 {sum(map(len, updates.values()))} 项；检查 Emby 空闲，准备备份并写库")
         changed, backup = await asyncio.to_thread(self._write_emby_database, updates[name])
         self.log(f"数据库已备份：{backup}；已更新 {changed} 项")
-        # Give Emby time to become responsive after restart before Persist/check.
-        for _ in range(12):
+        ready = False
+        for _ in range(24):
             await asyncio.sleep(5)
             try:
                 async with self._server(name) as emby:
                     await self._json(emby, "System/Info/Public")
+                    await self._json(emby, "Items", {"IncludeItemTypes": "Movie,Episode",
+                        "Recursive": "true", "Fields": "Path,Size,MediaSources", "Limit": 1})
                     await self._scheduled_task(emby, SHENYI_PERSIST, "Persist")
+                    ready = True
                     break
             except httpx.HTTPError:
                 continue
-        await self._check_mediainfo()
+        if not ready:
+            self.log(f"已写入 {changed} 项；Emby 重启后媒体查询尚未恢复，未执行完整复查。请稍后点击开始检查，不要重复写库")
+            with self.lock:
+                self.state["mediainfo"] = {**(self.state.get("mediainfo") or {}),
+                    "updated_count": changed, "recheck_pending": True}
+            return
+        try:
+            await self._check_mediainfo()
+        except httpx.HTTPError:
+            self.log(f"已写入 {changed} 项；写库后复查未成功，可能是 Emby 初始化或媒体查询异常。请稍后点击开始检查")
+            with self.lock:
+                self.state["mediainfo"] = {**(self.state.get("mediainfo") or {}),
+                    "updated_count": changed, "recheck_pending": True}
 
     async def _verify_local_emby(self, emby):
         """Never write the local 'emby' DB for a different connected server."""

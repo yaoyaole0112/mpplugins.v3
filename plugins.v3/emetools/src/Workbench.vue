@@ -1132,6 +1132,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         <section class="eme-card">
           <div class="eme-card-heading"><div><h3>媒体信息补全</h3><p>扫描 Emby 电影与分集的文件大小和时长；探测缺失信息后，在 Emby 空闲时备份数据库、停机写入并重启。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || enrich.status.running" @click="enrichmentAction('mediainfo_check')">开始检查</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.status.mediainfo?.incomplete_count" @click="enrichmentAction('mediainfo_fill')">开始补全</button></div></div>
           <p v-if="enrich.status.mediainfo" class="eme-hint">已检查 {{ enrich.status.mediainfo.total }} 项，需要补全 {{ enrich.status.mediainfo.incomplete_count }} 项。</p>
+          <p v-if="enrich.status.mediainfo?.recheck_pending" class="eme-message eme-warning">已写入 {{ enrich.status.mediainfo.updated_count }} 项，Emby 重启后的复查尚未成功；上方缺失数量是写库前结果，请稍后点击“开始检查”，不要直接重复补全。</p>
           <p class="eme-hint">开始补全会暂时停止 Emby；正在播放或有运行中的 Emby 任务时不会停机。数据库备份与源库保存在同一目录。</p>
         </section>
         <section class="eme-card">
