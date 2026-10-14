@@ -144,6 +144,20 @@ class TransferFailureCleanerTests(unittest.TestCase):
             self.assertIn(api["methods"], (["POST"], ["GET"]))
             self.assertEqual(api["dependencies"], [self.module.get_current_active_superuser])
 
+    def test_vue_build_exposes_config_and_page_for_host_dialogs(self):
+        plugin_path = Path(__file__).resolve().parents[1]
+        self.assertEqual(self.plugin.get_render_mode(), ("vue", "dist/assets"))
+        build_config = (plugin_path / "vite.config.js").read_text()
+        remote_entry = (plugin_path / "dist/assets/remoteEntry.js").read_text()
+        for component in ("Config", "Page"):
+            self.assertIn(f"'./{component}'", build_config)
+            self.assertIn(f'"./{component}"', remote_entry)
+            self.assertTrue((plugin_path / f"src/components/{component}.vue").is_file())
+        for asset in (plugin_path / "dist/assets").glob("*.js"):
+            import re
+            for reference in re.findall(r"['\"]\./([^'\"]+\.js)['\"]", asset.read_text()):
+                self.assertTrue((asset.parent / reference).is_file(), reference)
+
     def test_form_keeps_saved_types_without_current_records(self):
         with patch.object(self.plugin, "_failed_records", return_value=[]):
             form, defaults = self.plugin.get_form()

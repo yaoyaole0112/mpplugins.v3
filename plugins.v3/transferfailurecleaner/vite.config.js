@@ -8,7 +8,10 @@ export default defineConfig({
     federation({
       name: 'TransferFailureCleaner',
       filename: 'remoteEntry.js',
-      exposes: { './Config': './src/components/Config.vue' },
+      exposes: {
+        './Config': './src/components/Config.vue',
+        './Page': './src/components/Page.vue',
+      },
       shared: {
         vue: { requiredVersion: false, generate: false, singleton: true },
         vuetify: { requiredVersion: false, generate: false, singleton: true },

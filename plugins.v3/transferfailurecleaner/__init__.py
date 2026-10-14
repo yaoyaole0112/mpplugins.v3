@@ -21,7 +21,7 @@ class TransferFailureCleaner(_PluginBase):
     plugin_name = "失败整理记录清理"
     plugin_desc = "按错误类型配置多条清理规则，分别使用 MP 原生四种删除方式"
     plugin_icon = "Eraser.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "transferfailurecleaner_"
