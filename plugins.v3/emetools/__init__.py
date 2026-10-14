@@ -118,7 +118,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.95"
+    plugin_version = "2.9.96"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1169,16 +1169,51 @@ class EmeTools(_PluginBase):
 
         return self._locked("p115_cleanup", clean)
 
+    _MOVE_COPY_RECORDS_KEY = "p115_move_copy_records"
+
+    def _move_copy_record_key(self, source, destination):
+        return f"copy:{source}:{destination}"
+
+    def _load_move_copy_records(self):
+        records = self.get_data(self._MOVE_COPY_RECORDS_KEY)
+        if not isinstance(records, dict):
+            return {}
+        return {
+            str(key): {str(item) for item in value if item is not None}
+            for key, value in records.items()
+            if isinstance(value, (list, tuple, set))
+        }
+
+    def _save_move_copy_records(self, records):
+        self.save_data(self._MOVE_COPY_RECORDS_KEY, {
+            str(key): sorted(str(item) for item in value if item is not None)
+            for key, value in records.items()
+            if value
+        })
+
+    def _reset_move_copy_records(self):
+        records = self._load_move_copy_records()
+        self.save_data(self._MOVE_COPY_RECORDS_KEY, {})
+        logger.info("ME工具 文件转存：已清理复制记录 %d 条规则", len(records))
+        return {"ok": True, "cleared": len(records), "message": "复制记录已清理，下次将重新复制源目录中的全部项目"}
+
     def _move_info(self):
         rules = self._schedule["p115_move"]["rules"]
+        copy_records = self._load_move_copy_records()
         pending = {}
         if rules:
             with self._client() as client:
                 for rule in rules:
                     try:
                         files, folders = client.list_children(rule["src_id"])
+                        identifiers = [str(item["fid"]) for item in files] + [str(item["cid"]) for item in folders]
+                        if (rule.get("mode") or "move") == "copy":
+                            copied = copy_records.get(self._move_copy_record_key(rule["src_id"], rule["dst_id"]), set())
+                            count = sum(identifier not in copied for identifier in identifiers)
+                        else:
+                            count = len(identifiers)
                         pending[rule["src_id"]] = {"name": rule["src_name"] or rule["src_id"],
-                                                    "count": len(files) + len(folders)}
+                                                    "count": count}
                     except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
                         pending[rule["src_id"]] = {"name": rule["src_name"] or rule["src_id"],
                                                     "count": -1, "error": str(error)}
@@ -1195,7 +1230,7 @@ class EmeTools(_PluginBase):
         logger.info("ME工具 文件转存：开始检查 %d 条转存规则", len(rules))
 
         def move():
-            moved, errors, details = 0, [], []
+            moved, errors, details, copy_records = 0, [], [], self._load_move_copy_records()
             with self._client() as client:
                 for rule in rules:
                     source, destination = rule["src_id"], rule["dst_id"]
@@ -1203,7 +1238,8 @@ class EmeTools(_PluginBase):
                     action = client.copy_files if mode == "copy" else client.move_files
                     detail = {"src_id": source, "dst_id": destination, "mode": mode,
                               "src_name": rule.get("src_name"), "dst_name": rule.get("dst_name"),
-                              "status": "empty", "item_count": 0, "file_count": 0, "total_bytes": 0}
+                              "status": "empty", "item_count": 0, "skipped_count": 0,
+                              "file_count": 0, "total_bytes": 0}
                     details.append(detail)
                     try:
                         files, directories = client.list_children(source)
@@ -1216,6 +1252,20 @@ class EmeTools(_PluginBase):
                             logger.info("ME工具 文件转存：%s 源目录为空，跳过",
                                         _log_label(detail["src_name"] or source))
                             continue
+                        if mode == "copy":
+                            record_key = self._move_copy_record_key(source, destination)
+                            copied_ids = copy_records.setdefault(record_key, set())
+                            pending_identifiers = [identifier for identifier in identifiers
+                                                   if str(identifier) not in copied_ids]
+                            detail["skipped_count"] = len(identifiers) - len(pending_identifiers)
+                            identifiers = pending_identifiers
+                            if not identifiers:
+                                detail["status"] = "unchanged"
+                                logger.info("ME工具 文件转存：复制规则 %s → %s 没有新增项目，跳过 %d 项",
+                                            _log_label(detail["src_name"] or source),
+                                            _log_label(detail["dst_name"] or destination),
+                                            detail["skipped_count"])
+                                continue
                         moved_ids = set()
                         for index in range(0, len(identifiers), 500):
                             batch = identifiers[index:index + 500]
@@ -1223,6 +1273,9 @@ class EmeTools(_PluginBase):
                             if result.get("state"):
                                 moved += len(batch)
                                 moved_ids.update(batch)
+                                if mode == "copy":
+                                    copied_ids.update(str(identifier) for identifier in batch)
+                                    self._save_move_copy_records(copy_records)
                             else:
                                 errors.append(f"{source} → {destination}：{result.get('error') or result.get('msg')}")
                                 detail["status"] = "failed"
@@ -1257,9 +1310,11 @@ class EmeTools(_PluginBase):
                          if item.get("mode") == "copy" and item.get("status") == "success")
             moved_count = sum(item.get("item_count", 0) for item in details
                               if item.get("mode") != "copy" and item.get("status") == "success")
+            skipped = sum(item.get("skipped_count", 0) for item in details if item.get("mode") == "copy")
             return {"ok": not errors, "moved": moved, "moved_count": moved_count, "copied": copied,
+                    "skipped": skipped,
                     "errors": errors, "details": details,
-                    "message": f"转存完成：移动 {moved_count} 项，复制 {copied} 项，失败 {len(errors)} 条"}
+                    "message": f"转存完成：移动 {moved_count} 项，复制新增 {copied} 项，跳过已复制 {skipped} 项，失败 {len(errors)} 条"}
 
         return self._locked("p115_move", move)
 
@@ -1500,7 +1555,7 @@ class EmeTools(_PluginBase):
 
     async def action(self, action: ToolAction) -> dict:
         operation = action.operation
-        if operation not in {"dirs", "root_dirs", "p115_dirs", "pending", "move_info"}:
+        if operation not in {"dirs", "root_dirs", "p115_dirs", "pending", "move_info", "move_copy_reset"}:
             logger.info("ME工具：页面操作 %s 开始", _log_label(operation))
         try:
             if operation == "scan":
@@ -1576,6 +1631,8 @@ class EmeTools(_PluginBase):
                 return result
             if operation == "move_info":
                 return await asyncio.to_thread(self._move_info)
+            if operation == "move_copy_reset":
+                return await asyncio.to_thread(self._locked, "p115_move", self._reset_move_copy_records)
             if operation == "move_run":
                 return await asyncio.to_thread(self._move_run)
             raise HTTPException(status_code=400, detail="未知的工具操作")

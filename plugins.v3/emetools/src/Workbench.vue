@@ -979,6 +979,15 @@ async function runMove() {
     moveInfo.value = null
   })
 }
+async function resetMoveCopyRecords() {
+  if (!settingsLoaded.value) { error.value = '转存规则尚未加载，请刷新后重试'; return }
+  if (!window.confirm('确认清理所有复制规则的增量记录？清理后下次复制会重新提交源目录中的全部项目。')) return
+  await work(async () => {
+    const result = await execute('move_copy_reset')
+    notice.value = result.message || '复制记录已清理'
+    moveInfo.value = null
+  })
+}
 async function browse(type, index = 0) {
   folder.open = true
   folder.type = type
@@ -1276,7 +1285,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         <section class="eme-card"><div class="eme-card-heading"><div><h3>文件转存规则</h3><p>每条规则分别将源目录中的文件及子文件夹移动到对应目标目录。</p></div><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存规则</button></div>
           <p v-if="moveConfigDirty" class="eme-message eme-warning">转存规则或监控配置有未保存的修改；请选择完整的源和目标目录并点击“保存规则”，才能查看或执行新规则。</p>
           <div v-for="(rule, index) in rules" :key="index" class="eme-move-row"><span class="eme-move-label">源</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.src_name || '选择源目录'" @click="browse('src', index)">{{ rule.src_name || '选择源目录' }}</button><span class="eme-move-arrow" aria-hidden="true">→</span><span class="eme-move-label">目标</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.dst_name || '选择目标目录'" @click="browse('dst', index)">{{ rule.dst_name || '选择目标目录' }}</button><div class="eme-move-mode eme-picker" @click.stop><button type="button" class="eme-picker-trigger" :aria-label="`转存方式 ${index + 1}`" :aria-expanded="moveModePicker === index" @click="moveModePicker = moveModePicker === index ? -1 : index"><span>{{ moveModeLabel(rule.mode) }}</span><i class="mdi" :class="moveModePicker === index ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="moveModePicker === index" class="eme-picker-menu" role="listbox" aria-label="转存方式"><button v-for="item in moveModeOptions" :key="item.value" type="button" role="option" :aria-selected="rule.mode === item.value" class="eme-picker-option" :class="{ selected: rule.mode === item.value }" @click="selectMoveMode(index, item.value)"><i class="mdi" :class="rule.mode === item.value ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item.title }}</button></div></div><button class="eme-button text eme-remove" type="button" :aria-label="`移除转存规则 ${index + 1}`" @click="rules.splice(index, 1)">✕</button></div>
-          <div class="eme-actions"><button class="eme-button secondary" @click="rules.push({ src_id: '', src_name: '', dst_id: '', dst_name: '', mode: 'move' })">添加规则</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty" @click="getMove">查看待转存</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !rules.length" @click="runMove">立即执行已保存规则</button></div>
+          <div class="eme-actions"><button class="eme-button secondary" @click="rules.push({ src_id: '', src_name: '', dst_id: '', dst_name: '', mode: 'move' })">添加规则</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty" @click="getMove">查看待转存</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !rules.length" @click="runMove">立即执行已保存规则</button><button class="eme-button text" :disabled="busy || !settingsLoaded" @click="resetMoveCopyRecords">清理复制记录</button></div>
           <p v-if="moveInfo" class="eme-hint">上次执行：{{ moveInfo.last_run || '暂无' }}；<span v-for="(item, key) in moveInfo.pending || {}" :key="key">{{ item.name }}：{{ item.count < 0 ? item.error : `${item.count} 项` }}；</span></p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><h3>实时监控</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存监控</button></div><label class="eme-switch-label"><input v-model="schedule.p115_move.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label>检查间隔（秒，最少 60）<input v-model.number="schedule.p115_move.check_interval" type="number" min="60" step="60" /></label></section>

@@ -168,6 +168,63 @@ class ScheduledNotificationTests(unittest.TestCase):
         self.assertEqual(result["moved_count"], 0)
         self.assertEqual(result["copied"], 1)
 
+    def test_copy_rule_is_incremental_across_runs(self):
+        self.plugin._schedule["p115_move"]["rules"] = [{"src_id": "1", "src_name": "源",
+            "dst_id": "2", "dst_name": "目标", "mode": "copy"}]
+        client = MagicMock()
+        client.list_children.return_value = ([{"fid": "11", "size": 100}], [])
+        client.copy_files.return_value = {"state": True}
+        context = MagicMock()
+        context.__enter__.return_value = client
+        self.plugin._client = MagicMock(return_value=context)
+        records = {}
+        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: records if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
+        self.plugin.save_data.side_effect = lambda key, value, *args, **kwargs: records.update(value) if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
+
+        first = self.plugin._move_run()
+        second = self.plugin._move_run()
+
+        client.copy_files.assert_called_once_with(["11"], "2")
+        self.assertEqual(first["copied"], 1)
+        self.assertEqual(second["copied"], 0)
+        self.assertEqual(second["skipped"], 1)
+        self.assertEqual(second["details"][0]["status"], "unchanged")
+
+    def test_copy_rule_only_submits_new_items(self):
+        self.plugin._schedule["p115_move"]["rules"] = [{"src_id": "1", "dst_id": "2", "mode": "copy"}]
+        client = MagicMock()
+        client.list_children.return_value = ([{"fid": "11", "size": 100}, {"fid": "12", "size": 200}], [])
+        client.copy_files.return_value = {"state": True}
+        context = MagicMock()
+        context.__enter__.return_value = client
+        self.plugin._client = MagicMock(return_value=context)
+        records = {"copy:1:2": ["11"]}
+        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: records if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
+        self.plugin.save_data.side_effect = lambda key, value, *args, **kwargs: records.update(value) if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
+
+        result = self.plugin._move_run()
+
+        client.copy_files.assert_called_once_with(["12"], "2")
+        self.assertEqual(result["details"][0]["skipped_count"], 1)
+        self.assertEqual(records["copy:1:2"], ["11", "12"])
+
+    def test_copy_failure_does_not_record_failed_items(self):
+        self.plugin._schedule["p115_move"]["rules"] = [{"src_id": "1", "dst_id": "2", "mode": "copy"}]
+        client = MagicMock()
+        client.list_children.return_value = ([{"fid": "11", "size": 100}], [])
+        client.copy_files.return_value = {"state": False, "error": "失败"}
+        context = MagicMock()
+        context.__enter__.return_value = client
+        self.plugin._client = MagicMock(return_value=context)
+        records = {}
+        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: records if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
+        self.plugin.save_data.side_effect = lambda key, value, *args, **kwargs: records.update(value) if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
+
+        result = self.plugin._move_run()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(records, {})
+
     def test_manual_file_cleanup_confirmation_and_result(self):
         preview = {"ok": True, "folders": [{"name": "旧文件", "files": 1, "dirs": 0,
                                                "size": 1024, "error": ""}],
