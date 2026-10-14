@@ -229,7 +229,7 @@
     "name": "115网盘储存",
     "description": "更快更强的115网盘存储模块（V3 适配：proapi 优先，修复 webapi 405 导致的目录查询失败）",
     "labels": "云盘",
-    "version": "3.0.5",
+    "version": "3.0.7",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
     "author": "DDSRem / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -237,6 +237,8 @@
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
+      "v3.0.7": "兼容 MP 热加载残留的旧 concurrenttools 模块，导入前补齐 p115client 所需的 threadpool_map/taskgroup_map，修复重启及热加载失败",
+      "v3.0.6": "锁定 p115client 所需的 python-concurrenttools 与 python-iterutils 兼容版本，修复重启后两个 115 插件共同加载失败",
       "v3.0.5": "侧栏目录浏览优先使用 U115 Open 接口，避免 Cookie 接口 405 或超时导致 115网盘Plus 无法打开",
       "v3.0.4": "整理目标优先使用独立 Open 严格查询，区分确认不存在和接口异常；避免 Cookie 405 冷却阻断可用 Open 查询",
       "v3.0.3": "目标状态严格查询串行复核：冷却期间最多等待 65 秒，405 有限重试一次，持续异常仍拒绝误覆盖",

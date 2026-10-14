@@ -6,6 +6,18 @@ from pathlib import Path
 from re import search as re_search
 from typing import Any, List, Dict, Tuple, Optional, Union
 
+import concurrenttools
+
+if not hasattr(concurrenttools, "threadpool_map"):
+    if hasattr(concurrenttools, "thread_conmap"):
+        concurrenttools.threadpool_map = concurrenttools.thread_conmap
+    else:
+        from concurrenttools.basic import threadpool_map
+
+        concurrenttools.threadpool_map = threadpool_map
+if not hasattr(concurrenttools, "taskgroup_map"):
+    concurrenttools.taskgroup_map = concurrenttools.threadpool_map
+
 from app.core.config import settings
 from app.core.event import eventmanager, Event
 from app.log import logger

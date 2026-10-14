@@ -2,7 +2,19 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from threading import RLock
 from time import monotonic, sleep, time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+
+import concurrenttools
+
+if not hasattr(concurrenttools, "threadpool_map"):
+    if hasattr(concurrenttools, "thread_conmap"):
+        concurrenttools.threadpool_map = concurrenttools.thread_conmap
+    else:
+        from concurrenttools.basic import threadpool_map
+
+        concurrenttools.threadpool_map = threadpool_map
+if not hasattr(concurrenttools, "taskgroup_map"):
+    concurrenttools.taskgroup_map = concurrenttools.threadpool_map
 
 from cryptography.hazmat.primitives import hashes
 from httpx import stream, RequestError
