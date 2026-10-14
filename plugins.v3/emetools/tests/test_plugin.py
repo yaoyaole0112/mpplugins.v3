@@ -162,6 +162,18 @@ class PluginTests(unittest.TestCase):
             self.plugin.init_plugin({"strm_root": self.directory.name, "enrichment": persisted})
         self.assertEqual(self.plugin._enrichment.options()["max_actors"], 12)
 
+    def test_notification_settings_are_persisted_and_filter_success(self):
+        result = self.run_async(self.plugin.save_settings({"notifications": {
+            "enabled": True, "only_failures": True, "subscription": True,
+            "missing": True, "media": True, "enrichment": True, "invalid": True,
+            "cleanup": True, "move": True, "trash": True,
+        }}))
+        self.assertTrue(result["settings"]["notifications"]["only_failures"])
+        self.plugin._send_tool_notice("📁 文件转存", "转存完成：移动 1 项，复制 0 项，失败 0 条")
+        self.plugin.chain.post_message.assert_not_called()
+        self.plugin._send_tool_notice("📁 文件转存", "转存失败：1 个目录")
+        self.plugin.chain.post_message.assert_called_once()
+
     def test_emby_episode_webhook_debounces_by_series_and_ignores_other_events(self):
         from types import SimpleNamespace
         event = lambda **kwargs: SimpleNamespace(event_data=SimpleNamespace(**kwargs))

@@ -39,6 +39,11 @@ watch(notice, value => showToast(value, 'success'))
 watch(error, value => showToast(value, 'error'))
 const settings = reactive({ enabled: true, show_sidebar_nav: true, strm_root: '/strm',
   cookie_configured: false, rb_password: '', rb_password_configured: false })
+const notificationSettings = reactive({ enabled: true, only_failures: false, subscription: true,
+  missing: true, media: true, enrichment: true, invalid: true, cleanup: true, move: true, trash: true })
+const savedNotificationSettings = ref('')
+const notificationSettingsDirty = computed(() => settingsLoaded.value &&
+  JSON.stringify(notificationSettings) !== savedNotificationSettings.value)
 const schedule = reactive({
   tools: { enabled: false, cron: '0 3 * * *', path: '/strm', auto_delete: true, confirm_cleanup: false, confirm_mode: 'none' },
   p115_cleanup: { enabled: false, cron: '0 */2 * * *', dir_ids: [], dir_names: [] },
@@ -463,6 +468,8 @@ async function work(callback) {
 }
 function applyStatus(data) {
   Object.assign(settings, data.settings || {})
+  Object.assign(notificationSettings, data.settings?.notifications || {})
+  savedNotificationSettings.value = JSON.stringify(notificationSettings)
   savedStrmRoot.value = settings.strm_root
   settings.rb_password = ''
   telegram.api_id = settings.tg_api_id || ''
@@ -525,6 +532,15 @@ async function saveTelegramSettings() {
     telegram.forward_token = ''
     savedTelegramApiId.value = String(telegram.api_id || '')
     notice.value = 'Telegram 账号设置已保存'
+  })
+}
+async function saveNotificationSettings() {
+  if (!settingsLoaded.value) { error.value = '插件配置尚未加载，请刷新后重试'; return }
+  await work(async () => {
+    const result = await post('settings', { notifications: { ...notificationSettings } })
+    Object.assign(notificationSettings, result.settings.notifications || {})
+    savedNotificationSettings.value = JSON.stringify(notificationSettings)
+    notice.value = '通知设置已保存'
   })
 }
 async function loadMonitor(refreshDrafts = ['sub', 'kw']) {
@@ -1178,6 +1194,25 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         <p class="eme-hint">115 Cookie：{{ settings.cookie_configured ? '已从 115 网盘 STRM 助手读取，更新后自动同步' : '未读取到，请先在 115 网盘 STRM 助手中配置 Cookie' }}。115 连接沿用 MoviePilot 容器的网络环境。</p>
       </section>
       <section v-if="active === 'settings'" class="eme-card">
+        <div class="eme-card-heading"><div><h3>通知设置</h3><p>自定义媒体增强各功能是否发送 MoviePilot 插件通知。</p></div><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveNotificationSettings">保存设置</button></div>
+        <p v-if="notificationSettingsDirty" class="eme-message eme-warning">通知设置有未保存的修改；请点击“保存设置”。</p>
+        <div class="eme-options eme-settings-switches">
+          <label class="eme-switch-label"><input v-model="notificationSettings.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用功能通知</span></label>
+          <label class="eme-switch-label"><input v-model="notificationSettings.only_failures" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>仅当失败时通知</span></label>
+        </div>
+        <div class="eme-notification-grid">
+          <label class="eme-switch-label"><input v-model="notificationSettings.subscription" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>订阅监控</span></label>
+          <label class="eme-switch-label"><input v-model="notificationSettings.missing" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>缺集检测</span></label>
+          <label class="eme-switch-label"><input v-model="notificationSettings.media" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>媒体清理</span></label>
+          <label class="eme-switch-label"><input v-model="notificationSettings.enrichment" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>数据补全</span></label>
+          <label class="eme-switch-label"><input v-model="notificationSettings.invalid" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>清理数据</span></label>
+          <label class="eme-switch-label"><input v-model="notificationSettings.cleanup" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>清理文件</span></label>
+          <label class="eme-switch-label"><input v-model="notificationSettings.move" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>文件转存</span></label>
+          <label class="eme-switch-label"><input v-model="notificationSettings.trash" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>清空回收站</span></label>
+        </div>
+        <p class="eme-hint">关闭总开关后不发送媒体增强通知；开启“仅当失败时通知”后，成功完成类通知会被跳过，但待确认操作仍会发送。</p>
+      </section>
+      <section v-if="active === 'settings'" class="eme-card">
         <div class="eme-card-heading"><h3>Telegram 账号</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveTelegramSettings">保存设置</button></div>
         <p v-if="telegramSettingsDirty" class="eme-message eme-warning">Telegram 凭据有未保存的修改；请点击“保存设置”后再登录或使用转发 Bot。</p>
         <p class="eme-hint">使用你自己的 Telegram 账号监听频道。请从 my.telegram.org 的 API development tools 获取 API ID 和 API Hash。</p>
@@ -1359,6 +1394,9 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-move-arrow{font-size:18px}
 .eme-chips{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:12px 0}.eme-chip{padding:5px 8px;border-radius:9px;background:rgba(var(--v-theme-primary),.1);overflow-wrap:anywhere}.eme-chip button{border:0;background:transparent;color:#e45c5c;cursor:pointer;font-size:18px;margin-left:5px}
 .eme-chip{font-size:14px;line-height:1.5}
+.eme-chip{display:inline-flex;align-items:center;justify-content:center;line-height:1.25;min-height:34px;box-sizing:border-box;vertical-align:middle}.eme-chip button{display:inline-flex;align-items:center;justify-content:center;line-height:1;font-size:18px}
+.eme-notification-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 22px;margin-top:14px;padding-top:14px;border-top:1px solid rgba(var(--v-border-color),var(--v-border-opacity))}
+@media(max-width:760px){.eme-notification-grid{grid-template-columns:1fr}}
 .eme-missing-selects{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.eme-missing-selects>label:last-child{grid-column:1/-1}.eme-picker{position:relative;margin-top:7px}.eme-picker-trigger{box-sizing:border-box;width:100%;min-height:42px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;background:rgb(var(--v-theme-background));color:inherit;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;cursor:pointer;text-align:left}.eme-picker-trigger:hover,.eme-picker-trigger:focus-visible{border-color:rgb(var(--v-theme-primary));outline:none}.eme-picker-menu{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 5px);max-height:300px;overflow:auto;padding:8px;background:rgb(var(--v-theme-surface));border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px;box-shadow:0 12px 28px rgba(0,0,0,.3)}.eme-picker-search{width:100%!important;box-sizing:border-box;margin:0 0 7px!important}.eme-picker-option{width:100%;display:flex;align-items:flex-start;gap:8px;padding:8px;border:0;border-radius:7px;background:transparent;color:inherit;text-align:left;cursor:pointer;line-height:1.35}.eme-picker-option:hover,.eme-picker-option.selected{background:rgba(var(--v-theme-primary),.12);color:rgb(var(--v-theme-primary))}.eme-picker-option i{font-size:18px;flex:none}.eme-picker-empty{padding:10px;margin:0;color:rgba(var(--v-theme-on-surface),.6)}.eme-missing-results{overflow:visible;max-height:none;margin-top:16px}.eme-missing-target{color:#e45c5c;font-weight:700}.eme-air-status{font-weight:700}.eme-air-wait{color:#7eb6ff}.eme-air-live{color:#e6b15c}.eme-air-end{color:rgba(var(--v-theme-on-surface),.62)}.eme-missing-results table{border-collapse:collapse;width:100%;min-width:740px;text-align:center}.eme-missing-results th,.eme-missing-results td{padding:10px;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));white-space:normal;text-align:center;vertical-align:middle}.eme-missing-results th{font-weight:700;white-space:nowrap}
 .eme-episode-overrides{margin-top:20px;padding-top:16px;border-top:1px solid rgba(var(--v-border-color),var(--v-border-opacity))}.eme-episode-overrides .eme-card-heading{margin-bottom:8px}.eme-episode-override-form{display:grid;grid-template-columns:minmax(220px,2fr) minmax(110px,.7fr) minmax(130px,.9fr) auto;align-items:end;gap:12px}.eme-episode-override-form label{display:block}.eme-episode-override-form input{box-sizing:border-box;width:100%;min-height:42px;margin-top:7px;padding:10px 12px;background:rgb(var(--v-theme-background));color:inherit;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px}.eme-episode-override-form>.eme-button{min-height:42px;white-space:nowrap}.eme-episode-override-list{display:flex;flex-direction:column;gap:7px;margin-top:12px}.eme-episode-override-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 11px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px}.eme-episode-override-row .eme-remove{display:inline-flex;align-items:center;gap:3px;padding:4px 6px;white-space:nowrap}
 @media(max-width:760px){.eme-cleanup-grid{grid-template-columns:1fr}.eme-move-row{flex-wrap:wrap}.eme-move-row .eme-folder-choice{max-width:none;min-width:80px}.eme-move-mode{margin-left:auto;width:min(180px,100%)}}

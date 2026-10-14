@@ -57,6 +57,18 @@ DEFAULT_SCHEDULE = {
     "p115_trash": {"enabled": False, "cron": "0 3 * * *"},
     "p115_move": {"enabled": False, "check_interval": 120, "rules": []},
 }
+DEFAULT_NOTIFICATIONS = {
+    "enabled": True,
+    "only_failures": False,
+    "subscription": True,
+    "missing": True,
+    "media": True,
+    "enrichment": True,
+    "invalid": True,
+    "cleanup": True,
+    "move": True,
+    "trash": True,
+}
 SCHEDULE_FIELDS = {
     "tools": {"enabled", "cron", "path", "auto_delete", "confirm_cleanup", "confirm_mode"},
     "p115_cleanup": {"enabled", "cron", "dir_ids", "dir_names"},
@@ -106,7 +118,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.93"
+    plugin_version = "2.9.94"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -122,6 +134,9 @@ class EmeTools(_PluginBase):
         self._tg_api_hash = str(config.get("tg_api_hash") or "").strip()
         self._tg_forward_token = str(config.get("tg_forward_token") or "").strip()
         self._tg_session = str(config.get("tg_session") or "")
+        saved_notifications = config.get("notifications") or {}
+        self._notifications = {key: bool(saved_notifications.get(key, default))
+                               for key, default in DEFAULT_NOTIFICATIONS.items()}
         saved_monitor = config.get("monitor") or {}
         self._monitor_config = {
             scope: {"enabled": bool((saved_monitor.get(scope) or {}).get("enabled", False)),
@@ -525,7 +540,8 @@ class EmeTools(_PluginBase):
                 "strm_root": self._strm_root, "cookie_configured": bool(self._source_cookie()),
                 "rb_password_configured": self._rb_password != "000000", "tg_api_id": self._tg_api_id,
                 "tg_api_hash_configured": bool(self._tg_api_hash),
-                "tg_forward_token_configured": bool(self._tg_forward_token)}
+                "tg_forward_token_configured": bool(self._tg_forward_token),
+                "notifications": copy.deepcopy(self._notifications)}
 
     def _persist(self) -> None:
         self.update_config({"enabled": self._enabled, "show_sidebar_nav": self._show_sidebar_nav,
@@ -537,6 +553,7 @@ class EmeTools(_PluginBase):
                             "missing": copy.deepcopy(self._missing_config),
                             "media_cleanup": copy.deepcopy(self._media_config),
                             "enrichment": copy.deepcopy(self._enrichment_config),
+                            "notifications": copy.deepcopy(self._notifications),
                             "media_scan_library_ids": list(self._media_scan_library_ids)})
 
     async def media_status(self) -> dict:
@@ -814,7 +831,7 @@ class EmeTools(_PluginBase):
 
     async def save_settings(self, settings: dict) -> dict:
         allowed = {"enabled", "show_sidebar_nav", "strm_root", "rb_password",
-                   "tg_api_id", "tg_api_hash", "tg_forward_token"}
+                   "tg_api_id", "tg_api_hash", "tg_forward_token", "notifications"}
         if set(settings) - allowed:
             raise HTTPException(status_code=400, detail="连接设置包含未知字段")
         root = str(settings.get("strm_root", self._strm_root)).strip()
@@ -851,6 +868,12 @@ class EmeTools(_PluginBase):
             self._schedule["tools"]["path"] = root
         self._rb_password = password
         self._tg_api_id, self._tg_api_hash, self._tg_forward_token = api_id, api_hash, token
+        if "notifications" in settings:
+            notification_values = settings["notifications"]
+            if not isinstance(notification_values, dict) or set(notification_values) - set(DEFAULT_NOTIFICATIONS):
+                raise HTTPException(status_code=400, detail="通知设置包含未知字段")
+            self._notifications = {key: bool(notification_values.get(key, default))
+                                  for key, default in DEFAULT_NOTIFICATIONS.items()}
         if not self._enabled:
             for scope in ("sub", "kw"):
                 self._monitor_config[scope]["enabled"] = False
@@ -1264,6 +1287,23 @@ class EmeTools(_PluginBase):
         return count, size
 
     def _send_tool_notice(self, title: str, text: str) -> None:
+        content = f"{title or ''}\n{text or ''}"
+        category = "move" if "转存" in content or "文件转存" in content else \
+            "trash" if "回收站" in content else \
+            "cleanup" if "清理文件" in content else \
+            "invalid" if "无效数据" in content else \
+            "media" if "低质版本" in content or "去重" in content else \
+            "missing" if "缺集" in content else \
+            "subscription" if "订阅" in content else \
+            "enrichment" if "补全" in content else "media"
+        if not self._notifications.get("enabled", True) or not self._notifications.get(category, True):
+            logger.info("ME工具：通知已按设置跳过，类别=%s，标题=%s", category, _log_label(title or "无标题"))
+            return
+        has_failure = bool(re.search(r"失败(?!\s*0)", content)) or any(marker in content for marker in
+            ("错误", "异常", "跳过", "未配置", "超时"))
+        if self._notifications.get("only_failures") and not has_failure and "待确认" not in content:
+            logger.info("ME工具：仅失败通知已启用，跳过成功通知，类别=%s", category)
+            return
         # Skip _PluginBase.post_message's automatic "查看详情" plugin link: EME's
         # Telegram notification contains only its configured title and body.
         self.chain.post_message(Message(channel=NotificationChannel.Telegram, mtype=MessageType.Plugin,
