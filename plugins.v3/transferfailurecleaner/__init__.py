@@ -21,7 +21,7 @@ class TransferFailureCleaner(_PluginBase):
     plugin_name = "失败整理记录清理"
     plugin_desc = "按错误类型配置多条清理规则，分别使用 MP 原生四种删除方式"
     plugin_icon = "Eraser.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "transferfailurecleaner_"
@@ -55,6 +55,27 @@ class TransferFailureCleaner(_PluginBase):
         self._rules = {
             mode: self._normalize_types(config.get(f"errors_{mode}", [])) if has_rules else
             legacy_types if mode == self._delete_mode else ()
+            for mode in self._DELETE_MODES
+        }
+        self._config_error = ""
+        if "rules" in config:
+            self._rule_list = []
+            if not isinstance(config["rules"], list):
+                self._config_error = "规则配置格式无效，请重新配置并保存"
+            else:
+                for position, rule in enumerate(config["rules"], start=1):
+                    if (not isinstance(rule, dict) or rule.get("delete_mode") not in self._DELETE_MODES
+                            or not isinstance(rule.get("error_types"), list)):
+                        self._config_error = f"规则 {position} 配置无效，请检查删除方式和错误类型"
+                        continue
+                    self._rule_list.append({"delete_mode": rule["delete_mode"],
+                                            "error_types": list(self._normalize_types(rule["error_types"]))})
+        else:
+            self._rule_list = [{"delete_mode": mode, "error_types": list(selected)}
+                               for mode, selected in self._rules.items() if selected]
+        self._rules = {
+            mode: tuple(dict.fromkeys(error_type for rule in self._rule_list if rule["delete_mode"] == mode
+                                     for error_type in rule["error_types"]))
             for mode in self._DELETE_MODES
         }
         self._error_types = tuple(dict.fromkeys(
@@ -159,12 +180,18 @@ class TransferFailureCleaner(_PluginBase):
     def _run(self, preview: bool = False, manual: bool = False) -> Dict[str, Any]:
         if not manual and not self._enabled:
             return {"success": False, "message": "插件未启用"}
+        if self._config_error:
+            return {"success": False, "message": self._config_error}
+        rule_list = [{"delete_mode": rule["delete_mode"], "error_types": tuple(rule["error_types"])}
+                     for rule in self._rule_list]
         rules = dict(self._rules)
-        conflicts = self._rule_conflicts(rules)
+        conflicts = self._rule_conflicts({index: rule["error_types"] for index, rule in enumerate(rule_list)})
         if conflicts:
             return {"success": False, "message": "同一错误类型不能分配到多个删除规则，请调整后保存："
                     + "；".join(conflicts)}
         assignments = {error_type: mode for mode, selected in rules.items() for error_type in selected}
+        rule_assignments = {error_type: index for index, rule in enumerate(rule_list)
+                            for error_type in rule["error_types"]}
         selected = tuple(assignments)
         active_modes = [mode for mode, types in rules.items() if types]
         delete_mode = active_modes[0] if len(active_modes) == 1 else "multiple"
@@ -184,25 +211,35 @@ class TransferFailureCleaner(_PluginBase):
                        "skipped": 0, "retained": 0, "failed": 0, "types": {}}
                 for mode in active_modes
             }
+            rule_details = [{"number": index + 1, "delete_mode": rule["delete_mode"],
+                             "label": self._DELETE_MODES[rule["delete_mode"]][0], "matched": 0,
+                             "deleted": 0, "skipped": 0, "retained": 0, "failed": 0, "types": {}}
+                            for index, rule in enumerate(rule_list)]
             for error_type, count in counts.items():
                 rule_result = rule_results[assignments[error_type]]
                 rule_result["matched"] += count
                 rule_result["types"][error_type] = count
+                detail = rule_details[rule_assignments[error_type]]
+                detail["matched"] += count
+                detail["types"][error_type] = count
             summary = {"scanned": len(records), "matched": len(candidates),
                        "deleted": 0, "skipped": 0, "retained": 0, "failed": 0,
                        "types": dict(counts), "preview": preview,
                        "delete_mode": delete_mode, "delete_mode_label": mode_label,
-                       "rules": rule_results}
+                       "rules": rule_results, "rule_details": rule_details}
             if not preview:
                 for record in candidates:
                     record_mode = assignments[self._error_type(record.errmsg)]
+                    rule_index = rule_assignments[self._error_type(record.errmsg)]
                     try:
-                        outcome = self._delete_record(record.id, rules[record_mode], cutoff, record_mode)
+                        outcome = self._delete_record(record.id, rule_list[rule_index]["error_types"], cutoff, record_mode)
                         summary[outcome] += 1
                         rule_results[record_mode][outcome] += 1
+                        rule_details[rule_index][outcome] += 1
                     except Exception as error:
                         summary["failed"] += 1
                         rule_results[record_mode]["failed"] += 1
+                        rule_details[rule_index]["failed"] += 1
                         logger.error("失败整理记录清理：处理记录 %s 失败：%s", record.id, error)
             message = (
                 f"预览：扫描 {len(records)} 条失败记录，匹配 {len(candidates)} 条，未执行删除"
@@ -239,18 +276,33 @@ class TransferFailureCleaner(_PluginBase):
         return []
 
     def get_api(self) -> List[dict]:
-        return [{"path": path, "endpoint": endpoint, "methods": ["POST"],
+        return [{"path": path, "endpoint": endpoint, "methods": [method],
                  "auth": "bear", "dependencies": [Depends(get_current_active_superuser)],
                  "summary": summary}
-                for path, endpoint, summary in (
-                    ("/preview", self.preview, "预览失败整理记录清理"),
-                    ("/run", self.run_now, "立即清理选中的失败整理记录"),
+                for path, endpoint, method, summary in (
+                    ("/preview", self.preview, "POST", "预览失败整理记录清理"),
+                    ("/run", self.run_now, "POST", "立即清理选中的失败整理记录"),
+                    ("/options", self.get_options, "GET", "刷新错误类型"),
+                    ("/status", self.get_status, "GET", "查看已保存规则和执行摘要"),
                 )]
+
+    @staticmethod
+    def get_render_mode() -> Tuple[str, str]:
+        return "vue", "dist/assets"
+
+    def get_status(self) -> dict:
+        return {"config": self._config_snapshot(), "last_result": self.get_data("last_result") or {}}
+
+    def _config_snapshot(self) -> dict:
+        return {"enabled": self._enabled, "cron": self._cron, "retain_hours": self._retain_hours,
+                "rules": [{"delete_mode": rule["delete_mode"], "error_types": list(rule["error_types"])}
+                          for rule in self._rule_list]}
 
     def get_service(self) -> List[dict]:
         if not self._enabled or not self._error_types:
             return []
-        if self._rule_conflicts(self._rules):
+        if self._config_error or self._rule_conflicts({index: rule["error_types"]
+                                                     for index, rule in enumerate(self._rule_list)}):
             logger.error("失败整理记录清理：错误类型重复分配到多个规则，暂停定时清理")
             return []
         try:
@@ -261,7 +313,7 @@ class TransferFailureCleaner(_PluginBase):
         return [{"id": "TransferFailureCleanerCleanup", "name": "失败整理记录定时清理",
                  "trigger": trigger, "func": self.scheduled_cleanup, "kwargs": {}}]
 
-    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+    def get_options(self) -> dict:
         warning = ""
         try:
             counts = Counter(self._error_type(record.errmsg) for record in self._failed_records())
@@ -271,45 +323,10 @@ class TransferFailureCleaner(_PluginBase):
             warning = "暂时无法读取失败提示，请稍后重新打开配置页面。"
         options = [{"title": f"{error_type}（{counts[error_type]} 条）", "value": error_type}
                    for error_type in sorted(set(counts) | set(self._error_types))]
-        rule_cards = []
-        for rule_number, (mode, settings_value) in enumerate(self._DELETE_MODES.items(), start=1):
-            rule_cards.append({"component": "VCard", "props": {"variant": "outlined", "class": "mb-5"},
-                "content": [{"component": "VCardText", "props": {"class": "pa-4"}, "content": [
-                    {"component": "div", "props": {"class": "text-subtitle-1 font-weight-medium mb-4"},
-                        "text": f"规则 {rule_number} · {settings_value[0]}"},
-                    {"component": "VSelect", "props": {"model": f"errors_{mode}", "label": "此规则清理的错误类型",
-                        "density": "comfortable", "items": options, "item-title": "title", "item-value": "value",
-                        "multiple": True, "chips": True, "closable-chips": True,
-                        "hint": "可选多个类型；留空不执行。每个错误类型只能分配到一条规则。",
-                        "persistent-hint": True}},
-                ]}]})
-        return [{"component": "VForm", "props": {"class": "pa-2"}, "content": [
-            {"component": "VAlert", "props": {"type": "warning", "variant": "tonal",
-                "class": "mb-5", "style": "line-height: 1.7;",
-                "text": "文件删除不可恢复，请先预览。删除源文件会联动删除对应下载任务。"}},
-            *rule_cards,
-            {"component": "VCard", "props": {"variant": "outlined", "class": "mb-5"}, "content": [
-                {"component": "VCardText", "props": {"class": "pa-4"}, "content": [
-                    {"component": "div", "props": {"class": "text-subtitle-1 font-weight-medium mb-2"},
-                        "text": "公共设置（适用于所有规则）"},
-                    {"component": "VSwitch", "props": {"model": "enabled", "label": "启用定时清理",
-                        "class": "mb-4", "hide-details": True}},
-                    {"component": "VTextField", "props": {"model": "cron", "label": "执行周期（Cron）",
-                        "class": "mb-6", "density": "comfortable",
-                        "hint": "默认每天 03:00，使用 MP 时区。", "persistent-hint": True}},
-                    {"component": "VTextField", "props": {"model": "retain_hours", "label": "保留最近多少小时",
-                        "density": "comfortable", "type": "number", "min": 0,
-                        "hint": "0 不限制；设置保留时间后，时间无效的记录会跳过。", "persistent-hint": True}},
-                ]},
-            ]},
-            {"component": "VAlert", "props": {"type": "warning" if warning else "info", "variant": "tonal",
-                "class": "mb-4", "style": "line-height: 1.7;",
-                "text": warning or "错误类型来自当前失败记录；无法确认目标文件状态的错误会合并，忽略剧名、集数和底层异常。重新打开设置可刷新选项。"}},
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                "style": "line-height: 1.7;",
-                "text": "保存后到“查看数据”按规则预览或清理。手动和定时清理均使用已保存的规则；重复分配的错误类型会阻止执行。"}},
-        ]}], {"enabled": False, "cron": "0 3 * * *", "retain_hours": 0,
-              **{f"errors_{mode}": list(selected) for mode, selected in self._rules.items()}}
+        return {"error_options": options, "error_warning": warning}
+
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        return [], {**self._config_snapshot(), **self.get_options()}
 
     def get_page(self) -> List[dict]:
         last = self.get_data("last_result") or {}

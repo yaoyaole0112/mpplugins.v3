@@ -141,15 +141,15 @@ class TransferFailureCleanerTests(unittest.TestCase):
 
     def test_api_endpoints_require_superuser(self):
         for api in self.plugin.get_api():
-            self.assertEqual(api["methods"], ["POST"])
+            self.assertIn(api["methods"], (["POST"], ["GET"]))
             self.assertEqual(api["dependencies"], [self.module.get_current_active_superuser])
 
     def test_form_keeps_saved_types_without_current_records(self):
         with patch.object(self.plugin, "_failed_records", return_value=[]):
             form, defaults = self.plugin.get_form()
-        select = next(item for item in self.form_components(form) if item.get("props", {}).get("model") == "errors_record")
-        self.assertEqual(select["props"]["items"][0]["value"], "质量更好")
-        self.assertEqual(defaults["errors_record"], ["质量更好"])
+        self.assertEqual(form, [])
+        self.assertEqual(defaults["rules"], [{"delete_mode": "record", "error_types": ["质量更好"]}])
+        self.assertEqual(defaults["error_options"], [{"title": "质量更好（0 条）", "value": "质量更好"}])
 
     def test_delete_uses_host_command_without_locking_durable_receipt_or_deleting_files(self):
         session = Mock()
@@ -223,22 +223,16 @@ class TransferFailureCleanerTests(unittest.TestCase):
     def test_form_groups_fields_with_spacing_and_preserves_config_models(self):
         with patch.object(self.plugin, "_failed_records", return_value=[]):
             form, defaults = self.plugin.get_form()
-        components = list(self.form_components(form))
-        fields = {item["props"]["model"]: item for item in components if "model" in item.get("props", {})}
-        self.assertEqual(set(fields), set(defaults))
-        self.assertEqual(sum(item["component"] == "VCard" for item in components), 5)
-        for mode in self.plugin._DELETE_MODES:
-            self.assertTrue(fields[f"errors_{mode}"]["props"]["multiple"])
-            self.assertEqual(fields[f"errors_{mode}"]["props"]["density"], "comfortable")
-        self.assertNotIn("delete_mode", fields)
-        self.assertNotIn("error_types", fields)
+        self.assertEqual(form, [])
+        self.assertEqual(len(defaults["rules"]), 1)
+        self.assertEqual(defaults["rules"][0]["delete_mode"], "record")
+        self.assertIn("error_options", defaults)
 
     def test_form_displays_read_failure_separately(self):
         with patch.object(self.plugin, "_failed_records", side_effect=RuntimeError("unavailable")):
-            form, _defaults = self.plugin.get_form()
-        components = list(self.form_components(form))
-        self.assertTrue(any(item["component"] == "VAlert"
-                            and "暂时无法读取" in item["props"].get("text", "") for item in components))
+            form, defaults = self.plugin.get_form()
+        self.assertEqual(form, [])
+        self.assertIn("暂时无法读取", defaults["error_warning"])
 
     def test_target_state_errors_group_across_paths_and_rpc_details(self):
         core = self.plugin._TARGET_STATE_ERROR
@@ -275,11 +269,10 @@ class TransferFailureCleanerTests(unittest.TestCase):
         self.plugin.init_plugin({"error_types": [self.plugin._TARGET_STATE_TYPE]})
         with patch.object(self.plugin, "_failed_records", return_value=records), \
                 patch.object(self.plugin, "_delete_record") as delete:
-            form, _defaults = self.plugin.get_form()
+            form, defaults = self.plugin.get_form()
             result = self.plugin.preview()
-        field = next(item for item in self.form_components(form)
-                     if item.get("props", {}).get("model") == "errors_record")
-        self.assertEqual(field["props"]["items"], [
+        self.assertEqual(form, [])
+        self.assertEqual(defaults["error_options"], [
             {"title": f"{self.plugin._TARGET_STATE_TYPE}（2 条）", "value": self.plugin._TARGET_STATE_TYPE}
         ])
         self.assertEqual(result["data"]["types"], {self.plugin._TARGET_STATE_TYPE: 2})
@@ -357,9 +350,7 @@ class TransferFailureCleanerTests(unittest.TestCase):
         self.plugin.init_plugin({"delete_mode": "source", "error_types": ["质量更好"]})
         with patch.object(self.plugin, "_failed_records", return_value=[]):
             _form, defaults = self.plugin.get_form()
-        self.assertEqual(defaults["errors_source"], ["质量更好"])
-        for mode in ("record", "destination", "all"):
-            self.assertEqual(defaults[f"errors_{mode}"], [])
+        self.assertEqual(defaults["rules"], [{"delete_mode": "source", "error_types": ["质量更好"]}])
 
     def test_changed_error_is_rechecked_only_against_its_original_rule(self):
         session = Mock()
