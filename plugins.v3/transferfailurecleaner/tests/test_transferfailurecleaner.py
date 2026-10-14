@@ -239,6 +239,57 @@ class TransferFailureCleanerTests(unittest.TestCase):
         self.assertTrue(any(item["component"] == "VAlert"
                             and "暂时无法读取" in item["props"].get("text", "") for item in components))
 
+    def test_target_state_errors_group_across_paths_and_rpc_details(self):
+        core = self.plugin._TARGET_STATE_ERROR
+        examples = [
+            f"失败阶段：目标存储访问 {core}：/115open/喜剧之王/Season 1/S01E01.mkv - "
+            "【CloudDrive】查询文件信息失败: <_InactiveRpcError status = StatusCode.DEADLINE_EXCEEDED> "
+            "下一步：检查目标存储连接 已尝试 1/3 次",
+            f"{core}：/115open/另一部剧/S02E08.mkv - Permission denied",
+            f"失败阶段:目标存储访问\n{core}: /media/movie.mkv - timeout",
+            core,
+        ]
+        for message in examples:
+            with self.subTest(message=message):
+                self.assertEqual(self.plugin._error_type(message), self.plugin._TARGET_STATE_TYPE)
+
+    def test_target_group_does_not_merge_different_failures(self):
+        for message in ("失败阶段：目标存储访问 目标存储空间不足", "查询文件信息失败：/media/test.mkv",
+                        "源文件异常：" + self.plugin._TARGET_STATE_ERROR,
+                        self.plugin._TARGET_STATE_ERROR + "之外的错误"):
+            with self.subTest(message=message):
+                self.assertEqual(self.plugin._error_type(message), message)
+
+    def test_legacy_selection_normalizes_and_matches_another_episode(self):
+        core = self.plugin._TARGET_STATE_ERROR
+        self.plugin.init_plugin({"error_types": [f"{core}：/show/S01E01.mkv", f"{core}：/show/S01E02.mkv"]})
+        self.assertEqual(self.plugin._error_types, (self.plugin._TARGET_STATE_TYPE,))
+        self.assertTrue(self.plugin._matches(self.record(error=f"{core}：/other/S03E12.mkv"),
+                                             self.plugin._error_types, None))
+
+    def test_grouped_form_counts_and_preview_use_the_same_category(self):
+        core = self.plugin._TARGET_STATE_ERROR
+        records = [self.record(1, error=f"{core}：/show/S01E01.mkv"),
+                   self.record(2, error=f"{core}：/other/S02E02.mkv")]
+        self.plugin.init_plugin({"error_types": [self.plugin._TARGET_STATE_TYPE]})
+        with patch.object(self.plugin, "_failed_records", return_value=records), \
+                patch.object(self.plugin, "_delete_record") as delete:
+            form, _defaults = self.plugin.get_form()
+            result = self.plugin.preview()
+        field = next(item for item in self.form_components(form)
+                     if item.get("props", {}).get("model") == "error_types")
+        self.assertEqual(field["props"]["items"], [
+            {"title": f"{self.plugin._TARGET_STATE_TYPE}（2 条）", "value": self.plugin._TARGET_STATE_TYPE}
+        ])
+        self.assertEqual(result["data"]["types"], {self.plugin._TARGET_STATE_TYPE: 2})
+        self.assertEqual(result["data"]["matched"], 2)
+        delete.assert_not_called()
+
+    def test_raw_target_reason_survives_public_message_sanitizing(self):
+        with patch.object(self.module, "public_error_message", return_value="存储请求超时"):
+            self.assertEqual(self.plugin._error_type(self.plugin._TARGET_STATE_ERROR + "：/show/E01.mkv"),
+                             self.plugin._TARGET_STATE_TYPE)
+
 
 if __name__ == "__main__":
     unittest.main()

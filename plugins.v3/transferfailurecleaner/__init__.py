@@ -21,13 +21,15 @@ class TransferFailureCleaner(_PluginBase):
     plugin_name = "失败整理记录清理"
     plugin_desc = "按失败提示定时清理整理记录，支持与 MP 删除弹窗一致的四种删除方式"
     plugin_icon = "Eraser.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "transferfailurecleaner_"
     plugin_order = 30
     auth_level = 2
     _EMPTY_ERROR = "（无错误提示）"
+    _TARGET_STATE_ERROR = "无法确认目标文件状态，已跳过整理以避免误覆盖"
+    _TARGET_STATE_TYPE = "目标存储访问，无法确认目标文件状态，已跳过整理以避免误覆盖"
     _DELETE_MODES = {
         "record": ("仅删除转移记录", False, False),
         "source": ("删除转移记录和源文件", True, False),
@@ -49,7 +51,7 @@ class TransferFailureCleaner(_PluginBase):
             self._delete_mode = "record"
         values = config.get("error_types", [])
         self._error_types = tuple(dict.fromkeys(
-            value for value in values if isinstance(value, str) and value
+            self._error_type(value) for value in values if isinstance(value, str) and value
         )) if isinstance(values, list) else ()
         try:
             self._retain_hours = max(0, int(config.get("retain_hours", 0)))
@@ -60,7 +62,20 @@ class TransferFailureCleaner(_PluginBase):
     def _error_type(cls, value: Any) -> str:
         if value is None or not str(value).strip():
             return cls._EMPTY_ERROR
-        return public_error_message(value, context="transfer") or cls._EMPTY_ERROR
+        raw_message = str(value).strip()
+        public_message = public_error_message(value, context="transfer") or cls._EMPTY_ERROR
+        for message in (raw_message, public_message):
+            for stage_prefix in ("失败阶段：目标存储访问", "失败阶段:目标存储访问"):
+                if message.startswith(stage_prefix):
+                    message = message[len(stage_prefix):].lstrip(" \t\r\n：:")
+                    break
+            if message == cls._TARGET_STATE_TYPE:
+                return cls._TARGET_STATE_TYPE
+            if message.startswith(cls._TARGET_STATE_ERROR):
+                suffix = message[len(cls._TARGET_STATE_ERROR):]
+                if not suffix or suffix[0] in "：: \t\r\n":
+                    return cls._TARGET_STATE_TYPE
+        return public_message
 
     def _failed_records(self) -> list:
         records = {}
@@ -233,7 +248,7 @@ class TransferFailureCleaner(_PluginBase):
                         "class": "mb-6", "density": "comfortable",
                         "items": options, "item-title": "title", "item-value": "value", "multiple": True,
                         "chips": True, "closable-chips": True,
-                        "hint": "按提示精确匹配，未勾选时不清理。", "persistent-hint": True}},
+                        "hint": "按错误类型匹配，未勾选时不清理。", "persistent-hint": True}},
                     {"component": "VTextField", "props": {"model": "retain_hours", "label": "保留最近多少小时",
                         "density": "comfortable", "type": "number", "min": 0,
                         "hint": "0 不限制；设置保留时间后，时间无效的记录会跳过。", "persistent-hint": True}},
@@ -251,7 +266,7 @@ class TransferFailureCleaner(_PluginBase):
             ]},
             {"component": "VAlert", "props": {"type": "warning" if warning else "info", "variant": "tonal",
                 "class": "mb-4", "style": "line-height: 1.7;",
-                "text": warning or "错误类型来自当前失败记录，重新打开设置可刷新选项。"}},
+                "text": warning or "错误类型来自当前失败记录；无法确认目标文件状态的错误会合并，忽略剧名、集数和底层异常。重新打开设置可刷新选项。"}},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                 "style": "line-height: 1.7;",
                 "text": "保存后到“查看数据”预览或清理。手动清理无需开启定时开关，也使用已保存的删除方式。"}},
