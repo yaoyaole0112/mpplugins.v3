@@ -587,6 +587,15 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(response["config"]["check_interval"], 60)
         self.assertEqual(self.plugin.update_config.call_args.args[0]["schedule"]["p115_move"]["check_interval"], 60)
 
+    def test_move_rules_normalize_legacy_and_copy_modes(self):
+        with patch("emetools.Scheduler"):
+            response = self.run_async(self.plugin.save_schedule(ScheduleChange(
+                section="p115_move", settings={"rules": [
+                    {"src_id": "1", "dst_id": "2"},
+                    {"src_id": "3", "dst_id": "4", "mode": "copy"},
+                ]})))
+        self.assertEqual([rule["mode"] for rule in response["config"]["rules"]], ["move", "copy"])
+
     def test_helper_cookie_is_read_fresh_for_each_operation(self):
         self.plugin.get_config.side_effect = [{"cookies": "first"}, {"cookies": "second"}]
         with patch("emetools.P115Client") as client:

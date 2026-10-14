@@ -106,7 +106,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.91"
+    plugin_version = "2.9.92"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -964,8 +964,12 @@ class EmeTools(_PluginBase):
                 target = self._validate_cid(rule.get("dst_id"))
                 if source == target:
                     raise HTTPException(status_code=400, detail="源目录与目标目录不能相同")
+                mode = str(rule.get("mode") or "move").strip().lower()
+                if mode not in {"move", "copy"}:
+                    raise HTTPException(status_code=400, detail="转存方式只能选择移动或复制")
                 rules.append({"src_id": source, "src_name": str(rule.get("src_name") or "").strip(),
-                              "dst_id": target, "dst_name": str(rule.get("dst_name") or "").strip()})
+                              "dst_id": target, "dst_name": str(rule.get("dst_name") or "").strip(),
+                              "mode": mode})
             updated["rules"] = rules
             try:
                 updated["check_interval"] = max(60, int(updated.get("check_interval") or 120))
@@ -1172,14 +1176,17 @@ class EmeTools(_PluginBase):
             with self._client() as client:
                 for rule in rules:
                     source, destination = rule["src_id"], rule["dst_id"]
-                    detail = {"src_id": source, "dst_id": destination,
+                    mode = rule.get("mode") or "move"
+                    action = client.copy_files if mode == "copy" else client.move_files
+                    detail = {"src_id": source, "dst_id": destination, "mode": mode,
                               "src_name": rule.get("src_name"), "dst_name": rule.get("dst_name"),
-                              "status": "empty", "file_count": 0, "total_bytes": 0}
+                              "status": "empty", "item_count": 0, "file_count": 0, "total_bytes": 0}
                     details.append(detail)
                     try:
                         files, directories = client.list_children(source)
                         identifiers = [item["fid"] for item in files] + [item["cid"] for item in directories]
-                        logger.info("ME工具 文件转存：%s → %s，源文件=%d，源目录=%d",
+                        logger.info("ME工具 文件转存：%s %s → %s，源文件=%d，源目录=%d",
+                                    "复制" if mode == "copy" else "移动",
                                     _log_label(detail["src_name"] or source),
                                     _log_label(detail["dst_name"] or destination), len(files), len(directories))
                         if not identifiers:
@@ -1189,25 +1196,28 @@ class EmeTools(_PluginBase):
                         moved_ids = set()
                         for index in range(0, len(identifiers), 500):
                             batch = identifiers[index:index + 500]
-                            result = client.move_files(batch, destination)
+                            result = action(batch, destination)
                             if result.get("state"):
                                 moved += len(batch)
                                 moved_ids.update(batch)
                             else:
                                 errors.append(f"{source} → {destination}：{result.get('error') or result.get('msg')}")
                                 detail["status"] = "failed"
-                                logger.warning("ME工具 文件转存：%s → %s 移动失败，批次=%d",
+                                logger.warning("ME工具 文件转存：%s %s → %s 失败，批次=%d",
+                                               "复制" if mode == "copy" else "移动",
                                                _log_label(detail["src_name"] or source),
                                                _log_label(detail["dst_name"] or destination), len(batch))
                                 break
                         if moved_ids:
+                            detail["item_count"] = len(moved_ids)
                             moved_files = [item for item in files if item["fid"] in moved_ids]
                             moved_dirs = [item for item in directories if item["cid"] in moved_ids]
                             count, size = self._move_tree_stats(client, moved_dirs)
                             detail["file_count"] = len(moved_files) + count
                             detail["total_bytes"] = sum(int(item.get("size") or 0) for item in moved_files) + size
                             detail["status"] = "success"
-                            logger.info("ME工具 文件转存：%s → %s 已移动 %d 项（包含 %d 个文件），大小=%d 字节",
+                            logger.info("ME工具 文件转存：%s %s → %s 已处理 %d 项（包含 %d 个文件），大小=%d 字节",
+                                        "复制" if mode == "copy" else "移动",
                                         _log_label(detail["src_name"] or source),
                                         _log_label(detail["dst_name"] or destination), len(moved_ids),
                                         detail["file_count"], detail["total_bytes"])
@@ -1218,10 +1228,15 @@ class EmeTools(_PluginBase):
                                        _log_label(detail["src_name"] or source),
                                        _log_label(detail["dst_name"] or destination), type(error).__name__)
             self._last_run["p115_move"] = datetime.now().isoformat()
-            logger.info("ME工具 文件转存：本次完成，已移动=%d，失败=%d，空目录=%d",
+            logger.info("ME工具 文件转存：本次完成，已处理=%d，失败=%d，空目录=%d",
                         moved, len(errors), sum(item["status"] == "empty" for item in details))
-            return {"ok": not errors, "moved": moved, "errors": errors, "details": details,
-                    "message": f"转存完成：移动 {moved} 项，失败 {len(errors)} 条"}
+            copied = sum(item.get("item_count", 0) for item in details
+                         if item.get("mode") == "copy" and item.get("status") == "success")
+            moved_count = sum(item.get("item_count", 0) for item in details
+                              if item.get("mode") != "copy" and item.get("status") == "success")
+            return {"ok": not errors, "moved": moved, "moved_count": moved_count, "copied": copied,
+                    "errors": errors, "details": details,
+                    "message": f"转存完成：移动 {moved_count} 项，复制 {copied} 项，失败 {len(errors)} 条"}
 
         return self._locked("p115_move", move)
 

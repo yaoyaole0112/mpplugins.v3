@@ -158,7 +158,7 @@ def file_move(result):
         if detail.get("status") != "success":
             continue
         lines.extend([
-            f"🎯[源] {detail.get('src_name') or detail.get('src_id')} → [目标] {detail.get('dst_name') or detail.get('dst_id')}",
+            f"{'📋复制' if detail.get('mode') == 'copy' else '📦移动'}：[源] {detail.get('src_name') or detail.get('src_id')} → [目标] {detail.get('dst_name') or detail.get('dst_id')}",
             f"📚数量：{detail.get('file_count', 0)} 个 · 💾大小：{format_bytes(detail.get('total_bytes', 0))}",
             "",
         ])

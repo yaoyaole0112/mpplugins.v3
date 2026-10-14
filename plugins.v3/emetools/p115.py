@@ -149,6 +149,15 @@ class P115Client:
         response.raise_for_status()
         return response.json()
 
+    def copy_files(self, identifiers: list, destination: str) -> dict:
+        if not identifiers:
+            return {"state": False, "msg": "无文件 ID"}
+        fields = {"pid": str(destination)}
+        fields.update({f"fid[{index}]": str(identifier) for index, identifier in enumerate(identifiers)})
+        response = self.client.post(f"{API}/files/copy", data=fields, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
     def rb_list(self, limit: int = 1000) -> dict:
         response = self.client.get(f"{API}/rb", params={"aid": 7, "cid": 0, "limit": limit, "offset": 0})
         response.raise_for_status()

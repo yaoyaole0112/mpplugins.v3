@@ -152,6 +152,22 @@ class ScheduledNotificationTests(unittest.TestCase):
         self.assertEqual(result["details"][0]["file_count"], 3)
         self.assertEqual(result["details"][0]["total_bytes"], 600)
 
+    def test_copy_rule_uses_copy_api_and_reports_copied_count(self):
+        self.plugin._schedule["p115_move"]["rules"] = [{"src_id": "1", "src_name": "源",
+            "dst_id": "2", "dst_name": "目标", "mode": "copy"}]
+        client = MagicMock()
+        client.list_children.return_value = ([{"fid": "11", "size": 100}], [])
+        client.copy_files.return_value = {"state": True}
+        context = MagicMock()
+        context.__enter__.return_value = client
+        self.plugin._client = MagicMock(return_value=context)
+        result = self.plugin._move_run()
+        client.copy_files.assert_called_once_with(["11"], "2")
+        client.move_files.assert_not_called()
+        self.assertEqual(result["moved"], 1)
+        self.assertEqual(result["moved_count"], 0)
+        self.assertEqual(result["copied"], 1)
+
     def test_manual_file_cleanup_confirmation_and_result(self):
         preview = {"ok": True, "folders": [{"name": "旧文件", "files": 1, "dirs": 0,
                                                "size": 1024, "error": ""}],
