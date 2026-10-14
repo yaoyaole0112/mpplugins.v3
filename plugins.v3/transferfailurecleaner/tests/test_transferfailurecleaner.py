@@ -147,9 +147,9 @@ class TransferFailureCleanerTests(unittest.TestCase):
     def test_form_keeps_saved_types_without_current_records(self):
         with patch.object(self.plugin, "_failed_records", return_value=[]):
             form, defaults = self.plugin.get_form()
-        select = next(item for item in self.form_components(form) if item.get("props", {}).get("model") == "error_types")
+        select = next(item for item in self.form_components(form) if item.get("props", {}).get("model") == "errors_record")
         self.assertEqual(select["props"]["items"][0]["value"], "质量更好")
-        self.assertEqual(defaults["error_types"], [])
+        self.assertEqual(defaults["errors_record"], ["质量更好"])
 
     def test_delete_uses_host_command_without_locking_durable_receipt_or_deleting_files(self):
         session = Mock()
@@ -226,11 +226,12 @@ class TransferFailureCleanerTests(unittest.TestCase):
         components = list(self.form_components(form))
         fields = {item["props"]["model"]: item for item in components if "model" in item.get("props", {})}
         self.assertEqual(set(fields), set(defaults))
-        self.assertEqual(sum(item["component"] == "VCard" for item in components), 2)
-        for field in ("delete_mode", "error_types"):
-            self.assertEqual(fields[field]["props"]["class"], "mb-6")
-        self.assertEqual(fields["error_types"]["props"]["multiple"], True)
-        self.assertEqual(len(fields["delete_mode"]["props"]["items"]), 4)
+        self.assertEqual(sum(item["component"] == "VCard" for item in components), 5)
+        for mode in self.plugin._DELETE_MODES:
+            self.assertTrue(fields[f"errors_{mode}"]["props"]["multiple"])
+            self.assertEqual(fields[f"errors_{mode}"]["props"]["density"], "comfortable")
+        self.assertNotIn("delete_mode", fields)
+        self.assertNotIn("error_types", fields)
 
     def test_form_displays_read_failure_separately(self):
         with patch.object(self.plugin, "_failed_records", side_effect=RuntimeError("unavailable")):
@@ -277,7 +278,7 @@ class TransferFailureCleanerTests(unittest.TestCase):
             form, _defaults = self.plugin.get_form()
             result = self.plugin.preview()
         field = next(item for item in self.form_components(form)
-                     if item.get("props", {}).get("model") == "error_types")
+                     if item.get("props", {}).get("model") == "errors_record")
         self.assertEqual(field["props"]["items"], [
             {"title": f"{self.plugin._TARGET_STATE_TYPE}（2 条）", "value": self.plugin._TARGET_STATE_TYPE}
         ])
@@ -289,6 +290,121 @@ class TransferFailureCleanerTests(unittest.TestCase):
         with patch.object(self.module, "public_error_message", return_value="存储请求超时"):
             self.assertEqual(self.plugin._error_type(self.plugin._TARGET_STATE_ERROR + "：/show/E01.mkv"),
                              self.plugin._TARGET_STATE_TYPE)
+
+    def test_multiple_rules_dispatch_each_type_to_its_own_delete_mode(self):
+        self.plugin.init_plugin({"errors_record": ["存储访问失败"], "errors_source": ["质量更好"],
+                                 "errors_destination": ["目标错误"], "errors_all": ["全部错误"]})
+        records = [self.record(1, error="存储访问失败"), self.record(2),
+                   self.record(3, error="目标错误"), self.record(4, error="全部错误"),
+                   self.record(5, error="未选择"), self.record(6, status=True)]
+        with patch.object(self.plugin, "_failed_records", return_value=records), \
+                patch.object(self.plugin, "_delete_record", return_value="deleted") as delete:
+            result = self.plugin.run_now()
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["matched"], 4)
+        self.assertEqual(result["data"]["deleted"], 4)
+        for record_id, mode, error_type in ((1, "record", "存储访问失败"), (2, "source", "质量更好"),
+                                          (3, "destination", "目标错误"), (4, "all", "全部错误")):
+            delete.assert_any_call(record_id, (error_type,), None, mode)
+            self.assertEqual(result["data"]["rules"][mode]["deleted"], 1)
+        self.assertEqual(delete.call_count, 4)
+
+    def test_multi_rule_preview_reports_modes_without_deleting(self):
+        self.plugin.init_plugin({"errors_record": ["存储访问失败"], "errors_source": ["质量更好"]})
+        records = [self.record(1, error="存储访问失败"), self.record(2), self.record(3)]
+        with patch.object(self.plugin, "_failed_records", return_value=records), \
+                patch.object(self.plugin, "_delete_record") as delete:
+            result = self.plugin.preview()
+        self.assertEqual(result["data"]["delete_mode"], "multiple")
+        self.assertEqual(result["data"]["rules"]["record"]["matched"], 1)
+        self.assertEqual(result["data"]["rules"]["source"]["matched"], 2)
+        self.assertEqual(result["data"]["rules"]["source"]["deleted"], 0)
+        delete.assert_not_called()
+
+    def test_conflicting_rules_block_manual_preview_and_schedule(self):
+        self.plugin.init_plugin({"enabled": True, "errors_record": ["质量更好"], "errors_source": ["质量更好"]})
+        with patch.object(self.plugin, "_delete_record") as delete:
+            for run in (self.plugin.preview, self.plugin.run_now, self.plugin.scheduled_cleanup):
+                result = run()
+                self.assertFalse(result["success"])
+                self.assertIn("不能分配到多个", result["message"])
+            self.assertEqual(self.plugin.get_service(), [])
+            delete.assert_not_called()
+        self.module.list_transfer_history.assert_not_called()
+
+    def test_normalized_target_errors_conflict_across_rules(self):
+        core = self.plugin._TARGET_STATE_ERROR
+        self.plugin.init_plugin({"errors_record": [core + "：/show/E01.mkv"],
+                                 "errors_all": [core + "：/other/E02.mkv"]})
+        self.assertEqual(self.plugin._rule_conflicts(self.plugin._rules), [self.plugin._TARGET_STATE_TYPE])
+
+    def test_old_configuration_maps_into_same_mode_without_changing_schedule(self):
+        for mode in self.plugin._DELETE_MODES:
+            with self.subTest(mode=mode):
+                self.plugin.init_plugin({"enabled": True, "delete_mode": mode, "error_types": ["质量更好"],
+                                         "cron": "20 */2 * * *", "retain_hours": 6})
+                self.assertEqual(self.plugin._rules[mode], ("质量更好",))
+                self.assertEqual(sum(bool(selected) for selected in self.plugin._rules.values()), 1)
+                self.assertEqual(self.plugin._cron, "20 */2 * * *")
+                self.assertEqual(self.plugin._retain_hours, 6)
+
+    def test_cleared_rules_never_resurrect_legacy_configuration(self):
+        self.plugin.init_plugin({"error_types": ["质量更好"], "delete_mode": "all", "errors_record": []})
+        self.assertEqual(self.plugin._error_types, ())
+        self.assertFalse(self.plugin.run_now()["success"])
+
+    def test_form_migrates_legacy_selection_to_matching_rule_defaults(self):
+        self.plugin.init_plugin({"delete_mode": "source", "error_types": ["质量更好"]})
+        with patch.object(self.plugin, "_failed_records", return_value=[]):
+            _form, defaults = self.plugin.get_form()
+        self.assertEqual(defaults["errors_source"], ["质量更好"])
+        for mode in ("record", "destination", "all"):
+            self.assertEqual(defaults[f"errors_{mode}"], [])
+
+    def test_changed_error_is_rechecked_only_against_its_original_rule(self):
+        session = Mock()
+        session.execute.return_value.scalar_one_or_none.return_value = self.record(error="存储访问失败", task_id="task")
+        def session_scope():
+            yield session
+        runtime = types.SimpleNamespace(persistence=types.SimpleNamespace(sync_session=session_scope))
+        factory = types.ModuleType("app.factory")
+        factory.app = types.SimpleNamespace(state=types.SimpleNamespace(host_runtime=runtime))
+        with patch.dict(sys.modules, {"app.factory": factory}):
+            self.assertEqual(self.plugin._delete_record(1, ("质量更好",), None, "source"), "skipped")
+        self.module.get_transfer_history_mutation_command.assert_not_called()
+
+    def test_rule_outcomes_are_counted_separately(self):
+        self.plugin.init_plugin({"errors_record": ["存储访问失败"], "errors_source": ["质量更好"]})
+        records = [self.record(1, error="存储访问失败"), self.record(2)]
+        with patch.object(self.plugin, "_failed_records", return_value=records), \
+                patch.object(self.plugin, "_delete_record", side_effect=["deleted", "retained"]):
+            result = self.plugin.run_now()
+        self.assertEqual(result["data"]["rules"]["record"]["deleted"], 1)
+        self.assertEqual(result["data"]["rules"]["source"]["retained"], 1)
+        self.assertFalse(result["success"])
+
+    def test_multi_rule_results_display_separate_actions_and_counts(self):
+        self.plugin.init_plugin({"errors_record": ["存储访问失败"], "errors_source": ["质量更好"]})
+        records = [self.record(1, error="存储访问失败"), self.record(2)]
+        with patch.object(self.plugin, "_failed_records", return_value=records):
+            self.plugin.preview()
+        texts = [item.get("props", {}).get("text", "") for item in self.form_components(self.plugin.get_page())]
+        self.assertTrue(any("仅删除转移记录：匹配 1 条" in text for text in texts))
+        self.assertTrue(any("删除转移记录和源文件：匹配 1 条" in text for text in texts))
+
+    def test_global_retention_applies_to_every_rule(self):
+        now = datetime.now(timezone.utc)
+        self.plugin.init_plugin({"errors_record": ["存储访问失败"], "errors_source": ["质量更好"],
+                                 "retain_hours": 6})
+        records = [self.record(1, error="存储访问失败", date=(now - timedelta(hours=12)).isoformat()),
+                   self.record(2, date=(now - timedelta(hours=12)).isoformat()),
+                   self.record(3, error="存储访问失败", date=now.isoformat()),
+                   self.record(4, date=None)]
+        with patch.object(self.plugin, "_failed_records", return_value=records):
+            result = self.plugin.preview()
+        self.assertEqual(result["data"]["matched"], 2)
+        self.assertEqual(result["data"]["rules"]["record"]["matched"], 1)
+        self.assertEqual(result["data"]["rules"]["source"]["matched"], 1)
 
 
 if __name__ == "__main__":
