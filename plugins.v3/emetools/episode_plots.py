@@ -1,11 +1,12 @@
 import asyncio
+import json
 import re
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
 
-from .tvmao_client import _search_path, _USER_AGENT, _work_title_matches
+from .tvmao_client import _search_path, _suggest_path, _USER_AGENT, _work_title_matches
 
 
 _EPISODE = re.compile(r'^第\s*(\d+)\s*集\s*(?:[：:]\s*(.*))?$')
@@ -171,18 +172,25 @@ async def fetch_episode_plots(title, year, season, numbers, status=None, active=
 
         path = ''
         work_title = queries[0]
-        try:
-            for query in queries:
-                if active:
-                    active()
-                search = await read('https://www.tvmao.com/query.jsp?' + urlencode({'keys': query}))
-                path = _search_path(search, query, str(year) if season == 1 else '')
-                if path:
-                    work_title = query
-                    break
-        except httpx.HTTPError:
-            report('电视猫分集搜索不可用，尝试已确认的剧集地址或百度百科')
+        for query in queries:
+            try:
+                search = await read('https://www.tvmao.com/servlet/queryobject?' +
+                                    urlencode({'type': 'all', 'term': query}))
+                path = _suggest_path(json.loads(search), query, str(year) if season == 1 else '')
+            except (httpx.HTTPError, ValueError):
+                report('电视猫搜索建议暂不可用，尝试旧版搜索')
+            if not path:
+                try:
+                    search = await read('https://www.tvmao.com/query.jsp?' + urlencode({'keys': query}))
+                    path = _search_path(search, query, str(year) if season == 1 else '')
+                except httpx.HTTPError:
+                    report('电视猫旧版搜索不可用')
+            if path:
+                work_title = query
+                break
         path = path or direct_tvmao
+        if not path:
+            report('电视猫未唯一匹配剧名与年份，无法获取分集地址，尝试百度百科')
         if path and _TVMAO_WORK.fullmatch(path):
             try:
                 page = await read('https://www.tvmao.com' + path + '/episode')
@@ -191,6 +199,7 @@ async def fetch_episode_plots(title, year, season, numbers, status=None, active=
                     links = _episode_links(page, path)
                     for index, number in enumerate(numbers):
                         if number not in links:
+                            report(f'电视猫未提供第 {number} 集剧情链接，尝试百度百科')
                             continue
                         if index:
                             await asyncio.sleep(.2)

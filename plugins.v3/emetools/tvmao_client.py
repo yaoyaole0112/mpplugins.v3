@@ -8,7 +8,7 @@ the title of the actor page before they can be written to Emby.
 import html
 import re
 from html.parser import HTMLParser
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -69,13 +69,35 @@ def _work_title_matches(candidate, title, year=""):
 def _search_path(page, title, year=""):
     parser = _Links()
     parser.feed(page)
-    matches = set()
+    matches = {}
     for path, label, text in parser.links:
         match = _WORK_PATH.fullmatch(path)
         if match and (_work_title_matches(label, title, year) if label.strip() else
                       _work_title_matches(text, title, year)):
-            matches.add(path.rstrip("/").removesuffix("/actors"))
-    return next(iter(matches)) if len(matches) == 1 else ""
+            base = path.rstrip("/").removesuffix("/actors")
+            if match[1] not in matches or base.startswith('/kanju/'):
+                matches[match[1]] = base
+    return next(iter(matches.values())) if len(matches) == 1 else ""
+
+
+def _suggest_path(entries, title, year=""):
+    if not isinstance(entries, list):
+        return ""
+    matches = {}
+    for entry in entries:
+        if (not isinstance(entry, dict) or str(entry.get('typeId')) != '11'
+                or str(entry.get('name') or '').strip() != str(title).strip()
+                or (year and entry.get('year') and str(entry['year'])[:4] != str(year)[:4])):
+            continue
+        parsed = urlsplit(urljoin('https://www.tvmao.com/', str(entry.get('url') or '')))
+        if parsed.scheme not in {'https', 'http'} or parsed.hostname not in {'www.tvmao.com', 'm.tvmao.com'}:
+            continue
+        match = _WORK_PATH.fullmatch(parsed.path)
+        if match:
+            base = parsed.path.rstrip('/').removesuffix('/actors')
+            if match[1] not in matches or base.startswith('/kanju/'):
+                matches[match[1]] = base
+    return next(iter(matches.values())) if len(matches) == 1 else ""
 
 
 def _clean(text):
@@ -132,10 +154,17 @@ async def fetch_tvmao_cast(title, year="", tmdb_id="", status=None):
             search.raise_for_status()
             path = _search_path(search.text, title, year)
         except httpx.HTTPError:
-            if not direct:
-                raise
             if status:
-                status("电视猫站内搜索不可用，尝试用户提供的演员页")
+                status("电视猫旧搜索不可用，尝试公开搜索建议接口")
+        if not path:
+            try:
+                search = await client.get('https://www.tvmao.com/servlet/queryobject',
+                                          params={'type': 'all', 'term': title})
+                search.raise_for_status()
+                path = _suggest_path(search.json(), title, year)
+            except (httpx.HTTPError, ValueError):
+                if status:
+                    status('电视猫搜索建议接口不可用，尝试已确认的演员页或保留原数据')
         if not path and direct:
             path = direct
             if status:

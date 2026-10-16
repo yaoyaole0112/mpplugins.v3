@@ -1640,6 +1640,7 @@ class DataEnrichment:
                 web_seasons = {}
                 series_people = (update.get("People") if mode == "all" else item.get("People")) or []
                 changed = 0
+                missing_titles = missing_overviews = 0
                 for episode in episodes.get("Items", []):
                     season, number = episode.get("ParentIndexNumber"), episode.get("IndexNumber")
                     if season is None or number is None: continue
@@ -1716,10 +1717,14 @@ class DataEnrichment:
                             self.log(f"S{season:02d}E{number:02d} 已从{plot.get('source') or '剧情网页'}补充{'、'.join(fields)}")
                     if options["episode_cast"] and series_people:
                         full["People"] = series_people
+                    missing_titles += int(missing_episode_title(full.get("Name")))
+                    missing_overviews += int(missing_episode_overview(full.get("Overview")))
                     saved = await self._save_item(emby, episode["Id"], original_episode, full)
                     changed += saved
                     if saved and changed % 20 == 0: self.log(f"已补全 {changed} 集")
                 self.log(f"分集信息补全完成：{changed} 集")
+                if missing_titles or missing_overviews:
+                    self.log(f"仍有 {missing_titles} 集缺少有效标题、{missing_overviews} 集缺少简介；来源未覆盖或未可靠匹配，保留原值，不代表已补齐")
 
     async def _web_episode_plots(self, item, season, numbers):
         self.log(f"正在补充第 {season} 季缺失的分集信息：电视猫优先，百度百科兜底（{len(numbers)} 集）")

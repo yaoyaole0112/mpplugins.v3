@@ -428,6 +428,25 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(written['25']['Name'], '第25集：网页剧情标题')
         self.assertEqual(written['25']['Overview'], originals['25']['Overview'])
 
+    def test_missing_episode_title_is_reported_when_sources_cannot_supply_it(self):
+        emby = httpx.AsyncClient(base_url='http://emby/emby/')
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/')
+        with patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user'), \
+             patch.object(self.enrichment, '_item', side_effect=[
+                 {'Id': 'series', 'Name': '测试剧', 'Type': 'Series', 'ProviderIds': {'Tmdb': '12345'}},
+                 {'Id': 'ep4', 'Name': '第 4 集', 'Overview': '已有简介。'}]), \
+             patch.object(self.enrichment, '_json', new_callable=AsyncMock, return_value={
+                 'Items': [{'Id': 'ep4', 'ParentIndexNumber': 1, 'IndexNumber': 4}]}), \
+             patch.object(self.enrichment, '_tmdb_json', new_callable=AsyncMock,
+                          return_value={'episodes': []}), \
+             patch.object(self.enrichment, '_save_item', new_callable=AsyncMock, return_value=False), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', 'series', 'episodes', DEFAULT_ENRICH_CONFIG))
+        self.assertTrue(any('仍有 1 集缺少有效标题、0 集缺少简介' in line
+                            for line in self.enrichment.status()['log']))
+
     def test_tmdb_client_uses_moviepilot_domain_and_https_proxy(self):
         with patch('emetools.data_enrichment.settings.TMDB_API_DOMAIN', 'api.tmdb.org'), \
              patch('emetools.data_enrichment.get_runtime_setting', return_value={
