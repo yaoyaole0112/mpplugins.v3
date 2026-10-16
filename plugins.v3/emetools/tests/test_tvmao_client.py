@@ -8,10 +8,47 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from emetools.tvmao_client import _search_path, fetch_tvmao_cast, parse_actors
+from emetools.tvmao_client import _search_path, _suggest_path, fetch_tvmao_cast, parse_actors
 
 
 class TvmaoTests(unittest.TestCase):
+    def test_suggestion_match_requires_tv_work_name_year_and_trusted_url(self):
+        entry = {'name': '此处通往繁星', 'year': 2026, 'typeId': 11, 'url': '/kanju/ZmdlcSFc'}
+        self.assertEqual(_suggest_path([entry], entry['name'], '2026'), entry['url'])
+        for changes in ({'name': '此处通往繁星第二季'}, {'year': 2025}, {'typeId': 51},
+                        {'url': 'https://evil.example/kanju/ZmdlcSFc'}, {'url': 'javascript:alert(1)'}):
+            self.assertEqual(_suggest_path([{**entry, **changes}], entry['name'], '2026'), '')
+        self.assertEqual(_suggest_path({}, entry['name'], '2026'), '')
+
+    def test_suggestion_and_html_aliases_do_not_create_false_ambiguity(self):
+        entry = {'name': '同名剧', 'year': 2026, 'typeId': 11, 'url': '/drama/TEST123'}
+        alias = {**entry, 'url': 'https://m.tvmao.com/kanju/TEST123'}
+        self.assertEqual(_suggest_path([entry, alias], '同名剧', '2026'), '/kanju/TEST123')
+        self.assertEqual(_suggest_path([entry, {**entry, 'url': '/kanju/OTHER123'}], '同名剧', '2026'), '')
+        self.assertEqual(_search_path('<a href="/drama/TEST123" title="同名剧">同名剧</a>'
+                                     '<a href="/kanju/TEST123/actors" title="同名剧演员表">演员表</a>',
+                                     '同名剧', '2026'), '/kanju/TEST123')
+
+    def test_cast_uses_suggestions_when_legacy_search_silently_returns_homepage(self):
+        requested = []
+
+        def handler(request):
+            requested.append(request.url.path)
+            if request.url.path == '/query.jsp':
+                return httpx.Response(200, text='<title>电视剧,剧情介绍,演员表,节目预告_电视猫</title>')
+            if request.url.path == '/servlet/queryobject':
+                return httpx.Response(200, json=[{'name': '此处通往繁星', 'year': 2026, 'typeId': 11,
+                                                   'url': '/kanju/ZmdlcSFc'}])
+            return httpx.Response(200, text='<title>此处通往繁星演员表_电视猫</title>'
+                '<img alt="王灿（郭麒麟饰演）">')
+
+        original = httpx.AsyncClient
+        with patch('emetools.tvmao_client.httpx.AsyncClient', side_effect=lambda **kwargs:
+                   original(transport=httpx.MockTransport(handler), **kwargs)):
+            result = asyncio.run(fetch_tvmao_cast('此处通往繁星', '2026'))
+        self.assertEqual(requested, ['/query.jsp', '/servlet/queryobject', '/kanju/ZmdlcSFc/actors'])
+        self.assertEqual(result[0]['name'], '郭麒麟')
+
     def test_search_needs_exact_work_and_no_ambiguity(self):
         search = ('<a href="/kanju/OTHER999" title="征途第二季">第二季</a>'
                   '<a href="/kanju/YXAhXWhl" title="征途演员表">征途</a>')

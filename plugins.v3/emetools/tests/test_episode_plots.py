@@ -113,7 +113,34 @@ class EpisodePlotsTests(unittest.TestCase):
         result = self.run_fetch(handler)
         self.assertEqual(result[23], {'name': '第23集：剧情标题', 'overview': '这是第一句话。', 'source': '电视猫'})
         self.assertEqual(result[24], {'name': '第24集：百科乙标题', 'overview': '百科乙。', 'source': '百度百科'})
-        self.assertEqual(len(requested), 4)
+        self.assertEqual(len(requested), 5)
+
+    def test_public_suggestions_find_all_missing_stars_titles_without_known_work_mapping(self):
+        requested = []
+        title = '此处通往繁星'
+
+        def handler(request):
+            requested.append(request.url.path)
+            self.assertEqual(request.url.host, 'www.tvmao.com')
+            if request.url.path == '/servlet/queryobject':
+                self.assertEqual(request.url.params['type'], 'all')
+                self.assertEqual(request.url.params['term'], title)
+                return httpx.Response(200, json=[{'name': title, 'year': 2026, 'typeId': 11,
+                                                   'url': '/kanju/ZmdlcSFc'}])
+            if request.url.path == '/kanju/ZmdlcSFc/episode':
+                return httpx.Response(200, text=f'<title>{title}分集剧情_电视猫</title>' + ''.join(
+                    f'<a href="/kanju/ZmdlcSFc/episode/{(number - 1) // 3}-{number}">{number}</a>'
+                    for number in range(4, 10)))
+            number = int(request.url.path.rsplit('-', 1)[1])
+            return httpx.Response(200, text=tvmao_page(number, title))
+
+        result = self.run_fetch(handler, title=title, numbers=range(4, 10))
+        self.assertEqual(set(result), set(range(4, 10)))
+        self.assertEqual(len(requested), 8)
+        self.assertNotIn('/query.jsp', requested)
+        for number in range(4, 10):
+            self.assertEqual(result[number]['name'], f'第{number}集：剧情标题')
+            self.assertEqual(result[number]['source'], '电视猫')
 
     def test_complete_tvmao_data_does_not_request_baike(self):
         def handler(request):
