@@ -121,6 +121,25 @@ class P115ParseTests(unittest.TestCase):
 
 
 class PluginTests(unittest.TestCase):
+    def test_save_schedule_during_missing_scan_does_not_change_detection_config(self):
+        self.plugin._missing._is_scanning = True
+        original = self.plugin._missing._only_existing_seasons
+        with patch('emetools.Scheduler'):
+            response = self.run_async(self.plugin.missing_action({
+                'operation': 'save', 'config': {'cron': '35 */2 * * *', 'enabled': False}}))
+        self.assertEqual(response['config']['cron'], '35 */2 * * *')
+        self.assertEqual(self.plugin._missing._cron, '35 */2 * * *')
+        self.assertEqual(self.plugin._missing._only_existing_seasons, original)
+        self.assertTrue(self.plugin._missing._is_scanning)
+        self.assertEqual(self.plugin.update_config.call_args.args[0]['missing']['cron'], '35 */2 * * *')
+
+    def test_save_detection_config_during_missing_scan_remains_rejected(self):
+        self.plugin._missing._is_scanning = True
+        with self.assertRaises(HTTPException) as error:
+            self.run_async(self.plugin.missing_action({'operation': 'save', 'config': {
+                'only_existing_seasons': not self.plugin._missing_config['only_existing_seasons']}}))
+        self.assertEqual(error.exception.status_code, 409)
+
     def test_metadata_source_selection_is_persisted_without_changing_other_settings(self):
         self.plugin._enrichment_config['max_actors'] = 42
         result = self.run_async(self.plugin.enrichment_action(
