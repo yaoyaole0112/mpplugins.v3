@@ -29,6 +29,7 @@ from app.sdk.services import MediaServerHelper
 from app.schemas.types import MediaType
 from app.runtime.settings import get_runtime_setting
 from .tvmao_client import fetch_tvmao_cast
+from .episode_plots import fetch_episode_plots, missing_episode_title, missing_episode_overview
 from .emby_guard import EmbyClient, ENRICHMENT_SLOT, RESOLVE_SLOTS
 
 
@@ -1628,7 +1629,7 @@ class DataEnrichment:
                 while True:
                     page = await self._json(emby, f"Users/{user}/Items", {"ParentId": identifier,
                         "Recursive": "true", "IncludeItemTypes": "Episode", "Limit": 300,
-                        "StartIndex": offset})
+                        "StartIndex": offset, "Fields": "Overview"})
                     items = page.get("Items") or []
                     episodes["Items"].extend(items)
                     offset += len(items)
@@ -1636,6 +1637,7 @@ class DataEnrichment:
                         break
                 seasons = {}
                 translated_seasons = {}
+                web_seasons = {}
                 series_people = (update.get("People") if mode == "all" else item.get("People")) or []
                 changed = 0
                 for episode in episodes.get("Items", []):
@@ -1670,21 +1672,60 @@ class DataEnrichment:
                                 translated_seasons[season].update({key: value for key, value in proposals.items()
                                     if self._is_chinese_title(value) and not re.search(r"[A-Za-z]", value)})
                     tmdb_episode = seasons[season].get(number) or {}
-                    if not tmdb_episode.get("name") and not tmdb_episode.get("overview") and not (options["episode_cast"] and series_people):
+                    if (missing_episode_title(tmdb_episode.get("name")) and missing_episode_overview(tmdb_episode.get("overview"))
+                            and not (options["episode_cast"] and series_people)
+                            and not missing_episode_title(episode.get("Name"))
+                            and not missing_episode_overview(episode.get("Overview"))):
                         continue
                     full = await self._item(emby, user, episode["Id"])
                     original_episode = dict(full)
                     translated = translated_seasons.get(season, {})
-                    if tmdb_episode.get("name"):
+                    if not missing_episode_title(tmdb_episode.get("name")):
                         full["Name"] = self._select_chinese_title(
                             full.get("Name"), translated.get(f"n{number}"), tmdb_episode["name"])
-                    if tmdb_episode.get("overview"): full["Overview"] = translated.get(f"o{number}", tmdb_episode["overview"])
+                    if not missing_episode_overview(tmdb_episode.get("overview")):
+                        full["Overview"] = translated.get(f"o{number}", tmdb_episode["overview"])
+                    if missing_episode_title(full.get("Name")) or missing_episode_overview(full.get("Overview")):
+                        if season not in web_seasons:
+                            numbers = {number}
+                            for entry in episodes.get("Items", []):
+                                episode_number = entry.get("IndexNumber")
+                                if entry.get("ParentIndexNumber") != season or type(episode_number) is not int:
+                                    continue
+                                primary = seasons[season].get(episode_number) or {}
+                                resolved_title = entry.get("Name")
+                                if not missing_episode_title(primary.get("name")):
+                                    resolved_title = self._select_chinese_title(resolved_title,
+                                        translated.get(f"n{episode_number}"), primary["name"])
+                                if (missing_episode_title(resolved_title)
+                                        or (missing_episode_overview(entry.get("Overview"))
+                                            and missing_episode_overview(primary.get("overview")))):
+                                    numbers.add(episode_number)
+                            plot_item = {**item, "Name": self._select_chinese_title(
+                                item.get("Name"), item.get("Name"), detail.get("name"))}
+                            web_seasons[season] = await self._web_episode_plots(plot_item, season, numbers)
+                        plot = web_seasons[season].get(number) or {}
+                        fields = []
+                        if missing_episode_title(full.get("Name")) and not missing_episode_title(plot.get("name")):
+                            full["Name"] = plot["name"]
+                            fields.append("标题")
+                        if missing_episode_overview(full.get("Overview")) and plot.get("overview"):
+                            full["Overview"] = plot["overview"]
+                            fields.append("简介")
+                        if fields:
+                            self.log(f"S{season:02d}E{number:02d} 已从{plot.get('source') or '剧情网页'}补充{'、'.join(fields)}")
                     if options["episode_cast"] and series_people:
                         full["People"] = series_people
                     saved = await self._save_item(emby, episode["Id"], original_episode, full)
                     changed += saved
                     if saved and changed % 20 == 0: self.log(f"已补全 {changed} 集")
                 self.log(f"分集信息补全完成：{changed} 集")
+
+    async def _web_episode_plots(self, item, season, numbers):
+        self.log(f"正在补充第 {season} 季缺失的分集信息：电视猫优先，百度百科兜底（{len(numbers)} 集）")
+        return await fetch_episode_plots(str(item.get("Name") or ""),
+                                        str(item.get("ProductionYear") or ""), season, numbers,
+                                        self.log, self._ensure_active)
 
     def start_mediainfo_check(self):
         return self._begin("媒体信息检查", self._check_mediainfo)
