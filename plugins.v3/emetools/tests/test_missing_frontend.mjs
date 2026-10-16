@@ -87,7 +87,7 @@ test('unsaved configuration warning reacts to edits and successful saves', () =>
   assert.equal(vm.runInContext('missingConfigDirty.value', context), false)
 })
 
-test('saving during a scan persists schedule only and retains other drafts', async () => {
+test('saving during a scan persists the entire configuration', async () => {
   const { context, calls, saved } = fixture()
   await context.loadMissing()
   context.missing.scanning = true
@@ -96,19 +96,19 @@ test('saving during a scan persists schedule only and retains other drafts', asy
   context.missing.config.library_names.push('日韩剧')
   await context.missingCommand('save')
   assert.equal(calls.length, 1)
-  assert.deepEqual(Object.keys(calls[0].config).sort(), ['cron', 'enabled'])
+  assert.ok('library_names' in calls[0].config)
   assert.equal(saved.cron, '35 */2 * * *')
   assert.equal(saved.enabled, true)
-  assert.deepEqual(Array.from(saved.library_names), ['国产剧'])
+  assert.deepEqual(Array.from(saved.library_names), ['国产剧', '日韩剧'])
   assert.deepEqual(Array.from(context.missing.config.library_names), ['国产剧', '日韩剧'])
-  assert.notEqual(context.missingSavedConfig.value, JSON.stringify(context.missing.config))
-  assert.equal(context.missing.scanning, true)
+  assert.equal(context.missingSavedConfig.value, JSON.stringify(context.missing.config))
 })
 
 test('save availability and running restrictions are explained across pages', () => {
   const button = source.match(/<button[^>]*@click="missingCommand\('save'\)"[^>]*>/)[0]
   assert.equal(button.includes('missing.scanning'), false)
-  assert.ok(source.includes('保存定时配置'))
+  assert.equal(source.includes('保存定时配置'), false)
+  assert.ok(source.includes('保存的新配置在本轮结束后生效'))
   assert.ok(source.includes('媒体清理任务正在运行，保存配置和保存规则暂不可用'))
   assert.ok(source.includes('数据补全正在运行，暂不能保存补全设置'))
 })

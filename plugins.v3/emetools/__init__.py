@@ -118,7 +118,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.98"
+    plugin_version = "2.9.99"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -777,24 +777,16 @@ class EmeTools(_PluginBase):
                 raise HTTPException(status_code=400, detail=f"cron 表达式无效：{exc}") from exc
             if updated["enabled"] and self._legacy_missing_active():
                 raise HTTPException(status_code=409, detail="请先停用原「剧集缺集检测订阅」插件，再启用 ME工具缺集定时检测")
-            schedule_only = all(updated[key] == self._missing_config[key]
-                                for key in updated if key not in {"cron", "enabled"})
-            if self._missing._is_scanning and not schedule_only:
-                raise HTTPException(status_code=409, detail="扫描进行中，请稍后保存配置")
             newly_skipped = set(updated["skip_series_ids"]) - set(self._missing_config["skip_series_ids"])
             self._missing_config = updated
-            if not self._missing._is_scanning:
-                self._missing.configure(updated)
-            else:
-                self._missing._enabled = updated["enabled"]
-                self._missing._cron = updated["cron"]
+            deferred = self._missing.configure(updated)
             self._persist()
             Scheduler().update_plugin_job(self.__class__.__name__)
             if skip_series_id:
                 self._missing._results = [item for item in self._missing._results
                                           if str(item.get("TmdbId")) != skip_series_id]
                 self.save_data(self._missing._DATA_KEY, self._missing._results)
-            if newly_skipped and not skip_series_id:
+            if newly_skipped and not skip_series_id and not deferred:
                 # The old plugin cancels subscriptions for skipped series on save.
                 # Never do this during automatic migration/initialization.
                 original = self._missing._skip_series_ids
@@ -803,7 +795,9 @@ class EmeTools(_PluginBase):
                     await asyncio.to_thread(self._missing._cancel_skipped_subscriptions)
                 finally:
                     self._missing._skip_series_ids = original
-            return {"message": "已跳过该剧集的缺集检测" if skip_series_id else "缺集检测配置已保存",
+            return {"message": "配置已保存，本轮检测不受影响；本轮结束后生效，下次检测使用新配置" if deferred else
+                    "已跳过该剧集的缺集检测" if skip_series_id else "缺集检测配置已保存",
+                    "deferred": bool(deferred),
                     "config": copy.deepcopy(updated)}
         if operation == "scan":
             if self._missing._is_scanning:

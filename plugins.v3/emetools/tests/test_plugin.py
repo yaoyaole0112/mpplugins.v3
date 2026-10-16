@@ -128,17 +128,26 @@ class PluginTests(unittest.TestCase):
             response = self.run_async(self.plugin.missing_action({
                 'operation': 'save', 'config': {'cron': '35 */2 * * *', 'enabled': False}}))
         self.assertEqual(response['config']['cron'], '35 */2 * * *')
-        self.assertEqual(self.plugin._missing._cron, '35 */2 * * *')
+        self.assertTrue(response['deferred'])
         self.assertEqual(self.plugin._missing._only_existing_seasons, original)
         self.assertTrue(self.plugin._missing._is_scanning)
         self.assertEqual(self.plugin.update_config.call_args.args[0]['missing']['cron'], '35 */2 * * *')
+        self.plugin._missing._finish_scan_config()
+        self.assertEqual(self.plugin._missing._cron, '35 */2 * * *')
 
-    def test_save_detection_config_during_missing_scan_remains_rejected(self):
+    def test_save_detection_config_during_missing_scan_is_deferred_and_latest_wins(self):
         self.plugin._missing._is_scanning = True
-        with self.assertRaises(HTTPException) as error:
-            self.run_async(self.plugin.missing_action({'operation': 'save', 'config': {
-                'only_existing_seasons': not self.plugin._missing_config['only_existing_seasons']}}))
-        self.assertEqual(error.exception.status_code, 409)
+        original = self.plugin._missing._only_existing_seasons
+        with patch('emetools.Scheduler'):
+            result = self.run_async(self.plugin.missing_action({'operation': 'save', 'config': {
+                'only_existing_seasons': not original, 'cron': '0 4 * * *'}}))
+            self.run_async(self.plugin.missing_action({'operation': 'save', 'config': {'cron': '0 5 * * *'}}))
+        self.assertTrue(result['deferred'])
+        self.assertEqual(self.plugin._missing._only_existing_seasons, original)
+        self.plugin._missing._finish_scan_config()
+        self.assertEqual(self.plugin._missing._only_existing_seasons, not original)
+        self.assertEqual(self.plugin._missing._cron, '0 5 * * *')
+        self.assertFalse(self.plugin._missing._is_scanning)
 
     def test_metadata_source_selection_is_persisted_without_changing_other_settings(self):
         self.plugin._enrichment_config['max_actors'] = 42
@@ -148,6 +157,16 @@ class PluginTests(unittest.TestCase):
         persisted = self.plugin.update_config.call_args.args[0]['enrichment']
         self.assertEqual(persisted['metadata_source'], 'tmdb')
         self.assertEqual(persisted['max_actors'], 42)
+
+    def test_saved_skip_changes_do_not_cancel_subscriptions_until_scan_finishes(self):
+        self.plugin._missing._is_scanning = True
+        with patch('emetools.Scheduler'), patch.object(self.plugin._missing, '_cancel_skipped_subscriptions') as cancel:
+            self.run_async(self.plugin.missing_action({'operation': 'save', 'config': {'skip_series_ids': ['123']}}))
+            cancel.assert_not_called()
+            self.assertNotIn('123', self.plugin._missing._skip_series_ids)
+            self.plugin._missing._finish_scan_config()
+            cancel.assert_called_once()
+            self.assertIn('123', self.plugin._missing._skip_series_ids)
 
     def test_preview_preference_persists_and_survives_other_settings(self):
         result = self.run_async(self.plugin.enrichment_action(
