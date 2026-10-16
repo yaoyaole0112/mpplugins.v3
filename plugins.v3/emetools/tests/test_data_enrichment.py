@@ -1171,7 +1171,7 @@ class EnrichmentTests(unittest.TestCase):
         thumb = str(self.strm)[:-5] + '-thumb.jpg'
         self.assertEqual(self.enrichment._preview_status(key, thumb), 'missing')
         from PIL import Image
-        Image.new('RGB', (200, 200), (30, 205, 50)).save(thumb)
+        Image.new('RGB', (320, 180), (30, 205, 50)).save(thumb)
         self.assertEqual(self.enrichment._preview_status(key, thumb), 'candidate')
         stat = os.stat(thumb)
         self.storage['enrichment_preview_cache'] = {key: {'thumb': thumb, 'mtime': int(stat.st_mtime), 'size': stat.st_size}}
@@ -1181,6 +1181,21 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(self.enrichment._safe_strm(self.strm), str(self.strm))
         with self.assertRaises(ValueError):
             self.enrichment._safe_strm('/etc/passwd')
+
+    def test_wrong_aspect_ratio_is_repairable_even_when_cached(self):
+        from PIL import Image
+        thumb = str(self.strm)[:-5] + '-thumb.jpg'
+        Image.new('RGB', (1280, 576), (100, 100, 100)).save(thumb)
+        stat = os.stat(thumb)
+        self.storage['enrichment_preview_cache'] = {'Q4::ep1': {
+            'thumb': thumb, 'mtime': int(stat.st_mtime), 'size': stat.st_size}}
+        self.assertEqual(self.enrichment._preview_status('Q4::ep1', thumb), 'size')
+        self.assertEqual(self.enrichment._preview_dimensions(thumb), (1280, 576, True))
+        self.enrichment._preview_selection = {'Q4::ep1': {
+            'path': str(self.strm), 'thumb': thumb, 'status': 'size', 'series_id': 'Q4::series'}}
+        with patch.object(self.enrichment, '_begin', return_value={'started': True}) as begin:
+            self.enrichment.start_preview_repair('Q4::series', ['Q4::ep1'], dimensions_only=True)
+            begin.assert_called_once()
 
     def test_dovi_mixed_and_mild_casts_are_detected_without_a_dominant_channel(self):
         from PIL import Image
@@ -1216,7 +1231,7 @@ class EnrichmentTests(unittest.TestCase):
     def test_manual_force_allows_existing_dovi_and_missing_needs_no_force(self):
         from PIL import Image
         thumb = str(self.strm)[:-5] + '-thumb.jpg'
-        Image.new('RGB', (200, 200), (100, 100, 100)).save(thumb)
+        Image.new('RGB', (320, 180), (100, 100, 100)).save(thumb)
         self.enrichment._preview_selection = {'Q4::ep1': {
             'path': str(self.strm), 'thumb': thumb, 'status': 'keep',
             'dovi': True, 'series_id': 'Q4::series'}}
@@ -1538,7 +1553,7 @@ class EnrichmentTests(unittest.TestCase):
         self.assertTrue(saved)
         self.assertIn('Emby 分集 ID ep1', self.enrichment.status()['preview_repaired'][0])
         with Image.open(temporary) as image:
-            self.assertEqual(image.size, (200, 96))
+            self.assertEqual(image.size, (1280, 720))
 
     def test_enrich_reads_user_item_and_writes_admin_item(self):
         """Emby GET /Items/{id} gives 404; the detail GET must include UserId."""

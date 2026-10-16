@@ -21,6 +21,14 @@ test('preview UI does not equate a negative heuristic result with guaranteed nor
   assert.ok(source.includes('偏色检测为启发式判断，可能漏检'))
 })
 
+test('wrong-sized previews can be selected and optimized without force', () => {
+  assert.equal(disabled({ status: 'size', dovi: false, has_thumb: true }, false), false)
+  assert.ok(source.includes("enrichmentAction('preview_size'"))
+  assert.ok(source.includes('优化图片尺寸'))
+  assert.ok(source.includes('尺寸比例异常，可优化'))
+  assert.ok(source.includes('episode.width'))
+})
+
 test('force preference saves remotely and rolls back checkbox on failure', async () => {
   const body = source.match(/async function savePreviewForce\(event\) \{([\s\S]*?)\n\}/)[1]
   const context = {

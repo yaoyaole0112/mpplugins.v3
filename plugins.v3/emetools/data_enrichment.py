@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
-from PIL import Image
+from PIL import Image, ImageOps
 from pypinyin import lazy_pinyin
 
 from app.sdk.config import settings
@@ -1176,6 +1176,16 @@ class DataEnrichment:
             pass
         return ""
 
+    @staticmethod
+    def _preview_dimensions(thumb):
+        try:
+            source = BytesIO(thumb) if isinstance(thumb, (bytes, bytearray)) else thumb
+            with Image.open(source) as image:
+                width, height = image.size
+            return width, height, abs(width / max(height, 1) - 16 / 9) > .04
+        except (OSError, ValueError):
+            return 0, 0, False
+
     def _preview_status(self, item_id, thumb):
         if not os.path.isfile(thumb):
             return "missing"
@@ -1183,11 +1193,13 @@ class DataEnrichment:
             stat = os.stat(thumb)
             cached = self._preview_cache().get(item_id) or {}
             if cached.get("thumb") == thumb and cached.get("mtime") == int(stat.st_mtime) and cached.get("size") == stat.st_size:
-                return "fixed"
+                return "size" if self._preview_dimensions(thumb)[2] else "fixed"
         except OSError:
             return "missing"
         dovi = bool(re.search(r"dovi|dolby[ -]?vision|\.dv[.\-_ ]", thumb, re.I))
-        return "candidate" if self._color_cast(thumb, dovi=dovi) else "keep"
+        if self._color_cast(thumb, dovi=dovi):
+            return "candidate"
+        return "size" if self._preview_dimensions(thumb)[2] else "keep"
 
     @staticmethod
     def _video_url(path):
@@ -1221,7 +1233,8 @@ class DataEnrichment:
                 # sibling file.  Inspect the image Emby actually exposes too,
                 # otherwise the UI can show a green frame while local scanning
                 # reports it as normal.
-                if status == "keep":
+                width, height, size_issue = self._preview_dimensions(thumb)
+                if status in {"keep", "fixed"}:
                     try:
                         image_response = await client.get(
                             f"Items/{item['Id']}/Images/Primary",
@@ -1229,6 +1242,10 @@ class DataEnrichment:
                         )
                         content_type = str(image_response.headers.get("content-type") or "")
                         if image_response.is_success and content_type.lower().startswith("image/"):
+                            remote_width, remote_height, remote_size_issue = self._preview_dimensions(image_response.content)
+                            if remote_size_issue:
+                                width, height, size_issue = remote_width, remote_height, True
+                                status = "size"
                             if self._color_cast(image_response.content, dovi=dovi):
                                 status = "candidate"
                     except (httpx.HTTPError, OSError, ValueError):
@@ -1237,10 +1254,11 @@ class DataEnrichment:
                 result = {"id": key, "name": item.get("Name") or "",
                     "season": item.get("ParentIndexNumber") or 0,
                     "episode": item.get("IndexNumber") or 0,
-                    "dovi": dovi, "has_thumb": os.path.isfile(thumb), "status": status}
+                    "dovi": dovi, "has_thumb": os.path.isfile(thumb), "status": status,
+                    "width": width, "height": height, "size_issue": size_issue}
                 results.append(result)
                 selected[result["id"]] = {"path": fs_path, "thumb": thumb,
-                    "status": status, "dovi": dovi, "series_id": series_id,
+                    "status": status, "size_issue": size_issue, "dovi": dovi, "series_id": series_id,
                     "series": str(item.get("SeriesName") or "").replace("\n", " ")[:90],
                     "season": result["season"], "episode": result["episode"], "name": result["name"]}
         with self.lock:
@@ -2003,7 +2021,7 @@ class DataEnrichment:
             if stopped:
                 _docker("POST", "/containers/emby/start", timeout=60)
 
-    def start_preview_repair(self, series_id, episode_ids, force=False):
+    def start_preview_repair(self, series_id, episode_ids, force=False, dimensions_only=False):
         name, _ = self._split(series_id)
         if not isinstance(episode_ids, list) or not episode_ids or len(episode_ids) > 300:
             raise ValueError("请选择 1 至 300 集预览图")
@@ -2012,14 +2030,17 @@ class DataEnrichment:
                        if key.startswith(name + "::") and key in self._preview_selection]
         if len(targets) != len(episode_ids) or len(set(episode_ids)) != len(episode_ids):
             raise ValueError("所选分集已失效，请重新扫描")
+        if dimensions_only:
+            targets = [(key, target) for key, target in targets
+                       if target.get("size_issue") or target.get("status") == "size"]
         targets = [(key, target) for key, target in targets
                    if target.get("series_id", series_id) == series_id
                    and (self._preview_status(key, target.get("thumb", "")) == "missing" or
-                        target.get("status") == "candidate" or
-                        self._preview_status(key, target.get("thumb", "")) == "candidate" or
+                        target.get("status") in {"candidate", "size"} or
+                        self._preview_status(key, target.get("thumb", "")) in {"candidate", "size"} or
                         force and target.get("dovi"))]
         if not targets:
-            raise ValueError("没有检测到缺失或疑似偏色的分集图片")
+            raise ValueError("没有检测到缺失、疑似偏色或尺寸异常的分集图片")
         return self._begin("分集图片修复", self._repair_preview, series_id, targets, force)
 
     def start_batch_preview(self, series_ids):
@@ -2045,8 +2066,8 @@ class DataEnrichment:
                     target["series"] = title if title != "未命名剧集" else target.get("series") or title
                 scanned += len(episodes)
                 targets = [(entry["id"], self._preview_selection[entry["id"]])
-                           for entry in episodes if entry["status"] in ("candidate", "missing")]
-                self.log(f"[{index}/{len(series_ids)}] 共 {len(episodes)} 集，缺失或疑似偏色图片 {len(targets)} 集")
+                           for entry in episodes if entry["status"] in ("candidate", "missing", "size")]
+                self.log(f"[{index}/{len(series_ids)}] 共 {len(episodes)} 集，缺失、疑似偏色或尺寸异常图片 {len(targets)} 集")
                 # Prevent a large library from silently launching hundreds of
                 # network FFmpeg jobs; the user can rerun a narrower selection.
                 if len(targets) > 300:
@@ -2092,7 +2113,7 @@ class DataEnrichment:
             if target.get("status") == "missing" and status != "missing":
                 self.log(f"[{position}/{len(targets)}] 缩略图已由其他任务生成，跳过覆盖")
                 continue
-            if not force and (status == "fixed" or status == "keep" and target.get("status") != "candidate"):
+            if not force and status in {"fixed", "keep"} and target.get("status") not in {"candidate", "size"}:
                 self.log(f"[{position}/{len(targets)}] 已修复或无需修复，跳过")
                 continue
             try:
@@ -2122,7 +2143,7 @@ class DataEnrichment:
                         raise ValueError("独立截帧容器未生成有效图片")
                     with Image.open(frame) as image:
                         rgb = image.convert("RGB")
-                        rgb = rgb.crop((0, 0, rgb.width, max(1, int(rgb.height * .8))))
+                        rgb = ImageOps.fit(rgb, (1280, 720), method=Image.Resampling.LANCZOS)
                         temporary = thumb + ".emetools-tmp"
                         try:
                             rgb.save(temporary, format="JPEG", quality=92)
