@@ -1,6 +1,5 @@
 from threading import Event
 from time import time
-from traceback import format_exc
 
 from ...core.config import configer
 from ...core.i18n import i18n
@@ -9,8 +8,8 @@ from ...helper.life import MonitorLife
 from ...utils.exception import NotifyExceptionFormatter
 from ...utils.sentry import sentry_manager
 
-from app.log import logger
-from app.schemas import NotificationType
+from app.sdk.logging import logger
+from app.schemas import MessageType
 
 
 @sentry_manager.capture_plugin_exceptions
@@ -50,7 +49,6 @@ def monitor_life_thread_worker(
                 from_time = data.get("from_time")
                 from_id = data.get("from_id")
 
-        failures = 0
         while True:
             if stop_event.is_set():
                 logger.info("【监控生活事件】收到停止信号，退出上传事件监控")
@@ -64,29 +62,22 @@ def monitor_life_thread_worker(
                 from_time, from_id = monitor_life.once_pull(
                     from_time=from_time, from_id=from_id
                 )
-                failures = 0
             except Exception as e:
-                failures += 1
-                retry_delay = min(30 * 2 ** min(failures - 1, 4), 300)
-                logger.error(f"【监控生活事件】生活事件监控运行失败: {e}\n{format_exc()}")
-                configer.save_plugin_data(
-                    "monitor_life_strm_files",
-                    {"from_time": from_time, "from_id": from_id},
-                )
+                logger.error(f"【监控生活事件】生活事件监控运行失败: {e}")
                 if stop_event.is_set():
                     logger.info("【监控生活事件】收到停止信号，退出监控")
                     return
-                if configer.notify and failures == 1:
+                if configer.notify:
                     _err_text = NotifyExceptionFormatter.format_exception_for_notify(e)
                     post_message(
-                        mtype=NotificationType.Plugin,
+                        mtype=MessageType.Plugin,
                         title=i18n.translate("monitor_life_error_title"),
                         text=(
                             f"\n{i18n.translate('monitor_life_error_text', error=_err_text)}\n"
                         ),
                     )
-                logger.info(f"【监控生活事件】{retry_delay}s 后从原游标重试，不跳过失败事件")
-                if stop_event.wait(timeout=retry_delay):
+                logger.info("【监控生活事件】30s 后尝试重新启动生活事件监控")
+                if stop_event.wait(timeout=30):
                     logger.info("【监控生活事件】等待期间收到停止信号，退出监控")
                     return
 
@@ -96,7 +87,7 @@ def monitor_life_thread_worker(
         if configer.notify:
             _err_text = NotifyExceptionFormatter.format_exception_for_notify(e)
             post_message(
-                mtype=NotificationType.Plugin,
+                mtype=MessageType.Plugin,
                 title=i18n.translate("monitor_life_exit_title"),
                 text=(
                     f"\n{i18n.translate('monitor_life_exit_text', error=_err_text)}\n"

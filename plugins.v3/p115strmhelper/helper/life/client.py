@@ -1,9 +1,8 @@
 from filecmp import cmp as files_equal
 from shutil import move as shutil_move, rmtree
 from collections import defaultdict
-from json import dumps
-from threading import Timer, Event, Thread
-from time import sleep, strftime, localtime, time
+from threading import Timer, Event, Thread, Lock, current_thread
+from time import sleep, strftime, localtime, time, monotonic
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
 from itertools import batched
@@ -37,17 +36,16 @@ from p115client import P115Client, check_response
 from p115client.exception import P115AuthenticationError, P115OSError
 from p115client.tool.attr import get_path, normalize_attr
 from p115client.tool.fs_files import fs_files_iter
-from p115client.tool.iterdir import iter_files_with_path
+from p115client.tool.iterdir import iter_files
 from p115client.tool.life import (
     life_show,
     iter_life_behavior_once,
     BEHAVIOR_TYPE_TO_NAME,
-    BEHAVIOR_NAME_TO_TYPE,
 )
 
-from app.schemas import NotificationType, FileItem
-from app.log import logger
-from app.core.config import settings
+from app.schemas import MessageType, FileItem
+from app.sdk.logging import logger
+from app.sdk.config import settings
 from app.chain.storage import StorageChain
 from app.chain.transfer import TransferChain
 
@@ -82,16 +80,6 @@ class MonitorLife:
     WAIT_TIME_OUT: int = 15
     SLEEP_TIME: int = 10
     WEB_FALLBACK_DURATION: int = 24 * 60 * 60
-    WEB_APPS = {"", "web", "desktop", "chrome", "aps"}
-    LIFE_PULL_APPS = ("web", "ios", "android")
-    LIFE_WEB_ORIGINS = (
-        "https://webapi.115.com",
-        "https://115cdn.com/webapi",
-        "https://115vod.com/webapi",
-        "http://web.api.115.com",
-    )
-    LIFE_405_SWITCH_WAIT = 5
-    LIFE_405_COOLDOWN = 15
 
     def __init__(
         self,
@@ -109,7 +97,9 @@ class MonitorLife:
         self._client = client
         self.mediainfodownloader = mediainfodownloader
         self.stop_event = stop_event
-        self._life_pull_failures = 0
+        self._background_lock = Lock()
+        self._background_threads: Set[Thread] = set()
+        self._stopping = False
 
         self._monitor_life_notification_timer = None
         self._monitor_life_notification_queue = defaultdict(
@@ -141,11 +131,41 @@ class MonitorLife:
         """
         安排通知发送，如果一分钟内没有新事件则发送
         """
-        if self._monitor_life_notification_timer:
-            self._monitor_life_notification_timer.cancel()
+        with self._background_lock:
+            if self._monitor_life_notification_timer:
+                self._monitor_life_notification_timer.cancel()
+            self._background_threads = {
+                thread for thread in self._background_threads if thread.is_alive()
+            }
+            timer = Timer(60.0, self._send_notification)
+            self._monitor_life_notification_timer = timer
+            self._background_threads.add(timer)
+            try:
+                timer.start()
+            except Exception:
+                self._background_threads.discard(timer)
+                raise
 
-        self._monitor_life_notification_timer = Timer(60.0, self._send_notification)
-        self._monitor_life_notification_timer.start()
+    def stop(self, timeout: float = 25.0) -> bool:
+        """
+        停止接收手动整理并等待已启动任务及原定通知完成
+
+        :param timeout (float): 本次等待线程退出的总秒数
+
+        :return bool: 所有已跟踪线程退出时返回 True，否则保留资源供重试
+        """
+        deadline = monotonic() + max(0.0, timeout)
+        with self._background_lock:
+            self._stopping = True
+            threads = tuple(self._background_threads)
+        for thread in threads:
+            if thread is not current_thread() and thread.is_alive():
+                thread.join(timeout=max(0.0, deadline - monotonic()))
+        with self._background_lock:
+            self._background_threads = {
+                thread for thread in self._background_threads if thread.is_alive()
+            }
+            return not self._background_threads
 
     def _send_notification(self):
         """
@@ -166,7 +186,7 @@ class MonitorLife:
 
         if text_parts and configer.get_config("notify"):
             post_message(
-                mtype=NotificationType.Plugin,
+                mtype=MessageType.Plugin,
                 title=i18n.translate("life_sync_done_title"),
                 text="\n" + "\n".join(text_parts),
             )
@@ -352,7 +372,17 @@ class MonitorLife:
                     pantransfercacher.delete_pan_transfer_list.append(
                         str(event["file_id"])
                     )
-                for item in self._iter_transfer_files(int(file_id)):
+                for item in iter_files(
+                    self._client,
+                    cid=int(file_id),
+                    with_path=True,
+                    order="user_ptime",
+                    max_workers=None,
+                    with_ancestors=True,
+                    cooldown=2,
+                    use_media_api=False,
+                    **configer.get_ios_ua_app(),
+                ):
                     try:
                         check_iter_path_data(item)
                     except FileItemKeyMiss as e:
@@ -557,9 +587,12 @@ class MonitorLife:
                 )
             )
             for batch in batched(
-                iter_files_with_path(
+                iter_files(
                     self._client,
                     cid=int(file_id),
+                    with_path=True,
+                    order="user_ptime",
+                    max_workers=None,
                     with_ancestors=True,
                     cooldown=2,
                     use_media_api=False,
@@ -1494,24 +1527,9 @@ class MonitorLife:
 
         # 检查文件是否还存在
         storagechain = StorageChain()
-        strict_query = getattr(storagechain, "get_file_item_strict", None)
-        if not callable(strict_query):
-            logger.warning(
-                "【监控生活事件】宿主不支持严格查询，无法确认网盘路径是否不存在，保留本地文件: %s",
-                file_path,
-            )
-            return
-        try:
-            fileitem = strict_query(
-                storage=configer.storage_module, path=Path(file_path)
-            )
-        except Exception as error:
-            logger.warning(
-                "【监控生活事件】网盘路径查询失败，保留本地文件及历史记录: %s - %s",
-                file_path,
-                error,
-            )
-            return
+        fileitem = storagechain.get_file_item(
+            storage=configer.storage_module, path=Path(file_path)
+        )
         if fileitem:
             logger.warn(
                 f"【监控生活事件】网盘 {file_path} 目录存在，跳过本地删除: {fileitem}"
@@ -1598,7 +1616,7 @@ class MonitorLife:
                     )
                     _history_count = len(transfer_history) if transfer_history else 0
                     post_message(
-                        mtype=NotificationType.Plugin,
+                        mtype=MessageType.Plugin,
                         title=i18n.translate("life_sync_media_del_title"),
                         text=f"\n{del_type_text}\n"
                         f"{i18n.translate('sync_del_record_count', count=_history_count)}\n"
@@ -2049,84 +2067,6 @@ class MonitorLife:
         if isinstance(e, P115OSError):
             message = str(e)
             return "405" in message or "Method Not Allowed" in message
-        message = str(e)
-        return "405" in message or "Method Not Allowed" in message
-
-    def _life_request_kwargs(self, app: str, base_url: Optional[str] = None) -> Dict[str, Any]:
-        """
-        按通道组装请求参数。
-
-        不附加自定义 UA：iOS UA 打 webapi 会被 115 直接 405。
-        web 通道轮换 webapi 域名，避开单域名风控。
-        """
-        kwargs: Dict[str, Any] = {}
-        if base_url:
-            kwargs["base_url"] = base_url
-        return kwargs
-
-    def _iter_life_pull_attempts(self) -> List[Tuple[str, Optional[str]]]:
-        """
-        拉取尝试顺序：(app, base_url)
-        """
-        preferred = self._get_life_event_app()
-        attempts: List[Tuple[str, Optional[str]]] = []
-        seen = set()
-
-        def add(app: str, base_url: Optional[str] = None) -> None:
-            key = (app, base_url or "")
-            if key in seen:
-                return
-            seen.add(key)
-            attempts.append((app, base_url))
-
-        if preferred in self.WEB_APPS:
-            for origin in self.LIFE_WEB_ORIGINS:
-                add("web", origin)
-            add("ios")
-            add("android")
-        else:
-            add(preferred)
-            add("ios")
-            add("android")
-            for origin in self.LIFE_WEB_ORIGINS:
-                add("web", origin)
-        return attempts
-
-    def _iter_transfer_files(self, cid: int):
-        seen_ids = set()
-        attempts = [{"app": "android"}, configer.get_ios_ua_app()]
-        for index, kwargs in enumerate(attempts):
-            try:
-                for item in iter_files_with_path(
-                    self._client,
-                    cid=cid,
-                    with_ancestors=True,
-                    cooldown=2,
-                    max_workers=0,
-                    use_media_api=False,
-                    **kwargs,
-                ):
-                    item_id = str(item["id"])
-                    if item_id not in seen_ids:
-                        seen_ids.add(item_id)
-                        yield item
-                return
-            except Exception as error:
-                if not self._is_405_error(error) or index == len(attempts) - 1:
-                    raise
-                logger.warning(
-                    f"【网盘整理】目录 {cid} 的 {kwargs['app']} 接口返回 405，等待 5 秒后尝试备用接口"
-                )
-                if self._wait_or_stop(5):
-                    raise
-
-    def _wait_or_stop(self, seconds: int) -> bool:
-        """
-        等待指定秒数，收到停止信号则返回 True
-        """
-        if self.stop_event:
-            return self.stop_event.wait(timeout=seconds)
-        sleep(seconds)
         return False
 
     def _get_life_event_app(self) -> str:
@@ -2182,119 +2122,7 @@ class MonitorLife:
             state["ios_405_count"] = count
             configer.save_plugin_data("monitor_life_app_fallback", state)
 
-    def _flatten_life_list(
-        self, data: Dict[str, Any], from_time: float, from_id: int
-    ) -> List:
-        """
-        将 life.115.com/life_list 分组结果摊平为 behavior/detail 同结构事件
-        """
-        events: List = []
-        from_id_int = int(from_id or 0)
-        from_time_int = int(from_time or 0)
-        for group in data.get("list") or []:
-            items = group.get("items")
-            if not items:
-                continue
-            behavior_type = group.get("behavior_type") or ""
-            type_code = BEHAVIOR_NAME_TO_TYPE.get(behavior_type)
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                event = dict(item)
-                if event.get("type") is None and type_code is not None:
-                    event["type"] = type_code
-                try:
-                    event_type = int(event.get("type") or 0)
-                    event_id = int(event.get("id") or 0)
-                    event_time = int(event.get("update_time") or 0)
-                except (TypeError, ValueError):
-                    continue
-                if from_id_int and event_id <= from_id_int:
-                    continue
-                if from_time_int > 0 and event_time < from_time_int:
-                    continue
-                event["event_name"] = BEHAVIOR_TYPE_TO_NAME.get(
-                    event_type, behavior_type
-                )
-                events.append(event)
-        events.sort(
-            key=lambda item: (
-                int(item.get("update_time") or 0),
-                int(item.get("id") or 0),
-            ),
-            reverse=True,
-        )
-        return events
-
-    def _pull_life_list(self, from_time: float, from_id: int) -> List:
-        """
-        通过 life.115.com 拉取生活事件。
-
-        webapi/proapi 的 GET /behavior/detail 会被 115 直接 405。
-        """
-        end_time = int(time())
-        start_time = int(from_time) if from_time and float(from_time) > 0 else end_time - 120
-        if start_time >= end_time:
-            start_time = end_time - 2
-        page_size = 1000
-        payload = {
-            "show_type": 0,
-            "limit": page_size,
-            "start_time": start_time,
-            "end_time": end_time,
-        }
-        events = []
-        seen_ids = set()
-        offset = 0
-        previous_cursor = None
-        while True:
-            resp = self._client.life_list(payload)
-            check_response(resp)
-            data = resp.get("data") or {}
-            page = self._flatten_life_list(data, 0, 0)
-            if not page:
-                break
-            new_ids = {int(event["id"]) for event in page} - seen_ids
-            if not new_ids:
-                raise RuntimeError("【监控生活事件】生活事件分页未推进，保留原游标以便重试")
-            seen_ids.update(new_ids)
-            events.extend(
-                event
-                for event in self._flatten_life_list(data, from_time, from_id)
-                if int(event["id"]) in new_ids
-            )
-
-            oldest = page[-1]
-            if int(oldest["update_time"]) < start_time or (
-                from_id and int(oldest["id"]) <= int(from_id)
-            ):
-                break
-
-            offset += len(page)
-            cursor = data.get("last_data") or resp.get("last_data")
-            if cursor:
-                cursor = dumps(cursor) if isinstance(cursor, dict) else cursor
-                if cursor == previous_cursor:
-                    raise RuntimeError("【监控生活事件】生活事件分页游标未推进，保留原游标以便重试")
-                previous_cursor = cursor
-                payload.pop("start", None)
-                payload["last_data"] = cursor
-            elif len(page) >= page_size:
-                payload.pop("last_data", None)
-                payload["start"] = offset
-            else:
-                break
-
-        events.sort(key=lambda event: (int(event["update_time"]), int(event["id"])), reverse=True)
-        return events
-
-    def _pull_life_events(
-        self,
-        from_time: float,
-        from_id: int,
-        app: str,
-        base_url: Optional[str] = None,
-    ) -> List:
+    def _pull_life_events(self, from_time: float, from_id: int, app: str) -> List:
         """
         单次拉取生活事件
 
@@ -2310,14 +2138,14 @@ class MonitorLife:
                 # 每次尝试先清空旧的值
                 events_batch: List = []
 
-                request_kwargs = self._life_request_kwargs(app, base_url=base_url)
+                request_kwargs = configer.get_ios_ua_app(app=False)
                 request_kwargs["app"] = app
 
                 events_iterator = iter_life_behavior_once(
                     client=self._client,
                     from_time=from_time,
                     from_id=from_id,
-                    cooldown=5,
+                    cooldown=2,
                     **request_kwargs,
                 )
 
@@ -2337,16 +2165,15 @@ class MonitorLife:
                 events_batch.extend(list(events_iterator))
                 break
             except Exception as e:
-                # 405 是通道/风控问题，立即换通道，不要在同一接口上连打
-                if self._is_405_error(e):
+                if self._is_405_error(e) and app == "ios":
                     raise
                 if attempt <= 0:
                     logger.error(f"【监控生活事件】拉取数据失败：{e}")
                     raise
-                logger.warning(
+                logger.warn(
                     f"【监控生活事件】拉取数据失败，剩余重试次数 {attempt} 次：{e}"
                 )
-                if self._wait_or_stop(2):
+                if self.stop_event and self.stop_event.wait(timeout=2):
                     return []
 
         return events_batch
@@ -2363,37 +2190,43 @@ class MonitorLife:
         if self._wait_for_transfer_complete():
             return from_time, from_id
 
-        events_batch: List = []
+        app = self._get_life_event_app()
+        method = "webapi" if app == "web" else "proapi"
+        logger.debug("【监控生活事件】当前使用接口: %s", method)
+
         try:
-            events_batch = self._pull_life_list(from_time=from_time, from_id=from_id)
-        except Exception as e:
-            if self._is_405_error(e):
+            events_batch: List = self._pull_life_events(
+                from_time=from_time, from_id=from_id, app=app
+            )
+            if app == "ios":
+                self._reset_ios_405_count()
+        except (HTTPError, P115OSError) as e:
+            if app == "web":
+                if not self._is_405_error(e):
+                    raise
                 logger.warning(
-                    "【监控生活事件】life.115.com 拉取返回 405，冷却 %ss 后继续: %s",
-                    self.LIFE_405_COOLDOWN,
+                    "【监控生活事件】webapi 拉取返回 405，尝试 proapi: %s",
                     e,
                 )
-                if self._wait_or_stop(self.LIFE_405_COOLDOWN):
-                    return from_time, from_id
-                return from_time, from_id
-            self._life_pull_failures += 1
-            retry_delay = min(2 ** min(self._life_pull_failures, 6), 60)
-            logger.error(
-                "【监控生活事件】拉取数据失败（第 %s 次，%s 秒后重试，游标不变）：%s",
-                self._life_pull_failures,
-                retry_delay,
-                e,
-            )
-            if self._wait_or_stop(retry_delay):
-                return from_time, from_id
-            return from_time, from_id
+                self._clear_web_fallback()
+                events_batch: List = self._pull_life_events(
+                    from_time=from_time, from_id=from_id, app="ios"
+                )
+                self._reset_ios_405_count()
+            elif not self._is_405_error(e):
+                raise
+            else:
+                logger.warning(
+                    "【监控生活事件】proapi 拉取返回 405，尝试切换到 webapi 重试"
+                )
+                try:
+                    events_batch: List = self._pull_life_events(
+                        from_time=from_time, from_id=from_id, app="web"
+                    )
+                except (HTTPError, P115OSError):
+                    raise
 
-        if self._life_pull_failures:
-            logger.info(
-                "【监控生活事件】连接已恢复，连续失败 %s 次，继续从原游标拉取",
-                self._life_pull_failures,
-            )
-            self._life_pull_failures = 0
+                self._record_ios_405()
 
         if not events_batch:
             if self.stop_event and self.stop_event.wait(timeout=self.WAIT_TIME_OUT):
@@ -2678,7 +2511,19 @@ class MonitorLife:
             except Exception as e:
                 logger.error(f"【监控生活事件】手动整理任务执行失败: {path}, 错误: {e}")
 
-        transfer_thread = Thread(target=run_transfer, daemon=True)
-        transfer_thread.start()
+        with self._background_lock:
+            if self._stopping:
+                logger.warning("【监控生活事件】服务正在停止，无法启动手动整理")
+                return False
+            self._background_threads = {
+                thread for thread in self._background_threads if thread.is_alive()
+            }
+            transfer_thread = Thread(target=run_transfer, daemon=True)
+            self._background_threads.add(transfer_thread)
+            try:
+                transfer_thread.start()
+            except Exception:
+                self._background_threads.discard(transfer_thread)
+                raise
         logger.info(f"【监控生活事件】已启动手动整理任务线程: {path}")
         return True

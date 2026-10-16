@@ -5,30 +5,19 @@ from functools import wraps
 from pathlib import Path
 from re import search as re_search
 from typing import Any, List, Dict, Tuple, Optional, Union
+from asyncio import to_thread
 
-import concurrenttools
-
-if not hasattr(concurrenttools, "threadpool_map"):
-    if hasattr(concurrenttools, "thread_conmap"):
-        concurrenttools.threadpool_map = concurrenttools.thread_conmap
-    else:
-        from concurrenttools.basic import threadpool_map
-
-        concurrenttools.threadpool_map = threadpool_map
-if not hasattr(concurrenttools, "taskgroup_map"):
-    concurrenttools.taskgroup_map = concurrenttools.threadpool_map
-
-from app.core.config import settings
-from app.core.event import eventmanager, Event
-from app.log import logger
-from app.plugins import _PluginBase
+from app.sdk.config import settings
+from app.sdk.events import eventmanager, Event
+from app.sdk.logging import logger
+from app.sdk.plugin import _PluginBase
 from app.schemas import (
     FileItem,
-    NotificationType,
+    MessageType,
 )
-from app.core.meta import MetaVideo
-from app.schemas.types import EventType, MessageChannel, ChainEventType, MediaType
-from app.helper.directory import DirectoryHelper
+from app.sdk.media import MetaVideo
+from app.schemas.types import EventType, NotificationChannel, ChainEventType, MediaType
+from app.application.directory import DirectoryHelper
 from app.chain.storage import StorageChain
 
 try:
@@ -69,8 +58,7 @@ from .mcp import MCPManager
 from .patch.u115_open import U115Patcher
 from .patch.p115disk_upload import P115DiskPatcher
 from .patch.app_ver import AppVerPatcher
-from .patch.music_context import MusicContextPatcher
-from .core.message import UploadNotifyAggregator
+from .core.message import upload_notifier
 from .interactive.framework.callbacks import decode_action, Action
 from .interactive.framework.manager import BaseSessionManager
 from .interactive.framework.schemas import TSession
@@ -180,15 +168,15 @@ class P115StrmHelper(_PluginBase):
         初始化
         """
         super().__init__()
+        configer.bind_plugin(self)
 
         # 初始化配置项
-        configer.load_from_dict(config or {})
+        initial_config = config if config is not None else self.get_config()
+        if not configer.load_from_dict(initial_config or {}):
+            raise RuntimeError("插件配置初始化失败，后台服务未启动")
 
         if not Path(configer.PLUGIN_TEMP_PATH).exists():
             Path(configer.PLUGIN_TEMP_PATH).mkdir(parents=True, exist_ok=True)
-
-        # 初始化数据库
-        self.init_database()
 
         # 实例化处理器和渲染器
         self.action_handler = ActionHandler()
@@ -201,21 +189,23 @@ class P115StrmHelper(_PluginBase):
         """
         初始化插件
         """
+        if self.stop_service() is False:
+            raise RuntimeError("旧插件任务尚未退出，暂不应用新配置，请稍后重试")
+        if config and not configer.update_config(config):
+            raise RuntimeError("插件配置加载失败，后台服务未启动")
+        if configer.update_plugin_config() is False:
+            raise RuntimeError("插件实例目录配置保存失败，后台服务未启动")
+        Path(configer.PLUGIN_TEMP_PATH).mkdir(parents=True, exist_ok=True)
         self.api = Api(client=None)
-
         if config:
-            configer.update_config(config)
-            configer.update_plugin_config()
             i18n.load_translations()
             sentry_manager.reload_config()
 
-        # 停止现有任务
-        self.stop_service()
+        if not self.init_database():
+            raise RuntimeError("插件数据库初始化失败，后台服务未启动")
 
         if configer.enabled:
-            MusicContextPatcher.enable()
-            self.init_database()
-
+            upload_notifier.start(self)
             if servicer.init_service():
                 self.api = Api(client=servicer.client)
 
@@ -242,6 +232,14 @@ class P115StrmHelper(_PluginBase):
         if not Path(configer.PLUGIN_CONFIG_PATH).exists():
             Path(configer.PLUGIN_CONFIG_PATH).mkdir(parents=True, exist_ok=True)
         return ensure_database()
+
+    def get_database_migrations(self) -> Path:
+        """
+        声明随插件版本发布的数据库迁移目录
+
+        :return Path: Alembic 迁移目录的绝对路径
+        """
+        return Path(__file__).resolve().parent / "database"
 
     def get_state(self) -> bool:
         """
@@ -308,7 +306,7 @@ class P115StrmHelper(_PluginBase):
             {
                 "cmd": "/hdhivechin",
                 "event": EventType.PluginAction,
-                "desc": "手动 HDHive 签到",
+                "desc": "手动 RE0 签到",
                 "category": "",
                 "data": {"action": "hdhive_checkin_manual"},
             },
@@ -897,7 +895,7 @@ class P115StrmHelper(_PluginBase):
             cron_service.append(
                 {
                     "id": "P115StrmHelper_hdhive_checkin",
-                    "name": "HDHive 签到调度",
+                    "name": "RE0 签到调度",
                     "trigger": CronTrigger.from_crontab("*/5 * * * *"),
                     "func": servicer.hdhive_checkin_scheduler_tick,
                     "kwargs": {},
@@ -1053,7 +1051,7 @@ class P115StrmHelper(_PluginBase):
             EventType.SubtitleTransferComplete,
         ]
     )
-    def generate_strm(self, event: Event):
+    def generate_strm(self, event: Event) -> None:
         """
         监控目录整理生成 STRM 文件
         """
@@ -1072,16 +1070,17 @@ class P115StrmHelper(_PluginBase):
         if not event_type:
             return
 
-        strm_helper = TransferStrmHelper()
-        strm_helper.do_generate(
-            client=servicer.client,
-            item=item,
-            event_type=event_type,
-            mediainfodownloader=servicer.mediainfodownloader,
-        )
+        with servicer.sync_operation():
+            strm_helper = TransferStrmHelper()
+            strm_helper.do_generate(
+                client=servicer.client,
+                item=item,
+                event_type=event_type,
+                mediainfodownloader=servicer.mediainfodownloader,
+            )
 
     @eventmanager.register(EventType.PluginAction)
-    def p115_full_sync(self, event: Event):
+    def p115_full_sync(self, event: Event) -> None:
         """
         远程全量同步
         """
@@ -1090,16 +1089,17 @@ class P115StrmHelper(_PluginBase):
         event_data = event.event_data
         if not event_data or event_data.get("action") != "p115_full_sync":
             return
-        post_message(
-            channel=event.event_data.get("channel"),
-            source=event.event_data.get("source"),
-            title=i18n.translate("start_full_sync"),
-            userid=self._get_event_userid(event_data),
-        )
-        servicer.full_sync_strm_files()
+        with servicer.sync_operation():
+            post_message(
+                channel=event.event_data.get("channel"),
+                source=event.event_data.get("source"),
+                title=i18n.translate("start_full_sync"),
+                userid=self._get_event_userid(event_data),
+            )
+            servicer.full_sync_strm_files()
 
     @eventmanager.register(EventType.PluginAction)
-    def p115_inc_sync(self, event: Event):
+    def p115_inc_sync(self, event: Event) -> None:
         """
         远程增量同步
         """
@@ -1108,16 +1108,17 @@ class P115StrmHelper(_PluginBase):
         event_data = event.event_data
         if not event_data or event_data.get("action") != "p115_inc_sync":
             return
-        post_message(
-            channel=event.event_data.get("channel"),
-            source=event.event_data.get("source"),
-            title=i18n.translate("start_inc_sync"),
-            userid=self._get_event_userid(event_data),
-        )
-        servicer.increment_sync_strm_files(send_msg=True)
+        with servicer.sync_operation():
+            post_message(
+                channel=event.event_data.get("channel"),
+                source=event.event_data.get("source"),
+                title=i18n.translate("start_inc_sync"),
+                userid=self._get_event_userid(event_data),
+            )
+            servicer.increment_sync_strm_files(send_msg=True)
 
     @eventmanager.register(EventType.PluginAction)
-    def p115_strm(self, event: Event):
+    def p115_strm(self, event: Event) -> None:
         """
         全量生成指定网盘目录STRM
         """
@@ -1126,82 +1127,83 @@ class P115StrmHelper(_PluginBase):
         event_data = event.event_data
         if not event_data or event_data.get("action") != "p115_strm":
             return
-        userid = self._get_event_userid(event_data)
-        args = event_data.get("arg_str")
-        if not args:
-            logger.error(f"【全量STRM生成】缺少参数：{event_data}")
-            post_message(
-                channel=event.event_data.get("channel"),
-                source=event.event_data.get("source"),
-                title=i18n.translate("p115_strm_parameter_error"),
-                userid=userid,
-            )
-            return
-        if (
-            not configer.full_sync_strm_paths
-            or not configer.moviepilot_address
-            or not configer.user_download_mediaext
-        ):
-            post_message(
-                channel=event.event_data.get("channel"),
-                source=event.event_data.get("source"),
-                title=i18n.translate("p115_strm_full_sync_config_error"),
-                userid=userid,
-            )
-            return
+        with servicer.sync_operation():
+            userid = self._get_event_userid(event_data)
+            args = event_data.get("arg_str")
+            if not args:
+                logger.error(f"【全量STRM生成】缺少参数：{event_data}")
+                post_message(
+                    channel=event.event_data.get("channel"),
+                    source=event.event_data.get("source"),
+                    title=i18n.translate("p115_strm_parameter_error"),
+                    userid=userid,
+                )
+                return
+            if (
+                not configer.full_sync_strm_paths
+                or not configer.moviepilot_address
+                or not configer.user_download_mediaext
+            ):
+                post_message(
+                    channel=event.event_data.get("channel"),
+                    source=event.event_data.get("source"),
+                    title=i18n.translate("p115_strm_full_sync_config_error"),
+                    userid=userid,
+                )
+                return
 
-        status, paths = PathUtils.get_p115_strm_path(
-            paths=configer.full_sync_strm_paths, media_path=args
-        )
-        if not status:
+            status, paths = PathUtils.get_p115_strm_path(
+                paths=configer.full_sync_strm_paths, media_path=args
+            )
+            if not status:
+                post_message(
+                    channel=event.event_data.get("channel"),
+                    source=event.event_data.get("source"),
+                    title=f"{args} {i18n.translate('p115_strm_match_path_error')}",
+                    userid=userid,
+                )
+                return
+            strm_helper = FullSyncStrmHelper(
+                client=servicer.client,
+                mediainfodownloader=servicer.mediainfodownloader,
+            )
+            strm_helper.strm_exec_history_kind = "full_partial"
+            strm_helper.strm_exec_history_extra = {"arg_str": args}
             post_message(
                 channel=event.event_data.get("channel"),
                 source=event.event_data.get("source"),
-                title=f"{args} {i18n.translate('p115_strm_match_path_error')}",
+                title=i18n.translate("p115_strm_start_sync", paths=args),
                 userid=userid,
             )
-            return
-        strm_helper = FullSyncStrmHelper(
-            client=servicer.client,
-            mediainfodownloader=servicer.mediainfodownloader,
-        )
-        strm_helper.strm_exec_history_kind = "full_partial"
-        strm_helper.strm_exec_history_extra = {"arg_str": args}
-        post_message(
-            channel=event.event_data.get("channel"),
-            source=event.event_data.get("source"),
-            title=i18n.translate("p115_strm_start_sync", paths=args),
-            userid=userid,
-        )
-        strm_helper.generate_strm_files(
-            full_sync_strm_paths=paths,
-        )
-        (
-            strm_count,
-            mediainfo_count,
-            strm_fail_count,
-            mediainfo_fail_count,
-            remove_unless_strm_count,
-            strm_cleanup_deferred_count,
-        ) = strm_helper.get_generate_total()
-        text = f"""
+            strm_helper.generate_strm_files(
+                full_sync_strm_paths=paths,
+            )
+            (
+                strm_count,
+                mediainfo_count,
+                strm_fail_count,
+                mediainfo_fail_count,
+                remove_unless_strm_count,
+                strm_cleanup_deferred_count,
+            ) = strm_helper.get_generate_total()
+            text = f"""
 📂 网盘路径：{args}
 📄 生成STRM文件 {strm_count} 个
 ⬇️ 下载媒体文件 {mediainfo_count} 个
 ❌ 生成STRM失败 {strm_fail_count} 个
 🚫 下载媒体失败 {mediainfo_fail_count} 个
 """
-        if remove_unless_strm_count != 0:
-            text += f"🗑️ 清理无效STRM文件 {remove_unless_strm_count} 个"
-        if strm_cleanup_deferred_count != 0:
-            text += f"\n⏳ 待二次确认清理无效 STRM {strm_cleanup_deferred_count} 个"
-        post_message(
-            channel=event.event_data.get("channel"),
-            source=event.event_data.get("source"),
-            userid=userid,
-            title=i18n.translate("full_sync_done_title"),
-            text=text,
-        )
+            if remove_unless_strm_count != 0:
+                text += f"🗑️ 清理无效STRM文件 {remove_unless_strm_count} 个"
+            if strm_cleanup_deferred_count != 0:
+                text += f"\n⏳ 待二次确认清理无效 STRM {strm_cleanup_deferred_count} 个"
+            post_message(
+                channel=event.event_data.get("channel"),
+                source=event.event_data.get("source"),
+                userid=userid,
+                title=i18n.translate("full_sync_done_title"),
+                text=text,
+            )
 
     @eventmanager.register(EventType.PluginAction)
     def p115_search(self, event: Event):
@@ -1213,75 +1215,77 @@ class P115StrmHelper(_PluginBase):
         event_data = event.event_data
         if not event_data or event_data.get("action") != "p115_search":
             return
-        userid = self._get_event_userid(event_data)
+        with servicer.sync_operation():
+            userid = self._get_event_userid(event_data)
 
-        has_tg = bool(configer.tg_search_channels)
-        has_hdhive = is_hdhive_search_ready()
-        if not has_tg and not has_hdhive:
-            post_message(
-                channel=event.event_data.get("channel"),
-                source=event.event_data.get("source"),
-                title=i18n.translate("p115_search_config_error"),
-                userid=userid,
-            )
-            return
-
-        args = event_data.get("arg_str")
-        if not args:
-            logger.error(f"【搜索】缺少参数：{event_data}")
-            post_message(
-                channel=event.event_data.get("channel"),
-                source=event.event_data.get("source"),
-                title=i18n.translate("p115_search_parameter_error"),
-                userid=userid,
-            )
-            return
-
-        try:
-            session = session_manager.get_or_create(
-                event_data, plugin_id=self.__class__.__name__
-            )
-
-            search_keyword = args.strip()
-
-            action = Action(command="search", view="search_list", value=search_keyword)
-
-            immediate_messages = self.action_handler.process(session, action)
-            # 报错，截断后续运行
-            if immediate_messages:
-                for msg in immediate_messages:
-                    self.__send_message(session, text=msg.get("text"), title="错误")
+            has_tg = bool(configer.tg_search_channels)
+            has_hdhive = is_hdhive_search_ready()
+            if not has_tg and not has_hdhive:
+                post_message(
+                    channel=event.event_data.get("channel"),
+                    source=event.event_data.get("source"),
+                    title=i18n.translate("p115_search_config_error"),
+                    userid=userid,
+                )
                 return
 
-            # 设置页面
-            if not action.view:
-                logger.error("处理 search 命令失败: 视图为空")
+            args = event_data.get("arg_str")
+            if not args:
+                logger.error(f"【搜索】缺少参数：{event_data}")
+                post_message(
+                    channel=event.event_data.get("channel"),
+                    source=event.event_data.get("source"),
+                    title=i18n.translate("p115_search_parameter_error"),
+                    userid=userid,
+                )
                 return
-            session.go_to(action.view)
-            self._render_and_send(session)
-        except Exception as e:
-            logger.error(f"处理 search 命令失败: {e}", exc_info=True)
+
+            try:
+                session = session_manager.get_or_create(
+                    event_data, plugin_id=self.__class__.__name__
+                )
+
+                search_keyword = args.strip()
+
+                action = Action(command="search", view="search_list", value=search_keyword)
+
+                immediate_messages = self.action_handler.process(session, action)
+                # 报错，截断后续运行
+                if immediate_messages:
+                    for msg in immediate_messages:
+                        self.__send_message(session, text=msg.get("text"), title="错误")
+                    return
+
+                # 设置页面
+                if not action.view:
+                    logger.error("处理 search 命令失败: 视图为空")
+                    return
+                session.go_to(action.view)
+                self._render_and_send(session)
+            except Exception as e:
+                logger.error(f"处理 search 命令失败: {e}", exc_info=True)
 
     @eventmanager.register(EventType.PluginAction)
     def hdhive_checkin_manual(self, event: Event):
         """
-        远程命令 /hdhivechin 手动 HDHive 签到
+        远程命令 /hdhivechin 手动 RE0 签到
         """
         if not event:
             return
         event_data = event.event_data
         if not event_data or event_data.get("action") != "hdhive_checkin_manual":
             return
-        userid = self._get_event_userid(event_data)
+        with servicer.sync_operation():
+            userid = self._get_event_userid(event_data)
 
-        ok, text = run_hdhive_checkin_once(manual=True, send_notify=False)
-        post_message(
-            channel=event.event_data.get("channel"),
-            source=event.event_data.get("source"),
-            title="HDHive 手动签到" + ("成功" if ok else "失败"),
-            text="\n" + text + "\n",
-            userid=userid,
-        )
+            ok, text = run_hdhive_checkin_once(manual=True, send_notify=False)
+            post_message(
+                channel=event.event_data.get("channel"),
+                source=event.event_data.get("source"),
+                title="RE0 手动签到" + ("成功" if ok else "失败"),
+                text="\n" + text + "\n",
+                userid=userid,
+            )
 
     @eventmanager.register(EventType.PluginAction)
     def p115_checkin_manual(self, event: Event):
@@ -1293,18 +1297,19 @@ class P115StrmHelper(_PluginBase):
         event_data = event.event_data
         if not event_data or event_data.get("action") != "p115_checkin_manual":
             return
-        userid = self._get_event_userid(event_data)
+        with servicer.sync_operation():
+            userid = self._get_event_userid(event_data)
 
-        ok, text = run_p115_checkin_once(
-            client=servicer.client, manual=True, send_notify=False
-        )
-        post_message(
-            channel=event.event_data.get("channel"),
-            source=event.event_data.get("source"),
-            title="115 手动签到" + ("成功" if ok else "失败"),
-            text="\n" + text + "\n",
-            userid=userid,
-        )
+            ok, text = run_p115_checkin_once(
+                client=servicer.client, manual=True, send_notify=False
+            )
+            post_message(
+                channel=event.event_data.get("channel"),
+                source=event.event_data.get("source"),
+                title="115 手动签到" + ("成功" if ok else "失败"),
+                text="\n" + text + "\n",
+                userid=userid,
+            )
 
     @eventmanager.register(EventType.MessageAction)
     def message_action(self, event: Event):
@@ -1325,46 +1330,47 @@ class P115StrmHelper(_PluginBase):
             if target_plugin_id and target_plugin_id != own_plugin_id:
                 return
 
-            callback_text = event_data.get("text", "")
+            with servicer.sync_operation():
+                callback_text = event_data.get("text", "")
 
-            if strm_cleanup_interaction.try_handle_message_action(event_data):
-                return
-
-            # 1. 解码 Action callback_text = c:xxx|w:xxx|v|xxx
-            session_id, action = decode_action(callback_text=callback_text)
-            if not session_id or not action:
-                # 如果解码失败或不属于本插件，则忽略
-                return
-
-            # 2. 获取会话
-            session = session_manager.get(session_id)
-            if not session:
-                context = {
-                    "channel": event_data.get("channel"),
-                    "source": event_data.get("source"),
-                    "userid": event_data.get("userid") or event_data.get("user"),
-                    "original_message_id": event_data.get("original_message_id"),
-                    "original_chat_id": event_data.get("original_chat_id"),
-                }
-                self.post_message(
-                    **context,
-                    title="⚠️ 会话已过期",
-                    text="操作已超时。\n请重新发起 `/sh` 命令。",
-                )
-                return
-
-            # 3. 更新会话上下文
-            session.update_message_context(event_data)
-
-            # 4. 委托给 ActionHandler 处理业务逻辑
-            immediate_messages = self.action_handler.process(session, action)
-            if immediate_messages:
-                for msg in immediate_messages:
-                    self.__send_message(session, text=msg.get("text"), title="错误")
+                if strm_cleanup_interaction.try_handle_message_action(event_data):
                     return
 
-            # 5. 渲染新视图并发送
-            self._render_and_send(session)
+                # 1. 解码 Action callback_text = c:xxx|w:xxx|v|xxx
+                session_id, action = decode_action(callback_text=callback_text)
+                if not session_id or not action:
+                    # 如果解码失败或不属于本插件，则忽略
+                    return
+
+                # 2. 获取会话
+                session = session_manager.get(session_id)
+                if not session:
+                    context = {
+                        "channel": event_data.get("channel"),
+                        "source": event_data.get("source"),
+                        "userid": event_data.get("userid") or event_data.get("user"),
+                        "original_message_id": event_data.get("original_message_id"),
+                        "original_chat_id": event_data.get("original_chat_id"),
+                    }
+                    self.post_message(
+                        **context,
+                        title="⚠️ 会话已过期",
+                        text="操作已超时。\n请重新发起 `/sh` 命令。",
+                    )
+                    return
+
+                # 3. 更新会话上下文
+                session.update_message_context(event_data)
+
+                # 4. 委托给 ActionHandler 处理业务逻辑
+                immediate_messages = self.action_handler.process(session, action)
+                if immediate_messages:
+                    for msg in immediate_messages:
+                        self.__send_message(session, text=msg.get("text"), title="错误")
+                        return
+
+                # 5. 渲染新视图并发送
+                self._render_and_send(session)
         except Exception as e:
             logger.debug(f"出错了：{e}", exc_info=True)
 
@@ -1407,7 +1413,7 @@ class P115StrmHelper(_PluginBase):
 
     def __delete_message(
         self,
-        channel: MessageChannel,
+        channel: NotificationChannel,
         source: str,
         message_id: Union[str, int],
         chat_id: Optional[Union[str, int]] = None,
@@ -1467,47 +1473,48 @@ class P115StrmHelper(_PluginBase):
             )
             return
 
-        if len(configer.offline_download_paths) <= 1:
-            ok, added_count = servicer.offlinehelper.add_urls_to_transfer(url_list)
-            if ok:
-                post_message(
-                    channel=event_data.get("channel"),
-                    source=event_data.get("source"),
-                    title=i18n.translate("p115_add_offline_success", count=added_count),
-                    userid=userid,
-                )
-            else:
-                post_message(
-                    channel=event_data.get("channel"),
-                    source=event_data.get("source"),
-                    title=i18n.translate("p115_add_offline_fail"),
-                    userid=userid,
-                )
-            return
-
-        try:
-            session = session_manager.get_or_create(
-                event_data, plugin_id=self.__class__.__name__
-            )
-
-            action = Action(
-                command="offline_download_path",
-                view="offline_download_paths",
-                value=url_list,
-            )
-
-            immediate_messages = self.action_handler.process(session, action)
-            # 报错，截断后续运行
-            if immediate_messages:
-                for msg in immediate_messages:
-                    self.__send_message(session, text=msg.get("text"), title="错误")
+        with servicer.sync_operation():
+            if len(configer.offline_download_paths) <= 1:
+                ok, added_count = servicer.offlinehelper.add_urls_to_transfer(url_list)
+                if ok:
+                    post_message(
+                        channel=event_data.get("channel"),
+                        source=event_data.get("source"),
+                        title=i18n.translate("p115_add_offline_success", count=added_count),
+                        userid=userid,
+                    )
+                else:
+                    post_message(
+                        channel=event_data.get("channel"),
+                        source=event_data.get("source"),
+                        title=i18n.translate("p115_add_offline_fail"),
+                        userid=userid,
+                    )
                 return
 
-            # 设置页面
-            session.go_to("offline_download_paths")
-            self._render_and_send(session)
-        except Exception as e:
-            logger.error(f"处理离线下载命令失败: {e}")
+            try:
+                session = session_manager.get_or_create(
+                    event_data, plugin_id=self.__class__.__name__
+                )
+
+                action = Action(
+                    command="offline_download_path",
+                    view="offline_download_paths",
+                    value=url_list,
+                )
+
+                immediate_messages = self.action_handler.process(session, action)
+                # 报错，截断后续运行
+                if immediate_messages:
+                    for msg in immediate_messages:
+                        self.__send_message(session, text=msg.get("text"), title="错误")
+                    return
+
+                # 设置页面
+                session.go_to("offline_download_paths")
+                self._render_and_send(session)
+            except Exception as e:
+                logger.error(f"处理离线下载命令失败: {e}")
 
     @eventmanager.register(EventType.UserMessage)
     def user_add_share(self, event: Event):
@@ -1519,76 +1526,77 @@ class P115StrmHelper(_PluginBase):
         text = event.event_data.get("text")
         if not text:
             return
-        share_url = ShareLinkResolver.extract_share_url_from_text(text)
-        if not share_url:
-            return
+        with servicer.sync_operation():
+            share_url = ShareLinkResolver.extract_share_url_from_text(text)
+            if not share_url:
+                return
 
-        can_transfer, can_strm, u115 = self._share_link_capabilities(text)
-        event_data = event.event_data
-        channel = event_data.get("channel")
-        source = event_data.get("source")
-        userid = self._get_event_userid(event_data)
+            can_transfer, can_strm, u115 = self._share_link_capabilities(text)
+            event_data = event.event_data
+            channel = event_data.get("channel")
+            source = event_data.get("source")
+            userid = self._get_event_userid(event_data)
 
-        if can_transfer and can_strm:
-            try:
-                session = session_manager.get_or_create(
-                    event_data, plugin_id=self.__class__.__name__
-                )
-                session.business.share_recieve_url = share_url
-                session.business.share_strm_u115_url = u115
-                session.go_to("share_link_intent")
-                self._render_and_send(session)
-            except Exception as e:
-                logger.error(f"处理分享链接意图菜单失败: {e}", exc_info=True)
-            return
+            if can_transfer and can_strm:
+                try:
+                    session = session_manager.get_or_create(
+                        event_data, plugin_id=self.__class__.__name__
+                    )
+                    session.business.share_recieve_url = share_url
+                    session.business.share_strm_u115_url = u115
+                    session.go_to("share_link_intent")
+                    self._render_and_send(session)
+                except Exception as e:
+                    logger.error(f"处理分享链接意图菜单失败: {e}", exc_info=True)
+                return
 
-        if can_strm and not can_transfer:
-            servicer.share_interactive_gen_strm_queue.enqueue_and_notify_user(
-                share_url=u115,
-                channel=channel,
-                source=source,
-                userid=userid,
-            )
-            return
-
-        if can_transfer:
-            if len(configer.share_recieve_paths) <= 1:
-                servicer.sharetransferhelper.add_share(
-                    url=share_url,
+            if can_strm and not can_transfer:
+                servicer.share_interactive_gen_strm_queue.enqueue_and_notify_user(
+                    share_url=u115,
                     channel=channel,
                     source=source,
                     userid=userid,
                 )
                 return
-            try:
-                session = session_manager.get_or_create(
-                    event_data, plugin_id=self.__class__.__name__
-                )
 
-                action = Action(
-                    command="share_recieve_path",
-                    view="share_recieve_paths",
-                    value=share_url,
-                )
-
-                immediate_messages = self.action_handler.process(session, action)
-                if immediate_messages:
-                    for msg in immediate_messages:
-                        self.__send_message(session, text=msg.get("text"), title="错误")
+            if can_transfer:
+                if len(configer.share_recieve_paths) <= 1:
+                    servicer.sharetransferhelper.add_share(
+                        url=share_url,
+                        channel=channel,
+                        source=source,
+                        userid=userid,
+                    )
                     return
+                try:
+                    session = session_manager.get_or_create(
+                        event_data, plugin_id=self.__class__.__name__
+                    )
 
-                session.go_to("share_recieve_paths")
-                self._render_and_send(session)
-            except Exception as e:
-                logger.error(f"处理分享转存命令失败: {e}")
-            return
+                    action = Action(
+                        command="share_recieve_path",
+                        view="share_recieve_paths",
+                        value=share_url,
+                    )
 
-        servicer.sharetransferhelper.add_share(
-            url=share_url,
-            channel=channel,
-            source=source,
-            userid=userid,
-        )
+                    immediate_messages = self.action_handler.process(session, action)
+                    if immediate_messages:
+                        for msg in immediate_messages:
+                            self.__send_message(session, text=msg.get("text"), title="错误")
+                        return
+
+                    session.go_to("share_recieve_paths")
+                    self._render_and_send(session)
+                except Exception as e:
+                    logger.error(f"处理分享转存命令失败: {e}")
+                return
+
+            servicer.sharetransferhelper.add_share(
+                url=share_url,
+                channel=channel,
+                source=source,
+                userid=userid,
+            )
 
     @eventmanager.register(EventType.UserMessage)
     def user_add_offline_links(self, event: Event):
@@ -1620,12 +1628,12 @@ class P115StrmHelper(_PluginBase):
         """
         远程分享转存
         """
-        args = None
-        event_data = {}
-        if event:
-            event_data = event.event_data
-            if not event_data or event_data.get("action") != "p115_add_share":
-                return
+        if not event:
+            return
+        event_data = event.event_data
+        if not event_data or event_data.get("action") != "p115_add_share":
+            return
+        with servicer.sync_operation():
             args = event_data.get("arg_str")
             if not args:
                 logger.error(f"【分享转存】缺少参数：{event_data}")
@@ -1637,52 +1645,52 @@ class P115StrmHelper(_PluginBase):
                 )
                 return
 
-        share_url = (
-            ShareLinkResolver.extract_share_url_from_text(args) if args else None
-        )
-        if not share_url:
-            if args:
-                logger.error(f"【分享转存】无法从参数中解析分享链接：{event_data}")
-                post_message(
-                    channel=event_data.get("channel"),
-                    source=event_data.get("source"),
-                    title=i18n.translate("p115_add_share_parameter_error"),
-                    userid=self._get_event_userid(event_data),
-                )
-            return
-
-        if len(configer.share_recieve_paths) <= 1:
-            servicer.sharetransferhelper.add_share(
-                url=share_url,
-                channel=event.event_data.get("channel"),
-                source=event.event_data.get("source"),
-                userid=self._get_event_userid(event_data),
+            share_url = (
+                ShareLinkResolver.extract_share_url_from_text(args) if args else None
             )
-            return
-
-        try:
-            session = session_manager.get_or_create(
-                event.event_data, plugin_id=self.__class__.__name__
-            )
-
-            action = Action(
-                command="share_recieve_path",
-                view="share_recieve_paths",
-                value=share_url,
-            )
-
-            immediate_messages = self.action_handler.process(session, action)
-            # 报错，截断后续运行
-            if immediate_messages:
-                for msg in immediate_messages:
-                    self.__send_message(session, text=msg.get("text"), title="错误")
+            if not share_url:
+                if args:
+                    logger.error(f"【分享转存】无法从参数中解析分享链接：{event_data}")
+                    post_message(
+                        channel=event_data.get("channel"),
+                        source=event_data.get("source"),
+                        title=i18n.translate("p115_add_share_parameter_error"),
+                        userid=self._get_event_userid(event_data),
+                    )
                 return
 
-            # 设置页面
-            session.go_to("share_recieve_paths")
-            self._render_and_send(session)
-        except Exception as e:
-            logger.error(f"处理分享转存命令失败: {e}")
+            if len(configer.share_recieve_paths) <= 1:
+                servicer.sharetransferhelper.add_share(
+                    url=share_url,
+                    channel=event.event_data.get("channel"),
+                    source=event.event_data.get("source"),
+                    userid=self._get_event_userid(event_data),
+                )
+                return
+
+            try:
+                session = session_manager.get_or_create(
+                    event.event_data, plugin_id=self.__class__.__name__
+                )
+
+                action = Action(
+                    command="share_recieve_path",
+                    view="share_recieve_paths",
+                    value=share_url,
+                )
+
+                immediate_messages = self.action_handler.process(session, action)
+                # 报错，截断后续运行
+                if immediate_messages:
+                    for msg in immediate_messages:
+                        self.__send_message(session, text=msg.get("text"), title="错误")
+                    return
+
+                # 设置页面
+                session.go_to("share_recieve_paths")
+                self._render_and_send(session)
+            except Exception as e:
+                logger.error(f"处理分享转存命令失败: {e}")
 
     @eventmanager.register(EventType.PluginAction)
     def p115_share_strm(self, event: Event):
@@ -1692,68 +1700,69 @@ class P115StrmHelper(_PluginBase):
         event_data = event.event_data if event else {}
         if not event_data or event_data.get("action") != "p115_share_strm":
             return
-        args = event_data.get("arg_str")
-        userid = self._get_event_userid(event_data)
-        channel = event_data.get("channel")
-        source = event_data.get("source")
-        if not args:
-            logger.error(f"【分享交互生成STRM】缺少参数：{event_data}")
-            post_message(
-                channel=channel,
-                source=source,
-                title=i18n.translate("p115_share_strm_parameter_error"),
-                userid=userid,
-            )
-            return
-
-        share_urls = ShareLinkResolver.extract_all_u115_share_urls_from_text(args)
-        if not share_urls:
-            if ShareLinkResolver.extract_share_url_from_text(args):
-                post_message(
-                    channel=channel,
-                    source=source,
-                    title=i18n.translate("p115_share_strm_not_u115_error"),
-                    userid=userid,
-                )
-            else:
+        with servicer.sync_operation():
+            args = event_data.get("arg_str")
+            userid = self._get_event_userid(event_data)
+            channel = event_data.get("channel")
+            source = event_data.get("source")
+            if not args:
+                logger.error(f"【分享交互生成STRM】缺少参数：{event_data}")
                 post_message(
                     channel=channel,
                     source=source,
                     title=i18n.translate("p115_share_strm_parameter_error"),
                     userid=userid,
                 )
-            return
+                return
 
-        err_key = ShareInteractiveGenStrmQueue.validate_prerequisites()
-        if err_key:
+            share_urls = ShareLinkResolver.extract_all_u115_share_urls_from_text(args)
+            if not share_urls:
+                if ShareLinkResolver.extract_share_url_from_text(args):
+                    post_message(
+                        channel=channel,
+                        source=source,
+                        title=i18n.translate("p115_share_strm_not_u115_error"),
+                        userid=userid,
+                    )
+                else:
+                    post_message(
+                        channel=channel,
+                        source=source,
+                        title=i18n.translate("p115_share_strm_parameter_error"),
+                        userid=userid,
+                    )
+                return
+
+            err_key = ShareInteractiveGenStrmQueue.validate_prerequisites()
+            if err_key:
+                post_message(
+                    channel=channel,
+                    source=source,
+                    title=i18n.translate(err_key),
+                    userid=userid,
+                )
+                return
+
+            pending = 0
+            for share_url in share_urls:
+                pending = servicer.share_interactive_gen_strm_queue.enqueue(
+                    share_url=share_url,
+                    channel=channel,
+                    source=source,
+                    userid=userid,
+                )
+
             post_message(
                 channel=channel,
                 source=source,
-                title=i18n.translate(err_key),
+                title=i18n.translate("p115_share_strm_done_title"),
+                text=i18n.translate(
+                    "p115_share_strm_multi_queued",
+                    count=len(share_urls),
+                    pending=pending,
+                ),
                 userid=userid,
             )
-            return
-
-        pending = 0
-        for share_url in share_urls:
-            pending = servicer.share_interactive_gen_strm_queue.enqueue(
-                share_url=share_url,
-                channel=channel,
-                source=source,
-                userid=userid,
-            )
-
-        post_message(
-            channel=channel,
-            source=source,
-            title=i18n.translate("p115_share_strm_done_title"),
-            text=i18n.translate(
-                "p115_share_strm_multi_queued",
-                count=len(share_urls),
-                pending=pending,
-            ),
-            userid=userid,
-        )
 
     @eventmanager.register(EventType.PluginAction)
     def p115_add_offline(self, event: Event):
@@ -1801,16 +1810,17 @@ class P115StrmHelper(_PluginBase):
         if not event or not event.event_data:
             return
 
-        sync_del_webhook_queue.enqueue(
-            SyncDelWebhookTask(
-                event_data=deepcopy(event.event_data),
-                enabled=configer.sync_del_enabled,
-                notify=configer.sync_del_notify,
-                del_source=configer.sync_del_source,
-                p115_library_path=configer.sync_del_p115_library_path,
-                p115_force_delete_files=configer.sync_del_p115_force_delete_files,
+        with servicer.sync_operation():
+            sync_del_webhook_queue.enqueue(
+                SyncDelWebhookTask(
+                    event_data=deepcopy(event.event_data),
+                    enabled=configer.sync_del_enabled,
+                    notify=configer.sync_del_notify,
+                    del_source=configer.sync_del_source,
+                    p115_library_path=configer.sync_del_p115_library_path,
+                    p115_force_delete_files=configer.sync_del_p115_force_delete_files,
+                )
             )
-        )
 
     @eventmanager.register(EventType.DownloadFileDeleted)
     def download_file_del_sync(self, event: Event):
@@ -1823,8 +1833,9 @@ class P115StrmHelper(_PluginBase):
         if not event:
             return
 
-        mediasyncdel_helper = MediaSyncDelHelper()
-        mediasyncdel_helper.download_file_del_sync(event)
+        with servicer.sync_operation():
+            mediasyncdel_helper = MediaSyncDelHelper()
+            mediasyncdel_helper.download_file_del_sync(event)
 
     @eventmanager.register(ChainEventType.TransferRenameBuild)
     def rename_dict_supplement(self, event: Event) -> None:
@@ -1868,164 +1879,162 @@ class P115StrmHelper(_PluginBase):
             logger.debug("【媒体数据补充】文件后缀不受支持，跳过本次重命名补全")
             return
 
-        def share_strm_center(url: str) -> Optional[Dict[str, Any]]:
-            """
-            从中心化服务获取分享STRM的媒体信息
+        with servicer.sync_operation():
+            def share_strm_center(url: str) -> Optional[Dict[str, Any]]:
+                """
+                从中心化服务获取分享STRM的媒体信息
 
-            :param url: 包含 share_code、receive_code、id 参数的 STRM URL
-            :return: 媒体信息字典，获取失败返回 None
-            """
-            for i in ["P115StrmHelper", "share_code=", "receive_code=", "id="]:
-                if i not in url:
-                    return None
-            try:
-                _params = UrlUtils.parse_query_params(url)
-                cache_key = (
-                    f"{_params['share_code']}:{_params['receive_code']}:{_params['id']}"
-                )
-                if cache_key not in sharestrmcacher.file_item_dict:
-                    return None
-                _client = P115Center()
-                _data_dict = sharestrmcacher.file_item_dict[cache_key]
-                if not _data_dict.get("sha1"):
-                    return None
-                sharestrmcacher.file_item_dict.pop(cache_key)
-                _resp = _client.download_emby_mediainfo_data(
-                    [(_data_dict["sha1"], _data_dict["size"])]
-                )
-                _media_info = RenameDictUtils.emby_mediainfo_to_rename_fields(
-                    _resp.get(_data_dict["sha1"].upper())
-                )
-                if _media_info:
-                    logger.info(f"【媒体数据补充】中心化获取媒体信息: {url}")
-                    return _media_info
-                return None
-            except Exception as e:
-                logger.warning(f"【媒体数据补充】{url} 中心化获取媒体信息失败: {e}")
-                return None
-
-        def resolve_media_info(media_path: str, media_item: FileItem) -> Dict[str, Any]:
-            """
-            按原有中心化优先、ffprobe 兜底策略获取主视频媒体信息
-
-            :param media_path (str): 主视频源路径
-            :param media_item (FileItem): 主视频文件项
-
-            :return Dict: 媒体命名字段
-            """
-            resolved_info: Dict[str, Any] = {}
-            params: Dict[str, Any] = {"strm_resolve_media_info": share_strm_center}
-            need_ffprobe = True
-            if media_item.storage == "local":
-                params["source_path"] = media_path
-            elif media_item.storage in ["u115", "115网盘Plus"]:
-                if media_item.fileid in pantransfercacher.file_item_dict:
-                    client = P115Center()
-                    data_dict = pantransfercacher.file_item_dict[media_item.fileid]
-                    try:
-                        resp = client.download_emby_mediainfo_data(
-                            [(data_dict["sha1"], data_dict["size"])]
-                        )
-                        resolved_info = RenameDictUtils.emby_mediainfo_to_rename_fields(
-                            resp.get(data_dict["sha1"].upper())
-                        )
-                        pantransfercacher.file_item_dict.pop(media_item.fileid)
-                        if resolved_info:
-                            logger.info(
-                                f"【媒体数据补充】中心化获取媒体信息: {media_path}"
-                            )
-                            need_ffprobe = False
-                        else:
-                            logger.debug(
-                                f"【媒体数据补充】{media_path} 中心库未命中可用媒体信息，回退 ffprobe 探测"
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            f"【媒体数据补充】{media_path} 中心化获取媒体信息失败: {e}"
-                        )
-                params["url"] = (
-                    f"http://127.0.0.1:{settings.PORT}/api/v1/plugin/"
-                    f"P115StrmHelper/redirect_url/{media_item.fileid}"
-                )
-            elif media_item.storage == "CloudDrive储存":
-                params["url"] = (
-                    f"http://127.0.0.1:{settings.PORT}/api/v1/plugin/"
-                    f"P115StrmHelper/redirect_url/{media_item.fileid}"
-                )
-            else:
-                logger.error(f"【媒体数据补充】不支持的存储类型: {media_item.storage}")
-                return {}
-            if need_ffprobe:
-                resolved_info, error_message = RenameDictUtils.ffprobe_get_media_info(
-                    **params
-                )
-                if not resolved_info:
-                    logger.error(
-                        f"【媒体数据补充】{media_path} ffprobe 补充失败，保留原有命名字段: {error_message}"
-                    )
-                    return {}
-                logger.debug(f"【媒体数据补充】ffprobe 补充媒体信息成功: {media_path}")
-            return resolved_info
-
-        relation_key = RenameDictUtils.get_media_relation_key(
-            source_path,
-            extension,
-            settings.RMT_SUBEXT,
-            storage=source_item.storage,
-        )
-        media_info = type(self)._rename_media_fields_cache.get(relation_key)
-        if not isinstance(media_info, dict):
-            media_info = {}
-
-        if not media_info:
-            probe_path = source_path
-            probe_item = source_item
-            if is_extra:
+                :param url: 包含 share_code、receive_code、id 参数的 STRM URL
+                :return: 媒体信息字典，获取失败返回 None
+                """
+                for i in ["P115StrmHelper", "share_code=", "receive_code=", "id="]:
+                    if i not in url:
+                        return None
                 try:
-                    storagechain = StorageChain()
-                    parent_item = storagechain.get_parent_item(source_item)
-                    sibling_items = (
-                        storagechain.list_files(parent_item, recursion=False)
-                        if parent_item
-                        else []
+                    _params = UrlUtils.parse_query_params(url)
+                    cache_key = (
+                        f"{_params['share_code']}:{_params['receive_code']}:{_params['id']}"
                     )
+                    if cache_key not in sharestrmcacher.file_item_dict:
+                        return None
+                    _client = P115Center()
+                    _data_dict = sharestrmcacher.file_item_dict[cache_key]
+                    if not _data_dict.get("sha1"):
+                        return None
+                    sharestrmcacher.file_item_dict.pop(cache_key)
+                    _resp = _client.download_emby_mediainfo_data(
+                        [(_data_dict["sha1"], _data_dict["size"])]
+                    )
+                    _media_info = RenameDictUtils.emby_mediainfo_to_rename_fields(
+                        _resp[_data_dict["sha1"].upper()]
+                    )
+                    if _media_info:
+                        logger.info(f"【媒体数据补充】中心化获取媒体信息: {url}")
+                        return _media_info
+                    return None
                 except Exception as e:
-                    logger.warning(f"【媒体数据补充】读取伴随文件同目录列表失败: {e}")
-                    sibling_items = []
-                probe_item = RenameDictUtils.find_related_media_item(
-                    source_path=source_path,
-                    extension=extension,
-                    sibling_items=sibling_items or [],
-                    media_exts=settings.RMT_MEDIAEXT,
-                    subtitle_exts=settings.RMT_SUBEXT,
-                )
-                if not probe_item:
-                    logger.debug(f"【媒体数据补充】未找到唯一同名主视频: {source_path}")
-                    return
-                probe_path = str(probe_item.path)
-            media_info = resolve_media_info(probe_path, probe_item)
-            if not media_info:
-                return
-            type(self)._rename_media_fields_cache.set(relation_key, media_info)
+                    logger.warning(f"【媒体数据补充】{url} 中心化获取媒体信息失败: {e}")
+                    return None
 
-        overwrite_mode = configer.rename_dict_supplement_overwrite_mode
-        if overwrite_mode not in ("fill_missing", "always"):
-            overwrite_mode = "fill_missing"
-        for key, value in media_info.items():
-            if not value:
-                continue
-            if overwrite_mode == "fill_missing":
-                cur = data.rename_dict.get(key)
-                if isinstance(cur, str):
-                    cur_stripped = cur.strip()
-                    if cur_stripped and (
-                        key != "audioCodec"
-                        or re_search(r"(?:^|\s)\d+\.\d+$", cur_stripped)
-                    ):
-                        continue
-                elif cur is not None:
+            def resolve_media_info(media_path: str, media_item: FileItem) -> Dict[str, Any]:
+                """
+                按原有中心化优先、ffprobe 兜底策略获取主视频媒体信息
+
+                :param media_path (str): 主视频源路径
+                :param media_item (FileItem): 主视频文件项
+
+                :return Dict: 媒体命名字段
+                """
+                resolved_info: Dict[str, Any] = {}
+                params: Dict[str, Any] = {"strm_resolve_media_info": share_strm_center}
+                need_ffprobe = True
+                if media_item.storage == "local":
+                    params["source_path"] = media_path
+                elif media_item.storage in ["u115", "115网盘Plus"]:
+                    if media_item.fileid in pantransfercacher.file_item_dict:
+                        client = P115Center()
+                        data_dict = pantransfercacher.file_item_dict[media_item.fileid]
+                        try:
+                            resp = client.download_emby_mediainfo_data(
+                                [(data_dict["sha1"], data_dict["size"])]
+                            )
+                            resolved_info = RenameDictUtils.emby_mediainfo_to_rename_fields(
+                                resp[data_dict["sha1"].upper()]
+                            )
+                            pantransfercacher.file_item_dict.pop(media_item.fileid)
+                            if resolved_info:
+                                logger.info(
+                                    f"【媒体数据补充】中心化获取媒体信息: {media_path}"
+                                )
+                                need_ffprobe = False
+                            else:
+                                logger.warning(
+                                    f"【媒体数据补充】{media_path} 中心化获取媒体信息为空"
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                f"【媒体数据补充】{media_path} 中心化获取媒体信息失败: {e}"
+                            )
+                    params["url"] = (
+                        f"http://127.0.0.1:{settings.PORT}/api/v1/plugin/"
+                        f"P115StrmHelper/redirect_url/{media_item.fileid}"
+                    )
+                elif media_item.storage == "CloudDrive储存":
+                    params["url"] = (
+                        f"http://127.0.0.1:{settings.PORT}/api/v1/plugin/"
+                        f"P115StrmHelper/redirect_url/{media_item.fileid}"
+                    )
+                else:
+                    logger.error(f"【媒体数据补充】不支持的存储类型: {media_item.storage}")
+                    return {}
+                if need_ffprobe:
+                    resolved_info, error_message = RenameDictUtils.ffprobe_get_media_info(
+                        **params
+                    )
+                    if not resolved_info:
+                        logger.error(f"【媒体数据补充】获取媒体信息失败: {error_message}")
+                        return {}
+                return resolved_info
+
+            relation_key = RenameDictUtils.get_media_relation_key(
+                source_path,
+                extension,
+                settings.RMT_SUBEXT,
+                storage=source_item.storage,
+            )
+            media_info = type(self)._rename_media_fields_cache.get(relation_key)
+            if not isinstance(media_info, dict):
+                media_info = {}
+
+            if not media_info:
+                probe_path = source_path
+                probe_item = source_item
+                if is_extra:
+                    try:
+                        storagechain = StorageChain()
+                        parent_item = storagechain.get_parent_item(source_item)
+                        sibling_items = (
+                            storagechain.list_files(parent_item, recursion=False)
+                            if parent_item
+                            else []
+                        )
+                    except Exception as e:
+                        logger.warning(f"【媒体数据补充】读取伴随文件同目录列表失败: {e}")
+                        sibling_items = []
+                    probe_item = RenameDictUtils.find_related_media_item(
+                        source_path=source_path,
+                        extension=extension,
+                        sibling_items=sibling_items or [],
+                        media_exts=settings.RMT_MEDIAEXT,
+                        subtitle_exts=settings.RMT_SUBEXT,
+                    )
+                    if not probe_item:
+                        logger.debug(f"【媒体数据补充】未找到唯一同名主视频: {source_path}")
+                        return
+                    probe_path = str(probe_item.path)
+                media_info = resolve_media_info(probe_path, probe_item)
+                if not media_info:
+                    return
+                type(self)._rename_media_fields_cache.set(relation_key, media_info)
+
+            overwrite_mode = configer.rename_dict_supplement_overwrite_mode
+            if overwrite_mode not in ("fill_missing", "always"):
+                overwrite_mode = "fill_missing"
+            for key, value in media_info.items():
+                if not value:
                     continue
-            data.rename_dict[key] = value
+                if overwrite_mode == "fill_missing":
+                    cur = data.rename_dict.get(key)
+                    if isinstance(cur, str):
+                        cur_stripped = cur.strip()
+                        if cur_stripped and (
+                            key != "audioCodec"
+                            or re_search(r"(?:^|\s)\d+\.\d+$", cur_stripped)
+                        ):
+                            continue
+                    elif cur is not None:
+                        continue
+                data.rename_dict[key] = value
 
     @eventmanager.register(ChainEventType.TransferIntercept)
     def intercept_if_exists_in_library(self, event: Event) -> None:
@@ -2054,62 +2063,63 @@ class P115StrmHelper(_PluginBase):
         if not mediainfo:
             return
 
-        try:
-            exist_info = self.chain.media_exists(mediainfo=mediainfo)
-        except Exception as e:
-            logger.error(f"【媒体库存在拦截】查询媒体库失败: {e}", exc_info=True)
-            return
-
-        if not exist_info:
-            return
-
-        # 对于电视剧，需检查具体集是否已存在，而不是整部剧是否存在
-        if getattr(mediainfo, "type", None) == MediaType.TV:
-            file_meta = MetaVideo(title=data.target_path.name, isfile=True)
-            season = file_meta.begin_season
-            if season is not None and exist_info.seasons is not None:
-                exist_episodes = set(exist_info.seasons.get(season, []))
-                if file_meta.episode_list:
-                    file_episodes = set(file_meta.episode_list)
-                    if not file_episodes.issubset(exist_episodes):
-                        logger.info(
-                            f"【媒体库存在拦截】{data.fileitem.path} 集数 {file_episodes}"
-                            f" 不在媒体库季 {season} 已有集 {exist_episodes} 中，跳过拦截"
-                        )
-                        return
-
-        data.cancel = True
-        data.source = "P115StrmHelper"
-        media_title = getattr(mediainfo, "title", "") or ""
-        data.reason = f"媒体库已存在：{media_title}（{exist_info.server}）"
-        logger.info(f"【媒体库存在拦截】拦截整理 {data.fileitem.path}，{data.reason}")
-
-        try:
-            target_path = data.target_path
-            if target_path.suffix:
-                rename_format = settings.RENAME_FORMAT(getattr(mediainfo, "type", None))
-                dir_to_clean = DirectoryHelper.get_media_root_path(
-                    rename_format, target_path
-                )
-            else:
-                dir_to_clean = target_path
-            if not dir_to_clean:
+        with servicer.sync_operation():
+            try:
+                exist_info = self.chain.media_exists(mediainfo=mediainfo)
+            except Exception as e:
+                logger.error(f"【媒体库存在拦截】查询媒体库失败: {e}", exc_info=True)
                 return
-            storage_chain = StorageChain()
-            dir_item = storage_chain.get_file_item(
-                storage=data.target_storage,
-                path=dir_to_clean,
-            )
-            if dir_item and dir_item.type == "dir":
-                files = storage_chain.list_files(dir_item)
-                if files is not None and not files:
-                    storage_chain.delete_file(dir_item)
-                    logger.info(f"【媒体库存在拦截】已清理空目录: {dir_to_clean}")
-        except Exception as e:
-            logger.debug(
-                f"【媒体库存在拦截】清理空目录异常: {e}",
-                exc_info=True,
-            )
+
+            if not exist_info:
+                return
+
+            # 对于电视剧，需检查具体集是否已存在，而不是整部剧是否存在
+            if getattr(mediainfo, "type", None) == MediaType.TV:
+                file_meta = MetaVideo(title=data.target_path.name, isfile=True)
+                season = file_meta.begin_season
+                if season is not None and exist_info.seasons is not None:
+                    exist_episodes = set(exist_info.seasons.get(season, []))
+                    if file_meta.episode_list:
+                        file_episodes = set(file_meta.episode_list)
+                        if not file_episodes.issubset(exist_episodes):
+                            logger.info(
+                                f"【媒体库存在拦截】{data.fileitem.path} 集数 {file_episodes}"
+                                f" 不在媒体库季 {season} 已有集 {exist_episodes} 中，跳过拦截"
+                            )
+                            return
+
+            data.cancel = True
+            data.source = "P115StrmHelper"
+            media_title = getattr(mediainfo, "title", "") or ""
+            data.reason = f"媒体库已存在：{media_title}（{exist_info.server}）"
+            logger.info(f"【媒体库存在拦截】拦截整理 {data.fileitem.path}，{data.reason}")
+
+            try:
+                target_path = data.target_path
+                if target_path.suffix:
+                    rename_format = settings.RENAME_FORMAT(getattr(mediainfo, "type", None))
+                    dir_to_clean = DirectoryHelper.get_media_root_path(
+                        rename_format, target_path
+                    )
+                else:
+                    dir_to_clean = target_path
+                if not dir_to_clean:
+                    return
+                storage_chain = StorageChain()
+                dir_item = storage_chain.get_file_item(
+                    storage=data.target_storage,
+                    path=dir_to_clean,
+                )
+                if dir_item and dir_item.type == "dir":
+                    files = storage_chain.list_files(dir_item)
+                    if files is not None and not files:
+                        storage_chain.delete_file(dir_item)
+                        logger.info(f"【媒体库存在拦截】已清理空目录: {dir_to_clean}")
+            except Exception as e:
+                logger.debug(
+                    f"【媒体库存在拦截】清理空目录异常: {e}",
+                    exc_info=True,
+                )
 
     @eventmanager.register(ChainEventType.TransferOverwriteCheck)
     def share_strm_overwrite_check(self, event: Event) -> None:
@@ -2128,50 +2138,51 @@ class P115StrmHelper(_PluginBase):
         if data.target_path.suffix.lower() != ".strm":
             return
 
-        try:
-            url = data.target_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            return
+        with servicer.sync_operation():
+            try:
+                url = data.target_path.read_text(encoding="utf-8").strip()
+            except Exception:
+                return
 
-        if (
-            "P115StrmHelper" not in url
-            or "share_code=" not in url
-            or "receive_code=" not in url
-            or "id=" not in url
-        ):
-            return
+            if (
+                "P115StrmHelper" not in url
+                or "share_code=" not in url
+                or "receive_code=" not in url
+                or "id=" not in url
+            ):
+                return
 
-        params = UrlUtils.parse_query_params(url)
-        share_code = params.get("share_code")
-        receive_code = params.get("receive_code")
-        file_id = params.get("id")
+            params = UrlUtils.parse_query_params(url)
+            share_code = params.get("share_code")
+            receive_code = params.get("receive_code")
+            file_id = params.get("id")
 
-        if not all([share_code, receive_code, file_id]):
-            return
+            if not all([share_code, receive_code, file_id]):
+                return
 
-        cache_key = f"{share_code}:{receive_code}:{file_id}"
+            cache_key = f"{share_code}:{receive_code}:{file_id}"
 
-        if cache_key in sharestrmcacher.file_item_dict:
-            cached = sharestrmcacher.file_item_dict[cache_key]
-            data.target_size = cached.get("size")
-            data.source = "P115StrmHelper"
-            data.reason = "使用分享STRM缓存的真实文件大小"
-            logger.info(
-                f"【分享STRM覆盖检查】使用缓存大小: {data.target_size} for {data.target_path}"
-            )
-        else:
-            media_info, error_message = RenameDictUtils.ffprobe_get_media_info(url=url)
-            if media_info and media_info.get("file_size"):
-                data.target_size = media_info["file_size"]
+            if cache_key in sharestrmcacher.file_item_dict:
+                cached = sharestrmcacher.file_item_dict[cache_key]
+                data.target_size = cached.get("size")
                 data.source = "P115StrmHelper"
-                data.reason = "使用ffprobe探测的实际文件大小"
+                data.reason = "使用分享STRM缓存的真实文件大小"
                 logger.info(
-                    f"【分享STRM覆盖检查】使用ffprobe探测大小: {data.target_size} for {data.target_path}"
+                    f"【分享STRM覆盖检查】使用缓存大小: {data.target_size} for {data.target_path}"
                 )
             else:
-                logger.warning(
-                    f"【分享STRM覆盖检查】ffprobe探测失败: {error_message} for {url}"
-                )
+                media_info, error_message = RenameDictUtils.ffprobe_get_media_info(url=url)
+                if media_info and media_info.get("file_size"):
+                    data.target_size = media_info["file_size"]
+                    data.source = "P115StrmHelper"
+                    data.reason = "使用ffprobe探测的实际文件大小"
+                    logger.info(
+                        f"【分享STRM覆盖检查】使用ffprobe探测大小: {data.target_size} for {data.target_path}"
+                    )
+                else:
+                    logger.warning(
+                        f"【分享STRM覆盖检查】ffprobe探测失败: {error_message} for {url}"
+                    )
 
     @eventmanager.register(EventType.TransferFailed)
     def auto_delete_inferior_source(self, event: Event) -> None:
@@ -2200,43 +2211,49 @@ class P115StrmHelper(_PluginBase):
         if not source_path:
             return
 
-        try:
-            storage_chain = StorageChain()
-            if storage_chain.delete_media_file(fileitem=fileitem):
-                logger.info(
-                    f"【自动删除低质量源文件】已删除 {fileitem.storage} 源文件: {source_path}"
-                )
-            else:
+        with servicer.sync_operation():
+            try:
+                storage_chain = StorageChain()
+                if storage_chain.delete_media_file(fileitem=fileitem):
+                    logger.info(
+                        f"【自动删除低质量源文件】已删除 {fileitem.storage} 源文件: {source_path}"
+                    )
+                else:
+                    logger.error(
+                        f"【自动删除低质量源文件】删除 {fileitem.storage} 源文件失败: {source_path}"
+                    )
+                    return
+
+                # 发送通知
+                if configer.notify:
+                    post_message(
+                        mtype=MessageType.Plugin,
+                        title="【自动删除低质量源文件】源文件已删除",
+                        text=f"\n因媒体库已存在更高质量文件，已自动删除源文件:\n{source_path}",
+                    )
+            except Exception as e:
                 logger.error(
-                    f"【自动删除低质量源文件】删除 {fileitem.storage} 源文件失败: {source_path}"
+                    f"【自动删除低质量源文件】删除源文件失败: {source_path} - {e}",
+                    exc_info=True,
                 )
-                return
 
-            # 发送通知
-            if configer.notify:
-                post_message(
-                    mtype=NotificationType.Plugin,
-                    title="【自动删除低质量源文件】源文件已删除",
-                    text=f"\n因媒体库已存在更高质量文件，已自动删除源文件:\n{source_path}",
-                )
-        except Exception as e:
-            logger.error(
-                f"【自动删除低质量源文件】删除源文件失败: {source_path} - {e}",
-                exc_info=True,
-            )
+    def stop_service(self) -> bool:
+        """
+        退出插件并向宿主报告已知的关停失败
 
-    def stop_service(self):
+        :return bool: 后台服务停止步骤返回且资源已释放时为 True
         """
-        退出插件
-        """
-        type(self)._rename_media_fields_cache.clear()
-        servicer.stop()
-        MusicContextPatcher.disable()
-        ct_db_manager.close_database()
-        U115Patcher().disable()
-        P115DiskPatcher().disable()
-        AppVerPatcher().disable()
-        UploadNotifyAggregator.shutdown()
+        if servicer.stop() is False:
+            return False
+        try:
+            type(self)._rename_media_fields_cache.clear()
+            ct_db_manager.close_database()
+            U115Patcher().disable()
+            P115DiskPatcher().disable()
+            AppVerPatcher().disable()
+            return True
+        finally:
+            upload_notifier.shutdown(self)
 
     async def _save_config_api(self, request: Request) -> Dict:
         """
@@ -2244,11 +2261,16 @@ class P115StrmHelper(_PluginBase):
         """
         try:
             data = await request.json()
+            if not configer.validate_updates(data):
+                return {"code": 1, "msg": "配置无效，请查看详细日志"}
+            if await to_thread(self.stop_service) is False:
+                return {"code": 1, "msg": "旧插件任务尚未退出，请稍后重试"}
             if not configer.update_config(data):
                 return {"code": 1, "msg": "保存失败，请查看详细日志"}
 
             # 持久化存储配置
-            configer.update_plugin_config()
+            if configer.update_plugin_config() is False:
+                return {"code": 1, "msg": "配置保存失败，请检查宿主日志后重试"}
 
             i18n.load_translations()
 

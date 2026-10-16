@@ -1,30 +1,29 @@
-from sys import platform as sys_platform
 from collections import deque
-from itertools import batched
+from functools import partial
+from itertools import batched, cycle
 from os import close, O_CREAT, O_RDWR, open as os_open
 from pathlib import Path
 from posixpath import join as posix_join
+from sys import platform as sys_platform
 from threading import Thread
-from traceback import format_exc
 from time import perf_counter, sleep
 from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Tuple
-from urllib.error import HTTPError
+from uuid import uuid4
 
 from p115client import P115Client
-from p115client.exception import P115FileTooBig, P115OSError
 from p115client.tool.attr import normalize_attr
 from p115client.tool.export_dir import (
     export_dir_start,
     export_dir_status,
-    export_dir_iter_line,
+    export_dir_parse_iter,
     export_dir_parse_iter_path,
 )
 from p115client.tool.fs_files import fs_files_iter
 from p115client.tool.iterdir import iterdir
 from sqlalchemy.orm.exc import MultipleResultsFound
 
-from app.core.config import settings
-from app.log import logger
+from app.sdk.config import settings
+from app.sdk.logging import logger
 
 from ...core.cache import DirectoryCache, idpathcacher
 from ...core.config import configer
@@ -74,14 +73,6 @@ class IncrementSyncStrmHelper:
     """
 
     _EXPORT_DIR_WAIT_LOG_INTERVAL_SEC = 60.0
-    _FS_WEB_ORIGINS = (
-        "https://webapi.115.com",
-        "https://115cdn.com/webapi",
-        "https://115vod.com/webapi",
-        "http://web.api.115.com",
-    )
-    _FS_405_SWITCH_WAIT = 2
-    _FS_405_COOLDOWN = 60.0
 
     def __init__(self, client: P115Client, mediainfodownloader: MediaInfoDownloader):
         """
@@ -143,9 +134,7 @@ class IncrementSyncStrmHelper:
         self.strm_exec_history_kind: Optional[str] = None
         self.strm_fail_dict: Dict[str, str] = {}
         self.mediainfo_fail_dict: List = []
-        self._iterdir_last_kwargs: Optional[Dict[str, Any]] = None
-        self._fs_cooldown_until: float = 0.0
-        self._fs_risk_control: bool = False
+        self._iterdir_app_cycle = cycle([False, True])
 
         self.pan_transfer_enabled = configer.pan_transfer_enabled
         self.pan_transfer_paths = configer.pan_transfer_paths
@@ -173,24 +162,25 @@ class IncrementSyncStrmHelper:
             delay_seconds=configer.increment_sync_media_server_refresh_delay,
         )
 
+        tree_id = uuid4().hex
+        self._pan_path_by_local: Dict[str, Optional[str]] = {}
         self.local_tree_path = (
-            configer.get_config("PLUGIN_TEMP_PATH") / "increment_local_tree.txt"
-        )
-        self.pan_tree_path = (
-            configer.get_config("PLUGIN_TEMP_PATH") / "increment_pan_tree.txt"
+            configer.get_config("PLUGIN_TEMP_PATH")
+            / f"increment_local_tree_{tree_id}.txt"
         )
         self.pan_to_local_tree_path = (
-            configer.get_config("PLUGIN_TEMP_PATH") / "increment_pan_to_local_tree.txt"
+            configer.get_config("PLUGIN_TEMP_PATH")
+            / f"increment_pan_to_local_tree_{tree_id}.txt"
         )
         self.local_strm_tree_path = (
-            configer.get_config("PLUGIN_TEMP_PATH") / "increment_local_strm_tree.txt"
+            configer.get_config("PLUGIN_TEMP_PATH")
+            / f"increment_local_strm_tree_{tree_id}.txt"
         )
         self.pan_to_local_strm_tree_path = (
             configer.get_config("PLUGIN_TEMP_PATH")
-            / "increment_pan_to_local_strm_tree.txt"
+            / f"increment_pan_to_local_strm_tree_{tree_id}.txt"
         )
         self.local_tree = DirectoryTree(self.local_tree_path)
-        self.pan_tree = DirectoryTree(self.pan_tree_path)
         self.pan_to_local_tree = DirectoryTree(self.pan_to_local_tree_path)
         self.local_strm_tree = DirectoryTree(self.local_strm_tree_path)
         self.pan_to_local_strm_tree = DirectoryTree(self.pan_to_local_strm_tree_path)
@@ -198,7 +188,6 @@ class IncrementSyncStrmHelper:
     def __del__(self):
         self.directory_cache.close()
         self.local_tree.clear()
-        self.pan_tree.clear()
         self.pan_to_local_tree.clear()
         self.local_strm_tree.clear()
         self.pan_to_local_strm_tree.clear()
@@ -229,12 +218,11 @@ class IncrementSyncStrmHelper:
 
         return _tick
 
-    def __wait_export_dir(self, export_id: int | str) -> int:
+    def __wait_export_dir(self, export_id: int | str) -> None:
         """
         轮询等待 115 云端导出目录树任务完成
 
         :param export_id: 导出目录树任务 id
-        :return: 导出文件 ID
         :raises TimeoutError: 超过配置的超时时间仍未完成
         """
         timeout = configer.increment_sync_itertree_timeout_seconds
@@ -248,38 +236,11 @@ class IncrementSyncStrmHelper:
             )
             self.api_count += 1
             if status.get("file_id"):
-                return int(status["file_id"])
+                return
             if expired_t is not None and perf_counter() >= expired_t:
                 raise TimeoutError(export_id)
             wait_logger()
             sleep(1)
-
-    def __iter_export_dir_paths(
-        self, export_id: int | str, escape: Callable[[str], str]
-    ) -> Iterator[str]:
-        file_id = self.__wait_export_dir(export_id)
-        try:
-            try:
-                url = self.client.download_url(file_id, app="web")
-            except P115FileTooBig:
-                url = self.client.download_url(file_id, app="android")
-            self.api_count += 1
-            export_file = self.client.open(url)
-            try:
-                yield from export_dir_parse_iter_path(
-                    export_dir_iter_line(export_file), escape=escape
-                )
-            finally:
-                try:
-                    export_file.close()
-                except Exception as e:
-                    logger.warning(f"【增量STRM生成】关闭导出文件 {file_id} 失败: {e}")
-        finally:
-            try:
-                self.client.fs_delete(file_id, **configer.get_ios_ua_app(app=False))
-                self.api_count += 1
-            except Exception as e:
-                logger.warning(f"【增量STRM生成】清理导出文件 {file_id} 失败: {e}")
 
     def __itertree(
         self, pan_path: str, local_path: str
@@ -297,7 +258,6 @@ class IncrementSyncStrmHelper:
 
         lock_path = configer.PLUGIN_TEMP_PATH / "export_dir.lock"
         lock_fd = os_open(str(lock_path), O_CREAT | O_RDWR)
-        items_iterator = None
 
         try:
             _flock_ex(lock_fd)
@@ -329,7 +289,15 @@ class IncrementSyncStrmHelper:
             )
             self.api_count += 1
 
-            items_iterator = self.__iter_export_dir_paths(export_id, custom_escape)
+            self.__wait_export_dir(export_id)
+
+            items_iterator = export_dir_parse_iter(
+                self.client,
+                export_id,
+                parse_iter=partial(export_dir_parse_iter_path, escape=custom_escape),
+                delete=True,
+                **configer.get_ios_ua_app(app=False),
+            )
             try:
                 next(items_iterator)
                 relative_path = next(items_iterator)
@@ -373,12 +341,8 @@ class IncrementSyncStrmHelper:
             if previous_item is not None:
                 yield from process_file_item(previous_item)
         finally:
-            try:
-                if items_iterator is not None:
-                    items_iterator.close()
-            finally:
-                _flock_un(lock_fd)
-                close(lock_fd)
+            _flock_un(lock_fd)
+            close(lock_fd)
 
     def __iterdir(self, cid: int, path: str) -> Iterator[Dict[str, Any]]:
         """
@@ -390,116 +354,17 @@ class IncrementSyncStrmHelper:
         :return Iterator: 规范化后的网盘文件或文件夹信息迭代器
         """
         logger.debug(f"【增量STRM生成】迭代网盘目录: {cid} {path}")
-        last_error: Optional[Exception] = None
-        # [热补丁 2026-09-03] 风控熔断：本轮一旦检测到列目录全通道 405（115 按账号 cookie
-        # 的流量风控），即置位并短路，后续列目录调用直接抛错、不再发任何网络请求，避免逐
-        # 文件反复重列同一目录把风控持续戳起来。已在库中的文件不触发列目录，仍可正常生成
-        # STRM；未入库文件本轮跳过，交由下一次定时同步（风控冷却后）自然补齐。
-        if self._fs_risk_control:
-            raise RuntimeError(
-                "115 列目录处于风控熔断中，本轮跳过（等待下次同步补齐）"
-            )
-        # [热补丁 2026-09-03] 遵守 405 冷却：上一次全通道 405 后给 115 流量风控留恢复时间，
-        # 避免逐文件连续猛戳列目录接口而加重/延长风控。
-        cooldown_left = self._fs_cooldown_until - perf_counter()
-        if cooldown_left > 0:
-            logger.warning(
-                "【增量STRM生成】列目录处于 405 冷却中，等待 %.0f 秒后继续", cooldown_left
-            )
-            sleep(cooldown_left)
-        attempts = self._iterdir_attempts()
-        for index, kwargs in enumerate(attempts):
-            try:
-                iterator = fs_files_iter(
-                    self.client,
-                    cid,
-                    cooldown=2,
-                    **kwargs,
-                )
-                first_batch = next(iterator)
-            except StopIteration:
-                return
-            except Exception as e:
-                last_error = e
-                if not self._is_405_error(e):
-                    raise
-                next_attempt = attempts[index + 1] if index + 1 < len(attempts) else None
-                if next_attempt:
-                    logger.warning(
-                        "【增量STRM生成】列出目录 %s (%s) 返回 405，切换通道重试",
-                        path,
-                        kwargs.get("base_url") or kwargs.get("app") or "web",
-                    )
-                    sleep(self._FS_405_SWITCH_WAIT)
-                    continue
-                logger.error("【增量STRM生成】列出目录 %s 全部通道 405: %s", path, e)
-                self._fs_cooldown_until = perf_counter() + self._FS_405_COOLDOWN
-                self._fs_risk_control = True
-                raise
-
-            self._iterdir_last_kwargs = kwargs
+        for batch in fs_files_iter(
+            self.client,
+            cid,
+            cooldown=2,
+            **configer.get_ios_ua_app(app=next(self._iterdir_app_cycle)),
+        ):
             self.api_count += 1
-            yield from self._iterdir_normalize_batch(first_batch, path)
-            for batch in iterator:
-                self.api_count += 1
-                yield from self._iterdir_normalize_batch(batch, path)
-            return
-
-        if last_error is not None:
-            raise last_error
-
-    @staticmethod
-    def _is_405_error(e: Exception) -> bool:
-        """
-        判断异常是否由 HTTP 405 导致
-        """
-        if isinstance(e, HTTPError):
-            return e.code == 405
-        if isinstance(e, P115OSError):
-            message = str(e)
-            return "405" in message or "Method Not Allowed" in message
-        message = str(e)
-        return "405" in message or "Method Not Allowed" in message
-
-    def _iterdir_attempts(self) -> List[Dict[str, Any]]:
-        """
-        列出目录的通道顺序。
-
-        [热补丁 2026-09-03] 115 阿里云 WAF 已对本账号 cookie 在 webapi.115.com
-        等 webapi 域名的 /files 列目录端点做风控（GET/POST 均返回 405），而
-        proapi（android / ios）的 ufile/files 实测正常。故将 proapi 通道置于最前
-        优先使用，webapi 各域名降级为兜底，避免先猛戳被拦的 webapi 而触发/加重风控。
-        """
-        attempts: List[Dict[str, Any]] = [
-            {"app": "android"},
-            configer.get_ios_ua_app(app=True),
-        ]
-        attempts += [
-            {"app": "web", "base_url": origin} for origin in self._FS_WEB_ORIGINS
-        ]
-
-        last = self._iterdir_last_kwargs
-        if last:
-            rest = [item for item in attempts if item != last]
-            attempts = [last] + rest
-        return attempts
-
-    @staticmethod
-    def _iterdir_normalize_batch(
-        batch: Dict[str, Any], path: str
-    ) -> Iterator[Dict[str, Any]]:
-        """
-        将 fs_files 批次转换为带路径的规范化条目
-        """
-        for raw_item in batch.get("data", []):
-            item = normalize_attr(raw_item)
-            # [热补丁 2026-09-03] proapi(android/ios) 对文件夹返回的 fn 为空，
-            # 若照常拼接会得到以斜杠结尾的无效路径并污染数据库；本方法仅用于
-            # 按文件名定位目标媒体文件的 pickcode，文件条目名称正常，故跳过空名项。
-            if not item.get("name"):
-                continue
-            item["path"] = posix_join(path, item["name"])
-            yield item
+            for raw_item in batch.get("data", []):
+                item = normalize_attr(raw_item)
+                item["path"] = posix_join(path, item["name"])
+                yield item
 
     def __get_cid_by_path(self, path: str) -> Optional[int]:
         """
@@ -641,7 +506,7 @@ class IncrementSyncStrmHelper:
             logger.info("【增量STRM生成】扫描本地媒体库运行中...")
             sleep(10)
 
-    def __generate_pan_tree(self, pan_media_dir: str, target_dir: str):
+    def __generate_pan_tree(self, pan_media_dir: str, target_dir: str) -> None:
         """
         生成网盘目录树
 
@@ -652,21 +517,28 @@ class IncrementSyncStrmHelper:
         """
         last_error: Optional[Exception] = None
         for i in range(1, 4):
-            self.pan_tree.clear()
+            self._pan_path_by_local.clear()
             self.pan_to_local_tree.clear()
             self.pan_to_local_strm_tree.clear()
 
             logger.info(f"【增量STRM生成】开始生成网盘目录树: {pan_media_dir}")
 
             try:
-                for path1, path2 in self.__itertree(
+                for local_path, pan_path in self.__itertree(
                     pan_path=pan_media_dir, local_path=target_dir
                 ):
-                    self.pan_to_local_tree.generate_tree_from_list([path1], append=True)
-                    self.pan_tree.generate_tree_from_list([path2], append=True)
-                    if Path(path1).suffix.lower() == ".strm":
+                    if local_path in self._pan_path_by_local:
+                        if self._pan_path_by_local[local_path] != pan_path:
+                            # 冲突标记保留到本次扫描结束，避免后续重复项覆盖它
+                            self._pan_path_by_local[local_path] = None
+                        continue
+                    self._pan_path_by_local[local_path] = pan_path
+                    self.pan_to_local_tree.generate_tree_from_list(
+                        [local_path], append=True
+                    )
+                    if Path(local_path).suffix.lower() == ".strm":
                         self.pan_to_local_strm_tree.generate_tree_from_list(
-                            [path1], append=True
+                            [local_path], append=True
                         )
 
                 logger.info(f"【增量STRM生成】网盘目录树生成完成: {pan_media_dir}")
@@ -688,12 +560,11 @@ class IncrementSyncStrmHelper:
                     logger.warning(
                         f"【增量STRM生成】Redis OOM，第 {i} 次尝试后将目录树降级到 TXT 存储并重试..."
                     )
-                    self.pan_tree.switch_storage("txt")
                     self.pan_to_local_tree.switch_storage("txt")
                     self.pan_to_local_strm_tree.switch_storage("txt")
                 else:
                     logger.error(
-                        f"【增量STRM生成】网盘目录树生成 {pan_media_dir} 错误: {e}\n{format_exc()}"
+                        f"【增量STRM生成】网盘目录树生成 {pan_media_dir} 错误: {e}"
                     )
                     raise ItertreeInternalError(
                         f"网盘目录树生成失败: {pan_media_dir}"
@@ -703,7 +574,41 @@ class IncrementSyncStrmHelper:
                 f"网盘目录树生成失败: {pan_media_dir}"
             ) from last_error
 
-    def __handle_addition_path(self, pan_path: str, local_path: str):
+    def _iter_addition_paths(self) -> Iterator[Tuple[str, str]]:
+        """
+        按本地路径查找唯一网盘源文件，跳过缺失、冲突或类型不匹配的映射
+
+        :yields Tuple: 本地路径与网盘路径
+        """
+        for local_path in self.pan_to_local_tree.compare_trees(self.local_tree):
+            pan_path = self._pan_path_by_local.get(local_path)
+            reason = ""
+            if local_path not in self._pan_path_by_local:
+                reason = "缺少网盘源路径映射"
+            elif pan_path is None:
+                reason = "多个网盘源文件映射到同一本地路径"
+            else:
+                local_suffix = Path(local_path).suffix.lower()
+                pan_suffix = Path(pan_path).suffix.lower()
+                if local_suffix == ".strm":
+                    valid_type = pan_suffix in self.rmt_mediaext
+                else:
+                    valid_type = (
+                        self.auto_download_mediainfo
+                        and local_suffix == pan_suffix
+                        and pan_suffix in self.download_mediaext
+                        and pan_suffix not in self.rmt_mediaext
+                    )
+                if not valid_type:
+                    reason = f"本地与网盘源文件类型不匹配: {pan_path}"
+            if reason:
+                logger.warning(f"【增量STRM生成】跳过 {local_path}: {reason}")
+                self.strm_fail_count += 1
+                self.strm_fail_dict[local_path] = reason
+                continue
+            yield local_path, pan_path
+
+    def __handle_addition_path(self, pan_path: str, local_path: str) -> None:
         """
         处理新增路径
 
@@ -738,7 +643,7 @@ class IncrementSyncStrmHelper:
                     )
                     return
 
-            if self.auto_download_mediainfo:
+            if self.auto_download_mediainfo and new_file_path.suffix.lower() != ".strm":
                 if pan_path_obj.suffix.lower() in self.download_mediaext:
                     if not (
                         result := MediainfoDownloadMiddleware.should_download(
@@ -908,6 +813,10 @@ class IncrementSyncStrmHelper:
         """
         立即删除单个无效 STRM 文件
         """
+        # 扫描后路径可能变成目录，不能按文件删除或递归清理其内容
+        if Path(remove_path).is_dir():
+            logger.warning(f"【增量STRM生成】跳过目录路径: {remove_path}")
+            return
         logger.info(f"【增量STRM生成】清理无效 STRM 文件: {remove_path}")
         Path(remove_path).unlink(missing_ok=True)
         if self.remove_unless_file:
@@ -948,7 +857,7 @@ class IncrementSyncStrmHelper:
             cid=cid,
             cooldown=2,
             max_workers=0,
-            **configer.get_ios_ua_app(app=False),
+            **configer.get_ios_ua_app(),
         ):
             if not item["is_dir"]:
                 raise OSError("二级目录不能存在文件")
@@ -1006,6 +915,7 @@ class IncrementSyncStrmHelper:
                 pan_media_dir = pan_media_dir.rstrip("/")
                 target_dir = target_dir.rstrip("/")
 
+                local_tree_task_thread = None
                 try:
                     # 生成本地目录树文件
                     local_tree_task_thread = self.__generate_local_tree(
@@ -1027,19 +937,12 @@ class IncrementSyncStrmHelper:
                         logger.error(f"【增量STRM生成】{path} 目录树生成错误")
                     else:
                         # 生成或者下载文件
-                        for line in self.pan_to_local_tree.compare_trees_lines(
-                            self.local_tree
-                        ):
-                            pan_path_str = self.pan_tree.get_path_by_line_number(line)
-                            local_path_str = (
-                                self.pan_to_local_tree.get_path_by_line_number(line)
+                        for local_path_str, pan_path_str in self._iter_addition_paths():
+                            self.total_iterated += 1
+                            self.__handle_addition_path(
+                                pan_path=pan_path_str,
+                                local_path=local_path_str,
                             )
-                            if pan_path_str and local_path_str:
-                                self.total_iterated += 1
-                                self.__handle_addition_path(
-                                    pan_path=pan_path_str,
-                                    local_path=local_path_str,
-                                )
 
                         # 清理无效 STRM 文件
                         if self.remove_unless_strm:
@@ -1149,6 +1052,9 @@ class IncrementSyncStrmHelper:
                     sentry_manager.sentry_hub.capture_exception(e)
                     logger.error(f"【增量STRM生成】增量同步 STRM 文件失败: {e}")
                     return
+                finally:
+                    if local_tree_task_thread is not None:
+                        local_tree_task_thread.join()
 
                 if queue:
                     wait_seconds = 20 + 10 * retry_count
