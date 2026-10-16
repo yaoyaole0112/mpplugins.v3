@@ -155,6 +155,9 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
 
     def setUp(self):
         self.detector = object.__new__(MissingEpisodeDetector)
+        self.detector._config_lock = threading.RLock()
+        self.detector._pending_config = None
+        self.detector._is_scanning = False
         self.detector._ignore_season_zero = True
         self.detector._only_existing_seasons = True
         self.detector._ignore_future = True

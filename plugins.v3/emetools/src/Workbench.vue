@@ -674,15 +674,6 @@ function confirmModeLabel() {
   return confirmOptions.find(item => item.value === schedule.tools.confirm_mode)?.title || confirmOptions[0].title
 }
 async function missingCommand(operation) {
-  if (operation === 'save' && missing.scanning) {
-    await work(async () => {
-      const config = { cron: missing.config.cron, enabled: missing.config.enabled }
-      const result = await post('missing/action', { operation: 'save', config })
-      missingSavedConfig.value = JSON.stringify(result.config)
-      notice.value = '执行周期与定时开关已保存；本轮检测不受影响，其他修改请在扫描结束后保存'
-    })
-    return
-  }
   if (operation === 'scan') missingResultsPage.value = 1
   await work(async () => {
     if (!missingConfigInitialized.value) await loadMissing()
@@ -1093,8 +1084,8 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
       <p v-if="busy" class="eme-message" role="status">正在处理页面请求，完成后即可继续保存；当前修改会保留。</p>
       <template v-if="active === 'missing'">
         <section class="eme-card">
-          <div class="eme-card-heading"><div><h3>运行配置</h3><p>扫描 Emby 电视剧媒体库，对照 TMDB 检测缺集；可记录或按季订阅。</p></div><button class="eme-button primary" :disabled="busy || !missingConfigInitialized" @click="missingCommand('save')">{{ missing.scanning ? '保存定时配置' : '保存配置' }}</button></div>
-          <p v-if="missing.scanning" class="eme-message eme-warning">缺集检测正在运行：可保存执行周期和启用定时检测开关；检测范围、处理方式等其他草稿需扫描结束后再保存，不影响本轮检测。</p>
+          <div class="eme-card-heading"><div><h3>运行配置</h3><p>扫描 Emby 电视剧媒体库，对照 TMDB 检测缺集；可记录或按季订阅。</p></div><button class="eme-button primary" :disabled="busy || !missingConfigInitialized" @click="missingCommand('save')">保存配置</button></div>
+          <p v-if="missing.scanning" class="eme-message">检测中仍可修改并保存全部配置；本轮使用原配置，保存的新配置在本轮结束后生效。</p>
           <p v-if="missingConfigDirty" class="eme-message eme-warning">运行配置或检测范围有未保存的修改；请点击“保存配置”，或通过“立即检测”先保存再扫描。集数修正与结果中的“跳过检测”会单独保存。</p>
           <p v-if="missing.legacy_enabled" class="eme-message eme-error">原「剧集缺集检测订阅」插件仍启用。配置与历史结果已复制到这里；请先停用原插件，再开启此处定时任务或执行自动订阅扫描，避免重复订阅。原插件数据不会被删除。</p>
           <div class="eme-options eme-settings-switches">

@@ -72,6 +72,8 @@ class MissingEpisodeDetector:
         self._subscribe_chain = SubscribeChain()
         self._scan_lock = MISSING_SCAN_LOCK
         self._is_scanning = False
+        self._config_lock = threading.RLock()
+        self._pending_config = None
         self._results = []
         self._cancelled_subscriptions = []
         self._last_scan_time = "从未扫描"
@@ -81,6 +83,34 @@ class MissingEpisodeDetector:
         self._load_saved_data()
 
     def configure(self, config):
+        with self._config_lock:
+            if self._is_scanning:
+                self._pending_config = copy.deepcopy(config)
+                return True
+            self._apply_config(config)
+            return False
+
+    def _finish_scan_config(self):
+        with self._config_lock:
+            try:
+                if self._pending_config is not None:
+                    previous_skips = set(self._skip_series_ids)
+                    self._apply_config(self._pending_config)
+                    self._pending_config = None
+                    new_skips = self._skip_series_ids - previous_skips
+                    if new_skips:
+                        current_skips = self._skip_series_ids
+                        try:
+                            self._skip_series_ids = new_skips
+                            self._cancel_skipped_subscriptions()
+                        except Exception as error:
+                            logger.warning("缺集检测：延后取消跳过剧集订阅失败：%s", type(error).__name__)
+                        finally:
+                            self._skip_series_ids = current_skips
+            finally:
+                self._is_scanning = False
+
+    def _apply_config(self, config):
         config = normalize_cancel_config(config)
         self._enabled = bool(config.get("enabled", False))
         self._cron = str(config.get("cron") or DEFAULT_MISSING["cron"])
@@ -1049,7 +1079,8 @@ class MissingEpisodeDetector:
         if not self._scan_lock.acquire(blocking=False):
             logger.warning(f"【{self.plugin_name}】上次扫描尚未结束，跳过本次执行")
             return
-        self._is_scanning = True
+        with self._config_lock:
+            self._is_scanning = True
         started_at = datetime.now()
         self._scan_issues = []
         previous_results = copy.deepcopy(self._results)
@@ -1169,5 +1200,7 @@ class MissingEpisodeDetector:
             self.save_data(self._SCAN_KEY, self._scan_status)
             logger.error(f"【{self.plugin_name}】扫描失败：{error}", exc_info=True)
         finally:
-            self._is_scanning = False
-            self._scan_lock.release()
+            try:
+                self._finish_scan_config()
+            finally:
+                self._scan_lock.release()
