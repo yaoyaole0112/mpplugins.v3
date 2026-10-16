@@ -28,6 +28,9 @@ class EnrichmentTests(unittest.TestCase):
         owner = SimpleNamespace(_strm_root=str(root), get_data=lambda key: self.storage.get(key),
                                 save_data=lambda key, value: self.storage.__setitem__(key, value))
         self.enrichment = DataEnrichment(owner)
+        web_patch = patch.object(self.enrichment, '_web_episode_plots', new_callable=AsyncMock, return_value={})
+        self.web_plots = web_patch.start()
+        self.addCleanup(web_patch.stop)
 
     def test_movie_enrichment_writes_localized_overview_cast_and_director(self):
         saved = []
@@ -375,6 +378,56 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(written[0]['Name'], '第一集：新的开始')
         self.assertEqual(written[0]['Overview'], '中文剧情')
 
+    def test_episode_web_fallback_fills_only_missing_fields_even_without_tmdb_episodes(self):
+        originals = {
+            '23': {'Id': '23', 'Name': '第23集', 'Overview': ''},
+            '24': {'Id': '24', 'Name': '原有有效标题', 'Overview': ''},
+            '25': {'Id': '25', 'Name': 'Episode 25', 'Overview': '原有有效简介。'},
+            '26': {'Id': '26', 'Name': '正常标题', 'Overview': '正常简介。'}}
+        written = {}
+        self.web_plots.return_value = {
+            number: {'name': f'第{number}集：网页剧情标题', 'overview': '网页首句。', 'source': '电视猫'}
+            for number in (23, 24, 25)}
+
+        def emby_handler(request):
+            if request.method == 'POST':
+                written[request.url.path.rsplit('/', 1)[1]] = json.loads(request.content)
+                return httpx.Response(204)
+            if request.url.path.endswith('/Items/series'):
+                return httpx.Response(200, json={'Id': 'series', 'Type': 'Series', 'Name': '测试剧',
+                    'ProductionYear': 2026, 'ProviderIds': {'Tmdb': '12345'}})
+            episode_id = request.url.path.rsplit('/', 1)[1]
+            if episode_id in originals:
+                return httpx.Response(200, json=originals[episode_id])
+            self.assertEqual(request.url.params['Fields'], 'Overview')
+            return httpx.Response(200, json={'Items': [
+                {**entry, 'IndexNumber': int(key), 'ParentIndexNumber': 1}
+                for key, entry in originals.items()]})
+
+        def tmdb_handler(request):
+            return httpx.Response(200, json={'episodes': [
+                {'episode_number': 23, 'name': 'Episode 23', 'overview': ''},
+                {'episode_number': 25, 'name': '새로운 시작', 'overview': ''}]}
+                if '/season/' in request.url.path else {'name': '测试剧'})
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(tmdb_handler))
+        with patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user123'), \
+             patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+             patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'), \
+             patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock):
+            asyncio.run(self.enrichment._enrich('Q4', 'series', 'episodes', DEFAULT_ENRICH_CONFIG))
+        self.web_plots.assert_awaited_once()
+        self.assertEqual(self.web_plots.call_args.args[2], {23, 24, 25})
+        self.assertEqual(set(written), {'23', '24', '25'})
+        self.assertEqual(written['23']['Name'], '第23集：网页剧情标题')
+        self.assertEqual(written['23']['Overview'], '网页首句。')
+        self.assertEqual(written['24']['Name'], originals['24']['Name'])
+        self.assertEqual(written['24']['Overview'], '网页首句。')
+        self.assertEqual(written['25']['Name'], '第25集：网页剧情标题')
+        self.assertEqual(written['25']['Overview'], originals['25']['Overview'])
+
     def test_tmdb_client_uses_moviepilot_domain_and_https_proxy(self):
         with patch('emetools.data_enrichment.settings.TMDB_API_DOMAIN', 'api.tmdb.org'), \
              patch('emetools.data_enrichment.get_runtime_setting', return_value={
@@ -682,7 +735,7 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(series['ProviderIds'], {
             'Tmdb': '12345', 'Douban': '88', 'Imdb': 'tt12345', 'Tvdb': '987'})
         self.assertEqual(episode['People'], series['People'])
-        self.assertEqual(episode['Name'], '第一集')
+        self.assertEqual(episode['Name'], '旧分集')
         self.assertEqual(episode['Overview'], '剧情简介')
 
     def test_batch_enrichment_uses_overall_variety_title_and_actual_emby_season(self):
