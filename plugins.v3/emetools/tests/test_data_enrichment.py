@@ -1555,6 +1555,58 @@ class EnrichmentTests(unittest.TestCase):
         with Image.open(temporary) as image:
             self.assertEqual(image.size, (1280, 720))
 
+    def test_preview_refresh_failure_retains_image_and_retry_only_syncs(self):
+        from PIL import Image
+        thumb = str(self.strm.with_name(self.strm.stem + "-thumb.jpg"))
+        target = {"path": str(self.strm), "thumb": thumb, "status": "missing"}
+        requests = []
+
+        async def generate(path, output):
+            self.assertEqual(path, str(self.strm))
+            Image.new("RGB", (1280, 720), (50, 60, 70)).save(output)
+
+        def handler(request):
+            requests.append(request)
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.url.path, "/emby/Items/ep1/Refresh")
+            self.assertEqual(request.url.params["MetadataRefreshMode"], "ValidationOnly")
+            self.assertEqual(request.url.params["Recursive"], "false")
+            self.assertEqual(request.url.params["ReplaceAllImages"], "false")
+            return httpx.Response(400 if len(requests) == 1 else 204)
+
+        def client(_name):
+            return httpx.AsyncClient(base_url="http://emby/emby/", transport=httpx.MockTransport(handler))
+
+        with patch.object(self.enrichment, "_generate_preview", side_effect=generate) as generate_mock, \
+             patch.object(self.enrichment, "_server", side_effect=client), \
+             patch.object(self.enrichment, "scan_preview", new_callable=AsyncMock), \
+             patch("emetools.data_enrichment._docker") as docker:
+            with self.assertRaisesRegex(ValueError, "1 集修复失败"):
+                asyncio.run(self.enrichment._repair_preview("Q4::series", [("Q4::ep1", target)], False))
+            self.assertEqual(self.enrichment._preview_status("Q4::ep1", thumb), "pending")
+            self.assertFalse(self.storage["enrichment_preview_cache"]["Q4::ep1"]["synced"])
+            before = Path(thumb).read_bytes()
+            asyncio.run(self.enrichment._repair_preview("Q4::series", [("Q4::ep1", target)], False))
+            generate_mock.assert_awaited_once()
+            docker.assert_not_called()
+            self.assertEqual(Path(thumb).read_bytes(), before)
+        self.assertEqual(self.enrichment._preview_status("Q4::ep1", thumb), "fixed")
+        self.assertEqual(self.enrichment.status()["preview_result"], {"ok": 1, "fail": 0})
+        self.assertTrue(any("仅重试同步" in line for line in self.enrichment.status()["log"]))
+
+    def test_pending_preview_is_accepted_without_force(self):
+        from PIL import Image
+        thumb = str(self.strm.with_name(self.strm.stem + "-thumb.jpg"))
+        Image.new("RGB", (1280, 720), (50, 60, 70)).save(thumb)
+        stat = os.stat(thumb)
+        self.storage["enrichment_preview_cache"] = {"Q4::ep1": {
+            "thumb": thumb, "mtime": int(stat.st_mtime), "size": stat.st_size, "synced": False}}
+        self.enrichment._preview_selection = {"Q4::ep1": {
+            "path": str(self.strm), "thumb": thumb, "status": "pending"}}
+        with patch.object(self.enrichment, "_begin", return_value={"ok": True}) as begin:
+            self.enrichment.start_preview_repair("Q4::series", ["Q4::ep1"])
+        self.assertEqual(begin.call_args.args[3][0][0], "Q4::ep1")
+
     def test_enrich_reads_user_item_and_writes_admin_item(self):
         """Emby GET /Items/{id} gives 404; the detail GET must include UserId."""
         seen = []

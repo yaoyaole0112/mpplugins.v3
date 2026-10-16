@@ -1193,7 +1193,7 @@ class DataEnrichment:
             stat = os.stat(thumb)
             cached = self._preview_cache().get(item_id) or {}
             if cached.get("thumb") == thumb and cached.get("mtime") == int(stat.st_mtime) and cached.get("size") == stat.st_size:
-                return "size" if self._preview_dimensions(thumb)[2] else "fixed"
+                return "size" if self._preview_dimensions(thumb)[2] else ("pending" if cached.get("synced") is False else "fixed")
         except OSError:
             return "missing"
         dovi = bool(re.search(r"dovi|dolby[ -]?vision|\.dv[.\-_ ]", thumb, re.I))
@@ -2036,8 +2036,8 @@ class DataEnrichment:
         targets = [(key, target) for key, target in targets
                    if target.get("series_id", series_id) == series_id
                    and (self._preview_status(key, target.get("thumb", "")) == "missing" or
-                        target.get("status") in {"candidate", "size"} or
-                        self._preview_status(key, target.get("thumb", "")) in {"candidate", "size"} or
+                        target.get("status") in {"candidate", "size", "pending"} or
+                        self._preview_status(key, target.get("thumb", "")) in {"candidate", "size", "pending"} or
                         force and target.get("dovi"))]
         if not targets:
             raise ValueError("没有检测到缺失、疑似偏色或尺寸异常的分集图片")
@@ -2066,7 +2066,7 @@ class DataEnrichment:
                     target["series"] = title if title != "未命名剧集" else target.get("series") or title
                 scanned += len(episodes)
                 targets = [(entry["id"], self._preview_selection[entry["id"]])
-                           for entry in episodes if entry["status"] in ("candidate", "missing", "size")]
+                           for entry in episodes if entry["status"] in ("candidate", "missing", "size", "pending")]
                 self.log(f"[{index}/{len(series_ids)}] 共 {len(episodes)} 集，缺失、疑似偏色或尺寸异常图片 {len(targets)} 集")
                 # Prevent a large library from silently launching hundreds of
                 # network FFmpeg jobs; the user can rerun a narrower selection.
@@ -2093,8 +2093,7 @@ class DataEnrichment:
         if self.state["preview_repaired"]:
             self.log("本次已修复的剧集与分集见运行进度下方的修复清单")
 
-    async def _repair_preview(self, series_id, targets, force):
-        name, _ = self._split(series_id)
+    async def _generate_preview(self, path, thumb):
         host_root = await asyncio.to_thread(_frame_host_root)
         try:
             await asyncio.to_thread(_docker, "GET", "/images/%s/json" % quote(FRAME_IMAGE, safe=""))
@@ -2104,64 +2103,71 @@ class DataEnrichment:
             self.log("首次使用正在获取独立截帧镜像，可能需要较长时间")
             await asyncio.to_thread(_docker, "POST", "/images/create",
                                     params={"fromImage": "jellyfin/jellyfin", "tag": "latest"}, timeout=900)
+        url = self._video_url(path)
+        with tempfile.TemporaryDirectory(prefix="emetools-frame-", dir="/config") as frame_dir:
+            output_bind = f"{host_root}/{Path(frame_dir).name}:/out:rw"
+            command = ["-v", "error", "-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk",
+                "-threads", "1", "-filter_threads", "1", "-rw_timeout", "20000000",
+                "-ss", "00:05:00", "-i", url, "-an", "-sn", "-frames:v", "1",
+                "-vf", FRAME_FILTER, "-threads", "1", "-f", "image2", "-update", "1",
+                "-y", "/out/frame.png"]
+            config = {"Entrypoint": [FRAME_EXECUTABLE], "Cmd": command,
+                      "HostConfig": {"NetworkMode": "bridge", "Memory": 1610612736,
+                                     "CpuPeriod": 100000, "CpuQuota": 100000,
+                                     "Binds": [output_bind],
+                                     "Devices": [{"PathOnHost": "/dev/dri",
+                                                  "PathInContainer": "/dev/dri",
+                                                  "CgroupPermissions": "rwm"}]}}
+            await asyncio.to_thread(_docker_job, FRAME_IMAGE, config, timeout=240)
+            frame = Path(frame_dir) / "frame.png"
+            if not frame.is_file() or frame.stat().st_size > 32 * 1024 * 1024:
+                raise ValueError("独立截帧容器未生成有效图片")
+            with Image.open(frame) as image:
+                rgb = image.convert("RGB")
+                rgb = ImageOps.fit(rgb, (1280, 720), method=Image.Resampling.LANCZOS)
+                temporary = thumb + ".emetools-tmp"
+                try:
+                    rgb.save(temporary, format="JPEG", quality=92)
+                    os.replace(temporary, thumb)
+                finally:
+                    if os.path.exists(temporary): os.unlink(temporary)
+
+    async def _repair_preview(self, series_id, targets, force):
+        name, _ = self._split(series_id)
         completed, failed = 0, 0
         for position, (key, target) in enumerate(targets, 1):
             self._ensure_active()
             path = self._safe_strm(target["path"])
             thumb = path[:-5] + "-thumb.jpg"
             status = self._preview_status(key, thumb)
-            if target.get("status") == "missing" and status != "missing":
+            if target.get("status") == "missing" and status not in {"missing", "pending"}:
                 self.log(f"[{position}/{len(targets)}] 缩略图已由其他任务生成，跳过覆盖")
                 continue
             if not force and status in {"fixed", "keep"} and target.get("status") not in {"candidate", "size"}:
                 self.log(f"[{position}/{len(targets)}] 已修复或无需修复，跳过")
                 continue
             try:
-                phase = "读取视频链接"
+                phase = "截帧并生成缩略图"
                 started = time.monotonic()
-                self.log(f"[{position}/{len(targets)}] 正在截帧并转换杜比色彩")
-                url = self._video_url(path)
-                with tempfile.TemporaryDirectory(prefix="emetools-frame-", dir="/config") as frame_dir:
-                    output_bind = f"{host_root}/{Path(frame_dir).name}:/out:rw"
-                    command = ["-v", "error", "-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk",
-                        "-threads", "1", "-filter_threads", "1", "-rw_timeout", "20000000",
-                        "-ss", "00:05:00", "-i", url, "-an", "-sn", "-frames:v", "1",
-                        "-vf", FRAME_FILTER, "-threads", "1", "-f", "image2", "-update", "1",
-                        "-y", "/out/frame.png"]
-                    config = {"Entrypoint": [FRAME_EXECUTABLE], "Cmd": command,
-                              "HostConfig": {"NetworkMode": "bridge", "Memory": 1610612736,
-                                             "CpuPeriod": 100000, "CpuQuota": 100000,
-                                             "Binds": [output_bind],
-                                             "Devices": [{"PathOnHost": "/dev/dri",
-                                                          "PathInContainer": "/dev/dri",
-                                                          "CgroupPermissions": "rwm"}]}}
-                    phase = "独立容器截帧"
-                    await asyncio.to_thread(_docker_job, FRAME_IMAGE, config, timeout=240)
-                    phase = "写入缩略图"
-                    frame = Path(frame_dir) / "frame.png"
-                    if not frame.is_file() or frame.stat().st_size > 32 * 1024 * 1024:
-                        raise ValueError("独立截帧容器未生成有效图片")
-                    with Image.open(frame) as image:
-                        rgb = image.convert("RGB")
-                        rgb = ImageOps.fit(rgb, (1280, 720), method=Image.Resampling.LANCZOS)
-                        temporary = thumb + ".emetools-tmp"
-                        try:
-                            rgb.save(temporary, format="JPEG", quality=92)
-                            os.replace(temporary, thumb)
-                        finally:
-                            if os.path.exists(temporary): os.unlink(temporary)
+                self.log(f"[{position}/{len(targets)}] 正在同步已生成图片" if status == "pending" else f"[{position}/{len(targets)}] 正在截帧并转换杜比色彩")
+                if status != "pending":
+                    await self._generate_preview(path, thumb)
+                    cache = self._preview_cache()
+                    stat = os.stat(thumb)
+                    cache[key] = {"thumb": thumb, "mtime": int(stat.st_mtime), "size": stat.st_size, "synced": False}
+                    self.owner.save_data("enrichment_preview_cache", cache)
                 phase = "刷新 Emby 分集"
                 self.log(f"[{position}/{len(targets)}] 缩略图已生成，正在刷新 Emby")
                 async with self._server(name) as emby:
                     response = await emby.post(f"Items/{key.split('::', 1)[1]}/Refresh",
                                                params={"replaceAllMetadata": "false", "Recursive": "false",
-                                                       "MetadataRefreshMode": "None", "ImageRefreshMode": "Default",
+                                                       "MetadataRefreshMode": "ValidationOnly", "ImageRefreshMode": "Default",
                                                        "ReplaceAllImages": "false"})
                     response.raise_for_status()
                 phase = "保存图片修复记录"
                 cache = self._preview_cache()
                 stat = os.stat(thumb)
-                cache[key] = {"thumb": thumb, "mtime": int(stat.st_mtime), "size": stat.st_size}
+                cache[key] = {"thumb": thumb, "mtime": int(stat.st_mtime), "size": stat.st_size, "synced": True}
                 self.owner.save_data("enrichment_preview_cache", cache)
                 completed += 1
                 episode_id = key.split("::", 1)[1]
@@ -2177,7 +2183,9 @@ class DataEnrichment:
                 self.log(f"[{position}/{len(targets)}] 已修复并刷新 Emby：{detail}，耗时 {time.monotonic() - started:.1f} 秒")
             except Exception as error:
                 failed += 1
-                self.log(f"[{position}/{len(targets)}] {phase}失败：{type(error).__name__}：{str(error)[:100]}")
+                reason = f"HTTP {error.response.status_code}" if isinstance(error, httpx.HTTPStatusError) else type(error).__name__
+                retry = "；图片已生成，再次点击修复图片仅重试同步，不重新截帧" if phase == "刷新 Emby 分集" else ""
+                self.log(f"[{position}/{len(targets)}] {phase}失败：{reason}{retry}")
         with self.lock:
             self.state["preview_result"] = {"ok": completed, "fail": failed}
         self.log(f"预览图修复完成：成功 {completed} 集，失败 {failed} 集")

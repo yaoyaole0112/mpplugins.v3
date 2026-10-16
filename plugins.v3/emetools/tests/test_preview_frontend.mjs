@@ -16,15 +16,16 @@ test('manual force can select an existing DoVi thumbnail missed by automatic det
   assert.equal(disabled({ ...episode, dovi: false }, true), true)
 })
 
-test('preview UI does not equate a negative heuristic result with guaranteed normal color', () => {
-  assert.ok(source.includes("keep: '未检出明显偏色'"))
+test('preview UI labels unaffected images as normal while retaining heuristic guidance', () => {
+  assert.ok(source.includes("keep: '正常'"))
   assert.ok(source.includes('偏色检测为启发式判断，可能漏检'))
 })
 
 test('wrong-sized previews can be selected and optimized without force', () => {
   assert.equal(disabled({ status: 'size', dovi: false, has_thumb: true }, false), false)
-  assert.ok(source.includes("enrichmentAction('preview_size'"))
-  assert.ok(source.includes('优化图片尺寸'))
+  assert.ok(!source.includes("enrichmentAction('preview_size'"))
+  assert.ok(source.includes('修复图片'))
+  assert.equal(disabled({ status: 'pending' }, false), false)
   assert.ok(source.includes('尺寸比例异常，可优化'))
   assert.ok(source.includes('episode.width'))
 })
