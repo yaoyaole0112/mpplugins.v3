@@ -608,24 +608,28 @@ class EnrichmentTests(unittest.TestCase):
             asyncio.run(self.enrichment._trigger_keeper_thumbnails(client))
         self.assertEqual(client.path, 'ScheduledTasks/Running/keeper-task')
 
-    def test_batch_preview_repairs_missing_and_suspected_images(self):
+    def test_batch_preview_unifies_missing_color_size_and_pending_repairs(self):
         async def scan(series_id):
+            statuses = ['missing', 'candidate', 'size', 'pending', 'keep', 'fixed']
             self.enrichment._preview_selection = {
-                f'{series_id}::ep1': {'path': str(self.strm)},
-                f'{series_id}::ep2': {'path': str(self.strm)}}
-            return [{'id': f'{series_id}::ep1', 'status': 'missing'},
-                    {'id': f'{series_id}::ep2', 'status': 'candidate'}]
+                f'{series_id}::ep{index}': {'path': str(self.strm), 'status': status}
+                for index, status in enumerate(statuses, 1)}
+            return [{'id': key, 'status': target['status']}
+                    for key, target in self.enrichment._preview_selection.items()]
 
         async def repair(series_id, targets, force):
-            self.assertEqual([key for key, _ in targets], [f'{series_id}::ep1', f'{series_id}::ep2'])
+            self.assertEqual([key for key, _ in targets],
+                             [f'{series_id}::ep{index}' for index in range(1, 5)])
+            self.assertEqual([target['status'] for _, target in targets],
+                             ['missing', 'candidate', 'size', 'pending'])
             self.assertFalse(force)
-            self.enrichment.state['preview_result'] = {'ok': 1, 'fail': 0}
+            self.enrichment.state['preview_result'] = {'ok': len(targets), 'fail': 0}
 
         with patch.object(self.enrichment, 'scan_preview', side_effect=scan), \
              patch.object(self.enrichment, '_repair_preview', side_effect=repair):
             asyncio.run(self.enrichment._batch_preview(['Q4::1', 'Q4::2']))
         self.assertEqual(self.enrichment.status()['batch_result'],
-                         {'scanned': 4, 'ok': 2, 'fail': 0})
+                         {'scanned': 12, 'ok': 8, 'fail': 0})
         self.assertTrue(any('Emby 剧集条目 ID 1' in line for line in self.enrichment.status()['log']))
 
     def test_all_mode_writes_series_ids_studios_and_episode_people(self):
