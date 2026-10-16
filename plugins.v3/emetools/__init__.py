@@ -118,7 +118,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.99"
+    plugin_version = "2.9.100"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1727,9 +1727,10 @@ class EmeTools(_PluginBase):
                 if self._enrichment.status()["running"]:
                     raise ValueError("请等待当前补全任务结束后再扫描分集")
                 return {"episodes": await self._enrichment.scan_preview(action.series_id)}
-            if action.operation == "preview_repair":
+            if action.operation in {"preview_repair", "preview_size"}:
                 return self._enrichment.start_preview_repair(
-                    action.series_id, action.episode_ids, action.force)
+                    action.series_id, action.episode_ids, action.force,
+                    dimensions_only=action.operation == "preview_size")
             if action.operation == "batch_preview":
                 return self._enrichment.start_all_preview()
             raise HTTPException(status_code=400, detail="未知的数据补全操作")
