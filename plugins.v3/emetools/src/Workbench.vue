@@ -674,6 +674,15 @@ function confirmModeLabel() {
   return confirmOptions.find(item => item.value === schedule.tools.confirm_mode)?.title || confirmOptions[0].title
 }
 async function missingCommand(operation) {
+  if (operation === 'save' && missing.scanning) {
+    await work(async () => {
+      const config = { cron: missing.config.cron, enabled: missing.config.enabled }
+      const result = await post('missing/action', { operation: 'save', config })
+      missingSavedConfig.value = JSON.stringify(result.config)
+      notice.value = '执行周期与定时开关已保存；本轮检测不受影响，其他修改请在扫描结束后保存'
+    })
+    return
+  }
   if (operation === 'scan') missingResultsPage.value = 1
   await work(async () => {
     if (!missingConfigInitialized.value) await loadMissing()
@@ -1081,9 +1090,11 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
     </aside>
     <main class="eme-main">
       <div v-if="loading" class="eme-message">正在加载插件配置…</div>
+      <p v-if="busy" class="eme-message" role="status">正在处理页面请求，完成后即可继续保存；当前修改会保留。</p>
       <template v-if="active === 'missing'">
         <section class="eme-card">
-          <div class="eme-card-heading"><div><h3>运行配置</h3><p>扫描 Emby 电视剧媒体库，对照 TMDB 检测缺集；可记录或按季订阅。</p></div><button class="eme-button primary" :disabled="busy || missing.scanning || !missingConfigInitialized" @click="missingCommand('save')">保存配置</button></div>
+          <div class="eme-card-heading"><div><h3>运行配置</h3><p>扫描 Emby 电视剧媒体库，对照 TMDB 检测缺集；可记录或按季订阅。</p></div><button class="eme-button primary" :disabled="busy || !missingConfigInitialized" @click="missingCommand('save')">{{ missing.scanning ? '保存定时配置' : '保存配置' }}</button></div>
+          <p v-if="missing.scanning" class="eme-message eme-warning">缺集检测正在运行：可保存执行周期和启用定时检测开关；检测范围、处理方式等其他草稿需扫描结束后再保存，不影响本轮检测。</p>
           <p v-if="missingConfigDirty" class="eme-message eme-warning">运行配置或检测范围有未保存的修改；请点击“保存配置”，或通过“立即检测”先保存再扫描。集数修正与结果中的“跳过检测”会单独保存。</p>
           <p v-if="missing.legacy_enabled" class="eme-message eme-error">原「剧集缺集检测订阅」插件仍启用。配置与历史结果已复制到这里；请先停用原插件，再开启此处定时任务或执行自动订阅扫描，避免重复订阅。原插件数据不会被删除。</p>
           <div class="eme-options eme-settings-switches">
@@ -1148,6 +1159,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         </section>
       </template>
       <template v-if="active === 'media'">
+        <p v-if="media.running" class="eme-message eme-warning">媒体清理任务正在运行，保存配置和保存规则暂不可用；当前草稿会保留，请在任务结束后保存。</p>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>检测扫描</h3><p>扫描所选 Emby 媒体库对应的本地 STRM；空选表示扫描所有可用库。</p></div><button class="eme-button secondary" type="button" @click="mediaRulesOpen = true">清理规则</button></div>
           <div class="eme-media-scan-grid"><div class="eme-media-library-field"><label>Emby 媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" :aria-expanded="mediaPicker.open" @click="mediaPicker.open = !mediaPicker.open; mediaPicker.query = ''"><span>{{ mediaPickerLabel() }}</span><i class="mdi" :class="mediaPicker.open ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="mediaPicker.open" class="eme-picker-menu"><input v-model="mediaPicker.query" class="eme-picker-search" placeholder="搜索服务器或媒体库" @click.stop /><button v-for="library in mediaLibraryOptions()" :key="library.id" type="button" class="eme-picker-option" :class="{ selected: mediaScanLibraryIds.includes(library.id) }" @click="toggleMediaLibrary(library.id)"><i class="mdi" :class="mediaScanLibraryIds.includes(library.id) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ library.title }}</button><p v-if="!mediaLibraryOptions().length" class="eme-picker-empty">没有匹配项</p></div></div></label></div><button class="eme-button primary" :disabled="busy || media.running || mediaScanPending" @click="startMediaScan">开始扫描</button></div>
           <div class="eme-media-scan-actions"><span class="eme-hint eme-media-scan-status">{{ media.running || mediaScanPending ? '扫描中：' + (media.progress || `正在扫描 STRM 目录（${mediaScanScopeLabel()}）`) : '上次扫描：' + (media.last_scan || '从未扫描') }}</span></div><p v-if="media.last_error" class="eme-message eme-error">扫描失败：{{ media.last_error }}</p>
@@ -1295,6 +1307,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
         <div class="eme-dialog eme-enrich-settings-dialog" role="dialog" aria-modal="true" aria-label="补全设置">
           <div class="eme-card-heading"><h3>补全设置</h3><button class="eme-button text" type="button" @click="enrichSettings.open = false">关闭</button></div>
           <div class="eme-enrich-settings-body">
+            <p v-if="enrich.status.running" class="eme-message eme-warning">数据补全正在运行，暂不能保存补全设置；当前草稿会保留，请在任务结束后保存。</p>
             <label class="eme-switch-label"><input v-model="enrichSettings.draft.auto_on_import" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>入库自动补全</span></label>
             <p class="eme-hint">电影入库或同一部剧最近一次分集入库后静默 5 分钟再执行补全；电影补全本片，分集补全所属整剧。支持 Emby Webhook、整理完成和最近入库轮询兜底，电影与剧集共用下方设置。AI 按启用的翻译范围执行。</p>
             <div class="eme-enrich-source"><strong>元数据来源</strong><div class="eme-enrich-source-options"><label v-for="source in [{ value: 'tmdb', label: 'TMDB' }, { value: 'douban', label: '豆瓣优先' }]" :key="source.value"><input :checked="enrichSettings.draft.metadata_source === source.value" :disabled="busy || enrich.status.running" @change="saveMetadataSource" type="radio" name="enrich-metadata-source" :value="source.value" />{{ source.label }}</label></div></div>
@@ -1316,6 +1329,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div class="eme-media-rule-list"><div v-for="(rule, index) in media.config.rules" :key="rule.id" class="eme-media-rule"><div class="eme-media-rule-head"><strong>{{ rule.name }}</strong><div class="eme-media-rule-arrows"><button type="button" :disabled="index === 0" title="上移规则" :aria-label="`${rule.name}上移`" @click="shiftMediaRule(index, -1)">↑</button><button type="button" :disabled="index === media.config.rules.length - 1" title="下移规则" :aria-label="`${rule.name}下移`" @click="shiftMediaRule(index, 1)">↓</button></div></div><div v-if="rule.type === 'list'" class="eme-media-options"><span v-for="(entry, rank) in rule.order" :key="entry" class="eme-media-tag" role="button" tabindex="0" draggable="true" :aria-label="`${mediaLabel(rule, entry)}，优先级 ${rank + 1}，拖动或按左右方向键调整`" title="拖动调整优先级；键盘可使用左右方向键" @dragstart="draggedMediaRank = { rule: rule.id, index: rank }" @dragend="draggedMediaRank = null" @dragover.prevent @drop.prevent="dropMediaOption(rule, rank)" @keydown.left.prevent="shiftMediaRule(rank, -1, rule.id)" @keydown.right.prevent="shiftMediaRule(rank, 1, rule.id)"><span class="eme-media-tag-rank">{{ rank + 1 }}</span>{{ mediaLabel(rule, entry) }}</span></div><div v-else class="eme-media-directions"><button type="button" :class="{ selected: rule.direction === 'desc' }" @click="rule.direction = 'desc'">{{ rule.id === 'size' ? '大文件优先' : '高码率优先' }}</button><button type="button" :class="{ selected: rule.direction === 'asc' }" @click="rule.direction = 'asc'">{{ rule.id === 'size' ? '小文件优先' : '低码率优先' }}</button></div></div></div>
           <p class="eme-hint">排序、方向和“恢复默认”只更新草稿；点击“保存规则”后才会写入插件配置。</p>
           <div class="eme-media-rule-footer"><button class="eme-button secondary" :disabled="busy || media.running || !savedMediaConfig" @click="mediaCommand('reset_rules')">恢复默认</button><button class="eme-button primary" :disabled="busy || media.running || !savedMediaConfig" @click="mediaCommand('save', { config: { rules: media.config.rules } })">保存规则</button></div>
+          <p v-if="media.running" class="eme-message eme-warning">媒体清理任务正在运行，请在任务结束后保存规则；当前草稿不会自动保存。</p>
         </div>
       </div>
       <div v-if="folder.open" class="eme-overlay" @click.self="folder.open = false">
