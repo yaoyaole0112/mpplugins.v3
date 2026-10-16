@@ -2067,7 +2067,7 @@ class DataEnrichment:
                 scanned += len(episodes)
                 targets = [(entry["id"], self._preview_selection[entry["id"]])
                            for entry in episodes if entry["status"] in ("candidate", "missing", "size", "pending")]
-                self.log(f"[{index}/{len(series_ids)}] 共 {len(episodes)} 集，缺失、疑似偏色或尺寸异常图片 {len(targets)} 集")
+                self.log(f"[{index}/{len(series_ids)}] 共 {len(episodes)} 集，统一批量处理：缺图、偏色、尺寸异常或待同步图片 {len(targets)} 集；正常图片不覆盖")
                 # Prevent a large library from silently launching hundreds of
                 # network FFmpeg jobs; the user can rerun a narrower selection.
                 if len(targets) > 300:

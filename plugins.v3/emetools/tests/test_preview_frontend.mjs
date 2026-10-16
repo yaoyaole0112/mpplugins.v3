@@ -30,6 +30,12 @@ test('wrong-sized previews can be selected and optimized without force', () => {
   assert.ok(source.includes('episode.width'))
 })
 
+test('batch repair is a unified action for missing, color and size problems', () => {
+  assert.ok(source.includes("enrichmentAction('batch_preview')"))
+  assert.ok(source.includes('统一补全缺图、修复偏色及尺寸异常'))
+  assert.ok(source.includes('待同步图片仅重试同步；正常图片不覆盖，无需开启强制覆盖'))
+})
+
 test('force preference saves remotely and rolls back checkbox on failure', async () => {
   const body = source.match(/async function savePreviewForce\(event\) \{([\s\S]*?)\n\}/)[1]
   const context = {
