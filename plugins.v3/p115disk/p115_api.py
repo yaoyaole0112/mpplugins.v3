@@ -2,19 +2,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from threading import RLock
 from time import monotonic, sleep, time
-from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
-
-import concurrenttools
-
-if not hasattr(concurrenttools, "threadpool_map"):
-    if hasattr(concurrenttools, "thread_conmap"):
-        concurrenttools.threadpool_map = concurrenttools.thread_conmap
-    else:
-        from concurrenttools.basic import threadpool_map
-
-        concurrenttools.threadpool_map = threadpool_map
-if not hasattr(concurrenttools, "taskgroup_map"):
-    concurrenttools.taskgroup_map = concurrenttools.threadpool_map
+from typing import Dict, List, Optional, Set, Tuple
 
 from cryptography.hazmat.primitives import hashes
 from httpx import stream, RequestError
@@ -27,11 +15,10 @@ from p115client.const import _CACHE_DIR
 from p115client.exception import P115NotADirectoryError
 from p115client.tool.attr import normalize_attr, get_id_to_path, get_attr
 from p115client.tool.fs_files import fs_files_iter
-from p115client.tool.iterdir import iter_files_with_path_skim
+from p115client.tool.iterdir import iter_files_skim
 
 from app.chain.storage import StorageChain
 from app.modules.filemanager.storages import transfer_process
-from app.modules.filemanager.storages.u115 import U115Pan
 from app.schemas import FileItem, StorageUsage
 from app.schemas.exception import StorageQueryError
 from app.sdk.config import global_vars, settings
@@ -73,7 +60,6 @@ class P115Api:
         self._id_cache: IdPathCache = IdPathCache(maxsize=4096)
         self._id_item_cache: ItemIdCache = ItemIdCache(maxsize=4096)
         self._folder_lock = RLock()
-        self._strict_query_lock = RLock()
         self.transtype = {"move": "移动", "copy": "复制"}
 
         self._rename_call_counter = 0
@@ -100,47 +86,6 @@ class P115Api:
 
         self._get_item_fail_records: Dict[str, Dict[str, float]] = {}
         self._get_item_blacklist: Dict[str, float] = {}
-        # webapi.115.com 被 115 WAF 405 后的冷却；冷却期内只用 proapi(android/ios)
-        self._webapi_cooldown_until: float = 0.0
-        self._all_channel_cooldown_until: float = 0.0
-        self._last_405_log_at: float = 0.0
-        self._resolving_pid: bool = False
-
-    @staticmethod
-    def _is_405(exc: BaseException) -> bool:
-        text = str(exc)
-        return "405" in text or "Method Not Allowed" in text
-
-    def _channel_kwargs(self, app: str) -> Dict[str, Any]:
-        if app == "ios":
-            return get_ios_ua_app(app=True)
-        if app == "android":
-            return {"app": "android"}
-        return get_ios_ua_app(app=False)
-
-    def _iter_apps(self) -> List[str]:
-        apps = ["android", "ios"]
-        if monotonic() >= self._webapi_cooldown_until:
-            apps.append("web")
-        return apps
-
-    def _note_405(self, app: str, where: str, exc: BaseException) -> None:
-        now = monotonic()
-        if app == "web":
-            self._webapi_cooldown_until = now + 300
-        if now - self._last_405_log_at >= 30:
-            self._last_405_log_at = now
-            logger.warning(
-                f"【P115Disk】{where} 通道 {app} 返回 405，切换其它通道: {exc}"
-            )
-
-    def _set_all_channel_cooldown(self, seconds: int = 60) -> None:
-        self._all_channel_cooldown_until = monotonic() + seconds
-        if monotonic() - self._last_405_log_at >= 30:
-            self._last_405_log_at = monotonic()
-            logger.warning(
-                f"【P115Disk】全部通道 405，{seconds} 秒内跳过重复网盘查询以免持续风控"
-            )
 
     def get_pid_by_path(self, path: Path) -> int:
         """
@@ -155,56 +100,35 @@ class P115Api:
                 return 0
             pid = self._id_cache.get_id_by_dir(directory=path.as_posix())
             if pid:
-                return int(pid)
-            if monotonic() < self._all_channel_cooldown_until:
-                return -1
+                return pid
             self._get_pid_by_path_rate_limiter.acquire()
-            last_error: Optional[Exception] = None
-            saw_405 = False
-            for app in self._iter_apps():
-                try:
-                    if app == "web":
-                        resp = self.client.fs_dir_getid(
-                            path.as_posix(), **self._channel_kwargs(app)
-                        )
-                    else:
-                        resp = self.client.fs_dir_getid_app(
-                            path.as_posix(), **self._channel_kwargs(app)
-                        )
-                    check_response(resp)
-                    pid = int(resp.get("id", -1) or -1)
-                    if pid > 0:
-                        self._id_cache.add_cache(id=pid, directory=path.as_posix())
-                        return pid
-                    if pid == 0:
-                        resp = self.client.fs_makedirs_app(
-                            path.as_posix(), pid=0, **get_ios_ua_app()
-                        )
-                        check_response(resp)
-                        pid = int(resp["cid"])
-                        self._id_cache.add_cache(id=pid, directory=path.as_posix())
-                        return pid
-                except Exception as e:
-                    last_error = e
-                    if self._is_405(e):
-                        saw_405 = True
-                        self._note_405(app, "获取文件夹ID", e)
-                        continue
-                    logger.warn(f"【P115Disk】获取文件夹ID失败({app}): {e}")
-            if saw_405:
-                self._set_all_channel_cooldown()
-            if self._resolving_pid:
-                return -1
-            self._resolving_pid = True
-            try:
-                file_item = self.get_item(path)
-            finally:
-                self._resolving_pid = False
-            if file_item and file_item.fileid:
-                return int(file_item.fileid)
+            self._get_pid_by_path_call_counter = (
+                self._get_pid_by_path_call_counter + 1
+            ) % 2
+            if self._get_pid_by_path_call_counter == 0:
+                resp = self.client.fs_dir_getid(
+                    path.as_posix(), **get_ios_ua_app(app=False)
+                )
+            else:
+                resp = self.client.fs_dir_getid_app(path.as_posix(), **get_ios_ua_app())
+            check_response(resp)
+            pid = resp.get("id", -1)
+            if pid == 0:
+                resp = self.client.fs_makedirs_app(
+                    path.as_posix(), pid=0, **get_ios_ua_app()
+                )
+                check_response(resp)
+                pid = resp["cid"]
+                self._id_cache.add_cache(id=int(pid), directory=path.as_posix())
+                return pid
+            if pid != 0:
+                return pid
             return -1
         except Exception as e:
             logger.warn(f"【P115Disk】获取文件夹ID失败: {str(e)}")
+            file_item = self.get_item(path)
+            if file_item:
+                return int(file_item.fileid)
             return -1
 
     def iter_files(self, fileitem: FileItem) -> Optional[List[FileItem]]:
@@ -231,9 +155,10 @@ class P115Api:
 
         items = []
         try:
-            for item in iter_files_with_path_skim(
+            for item in iter_files_skim(
                 client=self.client,
                 cid=file_id,
+                with_path=True,
                 with_ancestors=False,
                 **get_ios_ua_app(),
             ):
@@ -281,16 +206,6 @@ class P115Api:
         :return List: 文件项列表，如果是文件则返回包含该文件的列表，如果是目录则返回目录下的所有文件和子目录
         """
         self._list_rate_limiter.acquire()
-        try:
-            open_items = U115Pan().list(
-                fileitem.model_copy(update={"storage": "u115"})
-            )
-            return [
-                item.model_copy(update={"storage": self._disk_name})
-                for item in open_items
-            ]
-        except Exception as e:
-            logger.warning(f"【P115Disk】Open 接口浏览失败，回退 Cookie 接口: {e}")
         if fileitem.type == "file":
             item = self.detail(fileitem)
             if item:
@@ -306,7 +221,6 @@ class P115Api:
                 return None
 
         items = []
-        seen: Set[str] = set()
         try:
             for data in fs_files_iter(
                 self.client, file_id, cooldown=1.5, **get_ios_ua_app(app=False)
@@ -316,10 +230,6 @@ class P115Api:
                     item = normalize_attr(item)
                     path = f"{fileitem.path}{item['name']}"
                     file_path = path + ("/" if item["is_dir"] else "")
-                    key = file_path.rstrip("/")
-                    if key in seen:
-                        continue
-                    seen.add(key)
                     self._id_cache.add_cache(id=item["id"], directory=path)
                     self._id_item_cache.add_cache(
                         id=item["id"],
@@ -411,18 +321,31 @@ class P115Api:
             new_path = Path(fileitem.path) / name
             parent_id = self.get_pid_by_path(Path(fileitem.path))
             if parent_id == -1:
+                logger.error(
+                    "【P115Disk】创建目录失败：父目录不存在，目标=%r", str(new_path)
+                )
                 return None
             payload = {
                 "cname": name,
                 "pid": parent_id,
             }
+            logger.info(
+                "【P115Disk】开始创建目录：存储=%s，路径=%r，父目录ID=%s",
+                self._disk_name,
+                str(new_path),
+                parent_id,
+            )
             resp = self.client.fs_mkdir(payload, **get_ios_ua_app(app=False))
             check_response(resp)
-            logger.info(f"【P115Disk】创建目录: {resp}")
             data = resp.get("cid", resp.get("file_id", None))
             if not data:
-                logger.error(f"【P115Disk】创建目录失败: {resp}")
+                logger.error(
+                    "【P115Disk】创建目录失败：响应缺少目录ID，路径=%r", str(new_path)
+                )
                 return None
+            logger.info(
+                "【P115Disk】创建目录成功：路径=%r，目录ID=%s", str(new_path), data
+            )
             self._id_cache.add_cache(id=data, directory=new_path.as_posix())
             modify_time = int(time())
             self._id_item_cache.add_cache(
@@ -447,7 +370,12 @@ class P115Api:
                 pickcode=self.client.to_pickcode(data),
             )
         except Exception as e:
-            logger.error(f"【P115Disk】创建目录失败: {str(e)}")
+            logger.error(
+                "【P115Disk】创建目录失败：父目录=%r，名称=%r，错误类型=%s",
+                fileitem.path,
+                name,
+                type(e).__name__,
+            )
             return None
 
     def get_folder(self, path: Path) -> Optional[FileItem]:
@@ -470,6 +398,11 @@ class P115Api:
             return None
         if folder:
             if folder.type == "dir":
+                logger.debug(
+                    "【P115Disk】复用已有目录：路径=%r，目录ID=%s",
+                    str(path),
+                    folder.fileid,
+                )
                 return folder
             logger.error(f"【P115Disk】目标路径不是目录: {path}")
             return None
@@ -484,11 +417,20 @@ class P115Api:
             )
 
         try:
+            logger.info(
+                "【P115Disk】开始创建目录：存储=%s，路径=%r（含缺失的父目录）",
+                self._disk_name,
+                str(path),
+            )
             resp = self.client.fs_makedirs_app(
                 path.as_posix(), pid=0, **get_ios_ua_app()
             )
             check_response(resp)
-            logger.info(f"【P115Disk】创建目录: {resp}")
+            logger.info(
+                "【P115Disk】创建目录成功：路径=%r，目录ID=%s",
+                str(path),
+                resp["cid"],
+            )
             self._id_cache.add_cache(id=int(resp["cid"]), directory=path.as_posix())
             modify_time = int(time())
             self._id_item_cache.add_cache(
@@ -513,7 +455,11 @@ class P115Api:
                 pickcode=self.client.to_pickcode(resp["cid"]),
             )
         except Exception as e:
-            logger.error(f"【P115Disk】{path} 目录创建出现未知错误：{e}")
+            logger.error(
+                "【P115Disk】创建目录失败：路径=%r，错误类型=%s",
+                str(path),
+                type(e).__name__,
+            )
             return None
 
     def get_item(self, path: Path) -> Optional[FileItem]:
@@ -538,9 +484,6 @@ class P115Api:
         if cached_item:
             return cached_item
 
-        if monotonic() < self._all_channel_cooldown_until:
-            return None
-
         self._get_item_rate_limiter.acquire()
 
         try:
@@ -548,156 +491,14 @@ class P115Api:
         except FileNotFoundError:
             self._record_get_item_failure(path_str, now)
             return None
-        except Exception as e:
-            if self._is_405(e):
-                self._note_405("web", "get_item", e)
-            try:
-                fb_item = self._fs_search_fallback(path)
-                if fb_item is not None:
-                    logger.warning(
-                        f"【P115Disk】路径查询失败，已通过 fs_search 获取: {path}"
-                    )
-                    return fb_item
-            except FileNotFoundError:
-                self._record_get_item_failure(path_str, now)
-                return None
+        except Exception:
             file_item = self._get_u115_item(path)
             if not file_item:
                 self._record_get_item_failure(path_str, now)
                 return None
             return file_item
 
-    def _fs_search_fallback(self, path: Path) -> Optional[FileItem]:
-        """
-        用 proapi fs_search 降级查询文件项。
-
-        不要走 webapi.115.com：当前账号对该域名 WAF 会直接 405。
-        p115client.fs_search 默认就是 proapi /open/ufile/search。
-        """
-        try:
-            parent_path = path.parent.as_posix()
-            if parent_path in ("", "/"):
-                parent_id = 0
-            else:
-                parent_id = self._id_cache.get_id_by_dir(parent_path)
-                if parent_id is None or int(parent_id) < 0:
-                    parent_id = self.get_pid_by_path(path.parent)
-                if parent_id is None or int(parent_id) < 0:
-                    return None
-            last_error: Optional[Exception] = None
-            resp = None
-            for app in ["android", "ios"]:
-                try:
-                    search_kwargs = dict(self._channel_kwargs(app))
-                    search_kwargs.pop("app", None)
-                    resp = self.client.fs_search(
-                        {"search_value": path.name, "cid": int(parent_id), "limit": 32},
-                        async_=False,
-                        **search_kwargs,
-                    )
-                    if resp and (resp.get("state") or resp.get("data") is not None):
-                        break
-                except Exception as e:
-                    last_error = e
-                    if self._is_405(e):
-                        self._note_405(app, "fs_search", e)
-                        continue
-                    logger.warning(f"【P115Disk】fs_search 降级查询失败({app}): {e}")
-            if not resp or not (resp.get("state") or resp.get("data")):
-                if last_error:
-                    logger.warning(f"【P115Disk】fs_search 降级查询失败: {last_error}")
-                return None
-            for it in resp.get("data") or []:
-                if (it.get("n") or "") != path.name:
-                    continue
-                fid = int(it["fid"])
-                is_dir = bool(int(it.get("d") or 0))
-                size = int(it.get("s") or 0) or None
-                modify_time = int(it.get("tp") or 0) or None
-                pickcode = it.get("pc")
-                item_path = path.as_posix()
-                self._id_cache.add_cache(id=fid, directory=item_path)
-                self._id_item_cache.add_cache(
-                    id=fid,
-                    item={
-                        "path": item_path,
-                        "id": fid,
-                        "size": size,
-                        "modify_time": modify_time,
-                        "pickcode": pickcode,
-                        "is_dir": is_dir,
-                    },
-                )
-                if is_dir:
-                    return FileItem(
-                        storage=self._disk_name,
-                        fileid=str(fid),
-                        parent_fileid=str(parent_id),
-                        path=item_path + "/",
-                        name=path.name,
-                        basename=path.name,
-                        type="dir",
-                        modify_time=modify_time,
-                        pickcode=pickcode,
-                    )
-                return FileItem(
-                    storage=self._disk_name,
-                    fileid=str(fid),
-                    parent_fileid=str(parent_id),
-                    name=path.name,
-                    basename=path.stem,
-                    extension=path.suffix[1:] or None,
-                    type="file",
-                    path=item_path,
-                    size=size,
-                    modify_time=modify_time,
-                    pickcode=pickcode,
-                )
-            # 搜索成功但无精确匹配：确认不存在
-            raise FileNotFoundError(path)
-        except FileNotFoundError:
-            raise
-        except Exception as e:
-            logger.warning(f"【P115Disk】fs_search 降级查询失败: {e}")
-            return None
-
     def get_item_strict(self, path: Path) -> Optional[FileItem]:
-        """冷却结束后有限复核；状态未知时仍拒绝覆盖。"""
-        cached_item = self._get_cached_item(path)
-        if cached_item:
-            return cached_item
-        deadline = monotonic() + 65
-        if not self._strict_query_lock.acquire(timeout=65):
-            raise StorageQueryError("【P115Disk】等待目标状态查询超时，无法确认文件状态")
-        try:
-            try:
-                return self._get_u115_item(path, strict=True)
-            except FileNotFoundError:
-                return None
-            except StorageQueryError as error:
-                logger.debug(f"【P115Disk】Open 严格查询不可用，回退 Cookie 查询: {error}")
-            for attempt in range(2):
-                while monotonic() < self._all_channel_cooldown_until:
-                    remaining = self._all_channel_cooldown_until - monotonic()
-                    budget = deadline - monotonic()
-                    if remaining > budget or budget <= 0:
-                        raise StorageQueryError("【P115Disk】查询冷却超出等待上限，无法确认文件状态")
-                    logger.info(f"【P115Disk】等待查询冷却 {remaining:.1f} 秒后复核目标: {path}")
-                    sleep(remaining)
-                try:
-                    return self._get_item_strict_once(path)
-                except StorageQueryError as error:
-                    if attempt or monotonic() >= deadline:
-                        raise
-                    if monotonic() >= self._all_channel_cooldown_until:
-                        if not self._is_405(error):
-                            raise
-                        self._set_all_channel_cooldown()
-            raise StorageQueryError("【P115Disk】无法确认文件状态")
-        finally:
-            self._strict_query_lock.release()
-
-    def _get_item_strict_once(self, path: Path) -> Optional[FileItem]:
         """
         严格获取文件或目录，无法确认状态时抛出存储查询异常
 
@@ -712,29 +513,13 @@ class P115Api:
             if cached_item:
                 return cached_item
 
-            if monotonic() < self._all_channel_cooldown_until:
-                return None
-
             self._get_item_rate_limiter.acquire()
             return self._query_item(path)
         except (FileNotFoundError, NotADirectoryError):
             return None
         except Exception as e:
-            if self._is_405(e):
-                self._note_405("web", "get_item_strict", e)
             try:
-                fb_item = self._fs_search_fallback(path)
-                if fb_item is not None:
-                    logger.warning(
-                        f"【P115Disk】路径查询失败，已通过 fs_search 获取: {path}"
-                    )
-                    return fb_item
-            except FileNotFoundError:
-                return None
-            try:
-                file_item = self._get_u115_item(path, strict=True)
-            except FileNotFoundError:
-                return None
+                file_item = self._get_u115_item(path)
             except Exception as fallback_error:
                 raise StorageQueryError(
                     f"【P115Disk】查询文件信息失败: {path} - {e}; "
@@ -749,7 +534,7 @@ class P115Api:
                 f"【P115Disk】查询文件信息失败: {path} - {e}"
             ) from e
 
-    def _get_u115_item(self, path: Path, strict: bool = False) -> Optional[FileItem]:
+    def _get_u115_item(self, path: Path) -> Optional[FileItem]:
         """
         通过 u115 存储降级查询文件项并更新正缓存
 
@@ -757,12 +542,7 @@ class P115Api:
 
         :return FileItem: 文件项，未查询到时返回 None
         """
-        if strict:
-            file_item = U115Pan().get_item_strict(path)
-            if file_item is None:
-                raise FileNotFoundError(path)
-        else:
-            file_item = StorageChain().get_file_item(storage="u115", path=path)
+        file_item = StorageChain().get_file_item(storage="u115", path=path)
         if not file_item:
             return None
 
@@ -841,60 +621,20 @@ class P115Api:
         :raises FileNotFoundError: 文件或目录确认不存在
         """
         path_str = path.as_posix()
-        last_error: Optional[Exception] = None
-        file_id = None
-        for app in self._iter_apps():
-            kwargs = dict(self._channel_kwargs(app))
-            kwargs.pop("app", None)
-            try:
-                try:
-                    file_id = get_id_to_path(
-                        client=self.client, path=path_str, app=app, **kwargs
-                    )
-                except KeyError:
-                    file_id = get_id_to_path(
-                        client=self.client,
-                        path=path_str,
-                        refresh=True,
-                        app=app,
-                        **kwargs,
-                    )
-                break
-            except FileNotFoundError:
-                raise
-            except Exception as e:
-                last_error = e
-                if self._is_405(e):
-                    self._note_405(app, "get_id_to_path", e)
-                    continue
-                raise
-        if file_id is None:
-            if last_error:
-                raise last_error
-            raise StorageQueryError(f"【P115Disk】无法解析路径: {path_str}")
-        attr_error: Optional[Exception] = None
-        file_item = None
-        for app in self._iter_apps():
-            try:
-                attr_kwargs = dict(self._channel_kwargs(app))
-                attr_kwargs.pop("app", None)
-                file_item = get_attr(
-                    client=self.client,
-                    id=file_id,
-                    app=app,
-                    **attr_kwargs,
-                )
-                break
-            except Exception as e:
-                attr_error = e
-                if self._is_405(e):
-                    self._note_405(app, "get_attr", e)
-                    continue
-                raise
-        if file_item is None:
-            if attr_error:
-                raise attr_error
-            raise StorageQueryError(f"【P115Disk】无法获取属性: {path_str}")
+        try:
+            file_id = get_id_to_path(
+                client=self.client, path=path_str, **get_ios_ua_app(app=False)
+            )
+        except KeyError:
+            file_id = get_id_to_path(
+                client=self.client,
+                path=path_str,
+                refresh=True,
+                **get_ios_ua_app(app=False),
+            )
+        file_item = get_attr(
+            client=self.client, id=file_id, **get_ios_ua_app(app=False)
+        )
 
         logger.debug(f"【P115Disk】文件信息: {file_item}")
         self._get_item_fail_records.pop(path_str, None)

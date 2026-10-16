@@ -1,7 +1,7 @@
 from pathlib import Path, PurePosixPath
 from typing import Any, List, Dict, Tuple, Optional
 
-from app.plugins import _PluginBase
+from app.sdk.plugin import _PluginBase
 from app.schemas import FileItem, Response, StorageOperSelectionEventData, StorageUsage
 from app.schemas.exception import StorageQueryError
 from app.schemas.types import ChainEventType
@@ -28,7 +28,7 @@ class P115Disk(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "3.0.7"
+    plugin_version = "3.0.3"
     # 插件作者
     plugin_author = "DDSRem"
     # 作者主页
@@ -519,14 +519,20 @@ class P115Disk(_PluginBase):
         self, fileitem: FileItem, recursion: bool = False
     ) -> Optional[List[FileItem]]:
         """
-        [热补丁 2026-08-26] 不通过 run_module 提供文件列表，统一由
-        filemanager 宿主模块经 StorageOperSelection 事件路由
-        （PluginStorageOperAdapter）返回，避免插件列表与宿主列表
-        extend 拼接导致文件列表翻倍。
+        查询当前目录下所有目录和文件
+
+        :param fileitem (FileItem): 目录文件项
+        :param recursion (bool): 是否递归查询
+
+        :return List: 文件项列表，如果存储不匹配则返回 None
         """
+
         if fileitem.storage != self._disk_name or not self._p115_api:
             return None
-        return self._p115_api.iter_files(fileitem) if recursion else self._p115_api.list(fileitem)
+
+        if recursion:
+            return self._p115_api.iter_files(fileitem)
+        return self._p115_api.list(fileitem)
 
     def any_files(self, fileitem: FileItem, extensions: list = None) -> Optional[bool]:
         """
