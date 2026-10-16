@@ -28,7 +28,7 @@ from app.application.service import get_service_configs
 from app.application.messaging.channel.admin import matches_channel_admin
 
 from .invalid_data import InvalidDataCleaner
-from .p115 import P115Client
+from .p115 import P115Client, P115DirectoryUnavailable
 from .subscription_monitor import SubscriptionMonitor, normalize_channel
 from .missing_episodes import DEFAULT_MISSING, MissingAction, MissingEpisodeDetector, normalize_cancel_config
 from .missing_fill import MissingFill
@@ -118,7 +118,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.9.96"
+    plugin_version = "2.9.97"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1230,6 +1230,9 @@ class EmeTools(_PluginBase):
         logger.info("ME工具 文件转存：开始检查 %d 条转存规则", len(rules))
 
         def move():
+            if time.monotonic() < getattr(self, "_move_retry_after", 0):
+                return {"ok": False, "moved": 0, "errors": [], "details": [],
+                        "message": "115 目录接口暂不可用，退避等待中；5 分钟后自动复查"}
             moved, errors, details, copy_records = 0, [], [], self._load_move_copy_records()
             with self._client() as client:
                 for rule in rules:
@@ -1241,6 +1244,7 @@ class EmeTools(_PluginBase):
                               "status": "empty", "item_count": 0, "skipped_count": 0,
                               "file_count": 0, "total_bytes": 0}
                     details.append(detail)
+                    stage = "读取源目录"
                     try:
                         files, directories = client.list_children(source)
                         identifiers = [item["fid"] for item in files] + [item["cid"] for item in directories]
@@ -1269,10 +1273,12 @@ class EmeTools(_PluginBase):
                         moved_ids = set()
                         for index in range(0, len(identifiers), 500):
                             batch = identifiers[index:index + 500]
+                            stage = "复制提交" if mode == "copy" else "移动提交"
                             result = action(batch, destination)
                             if result.get("state"):
                                 moved += len(batch)
                                 moved_ids.update(batch)
+                                detail["item_count"] = len(moved_ids)
                                 if mode == "copy":
                                     copied_ids.update(str(identifier) for identifier in batch)
                                     self._save_move_copy_records(copy_records)
@@ -1291,25 +1297,31 @@ class EmeTools(_PluginBase):
                             count, size = self._move_tree_stats(client, moved_dirs)
                             detail["file_count"] = len(moved_files) + count
                             detail["total_bytes"] = sum(int(item.get("size") or 0) for item in moved_files) + size
-                            detail["status"] = "success"
+                            if detail["status"] != "failed":
+                                detail["status"] = "success"
                             logger.info("ME工具 文件转存：%s %s → %s 已处理 %d 项（包含 %d 个文件），大小=%d 字节",
                                         "复制" if mode == "copy" else "移动",
                                         _log_label(detail["src_name"] or source),
                                         _log_label(detail["dst_name"] or destination), len(moved_ids),
                                         detail["file_count"], detail["total_bytes"])
                     except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
-                        errors.append(f"{source} → {destination}：{error}")
+                        reason = _log_label(error)
+                        errors.append(f"{source} → {destination}：{stage}失败：{reason}")
                         detail["status"] = "failed"
-                        logger.warning("ME工具 文件转存：%s → %s 查询或转存异常：%s",
+                        detail["error"] = f"{stage}：{reason}"
+                        logger.warning("ME工具 文件转存：%s → %s %s异常：%s：%s",
                                        _log_label(detail["src_name"] or source),
-                                       _log_label(detail["dst_name"] or destination), type(error).__name__)
+                                       _log_label(detail["dst_name"] or destination), stage, type(error).__name__, reason)
+                        if isinstance(error, P115DirectoryUnavailable):
+                            self._move_retry_after = time.monotonic() + 300
+                            break
             self._last_run["p115_move"] = datetime.now().isoformat()
             logger.info("ME工具 文件转存：本次完成，已处理=%d，失败=%d，空目录=%d",
                         moved, len(errors), sum(item["status"] == "empty" for item in details))
             copied = sum(item.get("item_count", 0) for item in details
-                         if item.get("mode") == "copy" and item.get("status") == "success")
+                         if item.get("mode") == "copy")
             moved_count = sum(item.get("item_count", 0) for item in details
-                              if item.get("mode") != "copy" and item.get("status") == "success")
+                              if item.get("mode") != "copy")
             skipped = sum(item.get("skipped_count", 0) for item in details if item.get("mode") == "copy")
             return {"ok": not errors, "moved": moved, "moved_count": moved_count, "copied": copied,
                     "skipped": skipped,

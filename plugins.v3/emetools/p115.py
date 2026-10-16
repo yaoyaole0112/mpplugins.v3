@@ -6,6 +6,12 @@ import httpx
 
 
 API = "https://webapi.115.com"
+
+
+class P115DirectoryUnavailable(RuntimeError):
+    pass
+
+
 LIST_ENDPOINTS = (
     ("https://115cdn.com/webapi/files", {"aid": 1, "o": "user_ptime", "asc": 0, "show_dir": 1,
                                          "fc_mix": 0, "format": "json", "v": "4.6", "natsort": 1}),
@@ -71,13 +77,23 @@ class P115Client:
     def _page(self, cid: str, offset: int):
         last_error = "目录接口异常或账号被风控"
         for attempt in range(3):
+            rejected = 0
             for url, defaults in LIST_ENDPOINTS:
                 try:
                     params = {**defaults, "cid": cid, "limit": 1000, "offset": offset}
                     response = self.client.get(url, params=params)
+                    if response.status_code in (401, 403, 405, 429):
+                        rejected += 1
+                        last_error = f"HTTP {response.status_code}"
+                        continue
                     response.raise_for_status()
                     data = response.json()
+                    if not isinstance(data, dict):
+                        raise ValueError("115 目录接口未返回对象")
                     if not data.get("state"):
+                        code = str(data.get("errNo") or data.get("errno") or data.get("code") or "")
+                        if code in {"990001", "99", "40101032"}:
+                            raise P115DirectoryUnavailable("115 登录状态失效，请在 STRM 助手重新登录并更新 Cookie；未执行转存")
                         last_error = str(data.get("error") or data.get("msg") or last_error)
                         continue
                     files, directories, total, length = self._parse_entries(data)
@@ -88,6 +104,10 @@ class P115Client:
                     return files, directories, total, length
                 except (httpx.HTTPError, ValueError, TypeError) as error:
                     last_error = str(error)
+            if rejected == len(LIST_ENDPOINTS):
+                raise P115DirectoryUnavailable(
+                    f"115 全部目录接口拒绝访问（{last_error}），可能为访问限制或登录状态异常；"
+                    "请检查 STRM 助手是否能列出目录及其 Cookie 状态；未执行转存")
             if attempt < 2:
                 time.sleep(3)
         raise RuntimeError("115 目录读取失败，未对内容作任何改动：" + last_error[:160])

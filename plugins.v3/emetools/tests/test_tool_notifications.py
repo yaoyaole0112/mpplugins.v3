@@ -225,6 +225,27 @@ class ScheduledNotificationTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(records, {})
 
+    def test_directory_rejection_backs_off_without_copying_or_clearing_records(self):
+        from emetools.p115 import P115DirectoryUnavailable
+
+        self.plugin._schedule["p115_move"]["rules"] = [
+            {"src_id": "1", "dst_id": "2", "mode": "copy"},
+            {"src_id": "3", "dst_id": "4", "mode": "copy"}]
+        client = MagicMock()
+        client.list_children.side_effect = P115DirectoryUnavailable("全部目录接口 HTTP 405")
+        context = MagicMock()
+        context.__enter__.return_value = client
+        self.plugin._client = MagicMock(return_value=context)
+        self.plugin.save_data.reset_mock()
+        result = self.plugin._move_run()
+        self.assertFalse(result["ok"])
+        self.assertIn("HTTP 405", result["details"][0]["error"])
+        client.list_children.assert_called_once_with("1")
+        client.copy_files.assert_not_called()
+        self.plugin.save_data.assert_not_called()
+        self.plugin._move_run()
+        client.list_children.assert_called_once_with("1")
+
     def test_manual_file_cleanup_confirmation_and_result(self):
         preview = {"ok": True, "folders": [{"name": "旧文件", "files": 1, "dirs": 0,
                                                "size": 1024, "error": ""}],
