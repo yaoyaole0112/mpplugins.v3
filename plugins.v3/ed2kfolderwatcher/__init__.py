@@ -8,6 +8,11 @@ from urllib.parse import quote
 
 from apscheduler.triggers.cron import CronTrigger
 
+try:
+    from Crypto.Hash import MD4 as _CryptoMD4
+except ImportError:
+    _CryptoMD4 = None
+
 from app.log import logger
 from app.plugins import _PluginBase
 
@@ -75,6 +80,23 @@ def _md4(data: bytes) -> bytes:
 
 
 def ed2k_hash(path: Path) -> str:
+    if _CryptoMD4 is not None:
+        part_hashes = []
+        with path.open("rb") as file_handle:
+            while True:
+                chunk = file_handle.read(ED2K_PART_SIZE)
+                if not chunk:
+                    break
+                digest = _CryptoMD4.new()
+                digest.update(chunk)
+                part_hashes.append(digest.digest())
+        if not part_hashes:
+            return _CryptoMD4.new().hexdigest()
+        if len(part_hashes) == 1:
+            return part_hashes[0].hex()
+        digest = _CryptoMD4.new()
+        digest.update(b"".join(part_hashes))
+        return digest.hexdigest()
     part_hashes = []
     with path.open("rb") as file_handle:
         while True:
@@ -95,7 +117,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "本地文件夹 ED2K 链接"
     plugin_desc = "监控本地文件夹，为稳定的新文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "OpenAI"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
