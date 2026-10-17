@@ -29,6 +29,7 @@ from app.sdk.services import MediaServerHelper
 from app.schemas.types import MediaType
 from app.runtime.settings import get_runtime_setting
 from .tvmao_client import fetch_tvmao_cast
+from .baike_cast import fetch_baike_cast
 from .episode_plots import fetch_episode_plots, missing_episode_title, missing_episode_overview
 from .emby_guard import EmbyClient, ENRICHMENT_SLOT, RESOLVE_SLOTS
 
@@ -916,6 +917,45 @@ class DataEnrichment:
             self.log(f"电视猫演员表不可用（{type(error).__name__}），保持豆瓣/TMDB 结果")
             return []
 
+    async def _baike_cast(self, item, media_type='tv'):
+        self._ensure_active()
+        return await fetch_baike_cast(str(item.get('Name') or ''),
+                                     str(item.get('ProductionYear') or ''), media_type,
+                                     status=self.log, active=self._ensure_active)
+
+    @staticmethod
+    def _merge_baike_cast(cast, secondary):
+        result = DataEnrichment._localize_primary_cast(cast, secondary)
+        added = 0
+        for candidate in secondary:
+            if not candidate.get('name'):
+                continue
+            matches = [actor for actor in cast
+                       if len(DataEnrichment._merge_cast([candidate], [actor])) == 1]
+            if matches:
+                continue
+            if any(re.sub(r'\s+', '', str(actor.get('name') or '')).casefold() ==
+                   re.sub(r'\s+', '', candidate['name']).casefold() for actor in result):
+                continue
+            result.append({'name': candidate['name'], 'role': candidate.get('role') or '',
+                           'profile_path': candidate.get('img') or candidate.get('profile_path') or ''})
+            added += 1
+        for position, actor in enumerate(result):
+            actor['order'] = position
+        return result, added
+
+    async def _supplement_baike_cast(self, cast, item, options, media_type='tv'):
+        usable = [actor for actor in cast if not options['no_avatar'] or actor.get('profile_path')]
+        if len(usable) >= options['max_actors'] and not self._needs_chinese_cast(cast, options['max_actors']):
+            return cast, []
+        detail = await self._baike_cast(item, media_type)
+        secondary = detail.get('casts') or []
+        if secondary:
+            cast, added = self._merge_baike_cast(cast, secondary)
+            self.log(f'百度百科中文演职补缺：获取完整演员表 {len(secondary)} 人，新增 {added} 人；'
+                     '保留主数据源演员及顺序，按设置筛选后写入')
+        return cast, detail.get('directors') or []
+
     @staticmethod
     def _split(item_id):
         if "::" not in item_id:
@@ -1387,6 +1427,7 @@ class DataEnrichment:
                     else:
                         cast, replaced, added = self._merge_tvmao_cast(cast, tvmao_cast)
                         self.log(f"电影电视猫中文演职补缺：汉化姓名 {replaced} 人，新增 {added} 人")
+            cast, baike_directors = await self._supplement_baike_cast(cast, item, options, 'movie')
             for actor in cast[:options["max_actors"]]:
                 if actor.get("id"):
                     try:
@@ -1412,6 +1453,8 @@ class DataEnrichment:
             douban_directors = douban.get("directors") or []
             if douban_directors:
                 tmdb_directors = self._merge_cast(douban_directors, tmdb_directors)
+            if baike_directors:
+                tmdb_directors, added = self._merge_baike_cast(tmdb_directors, baike_directors)
             directors = [{"Name": person["name"], "Type": "Director", "Role": "导演"}
                          for person in tmdb_directors if person.get("name")]
             people = directors[:10] + people
@@ -1597,25 +1640,28 @@ class DataEnrichment:
                             if web_cast:
                                 cast, replaced, added = self._merge_tvmao_cast(cast, web_cast)
                                 self.log(f"电视猫中文演职补缺：汉化姓名 {replaced} 人，新增 {added} 人")
+                    cast, baike_directors = await self._supplement_baike_cast(cast, item, options)
                     cast = sorted((p for p in cast if p.get("name") and
                                    (not options["no_avatar"] or p.get("profile_path"))),
                                   key=lambda p: p.get("order") if p.get("order") is not None else 999)
                     people = [{"Name": p["name"], "Type": "Actor",
                                "Role": p.get("role") or ""}
                               for p in cast[:options["max_actors"]]]
+                    people.extend({'Name': person['name'], 'Type': 'Director', 'Role': '导演'}
+                                  for person in baike_directors[:10] if person.get('name'))
                     await self._translate_people(people, options, item.get("Name"), "剧集")
                     if people:
                         if options["role_prefix"]:
                             for person in people:
-                                if person["Role"] and not person["Role"].startswith(("饰", "配")):
+                                if person['Type'] == 'Actor' and person["Role"] and not person["Role"].startswith(("饰", "配")):
                                     prefix = "配 " if re.search(r"配音|voice", person["Role"], re.I) else "饰 "
                                     person["Role"] = prefix + person["Role"]
                         update["People"] = people
                         locked = [field for field in update.get("LockedFields") or [] if field != "Cast"]
-                        if (len(people) >= options["cast_lock_min"] and
+                        if (sum(person['Type'] == 'Actor' for person in people) >= options["cast_lock_min"] and
                                 all(not self._needs_translation(person["Name"]) for person in people) and
                                 (not options["role_prefix"] or all(
-                                    person["Role"].startswith(("饰", "配")) for person in people))):
+                                    person['Type'] != 'Actor' or person["Role"].startswith(("饰", "配")) for person in people))):
                             locked.append("Cast")
                         update["LockedFields"] = locked
                 saved = await self._save_item(emby, identifier, original_item, update)

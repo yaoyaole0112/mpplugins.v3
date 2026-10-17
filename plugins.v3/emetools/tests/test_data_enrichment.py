@@ -31,6 +31,71 @@ class EnrichmentTests(unittest.TestCase):
         web_patch = patch.object(self.enrichment, '_web_episode_plots', new_callable=AsyncMock, return_value={})
         self.web_plots = web_patch.start()
         self.addCleanup(web_patch.stop)
+        baike_patch = patch.object(self.enrichment, '_baike_cast', new_callable=AsyncMock, return_value={})
+        self.baike_cast = baike_patch.start()
+        self.addCleanup(baike_patch.stop)
+
+    def test_baike_supplements_chinese_cast_without_replacing_primary_ids(self):
+        original = [{'id': 101, 'name': '演员甲', 'role': '主角', 'profile_path': '/primary.jpg'}]
+        self.baike_cast.return_value = {'casts': [
+            {'name': '演员甲', 'role': '主角', 'img': 'https://bkimg.cdn.bcebos.com/other.jpg'},
+            *[{'name': f'演员{number}', 'role': '配角', 'img': ''} for number in range(1, 58)]],
+            'directors': [{'name': '导演乙', 'role': '导演'}]}
+        cast, directors = asyncio.run(self.enrichment._supplement_baike_cast(
+            original, {'Name': '测试剧'}, DEFAULT_ENRICH_CONFIG))
+        self.baike_cast.assert_awaited_once()
+        self.assertEqual(len(cast), 58)
+        self.assertEqual(cast[0]['id'], 101)
+        self.assertEqual(cast[0]['profile_path'], '/primary.jpg')
+        self.assertEqual(cast[-1]['name'], '演员57')
+        self.assertEqual(directors[0]['name'], '导演乙')
+
+    def test_baike_not_requested_when_actor_limit_already_localized(self):
+        cast = [{'name': '演员甲', 'role': '主角', 'profile_path': '/primary.jpg'}]
+        result, directors = asyncio.run(self.enrichment._supplement_baike_cast(
+            cast, {'Name': '测试电影'}, {**DEFAULT_ENRICH_CONFIG, 'max_actors': 1}, 'movie'))
+        self.baike_cast.assert_not_awaited()
+        self.assertEqual(result, cast)
+        self.assertEqual(directors, [])
+
+    def test_baike_cast_written_for_movies_and_series_with_shared_settings(self):
+        for media_type in ('Movie', 'Series'):
+            with self.subTest(media_type=media_type):
+                saved = []
+                def emby_handler(request):
+                    saved.append(json.loads(request.content))
+                    return httpx.Response(204)
+                emby = httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(emby_handler))
+                tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/')
+                item = {'Id': 'test1', 'Type': media_type, 'Name': '测试剧',
+                        'ProductionYear': 2026, 'ProviderIds': {'Tmdb': '123'}}
+                primary = [{'name': '演员甲', 'character': '主角', 'roles': [{'character': '主角'}],
+                            'profile_path': '/primary.jpg'}]
+                detail = {'credits': {'cast': primary}, 'aggregate_credits': {'cast': primary}}
+                self.baike_cast.return_value = {'casts': [
+                    {'name': '演员甲', 'role': '主角', 'img': 'https://bkimg.cdn.bcebos.com/new.jpg'},
+                    {'name': '无头像演员', 'role': '护卫', 'img': ''},
+                    *[{'name': f'演员{number}', 'role': '护卫',
+                       'img': 'https://bkimg.cdn.bcebos.com/new.jpg'} for number in range(57)]],
+                    'directors': [{'name': '导演乙', 'role': '导演'}]}
+                with patch.object(self.enrichment, '_server', return_value=emby), \
+                     patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+                     patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user'), \
+                     patch.object(self.enrichment, '_item', new_callable=AsyncMock, return_value=item), \
+                     patch.object(self.enrichment, '_tmdb_json', new_callable=AsyncMock, return_value=detail), \
+                     patch.object(self.enrichment, '_douban_data', new_callable=AsyncMock, return_value={}), \
+                     patch.object(self.enrichment, '_tvmao_cast', new_callable=AsyncMock, return_value=[]), \
+                     patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+                    asyncio.run(self.enrichment._enrich('Q4', 'test1', 'credits',
+                        {**DEFAULT_ENRICH_CONFIG, 'episode_cast': False, 'ai_enabled': False}))
+                people = saved[0]['People']
+                actors = [person for person in people if person['Type'] == 'Actor']
+                self.assertEqual(len(actors), 30)
+                self.assertEqual(actors[0]['Name'], '演员甲')
+                self.assertNotIn('无头像演员', [person['Name'] for person in people])
+                self.assertTrue(all(person['Role'].startswith('饰 ') for person in actors))
+                self.assertEqual([person['Role'] for person in people if person['Type'] == 'Director'], ['导演'])
+                self.baike_cast.assert_awaited_with(item, 'movie' if media_type == 'Movie' else 'tv')
 
     def test_movie_enrichment_writes_localized_overview_cast_and_director(self):
         saved = []
