@@ -150,7 +150,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.3.2"
+    plugin_version = "1.4.0"
     plugin_author = "OpenAI"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -165,10 +165,12 @@ class Ed2kFolderWatcher(_PluginBase):
     _min_age = 60
     _delete_source = False
     _telegram_enabled = False
+    _telegram_mode = "bot"
     _telegram_token = ""
     _telegram_chat_id = ""
     _telegram_thread_id = ""
     _telegram_retry_after = 0
+    _telegram_user_last_send = 0
     _monitor_enabled = True
     _output_enabled = True
     _observer = None
@@ -196,10 +198,14 @@ class Ed2kFolderWatcher(_PluginBase):
         self._extensions = str(config.get("extensions") or DEFAULT_EXTENSIONS).strip()
         self._delete_source = bool(config.get("delete_source", False))
         self._telegram_enabled = bool(config.get("telegram_enabled", False))
+        self._telegram_mode = str(config.get("telegram_mode") or "bot").strip().lower()
+        if self._telegram_mode not in {"bot", "user"}:
+            self._telegram_mode = "bot"
         self._telegram_token = str(config.get("telegram_token") or "").strip()
         self._telegram_chat_id = str(config.get("telegram_chat_id") or "").strip()
         self._telegram_thread_id = str(config.get("telegram_thread_id") or "").strip()
         self._telegram_retry_after = 0
+        self._telegram_user_last_send = 0
         self._monitor_enabled = bool(config.get("monitor_enabled", True))
         self._output_enabled = bool(config.get("output_enabled", True))
         try:
@@ -344,12 +350,19 @@ class Ed2kFolderWatcher(_PluginBase):
         return {item.strip().lower().lstrip(".") for item in self._extensions.split(",") if item.strip()}
 
     def _telegram_target_key(self) -> str:
+        if self._telegram_mode == "user":
+            from .user_account import TelegramUserAccount
+            identity = TelegramUserAccount(Path(self.get_data_path())).identity()
+            value = f"user|{identity}|{self._telegram_chat_id}|{self._telegram_thread_id}"
+            return hashlib.sha256(value.encode("utf-8")).hexdigest()
         value = f"{self._telegram_token}|{self._telegram_chat_id}|{self._telegram_thread_id}"
         return hashlib.sha256(value.encode("utf-8")).hexdigest() if value.strip("|") else ""
 
     def _send_telegram(self, path: Path, link: str) -> bool:
         if not self._telegram_enabled:
             return True
+        if self._telegram_mode == "user":
+            return self._send_telegram_user(path, link)
         if not self._telegram_token or not self._telegram_chat_id:
             logger.warning("自动生成ED2K链接：Telegram 通知已启用，但 Bot Token 或 Chat ID 为空")
             return False
@@ -390,6 +403,37 @@ class Ed2kFolderWatcher(_PluginBase):
                     bot.close()
                 except Exception:
                     logger.warning("自动生成ED2K链接：关闭 Telegram 连接失败")
+
+    def _send_telegram_user(self, path: Path, link: str) -> bool:
+        if time.monotonic() < self._telegram_retry_after:
+            return False
+        try:
+            from .user_account import TelegramUserAccount
+            try:
+                from app.runtime.settings import get_runtime_setting
+                proxy = get_runtime_setting("PROXY")
+            except ImportError:
+                from app.core.config import settings
+                proxy = settings.PROXY
+            destination = telegram_destination(self._telegram_chat_id)
+            thread_id = int(self._telegram_thread_id) if self._telegram_thread_id else None
+            if thread_id is not None and thread_id <= 0:
+                raise ValueError("话题线程 ID 必须为正整数或留空")
+            account = TelegramUserAccount(Path(self.get_data_path()), proxy=proxy)
+            remaining = max(0, 3 - (time.monotonic() - self._telegram_user_last_send))
+            if self._stopping.wait(remaining):
+                return False
+            account.send(destination, link, thread_id=thread_id)
+            self._telegram_user_last_send = time.monotonic()
+            logger.info(f"自动生成ED2K链接：已使用 Telegram 个人账号发送：{path.name}")
+            return True
+        except Exception as err:
+            from .user_account import UserAccountError
+            detail = str(err) if isinstance(err, (UserAccountError, ValueError)) else f"个人账号发送异常（{type(err).__name__}）"
+            cooldown = max(60, int(getattr(err, "retry_after", 300)))
+            self._telegram_retry_after = time.monotonic() + cooldown
+            logger.warning(f"自动生成ED2K链接：Telegram 个人账号发送失败：{detail}；保留源文件，{cooldown}秒后允许重试，不会退回 Bot 模式")
+            return False
 
     def _notify_record(self, path: Path, record: dict) -> None:
         if not self._telegram_enabled:
@@ -518,7 +562,19 @@ class Ed2kFolderWatcher(_PluginBase):
         return [{"path": "/run", "endpoint": self.scan, "methods": ["GET"], "summary": "立即扫描并生成 ED2K 链接", "description": "扫描配置的本地文件夹并更新 ed2k.txt。"}]
 
     def get_page(self) -> Optional[List[dict]]:
-        return None
+        import shlex
+        from .user_account import TelegramUserAccount
+        account = TelegramUserAccount(Path(self.get_data_path()))
+        status = "已存在本地授权文件，实际有效性可用 --status 校验" if account.configured() else "尚未完成个人账号授权"
+        command = f"docker exec -it moviepilot python /app/app/plugins/ed2kfolderwatcher/telegram_user_login.py --data-dir {shlex.quote(str(self.get_data_path()))}"
+        return [{"component": "VCard", "content": [{"component": "VCardText", "props": {"class": "pa-6"}, "content": [
+            {"component": "h3", "text": "Telegram 个人账号授权"},
+            {"component": "p", "props": {"class": "my-4"}, "text": f"当前发送方式：{self._telegram_mode}；{status}。"},
+            {"component": "p", "text": "在服务器交互终端执行以下命令。API Hash、验证码和两步验证密码仅在终端隐藏输入，不要发到聊天中。"},
+            {"component": "pre", "props": {"class": "my-4", "style": "white-space:pre-wrap;word-break:break-all"}, "text": command},
+            {"component": "p", "text": "从 my.telegram.org 获取自己的 API ID/API Hash。授权成功后保存插件配置并立即扫描一次，可补发失败链接。个人账号模式只发送 ED2K 链接，不附加标题。"},
+            {"component": "p", "text": "Session 位于插件数据目录 telegram-user，仅保存在本地。它具有账号访问权限，切勿分享或上传。可在 Telegram 设置→设备中撤销授权。"}
+        ]}]}]
 
     def stop_service(self) -> None:
         if self._stopping is not None:
@@ -535,7 +591,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._worker = None
 
     def _save_config(self) -> None:
-        self.update_config({"enabled": self._enabled, "folder": self._folder, "recursive": self._recursive, "cron": self._cron, "output": self._output, "output_enabled": self._output_enabled, "monitor_enabled": self._monitor_enabled, "scan_enabled": self._scan_enabled, "extensions": self._extensions, "min_age": self._min_age, "delete_source": self._delete_source, "telegram_enabled": self._telegram_enabled, "telegram_token": self._telegram_token, "telegram_chat_id": self._telegram_chat_id, "telegram_thread_id": self._telegram_thread_id, "onlyonce": self._onlyonce})
+        self.update_config({"enabled": self._enabled, "folder": self._folder, "recursive": self._recursive, "cron": self._cron, "output": self._output, "output_enabled": self._output_enabled, "monitor_enabled": self._monitor_enabled, "scan_enabled": self._scan_enabled, "extensions": self._extensions, "min_age": self._min_age, "delete_source": self._delete_source, "telegram_enabled": self._telegram_enabled, "telegram_mode": self._telegram_mode, "telegram_token": self._telegram_token, "telegram_chat_id": self._telegram_chat_id, "telegram_thread_id": self._telegram_thread_id, "onlyonce": self._onlyonce})
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         def field(component: str, model: str, label: str, **props: Any) -> dict:
@@ -557,8 +613,10 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VSwitch", "scan_enabled", "启用定时增量补扫", hint="默认关闭；实时监控无需定时计划。网络挂载漏事件时可开启兜底。", persistent_hint=True),
             field("VTextField", "cron", "补扫计划（开启补扫时生效）", hint="默认每 10 分钟：*/10 * * * *", persistent_hint=True),
             field("VSwitch", "telegram_enabled", "发送 ED2K 链接到 Telegram"),
+            field("VSelect", "telegram_mode", "Telegram 发送方式", items=[{"title": "Bot Token（机器人）", "value": "bot"}, {"title": "个人账号（Telethon）", "value": "user"}], hint="个人账号模式无需接收机器人开启 Bot-to-Bot Communication。", persistent_hint=True),
             field("VTextField", "telegram_token", "Telegram Bot Token", type="password", hint="发送者的身份凭证，从 @BotFather 获取；不是接收方 Bot 的用户名。", persistent_hint=True),
-            field("VTextField", "telegram_chat_id", "Telegram 接收目标", placeholder="数字 Chat ID、@用户名 或公开 t.me 链接", hint="个人须先向发送机器人 /start；频道需授权。发给另一个机器人须填 @用户名，且双方在 BotFather 开启 Bot-to-Bot Communication。", persistent_hint=True),
+            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-5"}, "text": "个人账号模式首次需要终端授权，打开插件『查看数据』获取命令；无需填写 Bot Token。登录验证码和密码不要输入此配置页面。"},
+            field("VTextField", "telegram_chat_id", "Telegram 接收目标", placeholder="数字 Chat ID、@用户名 或公开 t.me 链接", hint="个人账号模式可直接填接收机器人 @用户名；Bot 模式发给机器人需双方开启互发。数字目标须是该账号已认识的聊天，推荐使用 @用户名。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "telegram_enabled": False, "telegram_token": "", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "telegram_enabled": False, "telegram_mode": "bot", "telegram_token": "", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False}

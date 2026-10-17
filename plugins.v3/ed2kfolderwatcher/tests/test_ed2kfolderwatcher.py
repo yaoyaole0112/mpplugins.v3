@@ -19,6 +19,7 @@ class Ed2kTests(unittest.TestCase):
         plugin_path = Path(__file__).resolve().parents[1] / "__init__.py"
         spec = importlib.util.spec_from_file_location("ed2k_test_plugin", plugin_path)
         cls.module = importlib.util.module_from_spec(spec)
+        modules["ed2k_test_plugin"] = cls.module
         with patch.dict(sys.modules, modules):
             spec.loader.exec_module(cls.module)
 
@@ -107,6 +108,50 @@ class Ed2kTests(unittest.TestCase):
             self.assertTrue(self.plugin._send_telegram(Path("test.mkv"), "link"))
         self.assertEqual(client.send_message.call_args.args[0], "@receiver_bot")
         client.close.assert_called_once()
+
+    def test_user_mode_no_bot_token_or_bot_fallback(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_mode = "user"
+        self.plugin._telegram_token = ""
+        self.plugin._telegram_chat_id = "@receiver_bot"
+        account = Mock()
+        user_module = types.ModuleType("ed2k_test_plugin.user_account")
+        user_module.TelegramUserAccount = Mock(return_value=account)
+        user_module.UserAccountError = type("UserAccountError", (Exception,), {})
+        settings = types.ModuleType("app.runtime.settings")
+        settings.get_runtime_setting = Mock(return_value=None)
+        with patch.dict(sys.modules, {"ed2k_test_plugin.user_account": user_module, "app.runtime.settings": settings}), patch.object(self.module, "TelegramBotApi", side_effect=AssertionError("bot fallback")):
+            self.assertTrue(self.plugin._send_telegram(Path("中文.mkv"), "pure-link"))
+            account.send.assert_called_once_with("@receiver_bot", "pure-link", thread_id=None)
+            account.send.side_effect = user_module.UserAccountError("请先登录")
+            self.assertFalse(self.plugin._send_telegram(Path("中文.mkv"), "pure-link"))
+            self.assertFalse(self.plugin._send_telegram(Path("中文.mkv"), "pure-link"))
+            self.assertEqual(account.send.call_count, 2)
+
+    def test_user_mode_saved_without_auth_secrets(self):
+        self.plugin._telegram_mode = "user"
+        self.plugin._save_config()
+        saved = self.plugin.update_config.call_args.args[0]
+        self.assertEqual(saved["telegram_mode"], "user")
+        self.assertNotIn("telegram_user_api_hash", saved)
+        self.assertNotIn("telegram_user_session", saved)
+
+    def test_user_target_dedup_separate_from_bot_and_account(self):
+        self.plugin._telegram_token = "bot-token"
+        self.plugin._telegram_chat_id = "@receiver_bot"
+        bot_key = self.plugin._telegram_target_key()
+        account = Mock()
+        account.identity.return_value = "first-user"
+        user_module = types.ModuleType("ed2k_test_plugin.user_account")
+        user_module.TelegramUserAccount = Mock(return_value=account)
+        self.plugin._telegram_mode = "user"
+        with patch.dict(sys.modules, {"ed2k_test_plugin.user_account": user_module}):
+            first_key = self.plugin._telegram_target_key()
+            self.assertNotEqual(bot_key, first_key)
+            self.plugin._telegram_token = "unrelated-token"
+            self.assertEqual(first_key, self.plugin._telegram_target_key())
+            account.identity.return_value = "second-user"
+            self.assertNotEqual(first_key, self.plugin._telegram_target_key())
 
     def test_link_preserves_chinese_and_escapes_delimiters(self):
         path = self.create("大哥小助理.母带.100% |测试.mkv")

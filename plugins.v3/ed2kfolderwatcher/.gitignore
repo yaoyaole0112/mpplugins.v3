@@ -1,0 +1,5 @@
+telegram-user/
+*.session
+*.session-*
+credentials.json
+__pycache__/
