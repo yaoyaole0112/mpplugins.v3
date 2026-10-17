@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -20,7 +21,74 @@ def tvmao_page(number=23, title='测试剧', caption='剧情标题', plot='这�
             '<div class="epipd">图片版权。</div></article>')
 
 
+def mobile_baike(title='测试剧', description='2026年电视剧', lemmas=None, numbers=()):
+    data = {'lemmaTitle': title, 'lemmaDesc': description, 'navigation': {'lemmas': lemmas or []},
+            'structuredContent': [[{'content': [
+                {'plotTitle': {'text': [{'tag': 'text', 'text': f'第{number}集'}]},
+                 'plotDetail': {'text': [{'tag': 'paragraph', 'content': [
+                     {'tag': 'text', 'text': f'第{number}集首句。第二句。'}]}]}}
+                for number in numbers]}]]}
+    return f'<title>{title}（{description}）_百度百科</title><h1>{title}</h1>' + \
+        '<script id="__NEXT_DATA__" type="application/json">' + json.dumps(
+            {'props': {'pageProps': {'pageData': data}}}, ensure_ascii=False) + '</script>'
+
+
 class EpisodePlotsTests(unittest.TestCase):
+    def test_mobile_structured_data_includes_hidden_episode_groups(self):
+        result = parse_baike_episodes(mobile_baike(numbers=range(1, 13)), '测试剧', '2026')
+        self.assertEqual(set(result), set(range(1, 13)))
+        self.assertEqual(result[12], {'name': '', 'overview': '第12集首句。'})
+        self.assertEqual(parse_baike_episodes(mobile_baike(numbers=(1,)), '其他剧', '2026'), {})
+        self.assertEqual(parse_baike_episodes(mobile_baike(description='2024年电视剧', numbers=(1,)),
+                                             '测试剧', '2026'), {})
+
+    def test_desktop_descriptive_title_and_mobile_release_year_validation(self):
+        page = '<title>测试剧（2026年播出的电视剧）_百度百科</title><h1>测试剧</h1>' \
+            '<h2>分集剧情</h2><div>第1集</div><p>百科首句。后文。</p><h2>演职员表</h2>'
+        self.assertEqual(parse_baike_episodes(page, '测试剧', '2026')[1]['overview'], '百科首句。')
+        self.assertEqual(parse_baike_episodes(page.replace('2026', '2024'), '测试剧', '2026'), {})
+        mobile = mobile_baike(numbers=(1,))
+        soup_start = mobile.index('{"props"')
+        payload = json.loads(mobile[soup_start:mobile.index('</script>')])
+        payload['props']['pageProps']['pageData']['card'] = {'content': [
+            {'title': '首播时间', 'data': [{'text': [{'tag': 'text', 'text': '2024年'}]}]}]}
+        self.assertEqual(parse_baike_episodes('<script id="__NEXT_DATA__">' + json.dumps(payload) + '</script>',
+                                             '测试剧', '2026'), {})
+
+    def test_desktop_403_mobile_homonymous_novel_resolves_verified_tv_work(self):
+        requested = []
+        lemmas = [{'lemmaId': 1, 'lemmaTitle': '测试剧', 'lemmaDesc': '网络小说', 'classify': ['文学作品']},
+                  {'lemmaId': 2, 'lemmaTitle': '测试剧', 'lemmaDesc': '2026年玄幻剧', 'classify': ['影视作品']}]
+
+        def handler(request):
+            requested.append((request.url.host, request.url.path))
+            if 'tvmao' in request.url.host:
+                return httpx.Response(200, text='[]' if 'queryobject' in request.url.path else '')
+            if request.url.host == 'baike.baidu.com':
+                return httpx.Response(403, text='<title>百度安全验证</title>')
+            self.assertEqual(request.url.host, 'wapbaike.baidu.com')
+            if request.url.path.endswith('/2'):
+                return httpx.Response(200, text=mobile_baike(numbers=range(1, 13)))
+            return httpx.Response(200, text=mobile_baike(description='网络小说', lemmas=lemmas))
+
+        result = self.run_fetch(handler, numbers=range(1, 13))
+        self.assertEqual(set(result), set(range(1, 13)))
+        self.assertEqual(result[12]['source'], '百度百科')
+        self.assertFalse(result[12].get('name'))
+        self.assertEqual(sum(host == 'wapbaike.baidu.com' for host, path in requested), 2)
+
+    def test_ambiguous_same_name_mobile_works_are_not_followed(self):
+        lemmas = [{'lemmaId': number, 'lemmaTitle': '测试剧', 'lemmaDesc': '2026年电视剧'}
+                  for number in (1, 2)]
+
+        def handler(request):
+            if 'tvmao' in request.url.host:
+                return httpx.Response(200, text='[]' if 'queryobject' in request.url.path else '')
+            self.assertFalse(request.url.path.endswith(('/1', '/2')))
+            return httpx.Response(200, text=mobile_baike(description='网络小说', lemmas=lemmas))
+
+        self.assertEqual(self.run_fetch(handler), {})
+
     def test_tvmao_keeps_caption_and_only_first_sentence(self):
         data = parse_tvmao_episode(tvmao_page(caption='沈玉儿送钱给陈盛元'), '测试剧', 23)
         self.assertEqual(data, {'name': '第23集：沈玉儿送钱给陈盛元', 'overview': '这是第一句话。'})

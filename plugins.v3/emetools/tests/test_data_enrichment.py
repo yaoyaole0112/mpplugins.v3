@@ -428,6 +428,42 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(written['25']['Name'], '第25集：网页剧情标题')
         self.assertEqual(written['25']['Overview'], originals['25']['Overview'])
 
+    def test_baike_overview_without_caption_is_written_and_existing_title_preserved(self):
+        from emetools.episode_plots import parse_baike_episodes
+
+        page_data = {'lemmaTitle': '测试剧', 'lemmaDesc': '2026年电视剧', 'structuredContent': [{
+            'plotTitle': {'text': [{'tag': 'text', 'text': '第1集'}]},
+            'plotDetail': {'text': [{'tag': 'text', 'text': '百科首句。后续剧情。'}]}}]}
+        page = '<title>测试剧_百度百科</title><script id="__NEXT_DATA__">' + json.dumps(
+            {'props': {'pageProps': {'pageData': page_data}}}) + '</script>'
+        self.web_plots.return_value = {number: {**data, 'source': '百度百科'}
+                                       for number, data in parse_baike_episodes(page, '测试剧', '2026').items()}
+        written = []
+
+        def handler(request):
+            if request.method == 'POST':
+                written.append(json.loads(request.content))
+                return httpx.Response(204)
+            if request.url.path.endswith('/Items/series'):
+                return httpx.Response(200, json={'Id': 'series', 'Type': 'Series', 'Name': '测试剧',
+                    'ProductionYear': 2026, 'ProviderIds': {'Tmdb': '123'}})
+            episode = {'Id': 'episode', 'Name': '原有有效标题', 'Overview': '',
+                       'IndexNumber': 1, 'ParentIndexNumber': 1}
+            return httpx.Response(200, json=episode if request.url.path.endswith('/Items/episode')
+                                  else {'Items': [episode]})
+
+        emby = httpx.AsyncClient(base_url='http://emby/emby/', transport=httpx.MockTransport(handler))
+        tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/', transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={'name': '测试剧', 'episodes': []})))
+        with patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='user'), \
+                patch.object(self.enrichment, '_server', return_value=emby), \
+                patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
+                patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
+            asyncio.run(self.enrichment._enrich('Q4', 'series', 'episodes', DEFAULT_ENRICH_CONFIG))
+        self.assertEqual(len(written), 1)
+        self.assertEqual(written[0]['Overview'], '百科首句。')
+        self.assertEqual(written[0]['Name'], '原有有效标题')
+
     def test_missing_episode_title_is_reported_when_sources_cannot_supply_it(self):
         emby = httpx.AsyncClient(base_url='http://emby/emby/')
         tmdb = httpx.AsyncClient(base_url='https://api.tmdb.org/3/')
