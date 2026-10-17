@@ -1,15 +1,16 @@
 {
   "Ed2kFolderWatcher": {
-    "name": "本地文件夹 ED2K 链接",
-    "description": "监控本地文件夹，为稳定的新文件自动生成标准 ED2K 链接。",
+    "name": "自动生成ED2K链接",
+    "description": "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接，并可发送到 Telegram。",
     "labels": "工具,文件管理",
-    "version": "1.1.2",
+    "version": "1.2.0",
     "icon": "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png",
     "author": "OpenAI",
     "v3": true,
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
     "level": 1,
     "history": {
+      "v1.2.0": "更名为自动生成ED2K链接；改为仅处理新增文件；优化配置间距；新增 Telegram Bot/频道群组通知。",
       "v1.1.2": "使用 PyCryptodome 的 C 版 MD4 加速大文件 ED2K 计算，避免纯 Python 哈希长时间占用 CPU。",
       "v1.1.1": "首次扫描改为逐文件增量写入链接和缓存，长时间扫描过程中也能看到已完成结果。",
       "v1.1.0": "新增 ED2K 生成成功后按队列删除源文件选项，删除失败自动保留并记录警告。",
