@@ -86,7 +86,7 @@ def _baike_text(value):
     return _baike_text(value.get('text') or value.get('content') or [])
 
 
-def _baike_candidates(page, title, year):
+def _baike_candidates(page, title, year, media_type='tv'):
     data = _baike_data(page)
     navigation = data.get('navigation') or {}
     candidates = set()
@@ -94,8 +94,8 @@ def _baike_candidates(page, title, year):
         if not isinstance(lemma, dict) or lemma.get('lemmaTitle') != title:
             continue
         description = str(lemma.get('lemmaDesc') or '')
-        if not re.search(r'电视剧|剧集|短剧|玄幻剧|仙侠剧|悬疑剧|爱情剧|古装剧', description) \
-                and '影视作品' not in (lemma.get('classify') or []):
+        category = r'电影|影片' if media_type == 'movie' else r'电视剧|剧集|短剧|玄幻剧|仙侠剧|悬疑剧|爱情剧|古装剧'
+        if not re.search(category, description):
             continue
         years = re.findall(r'(?<!\d)(?:19|20)\d{2}(?!\d)', description)
         if year and years and str(year)[:4] not in years:
