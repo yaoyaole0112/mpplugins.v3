@@ -1,0 +1,254 @@
+import importlib.util
+import json
+import sys
+import tempfile
+import time
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+
+class Ed2kTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        modules = {name: types.ModuleType(name) for name in ("app", "app.log", "app.plugins")}
+        modules["app"].__path__ = []
+        modules["app.log"].logger = Mock()
+        modules["app.plugins"]._PluginBase = type("PluginBase", (), {})
+        plugin_path = Path(__file__).resolve().parents[1] / "__init__.py"
+        spec = importlib.util.spec_from_file_location("ed2k_test_plugin", plugin_path)
+        cls.module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, modules):
+            spec.loader.exec_module(cls.module)
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.folder = self.root / "media"
+        self.folder.mkdir()
+        self.plugin = self.module.Ed2kFolderWatcher()
+        self.plugin.get_data_path = lambda: self.root / "data"
+        self.plugin.update_config = Mock()
+        self.plugin.init_plugin({"folder": str(self.folder), "min_age": 0})
+        self.addCleanup(self.plugin.stop_service)
+
+    def create(self, name="test.bin", data=b"hello"):
+        path = self.folder / name
+        path.write_bytes(data)
+        return path
+
+    def records(self):
+        return json.loads((self.root / "data" / "records.json").read_text())
+
+    def wait_for(self, predicate, timeout=8):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.05)
+        self.fail("worker timeout")
+
+    def test_md4_vectors_and_fallback(self):
+        for data, expected in [(b"", "31d6cfe0d16ae931b73c59d7e0c089c0"), (b"abc", "a448017aaf21d8525fc10ae87aa6729d")]:
+            self.assertEqual(self.module._md4(data).hex(), expected)
+            path = self.create(data=data)
+            with patch.object(self.module, "_CryptoMD4", None):
+                self.assertEqual(self.module.ed2k_hash(path), expected)
+
+    def test_boundary_hashes(self):
+        from Crypto.Hash import MD4
+        part_size = self.module.ED2K_PART_SIZE
+        rhash_vectors = {
+            0: "31d6cfe0d16ae931b73c59d7e0c089c0",
+            1: "bde52cb31de33e46245e05fbdbd6fb24",
+            9727999: "5461275e76837a313a0b2f67811c1023",
+            9728000: "ee15063dd1e9c5bd5c0e4205c0b8e698",
+            9728001: "748c0171a2d42d28afb644ef3e17f4e7",
+            19456000: "fcca57f6ae31dcfa2ce0e41119738eb1",
+        }
+        for size in (0, 1, part_size - 1, part_size, part_size + 1, 2 * part_size):
+            with self.subTest(size=size):
+                data = b"a" * size
+                if size < part_size:
+                    expected = MD4.new(data).hexdigest()
+                else:
+                    digests = [MD4.new(data[offset:offset + part_size]).digest() for offset in range(0, size, part_size)]
+                    if size % part_size == 0:
+                        digests.append(MD4.new().digest())
+                    expected = MD4.new(b"".join(digests)).hexdigest()
+                self.assertEqual(self.module.ed2k_hash(self.create(data=data)), expected)
+                self.assertEqual(expected, rhash_vectors[size])
+
+    def test_incremental_and_history_after_removal(self):
+        first = self.create()
+        self.plugin._process_file(first)
+        first.unlink()
+        second = self.create("second.bin", b"new")
+        self.plugin._process_file(second)
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("rehashed")):
+            self.plugin._process_file(second)
+        self.assertEqual(len(self.records()), 2)
+        self.assertEqual(len((self.folder / "ed2k.txt").read_text().splitlines()), 2)
+
+    def test_txt_disabled_and_legacy_migration(self):
+        self.plugin._output_enabled = False
+        path = self.create()
+        legacy = self.folder / ".ed2k.txt.cache.json"
+        legacy.write_text(json.dumps({"old": {"link": "old-link"}}))
+        self.plugin._process_file(path)
+        self.assertFalse((self.folder / "ed2k.txt").exists())
+        self.assertIn("old", self.records())
+        self.plugin._output = str(self.root / "different" / "links.txt")
+        self.assertEqual(len(self.records()), 2)
+
+    def test_self_outputs_and_symlinks_excluded(self):
+        path = self.create()
+        self.plugin._process_file(path)
+        self.assertFalse(self.plugin._eligible(self.folder / "ed2k.txt"))
+        self.assertFalse(self.plugin._eligible(self.create(".ed2k-write-test")))
+        self.assertFalse(self.plugin._eligible(self.create("download.part")))
+        symbolic = self.folder / "symbolic.bin"
+        symbolic.symlink_to(path)
+        self.assertFalse(self.plugin._eligible(symbolic))
+
+    def test_safety_no_destination_no_delete(self):
+        self.plugin._output_enabled = False
+        self.plugin._delete_source = True
+        path = self.create()
+        self.plugin._process_file(path)
+        self.assertTrue(path.exists())
+
+    def test_delete_only_after_success(self):
+        self.plugin._delete_source = True
+        path = self.create()
+        self.plugin._process_file(path)
+        self.assertFalse(path.exists())
+        self.assertEqual(len(self.records()), 1)
+        self.assertIn("ed2k://", (self.folder / "ed2k.txt").read_text())
+
+    def test_write_failure_preserves_source_and_cache(self):
+        path = self.create()
+        self.plugin._delete_source = True
+        original = self.plugin._atomic_write
+
+        def fail_txt(target, text):
+            if target.suffix == ".txt":
+                raise OSError("disk full")
+            return original(target, text)
+
+        with patch.object(self.plugin, "_atomic_write", side_effect=fail_txt):
+            with self.assertRaises(OSError):
+                self.plugin._process_file(path)
+        self.assertTrue(path.exists())
+        self.assertEqual(len(self.records()), 1)
+
+    def test_telegram_failure_retries_without_rehash(self):
+        path = self.create()
+        self.plugin._telegram_enabled = True
+        self.plugin._delete_source = True
+        with patch.object(self.plugin, "_send_telegram", return_value=False):
+            self.plugin._process_file(path)
+        self.assertTrue(path.exists())
+        self.assertIn(str(path), self.plugin._pending)
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("rehashed")), patch.object(self.plugin, "_send_telegram", return_value=True):
+            self.plugin._process_file(path)
+        self.assertFalse(path.exists())
+
+    def test_change_during_notification_prevents_delete(self):
+        path = self.create()
+        self.plugin._telegram_enabled = True
+        self.plugin._delete_source = True
+
+        def change(*args):
+            path.write_bytes(b"replacement content")
+            return True
+
+        with patch.object(self.plugin, "_send_telegram", side_effect=change):
+            self.plugin._process_file(path)
+        self.assertTrue(path.exists())
+
+    def test_change_during_hash_requeues(self):
+        path = self.create()
+
+        def change(*args):
+            path.write_bytes(b"different")
+            return "0" * 32
+
+        with patch.object(self.module, "ed2k_hash", side_effect=change):
+            self.plugin._process_file(path)
+        self.assertIn(str(path), self.plugin._pending)
+        self.assertFalse((self.folder / "ed2k.txt").exists())
+
+    def test_corrupt_cache_not_silently_overwritten(self):
+        path = self.create()
+        data = self.root / "data"
+        data.mkdir()
+        (data / "records.json").write_text("broken")
+        with self.assertRaises(ValueError):
+            self.plugin._process_file(path)
+        self.assertEqual((data / "records.json").read_text(), "broken")
+
+    def test_realtime_create_and_move_directory(self):
+        if self.module.Observer is None:
+            self.skipTest("watchdog not installed")
+        self.plugin.init_plugin({"enabled": True, "folder": str(self.folder), "min_age": 0})
+        self.assertEqual(self.plugin.get_service(), [])
+        path = self.create()
+        self.wait_for(lambda: (self.root / "data" / "records.json").exists())
+        self.assertIn(str(path), self.records())
+        staged = self.root / "staged"
+        staged.mkdir()
+        (staged / "moved.bin").write_bytes(b"moved")
+        staged.rename(self.folder / "arrived")
+        self.wait_for(lambda: len(self.records()) == 2)
+
+    def test_stop_cancels_pending_tasks(self):
+        self.plugin.init_plugin({"enabled": True, "folder": str(self.folder), "min_age": 60})
+        self.create()
+        self.plugin.stop_service()
+        self.assertFalse(self.plugin._worker)
+        self.assertFalse((self.folder / "ed2k.txt").exists())
+
+    def test_growing_file_event_is_delayed(self):
+        self.plugin.init_plugin({"enabled": True, "monitor_enabled": False, "folder": str(self.folder), "min_age": 0})
+        path = self.create()
+        self.plugin._queue_event(path)
+        time.sleep(0.5)
+        path.write_bytes(b"still downloading")
+        time.sleep(0.7)
+        self.assertFalse((self.folder / "ed2k.txt").exists())
+        self.wait_for(lambda: (self.folder / "ed2k.txt").exists())
+        self.assertEqual(self.records()[str(path)]["size"], len(b"still downloading"))
+
+    def test_atomic_replace_failure_preserves_old_txt(self):
+        output = self.folder / "ed2k.txt"
+        output.write_text("previous result")
+        with patch.object(self.module.os, "replace", side_effect=OSError("replace failed")):
+            with self.assertRaises(OSError):
+                self.plugin._atomic_write(output, "new result")
+        self.assertEqual(output.read_text(), "previous result")
+        self.assertFalse(list(self.folder.glob(".ed2k-write-*")))
+
+    def test_txt_disabled_does_not_modify_existing_file(self):
+        output = self.folder / "ed2k.txt"
+        output.write_text("keep unchanged")
+        self.plugin._output_enabled = False
+        self.plugin._process_file(self.create())
+        self.assertEqual(output.read_text(), "keep unchanged")
+
+    def test_invalid_extension_and_nonrecursive(self):
+        path = self.create()
+        self.plugin._extensions = "mkv,mp4"
+        self.assertFalse(self.plugin._eligible(path))
+        child = self.folder / "child"
+        child.mkdir()
+        nested = child / "test.mkv"
+        nested.write_bytes(b"data")
+        self.plugin._recursive = False
+        self.assertFalse(self.plugin._eligible(nested))
+
+
+if __name__ == "__main__":
+    unittest.main()

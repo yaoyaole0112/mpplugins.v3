@@ -18,6 +18,13 @@ from app.log import logger
 from app.plugins import _PluginBase
 
 try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except ImportError:
+    FileSystemEventHandler = None
+    Observer = None
+
+try:
     from app.modules.telegram.botapi import TelegramApiError, TelegramBotApi, TelegramNetworkError
 except ImportError:
     TelegramApiError = TelegramBotApi = TelegramNetworkError = None
@@ -85,34 +92,21 @@ def _md4(data: bytes) -> bytes:
     return b"".join(value.to_bytes(4, "little") for value in (a, b, c, d))
 
 
-def ed2k_hash(path: Path) -> str:
-    if _CryptoMD4 is not None:
-        part_hashes = []
-        with path.open("rb") as file_handle:
-            while True:
-                chunk = file_handle.read(ED2K_PART_SIZE)
-                if not chunk:
-                    break
-                digest = _CryptoMD4.new()
-                digest.update(chunk)
-                part_hashes.append(digest.digest())
-        if not part_hashes:
-            return _CryptoMD4.new().hexdigest()
-        if len(part_hashes) == 1:
-            return part_hashes[0].hex()
-        digest = _CryptoMD4.new()
-        digest.update(b"".join(part_hashes))
-        return digest.hexdigest()
+def ed2k_hash(path: Path, stop_event=None) -> str:
     part_hashes = []
     with path.open("rb") as file_handle:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError("任务已停止")
             chunk = file_handle.read(ED2K_PART_SIZE)
-            if not chunk:
+            digest = _CryptoMD4.new(chunk).digest() if _CryptoMD4 else _md4(chunk)
+            part_hashes.append(digest)
+            if len(chunk) < ED2K_PART_SIZE:
                 break
-            part_hashes.append(_md4(chunk))
-    if not part_hashes:
-        return _md4(b"").hex()
-    return _md4(b"".join(part_hashes)).hex() if len(part_hashes) > 1 else part_hashes[0].hex()
+    if len(part_hashes) == 1:
+        return part_hashes[0].hex()
+    combined = b"".join(part_hashes)
+    return (_CryptoMD4.new(combined).digest() if _CryptoMD4 else _md4(combined)).hex()
 
 
 def ed2k_link(path: Path, file_hash: str) -> str:
@@ -123,7 +117,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_author = "OpenAI"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -141,11 +135,24 @@ class Ed2kFolderWatcher(_PluginBase):
     _telegram_token = ""
     _telegram_chat_id = ""
     _telegram_thread_id = ""
+    _monitor_enabled = True
+    _output_enabled = True
+    _observer = None
+    _worker = None
+    _stopping = None
+    _pending = None
+    _condition = None
+    _scan_enabled = False
     _onlyonce = False
     _running = False
     _lock = threading.Lock()
 
     def init_plugin(self, config: dict = None) -> None:
+        self.stop_service()
+        self._stopping = threading.Event()
+        self._condition = threading.Condition()
+        self._pending = {}
+        self._lock = threading.RLock()
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
         self._folder = str(config.get("folder") or "").strip()
@@ -158,6 +165,8 @@ class Ed2kFolderWatcher(_PluginBase):
         self._telegram_token = str(config.get("telegram_token") or "").strip()
         self._telegram_chat_id = str(config.get("telegram_chat_id") or "").strip()
         self._telegram_thread_id = str(config.get("telegram_thread_id") or "").strip()
+        self._monitor_enabled = bool(config.get("monitor_enabled", True))
+        self._output_enabled = bool(config.get("output_enabled", True))
         try:
             self._min_age = max(0, int(config.get("min_age", 60)))
             CronTrigger.from_crontab(self._cron)
@@ -165,11 +174,17 @@ class Ed2kFolderWatcher(_PluginBase):
             self._min_age = 60
             self._cron = DEFAULT_CRON
             logger.error(f"本地文件夹 ED2K 链接：配置无效：{err}")
+        self._scan_enabled = bool(config.get("scan_enabled", False))
         self._onlyonce = bool(config.get("onlyonce", False))
+        if self._folder and (self._enabled or self._onlyonce):
+            self._worker = threading.Thread(target=self._work, name="ed2k-worker", daemon=True)
+            self._worker.start()
         if self._onlyonce and self._folder:
             self._onlyonce = False
             self._save_config()
-            threading.Thread(target=self.scan, name="ed2k-folder-scan-once", daemon=True).start()
+            self.scan()
+        if self._enabled and self._folder and self._monitor_enabled:
+            self._start_monitor()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -181,8 +196,110 @@ class Ed2kFolderWatcher(_PluginBase):
     def _paths(self) -> Tuple[Path, Path, Path]:
         folder = Path(self._folder).expanduser()
         output = Path(self._output).expanduser() if self._output else folder / "ed2k.txt"
-        cache = output.with_name(f".{output.name}.cache.json")
+        cache = Path(self.get_data_path()) / "records.json"
+        legacy = output.with_name(f".{output.name}.cache.json")
+        if not cache.exists() and legacy.exists():
+            records = json.loads(legacy.read_text(encoding="utf-8"))
+            self._atomic_write(cache, json.dumps(records, ensure_ascii=False))
         return folder, output, cache
+
+    def _start_monitor(self) -> None:
+        if Observer is None or FileSystemEventHandler is None:
+            logger.warning("自动生成ED2K链接：watchdog 不可用，实时监控未启动")
+            return
+        folder = Path(self._folder).expanduser()
+        if not folder.is_dir():
+            logger.warning(f"自动生成ED2K链接：监控目录不存在：{folder}")
+            return
+        plugin = self
+
+        class Handler(FileSystemEventHandler):
+            def _queue(self, path: str) -> None:
+                plugin._queue_event(Path(path))
+
+            def on_created(self, event):
+                if event.is_directory:
+                    for path in plugin._iter_files(Path(event.src_path)):
+                        plugin._queue_event(path)
+                else:
+                    self._queue(event.src_path)
+
+            def on_modified(self, event):
+                if not event.is_directory:
+                    self._queue(event.src_path)
+
+            def on_moved(self, event):
+                if event.is_directory:
+                    for path in plugin._iter_files(Path(event.dest_path)):
+                        plugin._queue_event(path)
+                else:
+                    self._queue(event.dest_path)
+
+        try:
+            self._observer = Observer()
+            self._observer.schedule(Handler(), str(folder), recursive=self._recursive)
+            self._observer.start()
+            logger.info(f"自动生成ED2K链接：已启动实时文件监控：{folder}")
+        except Exception as err:
+            self._observer = None
+            logger.error(f"自动生成ED2K链接：启动实时文件监控失败：{err}")
+
+    def _eligible(self, path: Path) -> bool:
+        folder, output, cache = self._paths()
+        resolved = path.resolve()
+        if path.is_symlink() or not path.is_file() or not resolved.is_relative_to(folder.resolve()):
+            return False
+        excluded = {output.resolve(), cache.resolve(), output.with_name(f".{output.name}.cache.json").resolve()}
+        if resolved in excluded or path.name.startswith(".ed2k-write-"):
+            return False
+        if not self._recursive and resolved.parent != folder.resolve():
+            return False
+        if path.suffix.lower() in {".part", ".tmp", ".!qb", ".crdownload"}:
+            return False
+        extensions = self._extension_set()
+        return not extensions or path.suffix.lower().lstrip(".") in extensions
+
+    def _queue_event(self, path: Path, delay=None) -> None:
+        if self._stopping.is_set():
+            return
+        try:
+            if not self._eligible(path):
+                return
+            stat = path.stat()
+            signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+            with self._condition:
+                self._pending[str(path)] = (time.monotonic() + (max(1, self._min_age) if delay is None else delay), signature)
+                self._condition.notify()
+        except OSError:
+            return
+
+    def _work(self) -> None:
+        while not self._stopping.is_set():
+            with self._condition:
+                if not self._pending:
+                    self._condition.wait(timeout=1)
+                    continue
+                key = min(self._pending, key=lambda item: self._pending[item][0])
+                due, signature = self._pending[key]
+                remaining = due - time.monotonic()
+                if remaining > 0:
+                    self._condition.wait(timeout=min(remaining, 1))
+                    continue
+                del self._pending[key]
+            path = Path(key)
+            try:
+                stat = path.stat()
+                if signature != (stat.st_size, stat.st_mtime_ns, stat.st_ino):
+                    self._queue_event(path)
+                    continue
+                self._process_file(path)
+            except FileNotFoundError:
+                pass
+            except InterruptedError:
+                return
+            except Exception as err:
+                logger.warning(f"自动生成ED2K链接：处理失败，60秒后重试：{path}：{type(err).__name__}")
+                self._queue_event(path, delay=60)
 
     def _extension_set(self) -> set[str]:
         return {item.strip().lower().lstrip(".") for item in self._extensions.split(",") if item.strip()}
@@ -200,24 +317,34 @@ class Ed2kFolderWatcher(_PluginBase):
         if TelegramBotApi is None:
             logger.warning("自动生成ED2K链接：当前 MoviePilot 未提供 Telegram Bot API")
             return False
+        bot = None
         try:
             thread_id = int(self._telegram_thread_id) if self._telegram_thread_id else None
-            bot = TelegramBotApi(self._telegram_token)
+            try:
+                from app.runtime.settings import get_runtime_setting
+                proxy = get_runtime_setting("PROXY")
+            except ImportError:
+                from app.core.config import settings
+                proxy = settings.PROXY
+            bot = TelegramBotApi(self._telegram_token, proxy=proxy)
             bot.send_message(
                 self._telegram_chat_id,
                 f"自动生成 ED2K 链接\n文件：{path.name}\n\n{link}",
                 disable_web_page_preview=True,
                 message_thread_id=thread_id,
             )
-            bot.close()
             logger.info(f"自动生成ED2K链接：Telegram 通知已发送：{path.name}")
             return True
-        except (TelegramApiError, TelegramNetworkError, ValueError) as err:
-            logger.warning(f"自动生成ED2K链接：Telegram 通知失败（保留待重试）：{type(err).__name__}: {err}")
-            return False
         except Exception as err:
-            logger.warning(f"自动生成ED2K链接：Telegram 通知异常（保留待重试）：{type(err).__name__}: {err}")
+            detail = str(err).replace(self._telegram_token, "[REDACTED]")
+            logger.warning(f"自动生成ED2K链接：Telegram 发送失败，保留源文件并重试：{type(err).__name__}: {detail}")
             return False
+        finally:
+            if bot is not None:
+                try:
+                    bot.close()
+                except Exception:
+                    logger.warning("自动生成ED2K链接：关闭 Telegram 连接失败")
 
     def _notify_record(self, path: Path, record: dict) -> None:
         if not self._telegram_enabled:
@@ -240,88 +367,87 @@ class Ed2kFolderWatcher(_PluginBase):
                     yield item
 
     @staticmethod
-    def _write_results(output: Path, cache_path: Path, records: dict) -> None:
-        ordered = sorted(records.values(), key=lambda item: item["link"].lower())
-        output.write_text("\n".join(item["link"] for item in ordered) + ("\n" if ordered else ""), encoding="utf-8")
-        cache_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+    def _atomic_write(path: Path, text: str) -> None:
+        import tempfile
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=".ed2k-write-", delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def _write_results(self, output: Optional[Path], cache_path: Path, records: dict) -> None:
+        self._atomic_write(cache_path, json.dumps(records, ensure_ascii=False, indent=2))
+        if output is not None:
+            links = sorted({item["link"] for item in records.values()})
+            self._atomic_write(output, "\n".join(links) + ("\n" if links else ""))
+
+    def _process_file(self, path: Path) -> None:
+        with self._lock:
+            if self._stopping.is_set() or not self._eligible(path):
+                return
+            folder, output, cache_path = self._paths()
+            output = output if self._output_enabled else None
+            stat = path.stat()
+            if stat.st_mtime + self._min_age > time.time():
+                self._queue_event(path)
+                return
+            records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+            key = str(path.resolve())
+            record = records.get(key)
+            signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_dev)
+            unchanged = record and (record.get("size"), record.get("mtime_ns")) == signature[:2]
+            legacy_boundary = record and stat.st_size > 0 and stat.st_size % ED2K_PART_SIZE == 0 and record.get("hash_version") != 2
+            if unchanged and not legacy_boundary and not self._delete_source:
+                if not self._telegram_enabled or (record.get("telegram_sent") and record.get("telegram_target") == self._telegram_target_key()):
+                    return
+            if not unchanged or legacy_boundary:
+                file_hash = ed2k_hash(path, self._stopping)
+                final = path.stat()
+                if signature != (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev):
+                    self._queue_event(path)
+                    return
+                record = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "name": path.name,
+                          "link": ed2k_link(path, file_hash), "hash_version": 2, "telegram_sent": False, "telegram_target": ""}
+                records[key] = record
+                logger.info(f"自动生成ED2K链接：生成完成：{path}")
+            self._write_results(output, cache_path, records)
+            self._notify_record(path, record)
+            self._write_results(output, cache_path, records)
+            delivered = not self._telegram_enabled or record.get("telegram_sent")
+            if not delivered:
+                self._queue_event(path, delay=60)
+            if self._delete_source and delivered and (output is not None or self._telegram_enabled):
+                final = path.stat()
+                if signature == (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) and not self._stopping.is_set():
+                    path.unlink()
+                    logger.info(f"自动生成ED2K链接：已删除源文件：{path}")
 
     def scan(self) -> None:
-        if not self._folder or not self._lock.acquire(blocking=False):
+        if not self._folder or self._stopping.is_set():
             return
-        self._running = True
-        try:
-            folder, output, cache_path = self._paths()
-            if not folder.is_dir():
-                logger.warning(f"本地文件夹 ED2K 链接：目录不存在：{folder}")
-                return
-            output.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
-            except Exception:
-                cache = {}
-            extensions = self._extension_set()
-            records = {}
-            delete_candidates = []
-            for path in self._iter_files(folder):
-                try:
-                    resolved = path.resolve()
-                    if resolved == output.resolve() or resolved == cache_path.resolve():
-                        continue
-                    stat = path.stat()
-                    if extensions and path.suffix.lower().lstrip(".") not in extensions:
-                        continue
-                    if self._min_age and (stat.st_mtime + self._min_age > time.time()):
-                        continue
-                    key = str(resolved)
-                    signature = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-                    cached = cache.get(key)
-                    if cached and cached.get("size") == signature["size"] and cached.get("mtime_ns") == signature["mtime_ns"]:
-                        records[key] = {**signature, "name": path.name, "link": cached["link"]}
-                        records[key]["telegram_sent"] = bool(cached.get("telegram_sent"))
-                        records[key]["telegram_target"] = cached.get("telegram_target", "")
-                        self._write_results(output, cache_path, records)
-                        self._notify_record(path, records[key])
-                        self._write_results(output, cache_path, records)
-                        if self._delete_source:
-                            delete_candidates.append(path)
-                        continue
-                    file_hash = ed2k_hash(path)
-                    final_stat = path.stat()
-                    if final_stat.st_size != stat.st_size or final_stat.st_mtime_ns != stat.st_mtime_ns:
-                        logger.info(f"本地文件夹 ED2K 链接：文件仍在变化，留待下次扫描：{path}")
-                        continue
-                    records[key] = {
-                        **signature,
-                        "name": path.name,
-                        "link": ed2k_link(path, file_hash),
-                        "telegram_sent": False,
-                        "telegram_target": "",
-                    }
-                    self._write_results(output, cache_path, records)
-                    self._notify_record(path, records[key])
-                    self._write_results(output, cache_path, records)
-                    if self._delete_source:
-                        delete_candidates.append(path)
-                    logger.info(f"本地文件夹 ED2K 链接：已处理 {path}")
-                except (OSError, ValueError) as err:
-                    logger.warning(f"本地文件夹 ED2K 链接：跳过 {path}：{err}")
-            self._write_results(output, cache_path, records)
-            if self._delete_source:
-                for path in delete_candidates:
-                    try:
-                        path.unlink()
-                        logger.info(f"本地文件夹 ED2K 链接：已删除源文件：{path}")
-                    except OSError as err:
-                        logger.warning(f"本地文件夹 ED2K 链接：删除源文件失败（已保留）：{path}：{err}")
-            logger.info(f"本地文件夹 ED2K 链接：扫描完成，共 {len(records)} 个文件，输出：{output}")
-        except Exception as err:
-            logger.error(f"本地文件夹 ED2K 链接扫描失败：{err}", exc_info=True)
-        finally:
-            self._running = False
-            self._lock.release()
+        folder, output, cache_path = self._paths()
+        if not folder.is_dir():
+            logger.warning(f"自动生成ED2K链接：目录不存在：{folder}")
+            return
+        with self._lock:
+            records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+            if self._output_enabled:
+                self._write_results(output, cache_path, records)
+        for path in self._iter_files(folder):
+            if self._stopping.is_set():
+                break
+            self._queue_event(path)
+        logger.info("自动生成ED2K链接：增量补扫已入队，已有链接不会重复计算")
 
     def get_service(self) -> List[Dict[str, Any]]:
-        if not self._enabled or not self._folder:
+        if not self._enabled or not self._folder or not self._scan_enabled:
             return []
         return [{"id": "Ed2kFolderWatcher", "name": "扫描本地文件夹并生成 ED2K", "trigger": CronTrigger.from_crontab(self._cron), "func": self.scan}]
 
@@ -332,10 +458,21 @@ class Ed2kFolderWatcher(_PluginBase):
         return None
 
     def stop_service(self) -> None:
-        return None
+        if self._stopping is not None:
+            self._stopping.set()
+        if self._condition is not None:
+            with self._condition:
+                self._condition.notify_all()
+        if self._observer is not None:
+            self._observer.stop()
+            self._observer.join()
+            self._observer = None
+        if self._worker is not None and self._worker is not threading.current_thread():
+            self._worker.join()
+            self._worker = None
 
     def _save_config(self) -> None:
-        self.update_config({"enabled": self._enabled, "folder": self._folder, "recursive": self._recursive, "cron": self._cron, "output": self._output, "extensions": self._extensions, "min_age": self._min_age, "delete_source": self._delete_source, "telegram_enabled": self._telegram_enabled, "telegram_token": self._telegram_token, "telegram_chat_id": self._telegram_chat_id, "telegram_thread_id": self._telegram_thread_id, "onlyonce": self._onlyonce})
+        self.update_config({"enabled": self._enabled, "folder": self._folder, "recursive": self._recursive, "cron": self._cron, "output": self._output, "output_enabled": self._output_enabled, "monitor_enabled": self._monitor_enabled, "scan_enabled": self._scan_enabled, "extensions": self._extensions, "min_age": self._min_age, "delete_source": self._delete_source, "telegram_enabled": self._telegram_enabled, "telegram_token": self._telegram_token, "telegram_chat_id": self._telegram_chat_id, "telegram_thread_id": self._telegram_thread_id, "onlyonce": self._onlyonce})
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         def field(component: str, model: str, label: str, **props: Any) -> dict:
@@ -348,14 +485,17 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VSwitch", "enabled", "启用插件"),
             field("VTextField", "folder", "监控目录", placeholder="/downloads/complete", hint="必须是 MoviePilot 容器内可见的本地路径。", persistent_hint=True),
             field("VSwitch", "recursive", "扫描子目录"),
+            field("VSwitch", "monitor_enabled", "监控新增文件", hint="文件创建或移动到监控目录后自动处理；定时补扫仍可作为兜底。", persistent_hint=True),
+            field("VSwitch", "output_enabled", "生成本地 TXT 文件", hint="关闭后只保存内部缓存，并可继续发送 Telegram；开启后写入下面的路径。", persistent_hint=True),
             field("VTextField", "output", "输出文件路径", placeholder="留空则写入监控目录/ed2k.txt"),
             field("VTextField", "extensions", "文件扩展名过滤", placeholder="留空处理全部文件，例如 mkv,mp4,flac"),
-            field("VTextField", "min_age", "文件稳定等待秒数", type="number", hint="文件修改时间距现在不足此秒数时跳过。", persistent_hint=True),
-            field("VSwitch", "delete_source", "生成完成后删除源文件", hint="ED2K 生成并成功写入清单后按队列逐个删除；删除失败会保留源文件。", persistent_hint=True),
-            field("VTextField", "cron", "扫描计划", hint="默认每 10 分钟：*/10 * * * *", persistent_hint=True),
+            field("VTextField", "min_age", "文件稳定等待秒数", type="number", hint="创建、移动或修改后等待稳定；持续写入会自动延后处理。", persistent_hint=True),
+            field("VSwitch", "delete_source", "生成完成后删除源文件", hint="仅在 TXT 写入成功且已启用的 TG 发送成功后删除；两种输出都关闭时不删除。", persistent_hint=True),
+            field("VSwitch", "scan_enabled", "启用定时增量补扫", hint="默认关闭；实时监控无需定时计划。网络挂载漏事件时可开启兜底。", persistent_hint=True),
+            field("VTextField", "cron", "补扫计划（开启补扫时生效）", hint="默认每 10 分钟：*/10 * * * *", persistent_hint=True),
             field("VSwitch", "telegram_enabled", "发送 ED2K 链接到 Telegram"),
-            field("VTextField", "telegram_token", "Telegram Bot Token", type="password", hint="从 @BotFather 获取；仅保存在 MoviePilot 配置中。", persistent_hint=True),
-            field("VTextField", "telegram_chat_id", "Telegram Chat ID", placeholder="例如 @my_channel 或 -1001234567890", hint="机器人必须已加入目标群组或频道并有发消息权限。", persistent_hint=True),
-            field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="可选，仅超级群组话题需要填写"),
+            field("VTextField", "telegram_token", "Telegram Bot Token", type="password", hint="发送者的身份凭证，从 @BotFather 获取；不是接收方 Bot 的用户名。", persistent_hint=True),
+            field("VTextField", "telegram_chat_id", "Telegram Chat ID", placeholder="例如 @my_channel 或 -1001234567890", hint="填写接收消息的用户/群组/频道；频道需给发送机器人发消息权限，不支持另一个 Bot。", persistent_hint=True),
+            field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "telegram_enabled": False, "telegram_token": "", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "telegram_enabled": False, "telegram_token": "", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False}
