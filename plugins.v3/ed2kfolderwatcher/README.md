@@ -68,7 +68,7 @@ docker exec -it moviepilot python /app/app/plugins/ed2kfolderwatcher/telegram_us
 
 采用 9,728,000 字节分块的 eMule 兼容 ED2K。小文件直接 MD4，大文件合并各块 MD4 后再次 MD4；文件恰为整块倍数时包含尾部空块 MD4。优先使用 PyCryptodome 原生 MD4，无该模块时使用纯 Python 回退。实现规则对照 RHash 的 `librhash/ed2k.c`；NanShare 当前部署的是编译后程序，未取得可核验的 ED2K 源码。
 
-40 项隔离测试覆盖个人账号发送路由、账号/模式去重隔离、纯链接与数字目标、未授权/机器人 Session 拒绝、会话权限、并发锁、凭证保存、错误脱敏、代理与 FloodWait，以及原有目录监控、增量、哈希、TXT、Telegram Bot 和安全删除。六组哈希向量（空文件、1 字节、分块边界前后、两整块）已与独立 RHash 库逐项比对。测试使用模拟个人账号客户端，实际个人账号登录及投递必须由账号所有者完成，发布时不声称已经完成真实发送。
+58 项隔离测试覆盖网页验证码登录、两步验证、验证码重试、过期清理、退出撤销、管理员权限、请求校验与敏感字段隐藏，以及个人账号发送路由、账号/模式去重隔离、纯链接与数字目标、未授权/机器人 Session 拒绝、会话权限、并发锁、凭证保存、错误脱敏、代理与 FloodWait，以及原有目录监控、增量、哈希、TXT、Telegram Bot 和安全删除。浏览器模拟验证了验证码 → 两步验证 → 已登录的页面流程。六组哈希向量（空文件、1 字节、分块边界前后、两整块）已与独立 RHash 库逐项比对。测试使用模拟个人账号客户端，实际个人账号登录及投递必须由账号所有者完成，发布时不声称已经完成真实发送。
 
 参考：
 - RHash: https://github.com/rhash/RHash/blob/master/librhash/ed2k.c
