@@ -1404,7 +1404,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-move-row{margin:10px 0}
 .eme-move-row .eme-folder-choice{max-width:230px}
 .eme-move-mode{width:132px;flex:none;margin-top:0}
-.eme-move-mode .eme-picker-trigger{min-height:36px;padding:8px 10px}
+.eme-move-mode .eme-picker-trigger{min-height:42px;height:42px;padding:10px}
 .eme-move-mode .eme-picker-menu{min-width:132px}
 .eme-move-label,.eme-move-arrow{flex:none;font-weight:700;color:rgba(var(--v-theme-on-surface),.65)}
 .eme-move-arrow{font-size:18px}
