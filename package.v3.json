@@ -6,7 +6,7 @@
     "version": "1.0.0",
     "icon": "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png",
     "author": "OpenAI",
-    "v3": false,
+    "v3": true,
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
     "level": 1,
     "history": {
