@@ -2,7 +2,9 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -13,7 +15,7 @@ from fastapi import HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from emetools import EmeTools, ScheduleChange, ToolAction, EnrichmentAction, _log_label
 from emetools.invalid_data import InvalidDataCleaner, QUARANTINE
-from emetools.p115 import P115Client
+from emetools.p115 import P115Client, P115DirectoryUnavailable
 from emetools.subscription_monitor import matches_subscription, matches_keyword, normalize_channel
 from app.schemas.types import EventType, NotificationChannel, MessageType
 from app.schemas.system import NotificationConf
@@ -113,11 +115,11 @@ class P115ParseTests(unittest.TestCase):
                                              "errNo": 990001, "request": "/rb/delete"})
 
         client = P115Client("valid-cookie")
-        client.client = httpx.Client(transport=httpx.MockTransport(handler))
-        result = client.delete_files(["123"])
         client.client.close()
-        self.assertFalse(result["state"])
-        self.assertIn("登录已过期", result["msg"])
+        client.client = httpx.Client(transport=httpx.MockTransport(handler))
+        self.addCleanup(client.client.close)
+        with self.assertRaisesRegex(P115DirectoryUnavailable, "登录状态失效"):
+            client.delete_files(["123"])
 
 
 class PluginTests(unittest.TestCase):
@@ -831,6 +833,81 @@ class PluginTests(unittest.TestCase):
             operation="cleanup_confirm", token=requested["token"])))
         self.assertFalse(confirmed["ok"])
         client.delete_files.assert_not_called()
+
+    def test_scheduled_cleanup_stops_on_partial_preview_without_confirmation(self):
+        self.plugin._enabled = True
+        self.plugin.get_config.return_value = {"cookies": "test"}
+        self.plugin._schedule["p115_cleanup"]["enabled"] = True
+        self.plugin._schedule["p115_cleanup"]["dir_ids"] = ["123", "456", "789"]
+        self.plugin._schedule["p115_cleanup"]["dir_names"] = ["ready", "blocked", "unread"]
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.list_files_in_dir.side_effect = [
+            [{"fid": "file", "size": 4}], P115DirectoryUnavailable("HTTP 405；已暂停请求 300 秒")]
+        client.list_children.return_value = ([], [])
+        self.plugin._client = lambda: client
+        with patch.object(self.plugin, "_cleanup_confirm") as confirm, \
+                patch.object(self.plugin, "_send_tool_notice") as notify, patch("emetools.logger") as logger:
+            self.plugin._run_scheduled("p115_cleanup")
+        confirm.assert_not_called()
+        client.delete_files.assert_not_called()
+        self.assertEqual(client.list_files_in_dir.call_count, 2)
+        notify.assert_called_once()
+        self.assertIn("blocked", str(notify.call_args))
+        self.assertNotIn("目录配置已变化", str(logger.mock_calls))
+
+    def test_115_scheduled_jobs_queue_instead_of_overlapping(self):
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_queued = threading.Event()
+        second_started = threading.Event()
+
+        def first_job():
+            first_started.set()
+            self.assertTrue(release_first.wait(2))
+
+        def second_job(section):
+            second_started.set()
+
+        def run_second():
+            second_queued.set()
+            self.plugin._run_scheduled("p115_cleanup")
+
+        with patch.object(self.plugin, "_run_media_scheduled_serial", side_effect=first_job), \
+                patch.object(self.plugin, "_run_scheduled_serial", side_effect=second_job), \
+                ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(self.plugin._run_media_scheduled)
+            try:
+                self.assertTrue(first_started.wait(2))
+                second = executor.submit(run_second)
+                self.assertTrue(second_queued.wait(2))
+                self.assertFalse(second_started.wait(0.03))
+            finally:
+                release_first.set()
+            first.result(timeout=2)
+            second.result(timeout=2)
+        self.assertTrue(second_started.is_set())
+
+    def test_manual_partial_preview_never_creates_cleanup_token(self):
+        self.plugin._schedule["p115_cleanup"]["dir_ids"] = ["123", "456"]
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.list_files_in_dir.side_effect = [[{"fid": "file", "size": 4}], RuntimeError("读取失败")]
+        client.list_children.return_value = ([], [])
+        self.plugin._client = lambda: client
+        result = self.plugin._cleanup_request()
+        self.assertFalse(result["ok"])
+        self.assertIn("预览失败", result["message"])
+        self.assertEqual(result["file_count"], 1)
+        self.assertFalse(self.plugin._pending)
+        client.delete_files.assert_not_called()
+
+    def test_directory_stats_propagate_shared_restriction(self):
+        client = MagicMock()
+        client.list_children.side_effect = P115DirectoryUnavailable("HTTP 405")
+        with self.assertRaises(P115DirectoryUnavailable):
+            self.plugin._move_tree_stats(client, [{"cid": "123", "size": 99}])
+        self.assertEqual(client.list_children.call_count, 1)
 
     def test_trash_requires_matching_preview_token(self):
         self.plugin.get_config.return_value = {"cookies": "test"}

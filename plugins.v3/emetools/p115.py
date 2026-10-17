@@ -1,8 +1,13 @@
 """115 web API operations used by this plugin, independent of EME."""
 
+import hashlib
+import math
+import threading
 import time
 
 import httpx
+
+from app.sdk.logging import logger
 
 
 API = "https://webapi.115.com"
@@ -10,6 +15,36 @@ API = "https://webapi.115.com"
 
 class P115DirectoryUnavailable(RuntimeError):
     pass
+
+
+class P115RequestGate:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.last_finished = None
+        self.retry_at = 0
+        self.failures = 0
+        self.list_endpoint = 0
+
+    def check(self):
+        remaining = math.ceil(self.retry_at - time.monotonic())
+        if remaining > 0:
+            raise P115DirectoryUnavailable(f"115 请求已暂停，约 {remaining} 秒后复查；本轮不再提交请求")
+
+    def defer(self, minimum=300, retry_after=0):
+        self.failures += 1
+        delay = min(3600, max(minimum * 2 ** min(self.failures - 1, 4), retry_after))
+        self.retry_at = time.monotonic() + delay
+        return delay
+
+
+_REQUEST_GATES = {}
+_REQUEST_GATES_LOCK = threading.Lock()
+
+
+def _request_gate(cookie):
+    account = hashlib.sha256(cookie.strip().encode()).digest()
+    with _REQUEST_GATES_LOCK:
+        return _REQUEST_GATES.setdefault(account, P115RequestGate())
 
 
 LIST_ENDPOINTS = (
@@ -27,6 +62,7 @@ class P115Client:
     def __init__(self, cookie: str):
         if not cookie.strip():
             raise ValueError("请先在 115 网盘 STRM 助手中配置 Cookie")
+        self._gate = _request_gate(cookie)
         self.client = httpx.Client(
             headers={"Cookie": cookie.strip(), "Referer": "https://115.com/",
                      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/125.0 Safari/537.36"},
@@ -38,6 +74,61 @@ class P115Client:
 
     def __exit__(self, exc_type, exc, traceback):
         self.client.close()
+
+    def _request(self, method, url, **kwargs):
+        endpoint = httpx.URL(url)
+        params = kwargs.get("params") or {}
+        cid = str(params.get("cid") or "")
+        safe_cid = cid if cid.isdecimal() else "-"
+        with self._gate.lock:
+            self._gate.check()
+            if self._gate.last_finished is not None:
+                delay = 1 - (time.monotonic() - self._gate.last_finished)
+                if delay > 0:
+                    time.sleep(delay)
+            try:
+                response = self.client.request(method, url, **kwargs)
+            except httpx.RequestError as error:
+                delay = self._gate.defer(minimum=60)
+                logger.warning("媒体增强 115：%s %s%s CID=%s 网络异常=%s，共享退避 %d 秒；不重放提交",
+                               method, endpoint.host, endpoint.path, safe_cid, type(error).__name__, delay)
+                raise P115DirectoryUnavailable(
+                    f"115 网络请求失败（{type(error).__name__}），已暂停请求 {delay} 秒；"
+                    "提交结果可能不确定，请先核实，本轮不自动重试") from None
+            finally:
+                self._gate.last_finished = time.monotonic()
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            code = str(payload.get("errNo") or payload.get("errno") or payload.get("code") or "") \
+                if isinstance(payload, dict) else ""
+            expired = isinstance(payload, dict) and not payload.get("state") and code in {"990001", "99", "40101032"}
+            if expired or response.status_code in (401, 403, 405, 429):
+                retry_after = response.headers.get("Retry-After", "")
+                delay = self._gate.defer(retry_after=int(retry_after) if retry_after.isdecimal() else 0)
+                if not expired:
+                    for position, (list_url, defaults) in enumerate(LIST_ENDPOINTS):
+                        if url == list_url:
+                            self._gate.list_endpoint = (position + 1) % len(LIST_ENDPOINTS)
+                            break
+                reason = "登录状态失效（115 明确返回认证错误码）" if expired else \
+                    f"接口访问受限（HTTP {response.status_code}），不代表已确认 Cookie 失效"
+                logger.warning("媒体增强 115：%s %s%s CID=%s HTTP=%d；%s；共享退避 %d 秒，停止切换接口",
+                               method, endpoint.host, endpoint.path, safe_cid, response.status_code, reason, delay)
+                raise P115DirectoryUnavailable(f"115 {reason}；已暂停请求 {delay} 秒，本轮停止")
+            if response.is_error:
+                logger.warning("媒体增强 115：%s %s%s CID=%s HTTP=%d",
+                               method, endpoint.host, endpoint.path, safe_cid, response.status_code)
+                raise RuntimeError(f"115 接口请求失败：HTTP {response.status_code}，未自动重放提交")
+            if self._gate.failures:
+                logger.info("媒体增强 115：退避后请求恢复，%s %s%s HTTP=%d",
+                            method, endpoint.host, endpoint.path, response.status_code)
+            self._gate.failures = 0
+            self._gate.retry_at = 0
+            logger.debug("媒体增强 115：%s %s%s CID=%s HTTP=%d",
+                         method, endpoint.host, endpoint.path, safe_cid, response.status_code)
+            return response
 
     @staticmethod
     def _parse_entries(response: dict):
@@ -76,40 +167,30 @@ class P115Client:
 
     def _page(self, cid: str, offset: int):
         last_error = "目录接口异常或账号被风控"
-        for attempt in range(3):
-            rejected = 0
-            for url, defaults in LIST_ENDPOINTS:
-                try:
-                    params = {**defaults, "cid": cid, "limit": 1000, "offset": offset}
-                    response = self.client.get(url, params=params)
-                    if response.status_code in (401, 403, 405, 429):
-                        rejected += 1
-                        last_error = f"HTTP {response.status_code}"
-                        continue
-                    response.raise_for_status()
-                    data = response.json()
-                    if not isinstance(data, dict):
-                        raise ValueError("115 目录接口未返回对象")
-                    if not data.get("state"):
-                        code = str(data.get("errNo") or data.get("errno") or data.get("code") or "")
-                        if code in {"990001", "99", "40101032"}:
-                            raise P115DirectoryUnavailable("115 登录状态失效，请在 STRM 助手重新登录并更新 Cookie；未执行转存")
-                        last_error = str(data.get("error") or data.get("msg") or last_error)
-                        continue
-                    files, directories, total, length = self._parse_entries(data)
-                    if not files and not directories and (total is None or total != 0):
-                        continue
-                    if total is None and length >= 1000:
-                        continue
-                    return files, directories, total, length
-                except (httpx.HTTPError, ValueError, TypeError) as error:
-                    last_error = str(error)
-            if rejected == len(LIST_ENDPOINTS):
-                raise P115DirectoryUnavailable(
-                    f"115 全部目录接口拒绝访问（{last_error}），可能为访问限制或登录状态异常；"
-                    "请检查 STRM 助手是否能列出目录及其 Cookie 状态；未执行转存")
-            if attempt < 2:
-                time.sleep(3)
+        with self._gate.lock:
+            self._gate.check()
+            start = self._gate.list_endpoint
+        endpoints = LIST_ENDPOINTS[start:] + LIST_ENDPOINTS[:start]
+        for url, defaults in endpoints:
+            try:
+                params = {**defaults, "cid": cid, "limit": 1000, "offset": offset}
+                response = self._request("GET", url, params=params)
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise ValueError("115 目录接口未返回对象")
+                if not data.get("state"):
+                    last_error = "目录接口返回业务错误"
+                    continue
+                files, directories, total, length = self._parse_entries(data)
+                if not files and not directories and (total is None or total != 0):
+                    last_error = "目录接口返回不完整的空列表"
+                    continue
+                if total is None and length >= 1000:
+                    last_error = "目录接口缺少分页总数"
+                    continue
+                return files, directories, total, length
+            except (ValueError, TypeError) as error:
+                last_error = type(error).__name__
         raise RuntimeError("115 目录读取失败，未对内容作任何改动：" + last_error[:160])
 
     def list_children(self, cid: str = "0"):
@@ -146,18 +227,8 @@ class P115Client:
     def delete_files(self, identifiers: list) -> dict:
         if not identifiers:
             return {"state": False, "msg": "无文件 ID"}
-        response = self.client.post(f"{API}/rb/delete", data={f"fid[{index}]": str(identifier)
+        response = self._request("POST", f"{API}/rb/delete", data={f"fid[{index}]": str(identifier)
                                                                   for index, identifier in enumerate(identifiers)})
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError:
-            try:
-                data = response.json()
-            except (ValueError, TypeError):
-                raise
-            if str(data.get("errNo") or data.get("errno") or "") == "990001":
-                return {"state": False, "msg": "115 登录已过期，请重新登录并更新 Cookie", "errNo": 990001}
-            raise
         return response.json()
 
     def move_files(self, identifiers: list, destination: str) -> dict:
@@ -165,8 +236,7 @@ class P115Client:
             return {"state": False, "msg": "无文件 ID"}
         fields = {"pid": str(destination)}
         fields.update({f"fid[{index}]": str(identifier) for index, identifier in enumerate(identifiers)})
-        response = self.client.post(f"{API}/files/move", data=fields, timeout=30)
-        response.raise_for_status()
+        response = self._request("POST", f"{API}/files/move", data=fields, timeout=30)
         return response.json()
 
     def copy_files(self, identifiers: list, destination: str) -> dict:
@@ -174,19 +244,16 @@ class P115Client:
             return {"state": False, "msg": "无文件 ID"}
         fields = {"pid": str(destination)}
         fields.update({f"fid[{index}]": str(identifier) for index, identifier in enumerate(identifiers)})
-        response = self.client.post(f"{API}/files/copy", data=fields, timeout=30)
-        response.raise_for_status()
+        response = self._request("POST", f"{API}/files/copy", data=fields, timeout=30)
         return response.json()
 
     def rb_list(self, limit: int = 1000) -> dict:
-        response = self.client.get(f"{API}/rb", params={"aid": 7, "cid": 0, "limit": limit, "offset": 0})
-        response.raise_for_status()
+        response = self._request("GET", f"{API}/rb", params={"aid": 7, "cid": 0, "limit": limit, "offset": 0})
         result = response.json()
         if not result.get("state"):
             raise RuntimeError(str(result.get("error") or result.get("msg") or "115 回收站查询失败"))
         return {"count": int(result.get("count") or 0), "items": result.get("data") or []}
 
     def clear_recyclebin(self, password: str = "000000") -> dict:
-        response = self.client.post(f"{API}/rb/secret_del", data={"password": str(password or "000000").zfill(6)[:6]})
-        response.raise_for_status()
+        response = self._request("POST", f"{API}/rb/secret_del", data={"password": str(password or "000000").zfill(6)[:6]})
         return response.json()

@@ -17,7 +17,7 @@ from app.sdk.services import MediaServerHelper
 from pypinyin import lazy_pinyin
 
 from .emby_guard import emby_request
-from .p115 import P115Client
+from .p115 import P115Client, P115DirectoryUnavailable
 
 
 REFRESH_LOCK = threading.Lock()
@@ -408,7 +408,7 @@ class MediaCleanup:
             cookie = self.owner._source_cookie()
             # The same cloud-to-local order as MediaEnhance, but never remove
             # the STRM if the 115 API explicitly reports a deletion failure.
-            for item in selected:
+            for position, item in enumerate(selected):
                 path = item["file_path"]
                 try:
                     fid = self._file_id(path)
@@ -432,6 +432,12 @@ class MediaCleanup:
                 except (OSError, RuntimeError, ValueError) as error:
                     failures.append({"file_path": path, "error": str(error)[:160]})
                     logger.warning("增强工具 媒体清理：跳过 %s：%s", os.path.basename(path), type(error).__name__)
+                    if isinstance(error, P115DirectoryUnavailable):
+                        failures.extend({"file_path": pending["file_path"], "error": "115 请求已暂停，本轮未删除"}
+                                        for pending in selected[position + 1:])
+                        logger.warning("媒体增强 媒体清理：115 请求已暂停，剩余 %d 项保留本地与网盘文件",
+                                       len(selected) - position - 1)
+                        break
             # Removed files must not reappear in the cached scan results.
             if deleted:
                 removed = {item["file_path"] for item in deleted}
