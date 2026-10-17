@@ -95,7 +95,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "本地文件夹 ED2K 链接"
     plugin_desc = "监控本地文件夹，为稳定的新文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "OpenAI"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -162,6 +162,12 @@ class Ed2kFolderWatcher(_PluginBase):
                 if item.is_file():
                     yield item
 
+    @staticmethod
+    def _write_results(output: Path, cache_path: Path, records: dict) -> None:
+        ordered = sorted(records.values(), key=lambda item: item["link"].lower())
+        output.write_text("\n".join(item["link"] for item in ordered) + ("\n" if ordered else ""), encoding="utf-8")
+        cache_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def scan(self) -> None:
         if not self._folder or not self._lock.acquire(blocking=False):
             return
@@ -194,6 +200,7 @@ class Ed2kFolderWatcher(_PluginBase):
                     cached = cache.get(key)
                     if cached and cached.get("size") == signature["size"] and cached.get("mtime_ns") == signature["mtime_ns"]:
                         records[key] = {**signature, "name": path.name, "link": cached["link"]}
+                        self._write_results(output, cache_path, records)
                         if self._delete_source:
                             delete_candidates.append(path)
                         continue
@@ -203,14 +210,13 @@ class Ed2kFolderWatcher(_PluginBase):
                         logger.info(f"本地文件夹 ED2K 链接：文件仍在变化，留待下次扫描：{path}")
                         continue
                     records[key] = {**signature, "name": path.name, "link": ed2k_link(path, file_hash)}
+                    self._write_results(output, cache_path, records)
                     if self._delete_source:
                         delete_candidates.append(path)
                     logger.info(f"本地文件夹 ED2K 链接：已处理 {path}")
                 except (OSError, ValueError) as err:
                     logger.warning(f"本地文件夹 ED2K 链接：跳过 {path}：{err}")
-            ordered = sorted(records.values(), key=lambda item: item["link"].lower())
-            output.write_text("\n".join(item["link"] for item in ordered) + ("\n" if ordered else ""), encoding="utf-8")
-            cache_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._write_results(output, cache_path, records)
             if self._delete_source:
                 for path in delete_candidates:
                     try:
@@ -218,7 +224,7 @@ class Ed2kFolderWatcher(_PluginBase):
                         logger.info(f"本地文件夹 ED2K 链接：已删除源文件：{path}")
                     except OSError as err:
                         logger.warning(f"本地文件夹 ED2K 链接：删除源文件失败（已保留）：{path}：{err}")
-            logger.info(f"本地文件夹 ED2K 链接：扫描完成，共 {len(ordered)} 个文件，输出：{output}")
+            logger.info(f"本地文件夹 ED2K 链接：扫描完成，共 {len(records)} 个文件，输出：{output}")
         except Exception as err:
             logger.error(f"本地文件夹 ED2K 链接扫描失败：{err}", exc_info=True)
         finally:
