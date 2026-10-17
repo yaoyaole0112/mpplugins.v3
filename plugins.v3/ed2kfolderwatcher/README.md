@@ -25,17 +25,19 @@ MoviePilot 本地目录 ED2K 插件。路径填写容器内路径，例如 `/med
 - **Bot Token 是发送者凭证**：程序调用 Telegram Bot API 需要以某个机器人身份发送消息，不是输入接收方用户名就能匿名发送。从 `@BotFather` 获取发送机器人 Token。
 - **Chat ID 是接收位置**：用户私聊 ID、群组/频道的 `-100…` ID，或公开频道 `@channel_username`。私聊用户须先启动机器人；群组须加入机器人，频道须授予发消息权限。
 - **话题线程 ID 可留空**：只在启用了话题的超级群组中指定某一个话题使用。普通私聊、普通群组、频道不填；它不是群组 Chat ID。
-- Bot API 不支持两个机器人之间直接对话。如果目标是某个接收链接的机器人，需要 Telegram 用户账号授权（API ID、API Hash、登录和 Session）；本插件不冒充用户账号。
-- 使用 MoviePilot 配置的网络代理。日志隐藏当前 Token；发送失败会保留记录，60 秒后重试。
+- **接收方是另一个机器人**：填写它的 `@用户名`，不要填数字 Bot ID；发送与接收机器人双方都必须在 `@BotFather` 开启 **Bot-to-Bot Communication Mode**。若第三方接收机器人没有开启该模式，插件无法替它开启，需联系其所有者。此前“机器人完全无法互发”的说明已更正，依据当前官方功能文档。
+- 接收目标也支持公开 `https://t.me/username` 链接或不带 `@` 的用户名，自动规范化。消息链接和私有邀请链接不能代替 Chat ID。
+- 使用 MoviePilot 配置的网络代理。日志隐藏当前 Token；发送失败会保留记录。网络失败冷却 60 秒；配置/权限错误冷却 300 秒，避免大量文件重复刷屏。修改配置并保存后立即解除冷却。
+- `400: chat not found` 表示目标不存在或当前发送机器人不可访问，而非网络不通。个人先向发送机器人发 `/start`；群组添加发送机器人；频道授予发消息权限。不要将发送机器人的 Bot ID 当成自己的个人 Chat ID。
 - 网络超时或发送成功后进程在记录状态前退出，可能重复发送，不保证严格恰好一次。重启后的待处理文件可用「立即扫描一次」或增量补扫重新入队。
 
 ## 哈希实现与参考
 
 采用 9,728,000 字节分块的 eMule 兼容 ED2K。小文件直接 MD4，大文件合并各块 MD4 后再次 MD4；文件恰为整块倍数时包含尾部空块 MD4。优先使用 PyCryptodome 原生 MD4，无该模块时使用纯 Python 回退。实现规则对照 RHash 的 `librhash/ed2k.c`；NanShare 当前部署的是编译后程序，未取得可核验的 ED2K 源码。
 
-21 项隔离测试覆盖中文链接与历史转换、监控、文件持续写入、增量记录、TXT 开关、缓存迁移、原子写入、Telegram 失败重试和安全删除。六组哈希向量（空文件、1 字节、分块边界前后、两整块）已与独立 RHash 库逐项比对。Telegram 实际投递仍需配置有效的发送者凭证及目标权限。
+25 项隔离测试覆盖 Telegram 目标规范化、错误诊断、失败冷却与 Token 脱敏，以及中文链接与历史转换、监控、文件持续写入、增量记录、TXT 开关、缓存迁移、原子写入、Telegram 失败重试和安全删除。六组哈希向量（空文件、1 字节、分块边界前后、两整块）已与独立 RHash 库逐项比对。Telegram 实际投递仍需配置有效的发送者凭证及目标权限。
 
 参考：
 - RHash: https://github.com/rhash/RHash/blob/master/librhash/ed2k.c
-- Telegram 机器人通信限制: https://core.telegram.org/bots/faq#why-doesn-39t-my-bot-see-messages-from-other-bots
+- Telegram 机器人互发: https://core.telegram.org/bots/features#bot-to-bot-communication
 - Telegram sendMessage / message_thread_id: https://core.telegram.org/bots/api#sendmessage

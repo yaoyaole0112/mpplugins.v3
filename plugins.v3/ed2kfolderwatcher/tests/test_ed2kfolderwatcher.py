@@ -57,6 +57,57 @@ class Ed2kTests(unittest.TestCase):
             with patch.object(self.module, "_CryptoMD4", None):
                 self.assertEqual(self.module.ed2k_hash(path), expected)
 
+    def test_telegram_destination_formats(self):
+        for value, expected in [(" 12345 ", "12345"), ("-10012345", "-10012345"), ("receiver_bot", "@receiver_bot"), ("@receiver_bot", "@receiver_bot"), ("https://t.me/receiver_bot", "@receiver_bot"), ("t.me/my_channel/", "@my_channel")]:
+            with self.subTest(value=value):
+                self.assertEqual(self.module.telegram_destination(value), expected)
+        for value in ("https://t.me/+invite", "https://t.me/channel/123", "https://example.com/receiver", "", "two names"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.module.telegram_destination(value)
+
+    def test_telegram_error_hints(self):
+        error = RuntimeError("Bad Request: chat not found")
+        hint = self.module.telegram_error_hint(error)
+        self.assertIn("/start", hint)
+        self.assertIn("@用户名", hint)
+        self.assertIn("Bot-to-Bot", hint)
+        error.error_code = 403
+        error.description = "Forbidden"
+        self.assertIn("频道发消息权限", self.module.telegram_error_hint(error))
+        error.error_code = 401
+        self.assertIn("Token 无效", self.module.telegram_error_hint(error))
+
+    def test_telegram_chat_error_cooldown_and_token_redaction(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_token = "private-token"
+        self.plugin._telegram_chat_id = "12345"
+        error = RuntimeError("chat not found private-token")
+        error.error_code = 400
+        client = Mock()
+        client.send_message.side_effect = error
+        settings = types.ModuleType("app.runtime.settings")
+        settings.get_runtime_setting = Mock(return_value=None)
+        with patch.object(self.module, "TelegramBotApi", return_value=client), patch.dict(sys.modules, {"app.runtime.settings": settings}):
+            self.assertFalse(self.plugin._send_telegram(Path("test.mkv"), "link"))
+            warning = self.module.logger.warning.call_args.args[0]
+            self.assertNotIn("private-token", warning)
+            self.assertIn("300秒", warning)
+            self.assertFalse(self.plugin._send_telegram(Path("second.mkv"), "link"))
+        client.send_message.assert_called_once()
+        client.close.assert_called_once()
+
+    def test_telegram_sends_to_normalized_username(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_token = "private-token"
+        self.plugin._telegram_chat_id = "https://t.me/receiver_bot"
+        client = Mock()
+        settings = types.ModuleType("app.runtime.settings")
+        settings.get_runtime_setting = Mock(return_value=None)
+        with patch.object(self.module, "TelegramBotApi", return_value=client), patch.dict(sys.modules, {"app.runtime.settings": settings}):
+            self.assertTrue(self.plugin._send_telegram(Path("test.mkv"), "link"))
+        self.assertEqual(client.send_message.call_args.args[0], "@receiver_bot")
+        client.close.assert_called_once()
+
     def test_link_preserves_chinese_and_escapes_delimiters(self):
         path = self.create("大哥小助理.母带.100% |测试.mkv")
         link = self.module.ed2k_link(path, "a" * 32)

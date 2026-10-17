@@ -1,11 +1,12 @@
 import json
 import hashlib
 import os
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlparse
 
 from apscheduler.triggers.cron import CronTrigger
 
@@ -117,11 +118,39 @@ def ed2k_link(path: Path, file_hash: str) -> str:
     return f"ed2k://|file|{ed2k_filename(path.name)}|{path.stat().st_size}|{file_hash}|/"
 
 
+def telegram_destination(value: str) -> str:
+    value = value.strip()
+    if value.startswith(("https://", "http://", "t.me/")):
+        parsed = urlparse(value if "://" in value else f"https://{value}")
+        username = parsed.path.strip("/")
+        if parsed.netloc.lower() not in {"t.me", "telegram.me", "www.t.me"} or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", username):
+            raise ValueError("请填写目标 @用户名 或数字 Chat ID，不要填写消息链接、私有邀请链接")
+        value = f"@{username}"
+    if re.fullmatch(r"-?\d+", value):
+        return value
+    if re.fullmatch(r"@?[A-Za-z][A-Za-z0-9_]*", value):
+        return f"@{value.lstrip('@')}"
+    raise ValueError("接收目标格式错误：请填写数字 Chat ID 或 @用户名")
+
+
+def telegram_error_hint(error: Exception) -> str:
+    description = str(getattr(error, "description", error)).lower()
+    if "chat not found" in description:
+        return "接收目标不存在或发送机器人无权访问：个人须先向发送机器人 /start；群组/频道须加入发送机器人并授权；接收方若是机器人，请用 @用户名（非数字 Bot ID），且双方在 @BotFather 开启 Bot-to-Bot Communication"
+    if getattr(error, "error_code", None) == 401:
+        return "发送机器人 Token 无效，请重新核对 BotFather 提供的 Token"
+    if getattr(error, "error_code", None) == 403:
+        return "接收方拒绝访问：检查用户是否屏蔽机器人、机器人是否已加入群组，以及频道发消息权限"
+    if "thread" in description or "topic" in description:
+        return "话题线程 ID 无效或话题不可用；普通私聊/频道请留空"
+    return "请检查目标、权限与网络；源文件及链接记录已保留"
+
+
 class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.3.1"
+    plugin_version = "1.3.2"
     plugin_author = "OpenAI"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -139,6 +168,7 @@ class Ed2kFolderWatcher(_PluginBase):
     _telegram_token = ""
     _telegram_chat_id = ""
     _telegram_thread_id = ""
+    _telegram_retry_after = 0
     _monitor_enabled = True
     _output_enabled = True
     _observer = None
@@ -169,6 +199,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._telegram_token = str(config.get("telegram_token") or "").strip()
         self._telegram_chat_id = str(config.get("telegram_chat_id") or "").strip()
         self._telegram_thread_id = str(config.get("telegram_thread_id") or "").strip()
+        self._telegram_retry_after = 0
         self._monitor_enabled = bool(config.get("monitor_enabled", True))
         self._output_enabled = bool(config.get("output_enabled", True))
         try:
@@ -325,8 +356,11 @@ class Ed2kFolderWatcher(_PluginBase):
         if TelegramBotApi is None:
             logger.warning("自动生成ED2K链接：当前 MoviePilot 未提供 Telegram Bot API")
             return False
+        if time.monotonic() < self._telegram_retry_after:
+            return False
         bot = None
         try:
+            destination = telegram_destination(self._telegram_chat_id)
             thread_id = int(self._telegram_thread_id) if self._telegram_thread_id else None
             try:
                 from app.runtime.settings import get_runtime_setting
@@ -336,7 +370,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 proxy = settings.PROXY
             bot = TelegramBotApi(self._telegram_token, proxy=proxy)
             bot.send_message(
-                self._telegram_chat_id,
+                destination,
                 f"自动生成 ED2K 链接\n文件：{path.name}\n\n{link}",
                 disable_web_page_preview=True,
                 message_thread_id=thread_id,
@@ -344,8 +378,11 @@ class Ed2kFolderWatcher(_PluginBase):
             logger.info(f"自动生成ED2K链接：Telegram 通知已发送：{path.name}")
             return True
         except Exception as err:
+            cooldown = 300 if getattr(err, "error_code", None) in (400, 401, 403) or isinstance(err, ValueError) else 60
+            self._telegram_retry_after = time.monotonic() + cooldown
             detail = str(err).replace(self._telegram_token, "[REDACTED]")
-            logger.warning(f"自动生成ED2K链接：Telegram 发送失败，保留源文件并重试：{type(err).__name__}: {detail}")
+            hint = (str(err) if isinstance(err, ValueError) else telegram_error_hint(err)).replace(self._telegram_token, "[REDACTED]")
+            logger.warning(f"自动生成ED2K链接：Telegram 发送失败：{type(err).__name__}: {detail}；{hint}；保留源文件，{cooldown}秒后允许重试；修改配置保存后立即解除冷却")
             return False
         finally:
             if bot is not None:
@@ -521,7 +558,7 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextField", "cron", "补扫计划（开启补扫时生效）", hint="默认每 10 分钟：*/10 * * * *", persistent_hint=True),
             field("VSwitch", "telegram_enabled", "发送 ED2K 链接到 Telegram"),
             field("VTextField", "telegram_token", "Telegram Bot Token", type="password", hint="发送者的身份凭证，从 @BotFather 获取；不是接收方 Bot 的用户名。", persistent_hint=True),
-            field("VTextField", "telegram_chat_id", "Telegram Chat ID", placeholder="例如 @my_channel 或 -1001234567890", hint="填写接收消息的用户/群组/频道；频道需给发送机器人发消息权限，不支持另一个 Bot。", persistent_hint=True),
+            field("VTextField", "telegram_chat_id", "Telegram 接收目标", placeholder="数字 Chat ID、@用户名 或公开 t.me 链接", hint="个人须先向发送机器人 /start；频道需授权。发给另一个机器人须填 @用户名，且双方在 BotFather 开启 Bot-to-Bot Communication。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
         ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "telegram_enabled": False, "telegram_token": "", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False}
