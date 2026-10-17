@@ -150,7 +150,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.5.4"
+    plugin_version = "1.6.0"
     plugin_author = "OpenAI"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -544,7 +544,8 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._queue_event(path)
                     return
                 record = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "name": path.name,
-                          "link": ed2k_link(path, file_hash), "hash_version": 2, "telegram_sent": False, "telegram_target": ""}
+                          "link": ed2k_link(path, file_hash), "hash_version": 2, "telegram_sent": False, "telegram_target": "",
+                          "generated_at": time.time(), "source_deleted": False}
                 records[key] = record
                 logger.info(f"自动生成ED2K链接：生成完成：{path}")
             self._write_results(output, cache_path, records)
@@ -556,7 +557,16 @@ class Ed2kFolderWatcher(_PluginBase):
             if self._delete_source and delivered and (output is not None or self._telegram_enabled):
                 final = path.stat()
                 if signature == (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) and not self._stopping.is_set():
-                    path.unlink()
+                    try:
+                        path.unlink()
+                    except OSError:
+                        record["delete_failed"] = True
+                        self._write_results(output, cache_path, records)
+                        raise
+                    record["source_deleted"] = True
+                    record["deleted_at"] = time.time()
+                    record.pop("delete_failed", None)
+                    self._write_results(output, cache_path, records)
                     logger.info(f"自动生成ED2K链接：已删除源文件：{path}")
 
     def scan(self) -> None:
@@ -586,7 +596,34 @@ class Ed2kFolderWatcher(_PluginBase):
         return build_routes(self)
 
     def get_page(self) -> Optional[List[dict]]:
-        return []
+        return [{"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                 "text": "最近生成的 ED2K 链接记录请使用新版查看页面；修改配置请在插件卡片三个点菜单中选择设置。"}]
+
+    def recent_records(self) -> dict:
+        cache_path = Path(self.get_data_path()) / "records.json"
+        try:
+            records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+            if not isinstance(records, dict) or any(not isinstance(record, dict) for record in records.values()):
+                raise ValueError()
+            ordered = sorted(enumerate(records.items()),
+                             key=lambda item: (float(item[1][1].get("generated_at") or 0), item[0]), reverse=True)
+            items = []
+            for index, (path, record) in ordered[:100]:
+                if record.get("source_deleted") is True:
+                    source_status = "deleted"
+                elif record.get("delete_failed"):
+                    source_status = "delete_failed"
+                elif record.get("source_deleted") is False:
+                    source_status = "retained"
+                else:
+                    source_status = "unknown"
+                items.append({"name": record.get("name") or Path(path).name, "link": record.get("link", ""),
+                              "generated_at": record.get("generated_at"), "source_status": source_status,
+                              "deleted_at": record.get("deleted_at")})
+            return {"ok": True, "items": items, "total": len(records), "limit": 100,
+                    "delete_source_enabled": self._delete_source}
+        except (OSError, ValueError, TypeError):
+            return {"ok": False, "message": "读取生成记录失败，原记录已保留，请检查日志或文件权限"}
 
     def stop_service(self) -> None:
         if self._stopping is not None:

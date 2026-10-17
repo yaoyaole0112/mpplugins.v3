@@ -274,6 +274,85 @@ class Ed2kTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertEqual(len(self.records()), 1)
         self.assertIn("ed2k://", (self.folder / "ed2k.txt").read_text())
+        record = self.records()[str(path)]
+        self.assertTrue(record["source_deleted"])
+        self.assertGreaterEqual(record["deleted_at"], record["generated_at"])
+        self.assertEqual(self.plugin.recent_records()["items"][0]["source_status"], "deleted")
+
+    def test_recent_page_and_empty_records(self):
+        self.assertTrue(self.plugin.get_page())
+        self.assertEqual(self.plugin.recent_records()["items"], [])
+        self.assertEqual(self.plugin.recent_records()["total"], 0)
+
+    def test_recent_records_retained_and_timestamp(self):
+        path = self.create()
+        self.plugin._process_file(path)
+        self.assertTrue(path.exists())
+        record = self.plugin.recent_records()["items"][0]
+        self.assertEqual(record["source_status"], "retained")
+        self.assertEqual(record["name"], path.name)
+        self.assertGreater(record["generated_at"], 0)
+        self.assertNotIn("path", record)
+
+    def test_recent_records_legacy_missing_file_not_inferred_deleted(self):
+        path = self.create()
+        self.plugin._process_file(path)
+        records = self.records()
+        records[str(path)].pop("source_deleted")
+        records[str(path)].pop("generated_at")
+        path.unlink()
+        self.plugin._write_results(None, self.root / "data" / "records.json", records)
+        record = self.plugin.recent_records()["items"][0]
+        self.assertEqual(record["source_status"], "unknown")
+        self.assertIsNone(record["generated_at"])
+
+    def test_recent_records_sorted_limited_and_read_only(self):
+        records = {str(self.folder / f"{index}.mkv"): {"name": f"{index}.mkv", "generated_at": index,
+                   "link": f"link-{index}", "source_deleted": False} for index in range(105)}
+        cache = self.root / "data" / "records.json"
+        self.plugin._write_results(None, cache, records)
+        before = cache.read_bytes()
+        with patch.object(self.plugin, "scan", side_effect=AssertionError("scanned")):
+            result = self.plugin.recent_records()
+        self.assertEqual(result["total"], 105)
+        self.assertEqual(len(result["items"]), 100)
+        self.assertEqual(result["items"][0]["name"], "104.mkv")
+        self.assertEqual(result["items"][-1]["name"], "5.mkv")
+        self.assertEqual(cache.read_bytes(), before)
+
+    def test_recent_records_bad_cache_does_not_overwrite(self):
+        cache = self.root / "data" / "records.json"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text("invalid json")
+        self.assertFalse(self.plugin.recent_records()["ok"])
+        self.assertEqual(cache.read_text(), "invalid json")
+
+    def test_delete_failure_recorded_and_retry_success(self):
+        self.plugin._delete_source = True
+        path = self.create()
+        original_unlink = Path.unlink
+
+        def fail_source(target, *args, **kwargs):
+            if target == path:
+                raise PermissionError("denied")
+            return original_unlink(target, *args, **kwargs)
+
+        with patch.object(Path, "unlink", new=fail_source):
+            with self.assertRaises(PermissionError):
+                self.plugin._process_file(path)
+        self.assertTrue(path.exists())
+        self.assertEqual(self.plugin.recent_records()["items"][0]["source_status"], "delete_failed")
+        self.plugin._process_file(path)
+        self.assertFalse(path.exists())
+        self.assertEqual(self.plugin.recent_records()["items"][0]["source_status"], "deleted")
+
+    def test_generation_time_preserved_on_unchanged_retry(self):
+        path = self.create()
+        self.plugin._process_file(path)
+        generated = self.records()[str(path)]["generated_at"]
+        self.plugin._delete_source = True
+        self.plugin._process_file(path)
+        self.assertEqual(self.records()[str(path)]["generated_at"], generated)
 
     def test_write_failure_preserves_source_and_cache(self):
         path = self.create()

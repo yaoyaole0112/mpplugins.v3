@@ -69,6 +69,9 @@ def response(content):
 
 
 def build_routes(plugin):
+    async def recent(principal=Depends(get_current_active_superuser)):
+        return response(await asyncio.to_thread(plugin.recent_records))
+
     async def status(principal=Depends(get_current_active_superuser)):
         return response({"ok": True, "settings": settings_snapshot(plugin)})
 
@@ -117,6 +120,7 @@ def build_routes(plugin):
 
     return [{"path": path, "endpoint": endpoint, "methods": [method], "auth": "bear", "summary": summary}
             for path, endpoint, method, summary in (
+                ("/records", recent, "GET", "最近生成链接与删源状态"),
                 ("/settings", status, "GET", "读取安全配置"), ("/settings", save, "POST", "保存插件配置"),
                 ("/telegram/status", telegram_status, "GET", "个人账号登录状态"),
                 ("/telegram/action", telegram_action, "POST", "个人账号网页授权"), ("/run", run, "POST", "增量补扫与补发"))]

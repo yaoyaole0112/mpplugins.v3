@@ -9,22 +9,53 @@ const settings = { enabled: false, folder: '/media/test', recursive: true, monit
   output_enabled: true, output: '', extensions: '', min_age: 60, delete_source: false,
   scan_enabled: false, cron: '*/10 * * * *', telegram_enabled: false, telegram_mode: 'user',
   telegram_chat_id: '', telegram_thread_id: '', telegram_token: '' }
-const api = { get: async path => path.endsWith('/settings')
-  ? { ok: true, settings }
-  : { ok: true, logged_in: false, pending: false, api_id: '', api_hash_configured: false } }
+let requests = []
+let mode = 'normal'
+const rows = ['deleted', 'retained', 'delete_failed', 'unknown'].map((source_status, index) => ({
+  name: `测试文件 ${index}.mkv`, link: `ed2k://|file|测试文件 ${index}.mkv|5|hash|/`,
+  generated_at: index ? null : 1700000000, source_status,
+}))
+const api = { get: async path => {
+  requests.push(path)
+  if (path.endsWith('/records')) return mode === 'error' ? { ok: false, message: '模拟读取失败' }
+    : { ok: true, items: mode === 'empty' ? [] : rows, total: mode === 'empty' ? 0 : 4, delete_source_enabled: false }
+  return path.endsWith('/settings') ? { ok: true, settings }
+    : { ok: true, logged_in: false, pending: false, api_id: '', api_hash_configured: false }
+} }
 
 try {
   remote.init({ vue: { [vue.version]: { get: () => () => vue, loaded: true } } })
   for (const name of ['./Page', './Config', './AppPage']) {
     const factory = await remote.get(name)
+    requests = []
     const app = vue.createApp(factory(), { api, pluginId: 'Ed2kFolderWatcher' })
     app.mount('#app')
     await new Promise(resolve => setTimeout(resolve, 100))
-    if (!document.querySelector('#app').innerText.includes('Telegram 账号')) throw Error(`${name}: account panel missing`)
     if (document.querySelector('#app [role=alert]')) throw Error(`${name}: API failed`)
     if (document.querySelector('#app').innerText.includes('Bot Token')) throw Error(`${name}: bot settings visible`)
     if (document.querySelector('#app option[value=bot]')) throw Error(`${name}: bot mode selectable`)
     const buttons = [...document.querySelectorAll('#app button')]
+    if (name !== './Config') {
+      const text = document.querySelector('#app').innerText
+      if (!text.includes('最近生成记录') || !text.includes('测试文件 0.mkv')) throw Error(`${name}: recent records missing`)
+      for (const label of ['已删除源文件', '未删除源文件', '删除失败，源文件保留', '历史记录：删源状态未记录']) {
+        if (!text.includes(label)) throw Error(`${name}: status missing: ${label}`)
+      }
+      if (text.includes('保存插件设置') || text.includes('保存账号设置') || document.querySelector('#app input')) throw Error(`${name}: configuration leaked into viewing page`)
+      if (requests.some(path => !path.endsWith('/records'))) throw Error(`${name}: viewing page requested settings`)
+      mode = 'empty'
+      buttons.find(button => button.textContent.trim() === '刷新记录').click()
+      await new Promise(resolve => setTimeout(resolve, 100))
+      if (!document.querySelector('#app').innerText.includes('暂无生成记录')) throw Error(`${name}: empty state missing`)
+      mode = 'error'
+      buttons.find(button => button.textContent.trim() === '刷新记录').click()
+      await new Promise(resolve => setTimeout(resolve, 100))
+      if (!document.querySelector('#app [role=alert]')?.textContent.includes('模拟读取失败')) throw Error(`${name}: error state missing`)
+      mode = 'normal'
+      app.unmount()
+      continue
+    }
+    if (!document.querySelector('#app').innerText.includes('Telegram 账号')) throw Error(`${name}: account panel missing`)
     if (buttons.filter(button => button.textContent.trim() === '保存插件设置').length !== 1) throw Error(`${name}: duplicate plugin save buttons`)
     if (buttons.filter(button => button.textContent.trim() === '保存账号设置').length !== 1) throw Error(`${name}: account save missing`)
     const headerButtons = [...document.querySelectorAll('#app .ed2k-header .header-actions button')]
@@ -40,7 +71,7 @@ try {
     if (!response.ok) throw Error(`stylesheet failed: ${response.status}`)
   }))
   document.body.dataset.result = 'passed'
-  document.querySelector('#result').textContent = 'PASS: built Page, Config, AppPage mounted; settings and CSS loaded'
+  document.querySelector('#result').textContent = 'PASS: Page/AppPage show records and source status only; Config keeps settings; empty/error states and CSS loaded'
 } catch (error) {
   document.body.dataset.result = 'failed'
   document.querySelector('#result').textContent = String(error)

@@ -68,6 +68,17 @@ class WebApiTests(unittest.TestCase):
         self.assertNotIn("secret-bot-token", response.text)
         self.assertEqual(response.headers["cache-control"], "no-store")
 
+    def test_recent_records_read_only_admin_endpoint(self):
+        self.authorize()
+        self.plugin.recent_records.return_value = {"ok": True, "items": [], "total": 0}
+        response = self.client.get("/records")
+        self.assertTrue(response.json()["ok"])
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.plugin.recent_records.assert_called_once_with()
+        self.plugin.scan.assert_not_called()
+        self.plugin.init_plugin.assert_not_called()
+        self.plugin.update_config.assert_not_called()
+
     def test_strict_payload_validation(self):
         self.authorize()
         for payload in ([1], {"operation": "sign_in", "values": {"session": "secret"}},
