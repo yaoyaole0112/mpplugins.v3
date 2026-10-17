@@ -118,7 +118,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.4"
+    plugin_version = "2.10.5"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -195,6 +195,8 @@ class EmeTools(_PluginBase):
                 defaults["confirm_mode"] = "moviepilot" if defaults["confirm_cleanup"] else "none"
         self._cleaner = InvalidDataCleaner(self._strm_root)
         self._locks = {name: threading.Lock() for name in self._schedule}
+        if not hasattr(self, "_p115_task_lock"):
+            self._p115_task_lock = threading.Lock()
         self._pending_lock = threading.Lock()
         self._pending = {}
         self._last_run = {}
@@ -500,6 +502,12 @@ class EmeTools(_PluginBase):
         return services
 
     def _run_media_scheduled(self) -> None:
+        if self._p115_task_lock.locked():
+            logger.info("媒体增强 媒体清理：其他115定时任务正在执行，排队后再运行")
+        with self._p115_task_lock:
+            self._run_media_scheduled_serial()
+
+    def _run_media_scheduled_serial(self) -> None:
         if not self._enabled or not self._media_config["enabled"]:
             return
         try:
@@ -1060,7 +1068,7 @@ class EmeTools(_PluginBase):
 
     def _cleanup_preview(self):
         configured = self._schedule["p115_cleanup"]
-        identifiers = configured.get("dir_ids") or []
+        identifiers = list(configured.get("dir_ids") or [])
         if not identifiers:
             logger.info("ME工具 清理文件：没有配置目录，跳过预览")
             return {"ok": False, "message": "请先保存 115 清理目录"}
@@ -1080,13 +1088,24 @@ class EmeTools(_PluginBase):
                     logger.info("ME工具 清理文件：目录 %s（CID %s），文件=%d，子目录=%d",
                                 _log_label(name), cid, len(files), len(children))
                 except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
-                    folders.append({"cid": cid, "name": name, "files": 0, "dirs": 0, "size": 0, "error": str(error)})
-                    logger.warning("ME工具 清理文件：目录 %s（CID %s）预览失败：%s",
-                                   _log_label(name), cid, type(error).__name__)
+                    reason = _log_label(error)
+                    folders.append({"cid": cid, "name": name, "files": 0, "dirs": 0, "size": 0, "error": reason})
+                    logger.warning("ME工具 清理文件：目录 %s（CID %s）预览失败：%s：%s",
+                                   _log_label(name), cid, type(error).__name__, reason)
+                    if isinstance(error, P115DirectoryUnavailable):
+                        names = configured.get("dir_names") or []
+                        for position in range(index + 1, len(identifiers)):
+                            folders.append({"cid": identifiers[position],
+                                            "name": (names[position] if position < len(names) else "") or identifiers[position],
+                                            "files": 0, "dirs": 0, "size": 0,
+                                            "error": "115 请求已暂停，本轮未读取此目录"})
+                        break
         logger.info("ME工具 清理文件：预览完成，文件=%d，子目录=%d，失败目录=%d",
                     sum(item["files"] for item in folders), sum(item["dirs"] for item in folders),
                     sum(bool(item["error"]) for item in folders))
-        return {"ok": True, "folders": folders, "file_count": sum(item["files"] for item in folders),
+        complete = len(snapshots) == len(identifiers)
+        return {"ok": complete, "message": "预览完成" if complete else "部分目录预览失败，本轮未执行任何清理，请稍后重新预览",
+                "folders": folders, "file_count": sum(item["files"] for item in folders),
                 "dir_count": sum(item["dirs"] for item in folders), "total_bytes": sum(item["size"] for item in folders),
                 "snapshots": snapshots}
 
@@ -1156,8 +1175,11 @@ class EmeTools(_PluginBase):
                                 detail["error"] = f"文件夹删除失败：{response.get('msg') or response.get('error')}"
                                 errors.append(f"目录 {cid} {detail['error']}")
                     except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
-                        detail["error"] = f"失败：{error}"
+                        detail["error"] = f"失败：{_log_label(error)}"
                         errors.append(f"目录 {cid} {detail['error']}")
+                        if isinstance(error, P115DirectoryUnavailable):
+                            logger.warning("ME工具 清理文件：115 请求已暂停，保留剩余文件和目录")
+                            break
                     logger.info("ME工具 清理文件：目录 %s 完成，文件=%d，子目录=%d，结果=%s",
                                 _log_label(detail["name"]), detail["files"], detail["dirs"],
                                 "失败" if detail["error"] else "成功")
@@ -1349,7 +1371,9 @@ class EmeTools(_PluginBase):
                 count += nested_count
                 size += nested_size
             except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
-                logger.warning(f"ME工具统计目录 {cid} 大小失败：{error}")
+                if isinstance(error, P115DirectoryUnavailable):
+                    raise
+                logger.warning("ME工具统计目录 %s 大小失败：%s：%s", cid, type(error).__name__, _log_label(error))
                 size += known_size
         return count, size
 
@@ -1465,6 +1489,14 @@ class EmeTools(_PluginBase):
                            _log_label(item.get("path")), _log_label(item.get("message")))
 
     def _run_scheduled(self, section: str) -> None:
+        if section == "tools":
+            return self._run_scheduled_serial(section)
+        if self._p115_task_lock.locked():
+            logger.info("媒体增强 %s：其他115定时任务正在执行，排队后再运行", SECTION_NAMES.get(section, section))
+        with self._p115_task_lock:
+            return self._run_scheduled_serial(section)
+
+    def _run_scheduled_serial(self, section: str) -> None:
         if not self._enabled or not self._schedule.get(section, {}).get("enabled"):
             return
         label = SECTION_NAMES.get(section, section)
@@ -1506,7 +1538,8 @@ class EmeTools(_PluginBase):
                 else:
                     preview = self._cleanup_preview()
                     if not preview.get("ok"):
-                        logger.warning("ME工具 清理文件：预览未通过，取消清理")
+                        logger.warning("ME工具 清理文件：目录预览未完整通过，本轮未执行任何清理")
+                        notification = notices.file_cleanup({}, preview)
                     elif preview.get("file_count") or preview.get("dir_count"):
                         result = self._cleanup_confirm(self._remember("cleanup", preview["snapshots"]))
                         if "deleted" in result:

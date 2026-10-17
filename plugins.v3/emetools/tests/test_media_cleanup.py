@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from emetools.media_cleanup import DEFAULT_CONFIG, MediaCleanup, validate_rules
+from emetools.p115 import P115DirectoryUnavailable
 
 
 class MediaCleanupTests(unittest.TestCase):
@@ -107,6 +108,20 @@ class MediaCleanupTests(unittest.TestCase):
             result = self.engine.delete([str(self.bad)])
         self.assertEqual(len(result["failures"]), 1)
         self.assertTrue(self.bad.exists())
+
+    def test_access_restriction_stops_batch_and_keeps_remaining_files(self):
+        another = self.folder / "Movie.480p.strm"
+        another.write_text("https://example.com/redirect115/333", encoding="utf-8")
+        self.engine.scan()
+        with patch("emetools.media_cleanup.P115Client") as client:
+            remote = client.return_value.__enter__.return_value
+            remote.delete_files.side_effect = P115DirectoryUnavailable("HTTP 405；已暂停请求 300 秒")
+            result = self.engine.delete([str(self.bad), str(another)])
+        remote.delete_files.assert_called_once()
+        self.assertFalse(result["deleted"])
+        self.assertEqual(len(result["failures"]), 2)
+        self.assertTrue(self.bad.exists())
+        self.assertTrue(another.exists())
 
     def test_rejects_outside_library_and_invalid_rule(self):
         self.engine.libraries = lambda: [{"id": "emby::1", "paths": ["/not/mounted"]}]
