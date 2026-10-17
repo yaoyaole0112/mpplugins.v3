@@ -111,7 +111,7 @@ def ed2k_hash(path: Path, stop_event=None) -> str:
 
 
 def ed2k_filename(name: str) -> str:
-    return "".join(character if ord(character) > 127 and character.isprintable() else quote(character, safe="") for character in name)
+    return "".join(character if character.isprintable() and character not in "|%/\\?#" else quote(character, safe="") for character in name)
 
 
 def ed2k_link(path: Path, file_hash: str) -> str:
@@ -150,7 +150,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.5.0"
+    plugin_version = "1.5.1"
     plugin_author = "OpenAI"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"

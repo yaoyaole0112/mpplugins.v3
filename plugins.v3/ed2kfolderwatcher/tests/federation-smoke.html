@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>ED2K federation smoke</title></head><body>
+<main id="app"></main><pre id="result">running</pre>
+<script type="module">
+import * as vue from '../node_modules/vue/dist/vue.esm-browser.prod.js'
+import * as remote from '../dist/assets/remoteEntry.js'
+
+const settings = { enabled: false, folder: '/media/test', recursive: true, monitor_enabled: true,
+  output_enabled: true, output: '', extensions: '', min_age: 60, delete_source: false,
+  scan_enabled: false, cron: '*/10 * * * *', telegram_enabled: false, telegram_mode: 'user',
+  telegram_chat_id: '', telegram_thread_id: '', telegram_token: '' }
+const api = { get: async path => path.endsWith('/settings')
+  ? { ok: true, settings }
+  : { ok: true, logged_in: false, pending: false, api_id: '', api_hash_configured: false } }
+
+try {
+  remote.init({ vue: { [vue.version]: { get: () => () => vue, loaded: true } } })
+  for (const name of ['./Page', './Config', './AppPage']) {
+    const factory = await remote.get(name)
+    const app = vue.createApp(factory(), { api, pluginId: 'Ed2kFolderWatcher' })
+    app.mount('#app')
+    await new Promise(resolve => setTimeout(resolve, 100))
+    if (!document.querySelector('#app').innerText.includes('Telegram 账号')) throw Error(`${name}: account panel missing`)
+    if (document.querySelector('#app [role=alert]')) throw Error(`${name}: API failed`)
+    if (document.querySelector('#app').innerText.includes('正在加载设置')) throw Error(`${name}: settings not loaded`)
+    app.unmount()
+  }
+  await Promise.all([...document.querySelectorAll('link[rel=stylesheet]')].map(async link => {
+    const response = await fetch(link.href)
+    if (!response.ok) throw Error(`stylesheet failed: ${response.status}`)
+  }))
+  document.body.dataset.result = 'passed'
+  document.querySelector('#result').textContent = 'PASS: built Page, Config, AppPage mounted; settings and CSS loaded'
+} catch (error) {
+  document.body.dataset.result = 'failed'
+  document.querySelector('#result').textContent = String(error)
+}
+</script></body></html>

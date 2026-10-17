@@ -156,9 +156,31 @@ class Ed2kTests(unittest.TestCase):
     def test_link_preserves_chinese_and_escapes_delimiters(self):
         path = self.create("大哥小助理.母带.100% |测试.mkv")
         link = self.module.ed2k_link(path, "a" * 32)
-        self.assertEqual(link, f"ed2k://|file|大哥小助理.母带.100%25%20%7C测试.mkv|5|{'a' * 32}|/")
+        self.assertEqual(link, f"ed2k://|file|大哥小助理.母带.100%25 %7C测试.mkv|5|{'a' * 32}|/")
         self.assertEqual(len(link.split("|")), 6)
         self.assertEqual(self.module.ed2k_filename("中文\n\u2028.mkv"), "中文%0A%E2%80%A8.mkv")
+
+    def test_filename_preserves_spaces_and_punctuation(self):
+        name = "花开锦绣 - S01E10 - 第 10 集 （国语）(2026) [2160p]【母带】，。！.mkv"
+        self.assertEqual(self.module.ed2k_filename(name), name)
+        self.assertEqual(self.module.ed2k_filename("分隔|百分%?#/\\\t.mkv"), "分隔%7C百分%25%3F%23%2F%5C%09.mkv")
+
+    def test_upgrade_rewrites_escaped_spaces_and_parentheses(self):
+        path = self.create("花开锦绣 - 第 10 集 (2026)（国语）.mkv")
+        self.plugin._process_file(path)
+        records = self.records()
+        record = records[str(path)]
+        record["link"] = f"ed2k://|file|{self.module.quote(path.name, safe='')}|5|{'a' * 32}|/"
+        record["telegram_sent"] = True
+        record["telegram_target"] = "previous-target"
+        self.plugin._write_results(self.folder / "ed2k.txt", self.root / "data" / "records.json", records)
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("rehashed")), patch.object(self.plugin, "_notify_record", side_effect=AssertionError("resent")):
+            self.plugin._refresh_link_names()
+        updated = self.records()[str(path)]
+        self.assertEqual(updated["link"], f"ed2k://|file|{path.name}|5|{'a' * 32}|/")
+        self.assertTrue(updated["telegram_sent"])
+        self.assertEqual(updated["telegram_target"], "previous-target")
+        self.assertEqual(updated["link"], (self.folder / "ed2k.txt").read_text().strip())
 
     def test_upgrade_rewrites_old_links_without_hashing_or_sending(self):
         path = self.create("大哥小助理.%E4%B8%AD.mkv")
