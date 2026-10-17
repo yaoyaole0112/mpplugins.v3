@@ -1395,9 +1395,10 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-confirm-mode .eme-picker{width:210px;max-width:100%;margin-top:0;flex:none}
 .eme-confirm-mode .eme-picker-option{white-space:nowrap}
 @media(max-width:760px){.eme-confirm-mode .eme-picker{width:min(210px,100%)}.eme-confirm-mode .eme-picker-option{white-space:normal}}
-.eme-cleanup-grid{display:grid;grid-template-columns:repeat(auto-fill,474px);gap:10px;margin:12px 0;width:100%}
+.eme-cleanup-grid{display:grid;grid-template-columns:repeat(auto-fill,274px);gap:10px;margin:12px 0;width:100%}
 .eme-cleanup-item,.eme-move-row{display:flex;align-items:center;min-width:0;gap:8px;padding:8px 10px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px}
-.eme-cleanup-item{width:474px;box-sizing:border-box}
+.eme-cleanup-item{width:274px;box-sizing:border-box}
+.eme-cleanup-item .eme-folder-choice{max-width:230px}
 .eme-folder-choice{min-width:0;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:center;font-weight:600}
 .eme-remove{flex:none;color:#e45c5c!important;padding:8px 10px}
 .eme-move-row{margin:10px 0}

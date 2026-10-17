@@ -1,30 +1,4 @@
 {
-  "Ed2kFolderWatcher": {
-    "name": "自动生成ED2K链接",
-    "description": "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接，并可发送到 Telegram。",
-    "labels": "工具,文件管理",
-    "version": "1.5.3",
-    "icon": "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png",
-    "author": "OpenAI",
-    "v3": true,
-    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
-    "level": 1,
-    "history": {
-      "v1.5.3": "简化插件页面，仅保留底部一个保存插件设置按钮；Telegram 账号设置继续独立保存。",
-      "v1.5.2": "Telegram 仅保留个人账号发送；隐藏并注释 Bot Token 配置与机器人发送实现，旧模式自动归一为个人账号，不再回退机器人模式。",
-      "v1.5.1": "修复联邦组件 Page/AppPage 重复入口导致页面加载失败；文件名保留空格、中英文括号等可读标点；仅转义链接结构保留符及不可显示字符，自动更新已有缓存及 TXT。",
-      "v1.5.0": "新增插件页面 Telegram 个人账号授权：API 设置、发送验证码、两步验证、状态检查和退出登录；管理员接口、敏感字段不回显、登录过期清理；保留终端工具作为备用。",
-      "v1.4.0": "新增个人账号发送模式；独立终端安全登录与会话状态检查；纯链接消息、独立本地 Session、权限保护和并发锁；支持代理、限速及发送失败保留重试。",
-      "v1.3.2": "Telegram 目标支持用户名和公开链接；细化 chat not found/权限错误提示；增加失败冷却，修正机器人互发说明。",
-      "v1.3.1": "ED2K 文件名保留可读中文；特殊分隔字符继续转义；自动更新历史缓存及 TXT，无需重新计算哈希。",
-      "v1.3.0": "新增实时目录监控和稳定文件队列；TXT 输出可关闭；定时增量补扫可选；原子保存历史链接；修复 eMule 分块边界和 Telegram 失败重试、安全删除。",
-      "v1.2.0": "更名为自动生成ED2K链接；改为仅处理新增文件；优化配置间距；新增 Telegram Bot/频道群组通知。",
-      "v1.1.2": "使用 PyCryptodome 的 C 版 MD4 加速大文件 ED2K 计算，避免纯 Python 哈希长时间占用 CPU。",
-      "v1.1.1": "首次扫描改为逐文件增量写入链接和缓存，长时间扫描过程中也能看到已完成结果。",
-      "v1.1.0": "新增 ED2K 生成成功后按队列删除源文件选项，删除失败自动保留并记录警告。",
-      "v1.0.0": "首次发布：支持本地文件夹定时扫描、标准 ED2K 哈希、缓存和链接清单输出。"
-    }
-  },
   "BrushFlow": {
     "name": "站点刷流",
     "description": "自动托管多个站点刷流任务，并独立调度、统计与诊断。",
@@ -49,7 +23,7 @@
     "name": "媒体增强",
     "description": "MoviePilot 独立运行订阅监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存",
     "labels": "工具,115网盘,订阅",
-    "version": "2.10.9",
+    "version": "2.10.10",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -248,34 +222,47 @@
   },
   "P115StrmHelper": {
     "name": "115网盘STRM助手",
-    "description": "115网盘STRM生成一条龙服务",
+    "description": "115网盘STRM生成一条龙服务（MoviePilot V3 适配：整理拦截、本地目录浏览、405 风控熔断）",
     "labels": "云盘",
-    "version": "3.0.0",
+    "version": "3.0.9",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
-    "author": "DDSRem",
+    "author": "DDSRem / helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
     "release": false,
     "system_version": ">=3.0.0",
-    "v3t": false,
     "level": 1,
     "history": {
-      "v3.0.0": "- 运行框架：适配 MoviePilot V3 SDK 与插件实例模型，配置、缓存、工作队列和定时任务按实例管理，更新宿主模块导入路径及依赖清单\n- 数据库与历史：接入 V3 宿主管理的插件数据库和迁移机制，适配 SQLite／PostgreSQL，支持校验并导入旧版 SQLite 数据，更新整理历史和存储快照读取\n- 存储与访问：适配 115 Open、115网盘Plus 和阿里云盘的存储实例及路径契约，更新存储缓存、上传接口、302 连接池、WebDAV 和 FUSE 接口及资源管理\n- STRM 同步：适配全量、增量、目录监控、挂载和 API 生成流程，更新目录上传队列、并发任务与交互回调，保留原有扫描和文件处理规则\n- 整理接管：基于 V3 原生持久任务重构批量整理，保留批量移动、复制、重命名及关联字幕／音轨；对齐宿主识别、命名、覆盖、预览、历史、事件和汇总通知流程\n- 整理恢复与诊断：支持批量任务恢复、逐文件结果核验、部分失败隔离及人工复核，避免重复复制；优化空目录清理，补充建目录、批量文件列表、操作结果和恢复日志\n- 整理后处理：适配 V3 整理完成事件，持久记录 STRM 生成、刮削和媒体库刷新进度，减少重复事件处理；兼容复制后文件 ID／pickcode 变化，支持失败步骤重试\n- 分享与转存：适配分享转存、分享 STRM 生成、审核下载队列及阿里云转 115 流程；上报 source 与原生 media_id，补充 AniList／AniDB 辅助编号，保留各来源的独立媒体身份\n- 搜索与刮削：适配 V3 媒体来源和原生编号模型，更新媒体搜索、HDHive／Telegram 搜索及元数据刮削接口\n- 消息与交互：适配实例消息通道、上传聚合通知、交互式菜单及离线下载回调，保留电影／剧集整理汇总，修复未配置访问域名时的通知链接处理\n- 生活事件与签到：适配生活事件监控、诊断任务、115 签到和 HDHive 签到的调度、请求及任务启停\n- 媒体服务与同步删除：适配 Emby／媒体库刷新、同步删除事件和 Webhook 队列，更新整理事件中的媒体及文件信息读取\n- 备份与清理：适配备份执行跟踪、手动备份接口、定时清理和分享失效清理任务，保留停用状态下的管理接口\n- 运行与验证范围：面向标准 MoviePilot V3／Python 3.14，配置 Linux、Windows、macOS 兼容测试及真实宿主契约验证；V3t 无 GIL 运行时不在支持范围内"
+      "v3.0.9": "修复目录整理固定 iOS 接口导致 405：优先 Android，405 时有限切换并去重；监听异常退避重试并保存原游标；修复 LoggerManager 不支持 exception 导致增量错误被掩盖",
+      "v3.0.8": "中心库无可用媒体信息改为调试日志并正常回退 ffprobe；缺少 SHA1 结果不再误报异常，真实接口错误和探测失败仍保留提示",
+      "v3.0.7": "增量目录树导出改为显式关闭与删除文件，避免底层生成器清理时掩盖真实的 115 读取错误；失败记录完整堆栈以便排查",
+      "v3.0.6": "适配新版宿主历史查询事务接口，修复同步删除 NoneType.execute；网盘严格查询失败或旧宿主无法确认路径不存在时保留本地文件，避免 401/405 误删",
+      "v3.0.4": "完整仓库安装：整合本地兼容补丁、生活事件断线退避重试、旧宿主音乐 storage/batch_mtype 参数适配，并锁定 p115client 兼容依赖",
+      "v3.0.5": "补齐旧宿主缺失的整理校验接口，避免 _transfer_validation_error 异常，保持音乐识别状态和分类校验",
+      "v3.0.3": "修复批量转存遗漏：115 生活事件按游标分页读取全部记录，分页异常时不推进监听游标；历史遗漏文件可手动补扫",
+      "v3.0.2": "音乐整理不拦截：识别为音乐时回退 MoviePilot 原生整理，避免当成影视伴随音轨吞掉",
+      "v3.0.1": "修复 V3 本地目录无法浏览：恢复 dist，browse_dir 优先并兼容 storage/list 响应包装；增量同步 405 风控熔断",
+      "v3.0.0": "适配 MoviePilot V3：整理接管改为拦截检查点执行，历史查询改用 media_source/media_id"
     }
   },
   "P115Disk": {
     "name": "115网盘储存",
-    "description": "更快更强的115网盘存储模块。",
+    "description": "更快更强的115网盘存储模块（V3 适配：proapi 优先，修复 webapi 405 导致的目录查询失败）",
     "labels": "云盘",
-    "version": "3.0.3",
-    "release": false,
+    "version": "3.0.7",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
-    "author": "DDSRem",
+    "author": "DDSRem / helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": false,
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
-      "v3.0.3": "修复速率限制器锁竞争问题",
-      "v3.0.2": "- 升级 p115client 至 0.0.9.7.2，同步更新 V3 依赖清单\n- 适配新版路径遍历接口，保留文件路径和祖先目录信息",
-      "v3.0.1": "修复清理缓存响应并适配 V3 存储管理接口",
-      "v3.0.0": "适配 MoviePilot V3 SDK 与插件依赖清单"
+      "v3.0.7": "兼容 MP 热加载残留的旧 concurrenttools 模块，导入前补齐 p115client 所需的 threadpool_map/taskgroup_map，修复重启及热加载失败",
+      "v3.0.6": "锁定 p115client 所需的 python-concurrenttools 与 python-iterutils 兼容版本，修复重启后两个 115 插件共同加载失败",
+      "v3.0.5": "侧栏目录浏览优先使用 U115 Open 接口，避免 Cookie 接口 405 或超时导致 115网盘Plus 无法打开",
+      "v3.0.4": "整理目标优先使用独立 Open 严格查询，区分确认不存在和接口异常；避免 Cookie 405 冷却阻断可用 Open 查询",
+      "v3.0.3": "目标状态严格查询串行复核：冷却期间最多等待 65 秒，405 有限重试一次，持续异常仍拒绝误覆盖",
+      "v3.0.2": "修复 webapi 405：路径查询改走 proapi android/ios，fs_search 不再强制 webapi.115.com，并避免 405 递归刷日志",
+      "v3.0.1": "MoviePilot V3 运行版同步"
     }
   },
   "AudiencesSignIn": {
@@ -406,6 +393,32 @@
       "v1.2.0": "配置页增加仅管理员可用的立即运行按钮，显示检查结果并优化字段提示间距",
       "v1.1.0": "支持按 Cron 定时检查全部类型的已有订阅，并修正新增订阅的归属",
       "v1.0.0": "首发：新建电视剧订阅时修正插件名称归属"
+    }
+  },
+  "Ed2kFolderWatcher": {
+    "name": "自动生成ED2K链接",
+    "description": "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接，并可发送到 Telegram。",
+    "labels": "工具,文件管理",
+    "version": "1.5.3",
+    "icon": "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png",
+    "author": "OpenAI",
+    "v3": true,
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "level": 1,
+    "history": {
+      "v1.5.3": "简化插件页面，仅保留底部一个保存插件设置按钮；Telegram 账号设置继续独立保存。",
+      "v1.5.2": "Telegram 仅保留个人账号发送；隐藏并注释 Bot Token 配置与机器人发送实现，旧模式自动归一为个人账号，不再回退机器人模式。",
+      "v1.5.1": "修复联邦组件 Page/AppPage 重复入口导致页面加载失败；文件名保留空格、中英文括号等可读标点；仅转义链接结构保留符及不可显示字符，自动更新已有缓存及 TXT。",
+      "v1.5.0": "新增插件页面 Telegram 个人账号授权：API 设置、发送验证码、两步验证、状态检查和退出登录；管理员接口、敏感字段不回显、登录过期清理；保留终端工具作为备用。",
+      "v1.4.0": "新增个人账号发送模式；独立终端安全登录与会话状态检查；纯链接消息、独立本地 Session、权限保护和并发锁；支持代理、限速及发送失败保留重试。",
+      "v1.3.2": "Telegram 目标支持用户名和公开链接；细化 chat not found/权限错误提示；增加失败冷却，修正机器人互发说明。",
+      "v1.3.1": "ED2K 文件名保留可读中文；特殊分隔字符继续转义；自动更新历史缓存及 TXT，无需重新计算哈希。",
+      "v1.3.0": "新增实时目录监控和稳定文件队列；TXT 输出可关闭；定时增量补扫可选；原子保存历史链接；修复 eMule 分块边界和 Telegram 失败重试、安全删除。",
+      "v1.2.0": "更名为自动生成ED2K链接；改为仅处理新增文件；优化配置间距；新增 Telegram Bot/频道群组通知。",
+      "v1.1.2": "使用 PyCryptodome 的 C 版 MD4 加速大文件 ED2K 计算，避免纯 Python 哈希长时间占用 CPU。",
+      "v1.1.1": "首次扫描改为逐文件增量写入链接和缓存，长时间扫描过程中也能看到已完成结果。",
+      "v1.1.0": "新增 ED2K 生成成功后按队列删除源文件选项，删除失败自动保留并记录警告。",
+      "v1.0.0": "首次发布：支持本地文件夹定时扫描、标准 ED2K 哈希、缓存和链接清单输出。"
     }
   }
 }
