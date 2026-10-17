@@ -1,4 +1,18 @@
 {
+  "Ed2kFolderWatcher": {
+    "name": "本地文件夹 ED2K 链接",
+    "description": "监控本地文件夹，为稳定的新文件自动生成标准 ED2K 链接。",
+    "labels": "工具,文件管理",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png",
+    "author": "OpenAI",
+    "v3": false,
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "level": 1,
+    "history": {
+      "v1.0.0": "首次发布：支持本地文件夹定时扫描、标准 ED2K 哈希、缓存和链接清单输出。"
+    }
+  },
   "BrushFlow": {
     "name": "站点刷流",
     "description": "自动托管多个站点刷流任务，并独立调度、统计与诊断。",
