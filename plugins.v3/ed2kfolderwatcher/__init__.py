@@ -150,7 +150,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.5.3"
+    plugin_version = "1.5.4"
     plugin_author = "OpenAI"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"

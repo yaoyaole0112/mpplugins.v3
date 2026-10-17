@@ -106,7 +106,14 @@ onUnmounted(() => {
 
 <template>
   <section class="ed2k-panel" :aria-busy="busy">
-    <header class="ed2k-header"><div><h2>自动生成ED2K链接</h2><p>实时目录监控 · 增量生成 · Telegram 自动发送</p></div><button type="button" class="secondary" @click="emit('close')">关闭</button></header>
+    <header class="ed2k-header">
+      <div><h2>自动生成ED2K链接</h2><p>实时目录监控 · 增量生成 · Telegram 自动发送</p></div>
+      <div class="header-actions">
+        <button type="button" :disabled="disabled || auth.pending" @click="saveSettings">保存插件设置</button>
+        <button type="button" class="secondary" :disabled="disabled || !settings.enabled || auth.pending" @click="run">增量补扫／补发链接</button>
+        <button type="button" class="secondary" @click="emit('close')">关闭</button>
+      </div>
+    </header>
     <div v-if="error" role="alert" class="message error">{{ error }}</div>
     <div v-if="notice" role="status" class="message success">{{ notice }}</div>
     <p v-if="!loaded">正在加载设置…</p>
@@ -138,10 +145,10 @@ onUnmounted(() => {
       <div class="actions"><button v-if="!auth.logged_in && !auth.pending" type="button" :disabled="disabled || !auth.api_hash_configured || auth.retry_in > 0 || !account.phone" @click="accountAction('send_code', { phone: account.phone })">{{ auth.retry_in > 0 ? `请等待 ${auth.retry_in} 秒` : '发送验证码' }}</button><button v-if="auth.pending" type="button" :disabled="disabled || (auth.password_required ? !account.password : !account.code)" @click="accountAction('sign_in', { code: account.code, password: account.password })">{{ auth.password_required ? '验证密码并登录' : '验证并登录' }}</button><button v-if="auth.pending" type="button" class="secondary" :disabled="disabled" @click="accountAction('cancel')">取消本次登录</button><button v-if="auth.logged_in || auth.session_present" type="button" class="danger" :disabled="disabled" @click="logout">退出登录</button><button type="button" class="secondary" :disabled="disabled" @click="work(refreshAuth)">刷新登录状态</button></div>
       <small>API Hash 保存后不回显；验证码和密码仅用于本次登录，不写入普通插件配置或日志。Session 只保存在本地，请通过可信网络或 HTTPS 使用本页面。</small>
     </article>
-    <footer class="actions"><button type="button" :disabled="disabled || auth.pending" @click="saveSettings">保存插件设置</button><button type="button" class="secondary" :disabled="disabled || !settings.enabled || auth.pending" @click="run">增量补扫／补发链接</button></footer>
   </section>
 </template>
 
 <style scoped>
+.header-actions{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;margin-left:auto}.header-actions button{white-space:nowrap}
 .ed2k-panel{padding:24px;max-width:1220px;margin:auto;color:rgb(var(--v-theme-on-surface));overflow:auto;max-height:85dvh;font-size:15px}.ed2k-header,.card-header{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}.ed2k-header{margin-bottom:24px}h2,h3{margin:0;font-weight:650}h2{font-size:24px}h3{font-size:20px}p{margin:16px 0;color:rgba(var(--v-theme-on-surface),.72);line-height:1.7}.card{padding:26px;margin-bottom:22px;border:1px solid rgba(var(--v-theme-on-surface),.16);border-radius:15px;background:rgba(var(--v-theme-on-surface),.025)}.fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px;margin:22px 0}.fields label{display:flex;flex-direction:column;gap:10px;min-width:0}.fields input,.fields select{width:100%;border:1px solid rgba(var(--v-theme-on-surface),.25);border-radius:9px;padding:13px 15px;min-height:48px;background:rgba(var(--v-theme-on-surface),.025);color:inherit;font:inherit}.fields select option{background:rgb(var(--v-theme-surface));color:rgb(var(--v-theme-on-surface))}.fields input:focus,.fields select:focus{outline:2px solid rgb(var(--v-theme-primary));outline-offset:2px}small{color:rgba(var(--v-theme-on-surface),.62);line-height:1.7}.switches{display:flex;flex-wrap:wrap;gap:20px;margin:22px 0}.switch{display:flex;align-items:center;gap:10px;cursor:pointer}.switch input{width:18px;height:18px;accent-color:rgb(var(--v-theme-primary))}.actions{display:flex;gap:12px;flex-wrap:wrap;margin:22px 0}button{padding:12px 20px;border:0;border-radius:9px;color:rgb(var(--v-theme-on-primary));background:rgb(var(--v-theme-primary));font:inherit;cursor:pointer;min-height:44px}.secondary{background:rgba(var(--v-theme-primary),.13);color:rgb(var(--v-theme-primary))}.danger{color:#ef8585;background:rgba(220,60,60,.15)}button:disabled{opacity:.45;cursor:not-allowed}.message{padding:16px 20px;border-radius:10px;margin:16px 0;overflow-wrap:anywhere}.error{background:rgba(230,65,65,.14);color:#ed9696}.success{background:rgba(60,180,110,.14);color:#79c99e}.warning{color:#e7b36a}.account-status{font-weight:600}@media(max-width:650px){.ed2k-panel{padding:14px}.card{padding:18px}.fields{grid-template-columns:1fr;gap:20px}.card-header{align-items:flex-start}button{padding:11px 15px}}
 </style>
