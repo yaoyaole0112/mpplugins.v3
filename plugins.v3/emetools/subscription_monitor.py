@@ -13,10 +13,11 @@ from app.runtime.settings import get_runtime_setting
 
 try:
     from telethon import TelegramClient, events
-    from telethon.errors import ChatForwardsRestrictedError, SessionPasswordNeededError
+    from telethon.errors import (AuthKeyDuplicatedError, ChatForwardsRestrictedError,
+                                 SessionPasswordNeededError)
     from telethon.sessions import StringSession
 except ImportError:
-    TelegramClient = events = StringSession = SessionPasswordNeededError = None
+    TelegramClient = events = StringSession = SessionPasswordNeededError = AuthKeyDuplicatedError = None
     ChatForwardsRestrictedError = None
 
 
@@ -220,18 +221,31 @@ class SubscriptionMonitor:
         self._ensure_loop()
         return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, self.loop))
 
-    async def _connect(self):
+    async def _close_client(self):
+        client, self.client = self.client, None
+        if client:
+            try:
+                await client.disconnect()
+            except Exception:
+                logger.debug("ME工具 Telegram：关闭旧客户端失败", exc_info=True)
+
+    async def _connect(self, fresh=False):
         if TelegramClient is None:
             raise ValueError("未安装 telethon，请重新安装插件依赖并重启 MoviePilot")
         if not self.plugin._tg_api_id or not self.plugin._tg_api_hash:
             raise ValueError("请先在设置中保存 Telegram API ID 和 API Hash")
         if self.client is None:
             logger.info("ME工具 Telegram：初始化用户账号监听客户端")
-            self.client = TelegramClient(StringSession(self.plugin._tg_session), int(self.plugin._tg_api_id), self.plugin._tg_api_hash)
+            session = "" if fresh else self.plugin._tg_session
+            self.client = TelegramClient(StringSession(session), int(self.plugin._tg_api_id), self.plugin._tg_api_hash)
             self.client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
         if not self.client.is_connected():
             logger.info("ME工具 Telegram：开始连接 Telegram")
-            await self.client.connect()
+            try:
+                await self.client.connect()
+            except AuthKeyDuplicatedError:
+                await self._close_client()
+                raise
             logger.info("ME工具 Telegram：连接成功")
         return self.client
 
@@ -244,8 +258,14 @@ class SubscriptionMonitor:
     async def send_code(self, phone):
         if not re.fullmatch(r"\+\d{7,15}", phone or ""):
             raise ValueError("手机号需为国际格式，例如 +8613800000000")
-        client = await self._connect()
-        result = await client.send_code_request(phone)
+        try:
+            client = await self._connect()
+            result = await client.send_code_request(phone)
+        except AuthKeyDuplicatedError:
+            logger.warning("ME工具 Telegram：旧登录 session 已被重复使用，改用全新临时 session 请求验证码")
+            await self._close_client()
+            client = await self._connect(fresh=True)
+            result = await client.send_code_request(phone)
         self.phone, self.code_hash = phone, result.phone_code_hash
         self.last_error = ""
         logger.info("ME工具 Telegram：登录验证码已请求（手机号及验证码不记录）")
@@ -363,6 +383,8 @@ class SubscriptionMonitor:
             except ValueError as exc:
                 if not self.code_hash:
                     self.last_error = str(exc)
+            except AuthKeyDuplicatedError:
+                self.last_error = "Telegram 旧会话被重复使用，请点击“发送验证码”重新登录"
             except Exception as exc:
                 self.last_error = f"Telegram 状态检查失败：{type(exc).__name__}"
         if logged:
