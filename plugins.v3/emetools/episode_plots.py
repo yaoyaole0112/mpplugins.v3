@@ -66,10 +66,81 @@ def parse_tvmao_episode(page, title, number, year=''):
     return {'name': text if match[2] else '', 'overview': overview}
 
 
+def _baike_data(page):
+    soup = BeautifulSoup(page, 'html.parser')
+    script = soup.find('script', id='__NEXT_DATA__')
+    try:
+        data = json.loads(script.string or '').get('props', {}).get('pageProps', {}).get('pageData', {}) if script else {}
+        return data if isinstance(data, dict) else {}
+    except (ValueError, AttributeError, TypeError):
+        return {}
+
+
+def _baike_text(value):
+    if isinstance(value, list):
+        return ''.join(_baike_text(item) for item in value)
+    if not isinstance(value, dict) or value.get('tag') in {'ref', 'image'}:
+        return ''
+    if isinstance(value.get('text'), str):
+        return value['text']
+    return _baike_text(value.get('text') or value.get('content') or [])
+
+
+def _baike_candidates(page, title, year):
+    data = _baike_data(page)
+    navigation = data.get('navigation') or {}
+    candidates = set()
+    for lemma in navigation.get('lemmas') or []:
+        if not isinstance(lemma, dict) or lemma.get('lemmaTitle') != title:
+            continue
+        description = str(lemma.get('lemmaDesc') or '')
+        if not re.search(r'电视剧|剧集|短剧|玄幻剧|仙侠剧|悬疑剧|爱情剧|古装剧', description) \
+                and '影视作品' not in (lemma.get('classify') or []):
+            continue
+        years = re.findall(r'(?<!\d)(?:19|20)\d{2}(?!\d)', description)
+        if year and years and str(year)[:4] not in years:
+            continue
+        identifier = str(lemma.get('lemmaId') or '')
+        if identifier.isdecimal():
+            candidates.add('/item/' + quote(title, safe='') + '/' + identifier)
+    return sorted(candidates) if len(candidates) == 1 else []
+
+
 def parse_baike_episodes(page, title, year=''):
+    data = _baike_data(page)
+    structured = {}
+    if data:
+        if data.get('lemmaTitle') != title:
+            return {}
+        description = str(data.get('lemmaDesc') or '')
+        years = re.findall(r'(?<!\d)(?:19|20)\d{2}(?!\d)', description)
+        if year and years and str(year)[:4] not in years:
+            return {}
+        for field in (data.get('card') or {}).get('content') or []:
+            if field.get('title') in {'首播时间', '首播日期', '上映时间', '发行时间'}:
+                dates = re.findall(r'(?<!\d)(?:19|20)\d{2}(?!\d)', _baike_text(field.get('data')))
+                if year and dates and str(year)[:4] not in dates:
+                    return {}
+
+        def collect(value):
+            if isinstance(value, list):
+                for child in value:
+                    collect(child)
+            elif isinstance(value, dict):
+                if 'plotTitle' in value and 'plotDetail' in value:
+                    caption = _baike_text(value['plotTitle']).strip()
+                    match = _EPISODE.fullmatch(caption)
+                    overview = first_sentence(_baike_text(value['plotDetail']))
+                    if match and overview:
+                        structured[int(match[1])] = {'name': caption if match[2] else '', 'overview': overview}
+                else:
+                    for child in value.values():
+                        collect(child)
+
+        collect(data.get('structuredContent') or [])
     soup = _document(page)
     heading = soup.find('h1')
-    if not heading or heading.get_text('', strip=True) != title:
+    if not data and (not heading or heading.get_text('', strip=True) != title):
         return {}
     if year:
         for label in soup.find_all('dt'):
@@ -79,12 +150,16 @@ def parse_baike_episodes(page, title, year=''):
                 if years and str(year)[:4] not in years:
                     return {}
     title_node = soup.find('title')
-    if title_node and not _work_title_matches(title_node.get_text(' ', strip=True).replace('_百度百科', ''), title, year):
-        return {}
+    if title_node and not data:
+        page_title = title_node.get_text(' ', strip=True).replace('_百度百科', '')
+        base_title = re.sub(r'[（(][^()（）]*[）)]$', '', page_title).strip()
+        if base_title != title or (year and re.search(r'(?:19|20)\d{2}', page_title)
+                                  and str(year)[:4] not in re.findall(r'(?:19|20)\d{2}', page_title)):
+            return {}
     text = soup.get_text('\n', strip=True)
     section = text.find('分集剧情')
     if section < 0:
-        return {}
+        return structured
     result = {}
     current = None
     paragraphs = []
@@ -108,6 +183,7 @@ def parse_baike_episodes(page, title, year=''):
             if line and not re.fullmatch(r'\[?\d+\]?', line):
                 paragraphs.append(line)
     save()
+    result.update(structured)
     return result
 
 
@@ -219,24 +295,43 @@ async def fetch_episode_plots(title, year, season, numbers, status=None, active=
         remaining = [number for number in numbers if not result.get(number, {}).get('name')
                      or not result.get(number, {}).get('overview')]
         if remaining:
-            try:
-                fallback = {}
-                for query in dict.fromkeys([work_title, *queries]):
-                    page = await read('https://baike.baidu.com' + (direct_baike or '/item/' + quote(query, safe='')))
-                    fallback = parse_baike_episodes(page, query, str(year) if season == 1 else '')
-                    if fallback:
-                        break
-                if not fallback:
-                    report('百度百科未获取到可确认的分集剧情（可能需验证或条目不匹配），不猜填')
-                for number in remaining:
-                    data = fallback.get(number) or {}
-                    if not data:
-                        continue
-                    current = result.setdefault(number, {})
-                    for field in ('name', 'overview'):
-                        if not current.get(field) and data.get(field):
-                            current[field] = data[field]
-                            current['source'] = '电视猫/百度百科' if current.get('source') == '电视猫' else '百度百科'
-            except httpx.HTTPError:
-                report('百度百科分集剧情读取失败，保留原有信息')
+            fallback = {}
+            for query in dict.fromkeys([work_title, *queries]):
+                baike_year = str(year) if season == 1 else ''
+                baike_path = direct_baike or '/item/' + quote(query, safe='')
+                for host in ('baike.baidu.com', 'wapbaike.baidu.com'):
+                    try:
+                        page = await read('https://' + host + baike_path)
+                        if '百度安全验证' in page[:10000]:
+                            report(f'百度百科 {host} 返回安全验证页，未读取该页剧情')
+                            continue
+                        fallback = parse_baike_episodes(page, query, baike_year)
+                        if not fallback:
+                            candidates = _baike_candidates(page, query, baike_year)
+                            if candidates:
+                                report('百度百科默认条目无分集剧情，已唯一匹配同名电视剧词条')
+                                page = await read('https://' + host + candidates[0])
+                                fallback = parse_baike_episodes(page, query, baike_year)
+                        if fallback:
+                            report(f'百度百科已解析 {len(fallback)} 集剧情（包含页面内分组选集数据）')
+                            break
+                    except httpx.HTTPStatusError as error:
+                        report(f'百度百科 {host} 返回 HTTP {error.response.status_code}，尝试其他公开入口；未写入该来源')
+                    except httpx.HTTPError as error:
+                        report(f'百度百科 {host} 读取异常：{type(error).__name__}，尝试其他公开入口')
+                    except (ValueError, TypeError, AttributeError):
+                        report(f'百度百科 {host} 页面结构无法解析，尝试其他公开入口')
+                if fallback:
+                    break
+            if not fallback:
+                report('百度百科未获取到可确认的分集剧情（访问受限、同名词条不唯一或条目无剧情），保留原有信息')
+            for number in remaining:
+                data = fallback.get(number) or {}
+                if not data:
+                    continue
+                current = result.setdefault(number, {})
+                for field in ('name', 'overview'):
+                    if not current.get(field) and data.get(field):
+                        current[field] = data[field]
+                        current['source'] = '电视猫/百度百科' if current.get('source') == '电视猫' else '百度百科'
     return result
