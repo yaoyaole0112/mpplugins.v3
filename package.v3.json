@@ -224,47 +224,34 @@
   },
   "P115StrmHelper": {
     "name": "115网盘STRM助手",
-    "description": "115网盘STRM生成一条龙服务（MoviePilot V3 适配：整理拦截、本地目录浏览、405 风控熔断）",
+    "description": "115网盘STRM生成一条龙服务",
     "labels": "云盘",
-    "version": "3.0.9",
+    "version": "3.0.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
-    "author": "DDSRem / helios",
-    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
-    "release": false,
+    "author": "DDSRem",
+    "release": true,
     "system_version": ">=3.0.0",
+    "v3t": false,
     "level": 1,
     "history": {
-      "v3.0.9": "修复目录整理固定 iOS 接口导致 405：优先 Android，405 时有限切换并去重；监听异常退避重试并保存原游标；修复 LoggerManager 不支持 exception 导致增量错误被掩盖",
-      "v3.0.8": "中心库无可用媒体信息改为调试日志并正常回退 ffprobe；缺少 SHA1 结果不再误报异常，真实接口错误和探测失败仍保留提示",
-      "v3.0.7": "增量目录树导出改为显式关闭与删除文件，避免底层生成器清理时掩盖真实的 115 读取错误；失败记录完整堆栈以便排查",
-      "v3.0.6": "适配新版宿主历史查询事务接口，修复同步删除 NoneType.execute；网盘严格查询失败或旧宿主无法确认路径不存在时保留本地文件，避免 401/405 误删",
-      "v3.0.4": "完整仓库安装：整合本地兼容补丁、生活事件断线退避重试、旧宿主音乐 storage/batch_mtype 参数适配，并锁定 p115client 兼容依赖",
-      "v3.0.5": "补齐旧宿主缺失的整理校验接口，避免 _transfer_validation_error 异常，保持音乐识别状态和分类校验",
-      "v3.0.3": "修复批量转存遗漏：115 生活事件按游标分页读取全部记录，分页异常时不推进监听游标；历史遗漏文件可手动补扫",
-      "v3.0.2": "音乐整理不拦截：识别为音乐时回退 MoviePilot 原生整理，避免当成影视伴随音轨吞掉",
-      "v3.0.1": "修复 V3 本地目录无法浏览：恢复 dist，browse_dir 优先并兼容 storage/list 响应包装；增量同步 405 风控熔断",
-      "v3.0.0": "适配 MoviePilot V3：整理接管改为拦截检查点执行，历史查询改用 media_source/media_id"
+      "v3.0.0": "- 运行框架：适配 MoviePilot V3 SDK 与插件实例模型，配置、缓存、工作队列和定时任务按实例管理，更新宿主模块导入路径及依赖清单\n- 数据库与历史：接入 V3 宿主管理的插件数据库和迁移机制，适配 SQLite／PostgreSQL，支持校验并导入旧版 SQLite 数据，更新整理历史和存储快照读取\n- 存储与访问：适配 115 Open、115网盘Plus 和阿里云盘的存储实例及路径契约，更新存储缓存、上传接口、302 连接池、WebDAV 和 FUSE 接口及资源管理\n- STRM 同步：适配全量、增量、目录监控、挂载和 API 生成流程，更新目录上传队列、并发任务与交互回调，保留原有扫描和文件处理规则\n- 整理接管：基于 V3 原生持久任务重构批量整理，保留批量移动、复制、重命名及关联字幕／音轨；对齐宿主识别、命名、覆盖、预览、历史、事件和汇总通知流程\n- 整理恢复与诊断：支持批量任务恢复、逐文件结果核验、部分失败隔离及人工复核，避免重复复制；优化空目录清理，补充建目录、批量文件列表、操作结果和恢复日志\n- 整理后处理：适配 V3 整理完成事件，持久记录 STRM 生成、刮削和媒体库刷新进度，减少重复事件处理；兼容复制后文件 ID／pickcode 变化，支持失败步骤重试\n- 分享与转存：适配分享转存、分享 STRM 生成、审核下载队列及阿里云转 115 流程；上报 source 与原生 media_id，补充 AniList／AniDB 辅助编号，保留各来源的独立媒体身份\n- 搜索与刮削：适配 V3 媒体来源和原生编号模型，更新媒体搜索、HDHive／Telegram 搜索及元数据刮削接口\n- 消息与交互：适配实例消息通道、上传聚合通知、交互式菜单及离线下载回调，保留电影／剧集整理汇总，修复未配置访问域名时的通知链接处理\n- 生活事件与签到：适配生活事件监控、诊断任务、115 签到和 HDHive 签到的调度、请求及任务启停\n- 媒体服务与同步删除：适配 Emby／媒体库刷新、同步删除事件和 Webhook 队列，更新整理事件中的媒体及文件信息读取\n- 备份与清理：适配备份执行跟踪、手动备份接口、定时清理和分享失效清理任务，保留停用状态下的管理接口\n- 运行与验证范围：面向标准 MoviePilot V3／Python 3.14，配置 Linux、Windows、macOS 兼容测试及真实宿主契约验证；V3t 无 GIL 运行时不在支持范围内"
     }
   },
   "P115Disk": {
     "name": "115网盘储存",
-    "description": "更快更强的115网盘存储模块（V3 适配：proapi 优先，修复 webapi 405 导致的目录查询失败）",
+    "description": "更快更强的115网盘存储模块。",
     "labels": "云盘",
-    "version": "3.0.7",
+    "version": "3.0.3",
+    "release": true,
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
-    "author": "DDSRem / helios",
-    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
-    "release": false,
+    "author": "DDSRem",
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
-      "v3.0.7": "兼容 MP 热加载残留的旧 concurrenttools 模块，导入前补齐 p115client 所需的 threadpool_map/taskgroup_map，修复重启及热加载失败",
-      "v3.0.6": "锁定 p115client 所需的 python-concurrenttools 与 python-iterutils 兼容版本，修复重启后两个 115 插件共同加载失败",
-      "v3.0.5": "侧栏目录浏览优先使用 U115 Open 接口，避免 Cookie 接口 405 或超时导致 115网盘Plus 无法打开",
-      "v3.0.4": "整理目标优先使用独立 Open 严格查询，区分确认不存在和接口异常；避免 Cookie 405 冷却阻断可用 Open 查询",
-      "v3.0.3": "目标状态严格查询串行复核：冷却期间最多等待 65 秒，405 有限重试一次，持续异常仍拒绝误覆盖",
-      "v3.0.2": "修复 webapi 405：路径查询改走 proapi android/ios，fs_search 不再强制 webapi.115.com，并避免 405 递归刷日志",
-      "v3.0.1": "MoviePilot V3 运行版同步"
+      "v3.0.3": "修复速率限制器锁竞争问题",
+      "v3.0.2": "- 升级 p115client 至 0.0.9.7.2，同步更新 V3 依赖清单\n- 适配新版路径遍历接口，保留文件路径和祖先目录信息",
+      "v3.0.1": "修复清理缓存响应并适配 V3 存储管理接口",
+      "v3.0.0": "适配 MoviePilot V3 SDK 与插件依赖清单"
     }
   },
   "AudiencesSignIn": {
