@@ -112,7 +112,7 @@ onUnmounted(() => {
     <p v-if="!loaded">正在加载设置…</p>
 
     <article class="card">
-      <div class="card-header"><h3>目录监控与输出</h3><button type="button" :disabled="disabled || auth.pending" @click="saveSettings">保存插件设置</button></div>
+      <h3>目录监控与输出</h3>
       <div class="switches"><label v-for="field in watchSwitches" :key="field.key" class="switch"><input v-model="settings[field.key]" type="checkbox" :disabled="disabled">{{ field.label }}</label></div>
       <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :min="field.type === 'number' ? 0 : undefined" :disabled="disabled"><small>{{ field.hint }}</small></label></div>
       <div class="switches"><label class="switch"><input v-model="settings.output_enabled" type="checkbox" :disabled="disabled">生成本地 TXT</label><label class="switch"><input v-model="settings.delete_source" type="checkbox" :disabled="disabled">成功后删除源文件</label><label class="switch"><input v-model="settings.scan_enabled" type="checkbox" :disabled="disabled">定时增量补扫</label></div>

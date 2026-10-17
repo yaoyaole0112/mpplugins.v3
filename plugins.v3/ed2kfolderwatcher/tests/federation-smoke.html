@@ -24,6 +24,9 @@ try {
     if (document.querySelector('#app [role=alert]')) throw Error(`${name}: API failed`)
     if (document.querySelector('#app').innerText.includes('Bot Token')) throw Error(`${name}: bot settings visible`)
     if (document.querySelector('#app option[value=bot]')) throw Error(`${name}: bot mode selectable`)
+    const buttons = [...document.querySelectorAll('#app button')]
+    if (buttons.filter(button => button.textContent.trim() === '保存插件设置').length !== 1) throw Error(`${name}: duplicate plugin save buttons`)
+    if (buttons.filter(button => button.textContent.trim() === '保存账号设置').length !== 1) throw Error(`${name}: account save missing`)
     if (document.querySelector('#app').innerText.includes('正在加载设置')) throw Error(`${name}: settings not loaded`)
     app.unmount()
   }
