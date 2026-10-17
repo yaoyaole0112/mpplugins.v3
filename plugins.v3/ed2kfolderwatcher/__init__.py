@@ -95,7 +95,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "本地文件夹 ED2K 链接"
     plugin_desc = "监控本地文件夹，为稳定的新文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "OpenAI"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -108,6 +108,7 @@ class Ed2kFolderWatcher(_PluginBase):
     _output = ""
     _extensions = DEFAULT_EXTENSIONS
     _min_age = 60
+    _delete_source = False
     _onlyonce = False
     _running = False
     _lock = threading.Lock()
@@ -120,6 +121,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._cron = str(config.get("cron") or DEFAULT_CRON).strip()
         self._output = str(config.get("output") or "").strip()
         self._extensions = str(config.get("extensions") or DEFAULT_EXTENSIONS).strip()
+        self._delete_source = bool(config.get("delete_source", False))
         try:
             self._min_age = max(0, int(config.get("min_age", 60)))
             CronTrigger.from_crontab(self._cron)
@@ -176,6 +178,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 cache = {}
             extensions = self._extension_set()
             records = {}
+            delete_candidates = []
             for path in self._iter_files(folder):
                 try:
                     resolved = path.resolve()
@@ -191,6 +194,8 @@ class Ed2kFolderWatcher(_PluginBase):
                     cached = cache.get(key)
                     if cached and cached.get("size") == signature["size"] and cached.get("mtime_ns") == signature["mtime_ns"]:
                         records[key] = {**signature, "name": path.name, "link": cached["link"]}
+                        if self._delete_source:
+                            delete_candidates.append(path)
                         continue
                     file_hash = ed2k_hash(path)
                     final_stat = path.stat()
@@ -198,12 +203,21 @@ class Ed2kFolderWatcher(_PluginBase):
                         logger.info(f"本地文件夹 ED2K 链接：文件仍在变化，留待下次扫描：{path}")
                         continue
                     records[key] = {**signature, "name": path.name, "link": ed2k_link(path, file_hash)}
+                    if self._delete_source:
+                        delete_candidates.append(path)
                     logger.info(f"本地文件夹 ED2K 链接：已处理 {path}")
                 except (OSError, ValueError) as err:
                     logger.warning(f"本地文件夹 ED2K 链接：跳过 {path}：{err}")
             ordered = sorted(records.values(), key=lambda item: item["link"].lower())
             output.write_text("\n".join(item["link"] for item in ordered) + ("\n" if ordered else ""), encoding="utf-8")
             cache_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+            if self._delete_source:
+                for path in delete_candidates:
+                    try:
+                        path.unlink()
+                        logger.info(f"本地文件夹 ED2K 链接：已删除源文件：{path}")
+                    except OSError as err:
+                        logger.warning(f"本地文件夹 ED2K 链接：删除源文件失败（已保留）：{path}：{err}")
             logger.info(f"本地文件夹 ED2K 链接：扫描完成，共 {len(ordered)} 个文件，输出：{output}")
         except Exception as err:
             logger.error(f"本地文件夹 ED2K 链接扫描失败：{err}", exc_info=True)
@@ -226,7 +240,7 @@ class Ed2kFolderWatcher(_PluginBase):
         return None
 
     def _save_config(self) -> None:
-        self.update_config({"enabled": self._enabled, "folder": self._folder, "recursive": self._recursive, "cron": self._cron, "output": self._output, "extensions": self._extensions, "min_age": self._min_age, "onlyonce": self._onlyonce})
+        self.update_config({"enabled": self._enabled, "folder": self._folder, "recursive": self._recursive, "cron": self._cron, "output": self._output, "extensions": self._extensions, "min_age": self._min_age, "delete_source": self._delete_source, "onlyonce": self._onlyonce})
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [{"component": "VForm", "content": [
@@ -236,6 +250,7 @@ class Ed2kFolderWatcher(_PluginBase):
             {"component": "VTextField", "props": {"model": "output", "label": "输出文件路径", "placeholder": "留空则写入监控目录/ed2k.txt"}},
             {"component": "VTextField", "props": {"model": "extensions", "label": "文件扩展名过滤", "placeholder": "留空处理全部文件，例如 mkv,mp4,flac"}},
             {"component": "VTextField", "props": {"model": "min_age", "label": "文件稳定等待秒数", "type": "number", "hint": "文件修改时间距现在不足此秒数时跳过。"}},
+            {"component": "VSwitch", "props": {"model": "delete_source", "label": "生成完成后删除源文件", "hint": "ED2K 生成并成功写入清单后按队列逐个删除；删除失败会保留源文件。", "persistent-hint": True}},
             {"component": "VTextField", "props": {"model": "cron", "label": "扫描计划", "hint": "默认每 10 分钟：*/10 * * * *"}},
             {"component": "VSwitch", "props": {"model": "onlyonce", "label": "保存后立即扫描一次"}},
-        ]}], {"enabled": False, "folder": "", "recursive": True, "output": "", "extensions": "", "min_age": 60, "cron": DEFAULT_CRON, "onlyonce": False}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "cron": DEFAULT_CRON, "onlyonce": False}
