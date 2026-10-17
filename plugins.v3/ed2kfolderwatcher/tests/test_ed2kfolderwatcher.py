@@ -24,6 +24,9 @@ class Ed2kTests(unittest.TestCase):
             spec.loader.exec_module(cls.module)
 
     def setUp(self):
+        module_patch = patch.dict(sys.modules, {"ed2k_test_plugin": self.module})
+        module_patch.start()
+        self.addCleanup(module_patch.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -78,36 +81,23 @@ class Ed2kTests(unittest.TestCase):
         error.error_code = 401
         self.assertIn("Token 无效", self.module.telegram_error_hint(error))
 
-    def test_telegram_chat_error_cooldown_and_token_redaction(self):
-        self.plugin._telegram_enabled = True
-        self.plugin._telegram_token = "private-token"
-        self.plugin._telegram_chat_id = "12345"
-        error = RuntimeError("chat not found private-token")
-        error.error_code = 400
-        client = Mock()
-        client.send_message.side_effect = error
-        settings = types.ModuleType("app.runtime.settings")
-        settings.get_runtime_setting = Mock(return_value=None)
-        with patch.object(self.module, "TelegramBotApi", return_value=client), patch.dict(sys.modules, {"app.runtime.settings": settings}):
+    def test_legacy_bot_config_forces_user_mode(self):
+        self.plugin.init_plugin({"folder": str(self.folder), "telegram_mode": "bot", "telegram_token": "private-token"})
+        self.assertEqual(self.plugin._telegram_mode, "user")
+        with patch.object(self.plugin, "_send_telegram_user", return_value=False) as sender, patch.object(self.module, "TelegramBotApi") as bot:
+            self.plugin._telegram_enabled = True
             self.assertFalse(self.plugin._send_telegram(Path("test.mkv"), "link"))
-            warning = self.module.logger.warning.call_args.args[0]
-            self.assertNotIn("private-token", warning)
-            self.assertIn("300秒", warning)
-            self.assertFalse(self.plugin._send_telegram(Path("second.mkv"), "link"))
-        client.send_message.assert_called_once()
-        client.close.assert_called_once()
+            sender.assert_called_once()
+            bot.assert_not_called()
 
-    def test_telegram_sends_to_normalized_username(self):
-        self.plugin._telegram_enabled = True
-        self.plugin._telegram_token = "private-token"
-        self.plugin._telegram_chat_id = "https://t.me/receiver_bot"
-        client = Mock()
-        settings = types.ModuleType("app.runtime.settings")
-        settings.get_runtime_setting = Mock(return_value=None)
-        with patch.object(self.module, "TelegramBotApi", return_value=client), patch.dict(sys.modules, {"app.runtime.settings": settings}):
+    def test_disabled_telegram_does_not_send(self):
+        with patch.object(self.plugin, "_send_telegram_user") as sender:
             self.assertTrue(self.plugin._send_telegram(Path("test.mkv"), "link"))
-        self.assertEqual(client.send_message.call_args.args[0], "@receiver_bot")
-        client.close.assert_called_once()
+            sender.assert_not_called()
+        form, defaults = self.plugin.get_form()
+        self.assertEqual(defaults["telegram_mode"], "user")
+        self.assertNotIn('"model": "telegram_token"', json.dumps(form))
+        self.assertNotIn('"model": "telegram_mode"', json.dumps(form))
 
     def test_user_mode_no_bot_token_or_bot_fallback(self):
         self.plugin._telegram_enabled = True
@@ -136,10 +126,9 @@ class Ed2kTests(unittest.TestCase):
         self.assertNotIn("telegram_user_api_hash", saved)
         self.assertNotIn("telegram_user_session", saved)
 
-    def test_user_target_dedup_separate_from_bot_and_account(self):
+    def test_user_target_dedup_ignores_bot_token_and_separates_accounts(self):
         self.plugin._telegram_token = "bot-token"
         self.plugin._telegram_chat_id = "@receiver_bot"
-        bot_key = self.plugin._telegram_target_key()
         account = Mock()
         account.identity.return_value = "first-user"
         user_module = types.ModuleType("ed2k_test_plugin.user_account")
@@ -147,7 +136,8 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._telegram_mode = "user"
         with patch.dict(sys.modules, {"ed2k_test_plugin.user_account": user_module}):
             first_key = self.plugin._telegram_target_key()
-            self.assertNotEqual(bot_key, first_key)
+            self.plugin._telegram_mode = "bot"
+            self.assertEqual(first_key, self.plugin._telegram_target_key())
             self.plugin._telegram_token = "unrelated-token"
             self.assertEqual(first_key, self.plugin._telegram_target_key())
             account.identity.return_value = "second-user"

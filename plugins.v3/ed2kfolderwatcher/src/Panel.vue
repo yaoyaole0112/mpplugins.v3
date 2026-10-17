@@ -7,14 +7,14 @@ const busy = ref(false)
 const loaded = ref(false)
 const error = ref('')
 const notice = ref('')
-const settings = reactive({ telegram_mode: 'user', telegram_token: '' })
+const settings = reactive({ telegram_mode: 'user' })
 const account = reactive({ api_id: '', api_hash: '', phone: '', code: '', password: '' })
 const auth = reactive({ logged_in: false, pending: false, password_required: false, api_hash_configured: false, expires_in: 0, retry_in: 0 })
 let timer
 let savedDelete = false
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || !loaded.value)
-const configFields = ['enabled', 'folder', 'recursive', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'delete_source', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_token']
+const configFields = ['enabled', 'folder', 'recursive', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'delete_source', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id']
 const watchSwitches = [{ key: 'enabled', label: '启用插件' }, { key: 'monitor_enabled', label: '实时监控文件' }, { key: 'recursive', label: '包含子目录' }]
 const textFields = [{ key: 'folder', label: '监控目录', hint: 'MoviePilot 容器内路径，例如 /media/movies' }, { key: 'extensions', label: '扩展名过滤', hint: '留空处理全部文件，例如 mkv,mp4' }, { key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '持续写入时自动延后，避免处理未完成文件' }]
 
@@ -40,7 +40,7 @@ function applyAuth(result) {
 function applySettings(result) {
   if (!result.ok) throw new Error(result.message || '读取或保存设置失败')
   Object.assign(settings, result.settings)
-  settings.telegram_token = ''
+  settings.telegram_mode = 'user'
   savedDelete = !!settings.delete_source
 }
 async function refreshAuth() {
@@ -123,8 +123,10 @@ onUnmounted(() => {
     <article class="card">
       <h3>Telegram 发送设置</h3>
       <div class="switches"><label class="switch"><input v-model="settings.telegram_enabled" type="checkbox" :disabled="disabled">发送 ED2K 链接到 Telegram</label></div>
-      <div class="fields"><label>发送方式<select v-model="settings.telegram_mode" :disabled="disabled"><option value="user">个人账号（推荐发送给接收机器人）</option><option value="bot">Bot Token（机器人）</option></select></label><label>接收目标<input v-model="settings.telegram_chat_id" :disabled="disabled" placeholder="@Htrbgcbtbot"><small>支持 @用户名、数字 Chat ID 或公开 t.me 链接。</small></label><label>话题线程 ID（可选）<input v-model="settings.telegram_thread_id" :disabled="disabled" placeholder="普通私聊、频道留空"></label><label v-if="settings.telegram_mode === 'bot'">发送机器人 Token<input v-model="settings.telegram_token" type="password" :disabled="disabled" autocomplete="new-password" :placeholder="settings.telegram_token_configured ? '已配置；留空保持不变' : '填写发送机器人的 Token'"><small>Bot 模式向其他机器人私聊，双方需开启 Bot-to-Bot Communication。</small></label></div>
-      <p>个人账号模式只发送链接，不加标题，不需要第三方接收机器人开启互发。修改发送设置后请点击“保存插件设置”。</p>
+      <!-- <select v-model="settings.telegram_mode"><option value="bot">Bot Token（机器人）</option></select> -->
+      <!-- <label>发送机器人 Token<input v-model="settings.telegram_token" type="password" autocomplete="new-password"></label> -->
+      <div class="fields"><label>接收目标<input v-model="settings.telegram_chat_id" :disabled="disabled" placeholder="@Htrbgcbtbot"><small>支持 @用户名、数字 Chat ID 或公开 t.me 链接。</small></label><label>话题线程 ID（可选）<input v-model="settings.telegram_thread_id" :disabled="disabled" placeholder="普通私聊、频道留空"></label></div>
+      <p>发送方式：个人账号。只发送链接，不加标题；请在下方完成账号授权。修改接收目标后请点击“保存插件设置”。</p>
     </article>
 
     <article class="card" data-testid="telegram-account">

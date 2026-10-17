@@ -22,6 +22,8 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100))
     if (!document.querySelector('#app').innerText.includes('Telegram 账号')) throw Error(`${name}: account panel missing`)
     if (document.querySelector('#app [role=alert]')) throw Error(`${name}: API failed`)
+    if (document.querySelector('#app').innerText.includes('Bot Token')) throw Error(`${name}: bot settings visible`)
+    if (document.querySelector('#app option[value=bot]')) throw Error(`${name}: bot mode selectable`)
     if (document.querySelector('#app').innerText.includes('正在加载设置')) throw Error(`${name}: settings not loaded`)
     app.unmount()
   }

@@ -62,8 +62,9 @@ class WebApiTests(unittest.TestCase):
     def test_settings_hide_token_and_no_cache(self):
         self.authorize()
         response = self.client.get("/settings")
-        self.assertTrue(response.json()["settings"]["telegram_token_configured"])
-        self.assertEqual(response.json()["settings"]["telegram_token"], "")
+        self.assertNotIn("telegram_token_configured", response.json()["settings"])
+        self.assertNotIn("telegram_token", response.json()["settings"])
+        self.assertEqual(response.json()["settings"]["telegram_mode"], "user")
         self.assertNotIn("secret-bot-token", response.text)
         self.assertEqual(response.headers["cache-control"], "no-store")
 
@@ -84,8 +85,9 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(self.plugin._telegram_retry_after, 0)
 
     def test_validation_preserves_blank_bot_token(self):
-        result = web_api.validate_settings(self.plugin, {"telegram_token": "", "min_age": "12"})
+        result = web_api.validate_settings(self.plugin, {"telegram_token": "ignored", "telegram_mode": "bot", "min_age": "12"})
         self.assertEqual(result["telegram_token"], "secret-bot-token")
+        self.assertEqual(result["telegram_mode"], "user")
         self.assertEqual(result["min_age"], 12)
         for values in ({"enabled": "false"}, {"min_age": -1}, {"telegram_thread_id": "-3"}, {"api_hash": "secret"}):
             with self.assertRaises(web_api.UserAccountError):

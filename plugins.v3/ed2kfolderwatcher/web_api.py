@@ -18,8 +18,7 @@ BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "
 
 def settings_snapshot(plugin):
     result = {name: getattr(plugin, f"_{name}") for name in CONFIG_FIELDS}
-    result["telegram_token"] = ""
-    result["telegram_token_configured"] = bool(plugin._telegram_token)
+    result["telegram_mode"] = "user"
     return result
 
 
@@ -40,15 +39,14 @@ def validate_settings(plugin, values):
                 raise UserAccountError("配置文本格式不正确或过长")
             value = value.strip()
         result[name] = value
-    if result["telegram_mode"] not in {"bot", "user"}:
-        raise UserAccountError("请选择有效的 Telegram 发送模式")
+    result["telegram_mode"] = "user"
     try:
         CronTrigger.from_crontab(result["cron"])
     except Exception:
         raise UserAccountError("定时补扫计划格式无效") from None
     if result["telegram_thread_id"] and (not result["telegram_thread_id"].isdigit() or int(result["telegram_thread_id"]) <= 0):
         raise UserAccountError("话题线程 ID 必须为正整数或留空")
-    result["telegram_token"] = result.get("telegram_token") or plugin._telegram_token
+    result["telegram_token"] = plugin._telegram_token
     result["onlyonce"] = False
     return result
 
