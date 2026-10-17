@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from apscheduler.triggers.cron import CronTrigger
 
@@ -109,15 +109,19 @@ def ed2k_hash(path: Path, stop_event=None) -> str:
     return (_CryptoMD4.new(combined).digest() if _CryptoMD4 else _md4(combined)).hex()
 
 
+def ed2k_filename(name: str) -> str:
+    return "".join(character if ord(character) > 127 and character.isprintable() else quote(character, safe="") for character in name)
+
+
 def ed2k_link(path: Path, file_hash: str) -> str:
-    return f"ed2k://|file|{quote(path.name, safe='')}|{path.stat().st_size}|{file_hash}|/"
+    return f"ed2k://|file|{ed2k_filename(path.name)}|{path.stat().st_size}|{file_hash}|/"
 
 
 class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     plugin_author = "OpenAI"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -177,6 +181,10 @@ class Ed2kFolderWatcher(_PluginBase):
         self._scan_enabled = bool(config.get("scan_enabled", False))
         self._onlyonce = bool(config.get("onlyonce", False))
         if self._folder and (self._enabled or self._onlyonce):
+            try:
+                self._refresh_link_names()
+            except (OSError, ValueError) as err:
+                logger.warning(f"自动生成ED2K链接：更新历史链接文件名失败，保留原记录：{type(err).__name__}")
             self._worker = threading.Thread(target=self._work, name="ed2k-worker", daemon=True)
             self._worker.start()
         if self._onlyonce and self._folder:
@@ -387,6 +395,24 @@ class Ed2kFolderWatcher(_PluginBase):
         if output is not None:
             links = sorted({item["link"] for item in records.values()})
             self._atomic_write(output, "\n".join(links) + ("\n" if links else ""))
+
+    def _refresh_link_names(self) -> None:
+        folder, output, cache_path = self._paths()
+        if not cache_path.exists():
+            return
+        records = json.loads(cache_path.read_text(encoding="utf-8"))
+        changed = False
+        for record in records.values():
+            parts = record["link"].split("|")
+            if len(parts) != 6 or parts[:2] != ["ed2k://", "file"]:
+                continue
+            parts[2] = ed2k_filename(record.get("name") or unquote(parts[2]))
+            link = "|".join(parts)
+            if link != record["link"]:
+                record["link"] = link
+                changed = True
+        if changed or (records and self._output_enabled):
+            self._write_results(output if self._output_enabled else None, cache_path, records)
 
     def _process_file(self, path: Path) -> None:
         with self._lock:

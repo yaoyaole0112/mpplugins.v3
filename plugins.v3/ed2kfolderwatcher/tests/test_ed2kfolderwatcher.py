@@ -57,6 +57,45 @@ class Ed2kTests(unittest.TestCase):
             with patch.object(self.module, "_CryptoMD4", None):
                 self.assertEqual(self.module.ed2k_hash(path), expected)
 
+    def test_link_preserves_chinese_and_escapes_delimiters(self):
+        path = self.create("大哥小助理.母带.100% |测试.mkv")
+        link = self.module.ed2k_link(path, "a" * 32)
+        self.assertEqual(link, f"ed2k://|file|大哥小助理.母带.100%25%20%7C测试.mkv|5|{'a' * 32}|/")
+        self.assertEqual(len(link.split("|")), 6)
+        self.assertEqual(self.module.ed2k_filename("中文\n\u2028.mkv"), "中文%0A%E2%80%A8.mkv")
+
+    def test_upgrade_rewrites_old_links_without_hashing_or_sending(self):
+        path = self.create("大哥小助理.%E4%B8%AD.mkv")
+        self.plugin._process_file(path)
+        path.unlink()
+        records = self.records()
+        record = records[str(path)]
+        record["link"] = f"ed2k://|file|{self.module.quote(path.name, safe='')}|5|{'a' * 32}|/"
+        record["telegram_sent"] = True
+        record["telegram_target"] = "previous-target"
+        self.plugin._write_results(self.folder / "ed2k.txt", self.root / "data" / "records.json", records)
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("rehashed")), patch.object(self.plugin, "_send_telegram", side_effect=AssertionError("resent")):
+            self.plugin._refresh_link_names()
+        updated = self.records()[str(path)]
+        self.assertIn("大哥小助理.%25E4%25B8%25AD.mkv", updated["link"])
+        self.assertTrue(updated["telegram_sent"])
+        self.assertEqual(updated["telegram_target"], "previous-target")
+        self.assertEqual(updated["link"], (self.folder / "ed2k.txt").read_text().strip())
+
+    def test_upgrade_respects_txt_disabled(self):
+        path = self.create("中文.mkv")
+        self.plugin._process_file(path)
+        records = self.records()
+        records[str(path)]["link"] = f"ed2k://|file|%E4%B8%AD%E6%96%87.mkv|5|{'a' * 32}|/"
+        output = self.folder / "ed2k.txt"
+        cache = self.root / "data" / "records.json"
+        self.plugin._write_results(output, cache, records)
+        previous = output.read_text()
+        self.plugin._output_enabled = False
+        self.plugin._refresh_link_names()
+        self.assertIn("中文.mkv", self.records()[str(path)]["link"])
+        self.assertEqual(output.read_text(), previous)
+
     def test_boundary_hashes(self):
         from Crypto.Hash import MD4
         part_size = self.module.ED2K_PART_SIZE
