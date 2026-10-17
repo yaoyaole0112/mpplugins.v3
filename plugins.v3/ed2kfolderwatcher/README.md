@@ -27,16 +27,19 @@ MoviePilot 本地目录 ED2K 插件。路径填写容器内路径，例如 `/med
 选择「Telegram 发送方式 → 个人账号（Telethon）」。这时不使用 Bot Token，也不要求接收方开启机器人互发。使用独立的个人账号 Session，不导入其他插件的会话，不监听或自动回复聊天消息。
 
 1. 在 `my.telegram.org` 用你自己的账号申请 API ID/API Hash。
-2. 在服务器的**交互终端**执行（容器名称不是 `moviepilot` 时自行替换）：
+2. 打开插件「配置」或「查看数据」，在 **Telegram 个人账号授权** 区输入 API ID/API Hash，点击「保存 API 设置」。API Hash 保存后不回显，留空保持原值。
+3. 输入国际格式手机号（如 `+8613800000000`），点击「发送验证码」，查看 Telegram 官方服务消息并输入验证码；如果开启了两步验证，再输入密码完成登录。验证码和密码只用于本次登录，不保存到普通插件配置、日志或浏览器存储。登录流程最多保留 10 分钟，重载插件后需要重新请求验证码。
+4. 显示「Telegram 已登录」后，选择个人账号发送方式，填写接收机器人 `@用户名`，保存插件设置，再点击「增量补扫／补发链接」。不需要终端命令。
+
+请通过可信网络或 HTTPS 使用授权页面。授权接口仅允许 MoviePilot 管理员调用。页面提供「取消本次登录」「刷新登录状态」「退出登录」；退出会撤销本插件会话，保留 API 设置，不影响手机登录。不会自动读取其他插件的凭证或 Session。
+
+如页面暂不可用，仍保留**备用终端工具**（容器名称不是 `moviepilot` 时自行替换）：
 
    ```bash
    docker exec -it moviepilot python /app/app/plugins/ed2kfolderwatcher/telegram_user_login.py --data-dir /config/plugins/Ed2kFolderWatcher
    ```
 
-3. 按提示输入 API ID、API Hash、手机号、登录验证码及可能需要的两步验证密码。除 API ID 外均隐藏输入；验证码、手机号和密码不保存到插件配置或凭证 JSON。不要在聊天里提供这些信息。
-4. 在插件中保留接收机器人 `@用户名`，保存配置并勾选一次「立即扫描」，补发已生成但未成功发送的链接。
-
-实际数据目录以插件「查看数据」页面展示的命令为准。只验证授权、不发送消息：
+按提示完成登录即可。不要在聊天里提供凭证、验证码或密码。只验证授权、不发送消息：
 
 ```bash
 docker exec -it moviepilot python /app/app/plugins/ed2kfolderwatcher/telegram_user_login.py --data-dir /config/plugins/Ed2kFolderWatcher --status
@@ -44,7 +47,7 @@ docker exec -it moviepilot python /app/app/plugins/ed2kfolderwatcher/telegram_us
 
 - 个人账号模式仅发送完整 ED2K 链接，不加文件标题或其他说明，方便接收机器人解析。接收方服务如果要求先 `/start` 或注册，请用自己的账号先完成。
 - 授权文件仅在插件数据目录 `telegram-user/`：`credentials.json` 保存 API ID/API Hash 和用户 ID，`account.session` 保存 Telegram 登录会话。目录权限 700，文件权限 600，源码内不存凭证，也不会上传 GitHub。备份 MoviePilot 数据时也要保护这些文件。
-- Session 具有账号访问权限，不是普通配置。可在 Telegram「设置 → 设备」中撤销本工具的授权；再次使用需重新运行登录命令。使用不同 API ID/API Hash 重新授权时，先停用插件并安全移除旧 `telegram-user/` 数据，再登录；不要共享同一 Session 给其他程序。
+- Session 具有账号访问权限，不是普通配置。可在 Telegram「设置 → 设备」中撤销本工具的授权；再次使用需重新登录。更改 API ID/API Hash 前先在插件页面退出登录；不要共享同一 Session 给其他程序。
 - 登录与发送使用文件锁，防止同时操作 SQLite 会话。发送使用独立事件循环和连接，最多等待 60 秒；沿用 MoviePilot 的 HTTP/SOCKS 代理设置（不支持 HTTPS 代理隧道）。同一插件成功发送间隔至少 3 秒，并遵守 Telegram 返回的限速等待。
 - 未登录、会话失效或权限不足时保留链接与源文件，不会退回 Bot 身份发送。登录完成后保存插件配置解除冷却，再立即扫描一次。
 - 依赖见 `requirements.txt`；当前服务器已具备 Telethon。其他环境应通过插件依赖安装流程安装，插件不会自行联网执行 pip。

@@ -53,7 +53,7 @@ class TelegramUserAccount:
                 raise ValueError()
             return credentials
         except (OSError, ValueError, KeyError, TypeError):
-            raise UserAccountError("个人账号尚未授权或本地凭证无效；请在服务器终端运行 telegram_user_login.py 完成登录，勿把验证码发到聊天中") from None
+            raise UserAccountError("个人账号尚未授权或本地凭证无效；请打开插件页面完成登录，也可使用备用终端工具，勿把验证码发到聊天中") from None
 
     def _permissions(self) -> None:
         self.directory.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -106,7 +106,7 @@ class TelegramUserAccount:
             client = self._client(credentials)
             await client.connect()
             if not await client.is_user_authorized():
-                raise UserAccountError("个人账号会话未登录或已失效，请重新运行本地登录工具")
+                raise UserAccountError("个人账号会话未登录或已失效，请打开插件账号页面重新登录")
             me = await client.get_me()
             if not me or getattr(me, "bot", False):
                 raise UserAccountError("必须授权 Telegram 个人账号，不能使用机器人会话")
@@ -132,7 +132,7 @@ class TelegramUserAccount:
                 seconds = max(60, int(getattr(error, "seconds", 300)))
                 raise UserAccountError(f"Telegram 要求限速等待 {seconds} 秒；请勿重复尝试", seconds + 1) from None
             if name in {"AuthKeyUnregisteredError", "SessionRevokedError", "UnauthorizedError", "UserDeactivatedError"}:
-                raise UserAccountError("个人账号会话已失效，请在终端重新登录") from None
+                raise UserAccountError("个人账号会话已失效，请在插件页面重新登录") from None
             if name in {"UserIsBlockedError", "ChatWriteForbiddenError", "UserBannedInChannelError", "PeerIdInvalidError", "UsernameInvalidError", "UsernameNotOccupiedError"}:
                 raise UserAccountError("接收目标不可用或个人账号无权发送；请核对 @用户名、账号状态及接收机器人的使用要求") from None
             raise UserAccountError(f"个人账号连接或发送失败（{name}）；请检查代理与网络，不会退回 Bot 身份发送", 60) from None

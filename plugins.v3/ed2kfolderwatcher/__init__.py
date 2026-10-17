@@ -150,7 +150,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.4.0"
+    plugin_version = "1.5.0"
     plugin_author = "OpenAI"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -182,6 +182,8 @@ class Ed2kFolderWatcher(_PluginBase):
     _onlyonce = False
     _running = False
     _lock = threading.Lock()
+    _web_login = None
+    _web_login_lock = threading.Lock()
 
     def init_plugin(self, config: dict = None) -> None:
         self.stop_service()
@@ -189,6 +191,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._condition = threading.Condition()
         self._pending = {}
         self._lock = threading.RLock()
+        self._web_login_lock = threading.Lock()
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
         self._folder = str(config.get("folder") or "").strip()
@@ -233,6 +236,29 @@ class Ed2kFolderWatcher(_PluginBase):
 
     def get_state(self) -> bool:
         return self._enabled
+
+    @staticmethod
+    def get_render_mode() -> Tuple[str, str]:
+        return "vue", "dist/assets"
+
+    def _get_web_login(self):
+        with self._web_login_lock:
+            if self._web_login is None:
+                from .telegram_web import TelegramWebLogin
+                from .user_account import TelegramUserAccount
+                try:
+                    from app.runtime.settings import get_runtime_setting
+                    proxy = get_runtime_setting("PROXY")
+                except ImportError:
+                    proxy = None
+                self._web_login = TelegramWebLogin(TelegramUserAccount(Path(self.get_data_path()), proxy=proxy))
+            return self._web_login
+
+    async def telegram_account_status(self):
+        return await self._get_web_login().call("status")
+
+    async def telegram_account_action(self, change):
+        return await self._get_web_login().call(str(change.get("operation") or ""), change.get("values") or {})
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
@@ -559,22 +585,11 @@ class Ed2kFolderWatcher(_PluginBase):
         return [{"id": "Ed2kFolderWatcher", "name": "扫描本地文件夹并生成 ED2K", "trigger": CronTrigger.from_crontab(self._cron), "func": self.scan}]
 
     def get_api(self) -> List[Dict[str, Any]]:
-        return [{"path": "/run", "endpoint": self.scan, "methods": ["GET"], "summary": "立即扫描并生成 ED2K 链接", "description": "扫描配置的本地文件夹并更新 ed2k.txt。"}]
+        from .web_api import build_routes
+        return build_routes(self)
 
     def get_page(self) -> Optional[List[dict]]:
-        import shlex
-        from .user_account import TelegramUserAccount
-        account = TelegramUserAccount(Path(self.get_data_path()))
-        status = "已存在本地授权文件，实际有效性可用 --status 校验" if account.configured() else "尚未完成个人账号授权"
-        command = f"docker exec -it moviepilot python /app/app/plugins/ed2kfolderwatcher/telegram_user_login.py --data-dir {shlex.quote(str(self.get_data_path()))}"
-        return [{"component": "VCard", "content": [{"component": "VCardText", "props": {"class": "pa-6"}, "content": [
-            {"component": "h3", "text": "Telegram 个人账号授权"},
-            {"component": "p", "props": {"class": "my-4"}, "text": f"当前发送方式：{self._telegram_mode}；{status}。"},
-            {"component": "p", "text": "在服务器交互终端执行以下命令。API Hash、验证码和两步验证密码仅在终端隐藏输入，不要发到聊天中。"},
-            {"component": "pre", "props": {"class": "my-4", "style": "white-space:pre-wrap;word-break:break-all"}, "text": command},
-            {"component": "p", "text": "从 my.telegram.org 获取自己的 API ID/API Hash。授权成功后保存插件配置并立即扫描一次，可补发失败链接。个人账号模式只发送 ED2K 链接，不附加标题。"},
-            {"component": "p", "text": "Session 位于插件数据目录 telegram-user，仅保存在本地。它具有账号访问权限，切勿分享或上传。可在 Telegram 设置→设备中撤销授权。"}
-        ]}]}]
+        return []
 
     def stop_service(self) -> None:
         if self._stopping is not None:
@@ -589,6 +604,9 @@ class Ed2kFolderWatcher(_PluginBase):
         if self._worker is not None and self._worker is not threading.current_thread():
             self._worker.join()
             self._worker = None
+        if self._web_login is not None:
+            self._web_login.close()
+            self._web_login = None
 
     def _save_config(self) -> None:
         self.update_config({"enabled": self._enabled, "folder": self._folder, "recursive": self._recursive, "cron": self._cron, "output": self._output, "output_enabled": self._output_enabled, "monitor_enabled": self._monitor_enabled, "scan_enabled": self._scan_enabled, "extensions": self._extensions, "min_age": self._min_age, "delete_source": self._delete_source, "telegram_enabled": self._telegram_enabled, "telegram_mode": self._telegram_mode, "telegram_token": self._telegram_token, "telegram_chat_id": self._telegram_chat_id, "telegram_thread_id": self._telegram_thread_id, "onlyonce": self._onlyonce})
@@ -615,7 +633,7 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VSwitch", "telegram_enabled", "发送 ED2K 链接到 Telegram"),
             field("VSelect", "telegram_mode", "Telegram 发送方式", items=[{"title": "Bot Token（机器人）", "value": "bot"}, {"title": "个人账号（Telethon）", "value": "user"}], hint="个人账号模式无需接收机器人开启 Bot-to-Bot Communication。", persistent_hint=True),
             field("VTextField", "telegram_token", "Telegram Bot Token", type="password", hint="发送者的身份凭证，从 @BotFather 获取；不是接收方 Bot 的用户名。", persistent_hint=True),
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-5"}, "text": "个人账号模式首次需要终端授权，打开插件『查看数据』获取命令；无需填写 Bot Token。登录验证码和密码不要输入此配置页面。"},
+            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-5"}, "text": "个人账号可在插件新版页面的 Telegram 个人账号授权区完成登录，无需终端或 Bot Token；请使用可信网络或 HTTPS。"},
             field("VTextField", "telegram_chat_id", "Telegram 接收目标", placeholder="数字 Chat ID、@用户名 或公开 t.me 链接", hint="个人账号模式可直接填接收机器人 @用户名；Bot 模式发给机器人需双方开启互发。数字目标须是该账号已认识的聊天，推荐使用 @用户名。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
