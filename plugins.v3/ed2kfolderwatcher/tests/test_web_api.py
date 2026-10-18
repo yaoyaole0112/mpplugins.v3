@@ -46,6 +46,13 @@ class WebApiTests(unittest.TestCase):
     def authorize(self):
         self.app.dependency_overrides[web_api.get_current_active_superuser] = lambda: types.SimpleNamespace(is_superuser=True)
 
+    def test_multi_target_settings_validation(self):
+        result = web_api.validate_settings(self.plugin, {"telegram_enabled": True, "telegram_chat_id": "@first\n@second|123"})
+        self.assertEqual(result["telegram_chat_id"], "@first\n@second|123")
+        for value in ("", "@valid\ninvalid target", "@group|0"):
+            with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"telegram_enabled": True, "telegram_chat_id": value})
+
     def test_every_route_declares_bearer_admin_auth(self):
         for route in self.routes:
             self.assertEqual(route["auth"], "bear")

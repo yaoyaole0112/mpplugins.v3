@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from app.api.dependencies.auth import get_current_active_superuser
 
 from .user_account import UserAccountError
+from .telegram_targets import telegram_targets
 
 
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
@@ -47,6 +48,11 @@ def validate_settings(plugin, values):
     if result["telegram_thread_id"] and (not result["telegram_thread_id"].isdigit() or int(result["telegram_thread_id"]) <= 0):
         raise UserAccountError("话题线程 ID 必须为正整数或留空")
     result["telegram_token"] = plugin._telegram_token
+    if result["telegram_enabled"] or result["telegram_chat_id"]:
+        try:
+            telegram_targets(result["telegram_chat_id"], result["telegram_thread_id"])
+        except ValueError as error:
+            raise UserAccountError(str(error)) from None
     result["onlyonce"] = False
     return result
 
@@ -107,6 +113,7 @@ def build_routes(plugin):
             result = await plugin.telegram_account_action(values)
             if result.get("logged_in") or operation == "save":
                 plugin._telegram_retry_after = 0
+                plugin._telegram_target_retry = {}
             return response(result)
         except UserAccountError as error:
             manager = plugin._get_web_login()

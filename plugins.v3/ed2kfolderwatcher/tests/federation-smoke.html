@@ -56,6 +56,12 @@ try {
       continue
     }
     if (!document.querySelector('#app').innerText.includes('Telegram 账号')) throw Error(`${name}: account panel missing`)
+    const targets = document.querySelector('#app textarea')
+    if (!targets || targets.rows < 3 || !document.querySelector('#app').innerText.includes('接收目标（支持多个）')) throw Error(`${name}: multiple target textarea missing`)
+    targets.value = '@receiver_bot\n@channel\n-1001234567890'
+    targets.dispatchEvent(new Event('input', { bubbles: true }))
+    await vue.nextTick()
+    if (!targets.value.includes('\n@channel\n')) throw Error(`${name}: multiline input lost`)
     if (buttons.filter(button => button.textContent.trim() === '保存插件设置').length !== 1) throw Error(`${name}: duplicate plugin save buttons`)
     if (buttons.filter(button => button.textContent.trim() === '保存账号设置').length !== 1) throw Error(`${name}: account save missing`)
     const headerButtons = [...document.querySelectorAll('#app .ed2k-header .header-actions button')]

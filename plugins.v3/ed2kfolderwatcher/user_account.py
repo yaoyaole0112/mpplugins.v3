@@ -9,9 +9,10 @@ from urllib.parse import unquote, urlparse
 
 
 class UserAccountError(Exception):
-    def __init__(self, message: str, retry_after: int = 300):
+    def __init__(self, message: str, retry_after: int = 300, account_wide: bool = False):
         super().__init__(message)
         self.retry_after = retry_after
+        self.account_wide = account_wide
 
 
 def mtproto_proxy(proxy):
@@ -130,7 +131,7 @@ class TelegramUserAccount:
             name = type(error).__name__
             if name in {"FloodWaitError", "SlowModeWaitError", "FloodPremiumWaitError"}:
                 seconds = max(60, int(getattr(error, "seconds", 300)))
-                raise UserAccountError(f"Telegram 要求限速等待 {seconds} 秒；请勿重复尝试", seconds + 1) from None
+                raise UserAccountError(f"Telegram 要求限速等待 {seconds} 秒；请勿重复尝试", seconds + 1, account_wide=name != "SlowModeWaitError") from None
             if name in {"AuthKeyUnregisteredError", "SessionRevokedError", "UnauthorizedError", "UserDeactivatedError"}:
                 raise UserAccountError("个人账号会话已失效，请在插件页面重新登录") from None
             if name in {"UserIsBlockedError", "ChatWriteForbiddenError", "UserBannedInChannelError", "PeerIdInvalidError", "UsernameInvalidError", "UsernameNotOccupiedError"}:

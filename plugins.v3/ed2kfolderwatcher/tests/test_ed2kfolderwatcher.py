@@ -43,6 +43,117 @@ class Ed2kTests(unittest.TestCase):
         path.write_bytes(data)
         return path
 
+    def test_multiple_targets_normalize_and_deduplicate(self):
+        self.plugin._telegram_chat_id = "@Receiver\nhttps://t.me/receiver, -100123；@group|123;@other|"
+        self.plugin._telegram_thread_id = "456"
+        self.assertEqual(self.plugin._telegram_targets(), [("@Receiver", 456), ("-100123", 456), ("@group", 123), ("@other", None)])
+
+    def test_multiple_targets_invalid_or_empty_rejected(self):
+        for value in ("", "@valid\ninvalid target", "@group|0", "@group|12|34", ";\n"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.plugin._telegram_chat_id = value
+                self.plugin._telegram_targets()
+
+    def test_multiple_targets_limit(self):
+        self.plugin._telegram_chat_id = "\n".join(f"@target{number}" for number in range(51))
+        with self.assertRaises(ValueError):
+            self.plugin._telegram_targets()
+
+    def test_multi_target_partial_delivery_retry_and_checkpoint(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first\n@second\n@third"
+        record = {"link": "pure-link", "telegram_sent": False}
+        checkpoint = Mock()
+        with patch.object(self.plugin, "_send_telegram", side_effect=[True, False, True]) as sender:
+            self.plugin._notify_record(Path("test.bin"), record, checkpoint)
+        self.assertEqual(sender.call_count, 3)
+        self.assertEqual(checkpoint.call_count, 2)
+        self.assertFalse(record["telegram_sent"])
+        record = json.loads(json.dumps(record))
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_record(Path("test.bin"), record)
+        sender.assert_called_once_with(Path("test.bin"), "pure-link", target=("@second", None))
+        self.assertTrue(record["telegram_sent"])
+
+    def test_multi_target_reorder_and_add_only_new(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first\n@second"
+        record = {"link": "pure-link"}
+        with patch.object(self.plugin, "_send_telegram", return_value=True):
+            self.plugin._notify_record(Path("test.bin"), record)
+        key = self.plugin._telegram_target_key()
+        self.plugin._telegram_chat_id = "https://t.me/SECOND;first"
+        self.assertEqual(key, self.plugin._telegram_target_key())
+        self.plugin._telegram_chat_id += ";@third"
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_record(Path("test.bin"), record)
+        sender.assert_called_once_with(Path("test.bin"), "pure-link", target=("@third", None))
+
+    def test_multi_target_legacy_delivery_migrates(self):
+        import hashlib
+        from ed2k_test_plugin.user_account import TelegramUserAccount
+        self.plugin._telegram_enabled = True
+        identity = TelegramUserAccount(Path(self.plugin.get_data_path())).identity()
+        legacy = hashlib.sha256(f"user|{identity}|@first|".encode()).hexdigest()
+        record = {"link": "pure-link", "telegram_sent": True, "telegram_target": legacy}
+        self.plugin._telegram_chat_id = "@first\n@second"
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_record(Path("test.bin"), record)
+        sender.assert_called_once_with(Path("test.bin"), "pure-link", target=("@second", None))
+
+    def test_multi_target_checkpoint_failure_stops_delivery(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first\n@second"
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            with self.assertRaises(OSError):
+                self.plugin._notify_record(Path("test.bin"), {"link": "pure-link"}, Mock(side_effect=OSError("disk full")))
+        self.assertEqual(sender.call_count, 1)
+
+    def test_multi_target_delete_requires_all_and_persists_partial(self):
+        path = self.create()
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first\n@second"
+        self.plugin._delete_source = True
+        with patch.object(self.plugin, "_send_telegram", side_effect=[True, False]):
+            self.plugin._process_file(path)
+        self.assertTrue(path.exists())
+        record = self.records()[str(path.resolve())]
+        self.assertEqual(len(record["telegram_deliveries"]), 1)
+        self.assertFalse(record["telegram_sent"])
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("rehashed")), patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._process_file(path)
+        self.assertEqual(sender.call_count, 1)
+        self.assertFalse(path.exists())
+
+    def test_multi_target_failure_cooldown_does_not_block_others(self):
+        from ed2k_test_plugin.user_account import UserAccountError
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first\n@second"
+        self.plugin._stopping = Mock()
+        self.plugin._stopping.wait.return_value = False
+        account = Mock()
+        account.identity.return_value = "test-user"
+        account.send.side_effect = [UserAccountError("目标无权发送"), None]
+        runtime = types.ModuleType("app.runtime.settings")
+        runtime.get_runtime_setting = Mock(return_value=None)
+        with patch.dict(sys.modules, {"app.runtime.settings": runtime}), patch("ed2k_test_plugin.user_account.TelegramUserAccount", return_value=account):
+            self.assertFalse(self.plugin._send_telegram_user(Path("test.bin"), "link", target=("@first", None)))
+            self.assertTrue(self.plugin._send_telegram_user(Path("test.bin"), "link", target=("@second", None)))
+            self.assertFalse(self.plugin._send_telegram_user(Path("test.bin"), "link", target=("@first", None)))
+        self.assertEqual(account.send.call_count, 2)
+
+    def test_multi_target_account_flood_wait_blocks_remaining(self):
+        from ed2k_test_plugin.user_account import UserAccountError
+        self.plugin._telegram_enabled = True
+        account = Mock()
+        account.send.side_effect = UserAccountError("限速", 123, account_wide=True)
+        runtime = types.ModuleType("app.runtime.settings")
+        runtime.get_runtime_setting = Mock(return_value=None)
+        with patch.dict(sys.modules, {"app.runtime.settings": runtime}), patch("ed2k_test_plugin.user_account.TelegramUserAccount", return_value=account):
+            self.assertFalse(self.plugin._send_telegram_user(Path("test.bin"), "link", target=("@first", None)))
+            self.assertFalse(self.plugin._send_telegram_user(Path("test.bin"), "link", target=("@second", None)))
+        self.assertEqual(account.send.call_count, 1)
+
     def records(self):
         return json.loads((self.root / "data" / "records.json").read_text())
 
@@ -373,6 +484,7 @@ class Ed2kTests(unittest.TestCase):
     def test_telegram_failure_retries_without_rehash(self):
         path = self.create()
         self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@receiver"
         self.plugin._delete_source = True
         with patch.object(self.plugin, "_send_telegram", return_value=False):
             self.plugin._process_file(path)
@@ -385,6 +497,7 @@ class Ed2kTests(unittest.TestCase):
     def test_change_during_notification_prevents_delete(self):
         path = self.create()
         self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@receiver"
         self.plugin._delete_source = True
 
         def change(*args):

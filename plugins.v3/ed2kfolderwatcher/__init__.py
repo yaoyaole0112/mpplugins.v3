@@ -1,12 +1,11 @@
 import json
 import hashlib
 import os
-import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote
 
 from apscheduler.triggers.cron import CronTrigger
 
@@ -119,18 +118,8 @@ def ed2k_link(path: Path, file_hash: str) -> str:
 
 
 def telegram_destination(value: str) -> str:
-    value = value.strip()
-    if value.startswith(("https://", "http://", "t.me/")):
-        parsed = urlparse(value if "://" in value else f"https://{value}")
-        username = parsed.path.strip("/")
-        if parsed.netloc.lower() not in {"t.me", "telegram.me", "www.t.me"} or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", username):
-            raise ValueError("请填写目标 @用户名 或数字 Chat ID，不要填写消息链接、私有邀请链接")
-        value = f"@{username}"
-    if re.fullmatch(r"-?\d+", value):
-        return value
-    if re.fullmatch(r"@?[A-Za-z][A-Za-z0-9_]*", value):
-        return f"@{value.lstrip('@')}"
-    raise ValueError("接收目标格式错误：请填写数字 Chat ID 或 @用户名")
+    from .telegram_targets import telegram_destination as normalize
+    return normalize(value)
 
 
 def telegram_error_hint(error: Exception) -> str:
@@ -150,7 +139,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.6.1"
+    plugin_version = "1.7.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -206,6 +195,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._telegram_chat_id = str(config.get("telegram_chat_id") or "").strip()
         self._telegram_thread_id = str(config.get("telegram_thread_id") or "").strip()
         self._telegram_retry_after = 0
+        self._telegram_target_retry = {}
         self._telegram_user_last_send = 0
         self._monitor_enabled = bool(config.get("monitor_enabled", True))
         self._output_enabled = bool(config.get("output_enabled", True))
@@ -374,15 +364,26 @@ class Ed2kFolderWatcher(_PluginBase):
         return {item.strip().lower().lstrip(".") for item in self._extensions.split(",") if item.strip()}
 
     def _telegram_target_key(self) -> str:
+        targets = self._telegram_targets()
+        keys = sorted(self._telegram_delivery_key(*target) for target in targets)
+        return hashlib.sha256("|".join(keys).encode("utf-8")).hexdigest()
+
+    def _telegram_targets(self):
+        from .telegram_targets import telegram_targets
+        return telegram_targets(self._telegram_chat_id, self._telegram_thread_id)
+
+    def _telegram_delivery_key(self, destination: str, thread_id) -> str:
         from .user_account import TelegramUserAccount
         identity = TelegramUserAccount(Path(self.get_data_path())).identity()
-        value = f"user|{identity}|{self._telegram_chat_id}|{self._telegram_thread_id}"
+        value = f"user|{identity}|{destination.lower()}|{thread_id or ''}"
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
-    def _send_telegram(self, path: Path, link: str) -> bool:
+    def _send_telegram(self, path: Path, link: str, target=None) -> bool:
         if not self._telegram_enabled:
             return True
-        return self._send_telegram_user(path, link)
+        if target is None:
+            return self._send_telegram_user(path, link)
+        return self._send_telegram_user(path, link, target=target)
 
         # if self._telegram_mode == "user":
         #     return self._send_telegram_user(path, link)
@@ -427,8 +428,11 @@ class Ed2kFolderWatcher(_PluginBase):
         #         except Exception:
         #             logger.warning("自动生成ED2K链接：关闭 Telegram 连接失败")
 
-    def _send_telegram_user(self, path: Path, link: str) -> bool:
+    def _send_telegram_user(self, path: Path, link: str, target=None) -> bool:
         if time.monotonic() < self._telegram_retry_after:
+            return False
+        retry_key = target or (self._telegram_chat_id, self._telegram_thread_id)
+        if time.monotonic() < self._telegram_target_retry.get(retry_key, 0):
             return False
         try:
             from .user_account import TelegramUserAccount
@@ -438,33 +442,62 @@ class Ed2kFolderWatcher(_PluginBase):
             except ImportError:
                 from app.core.config import settings
                 proxy = settings.PROXY
-            destination = telegram_destination(self._telegram_chat_id)
-            thread_id = int(self._telegram_thread_id) if self._telegram_thread_id else None
-            if thread_id is not None and thread_id <= 0:
-                raise ValueError("话题线程 ID 必须为正整数或留空")
+            destination, thread_id = target or self._telegram_targets()[0]
             account = TelegramUserAccount(Path(self.get_data_path()), proxy=proxy)
             remaining = max(0, 3 - (time.monotonic() - self._telegram_user_last_send))
             if self._stopping.wait(remaining):
                 return False
-            account.send(destination, link, thread_id=thread_id)
             self._telegram_user_last_send = time.monotonic()
-            logger.info(f"自动生成ED2K链接：已使用 Telegram 个人账号发送：{path.name}")
+            account.send(destination, link, thread_id=thread_id)
+            self._telegram_target_retry.pop(retry_key, None)
+            logger.info(f"自动生成ED2K链接：已使用 Telegram 个人账号发送至 {destination}：{path.name}")
             return True
         except Exception as err:
             from .user_account import UserAccountError
             detail = str(err) if isinstance(err, (UserAccountError, ValueError)) else f"个人账号发送异常（{type(err).__name__}）"
             cooldown = max(60, int(getattr(err, "retry_after", 300)))
-            self._telegram_retry_after = time.monotonic() + cooldown
-            logger.warning(f"自动生成ED2K链接：Telegram 个人账号发送失败：{detail}；保留源文件，{cooldown}秒后允许重试，不会退回 Bot 模式")
+            if getattr(err, "account_wide", False):
+                self._telegram_retry_after = time.monotonic() + cooldown
+            self._telegram_target_retry[retry_key] = time.monotonic() + cooldown
+            logger.warning(f"自动生成ED2K链接：Telegram 个人账号发送失败（目标 {retry_key[0]}）：{detail}；保留源文件，{cooldown}秒后允许重试，不会退回 Bot 模式")
             return False
 
-    def _notify_record(self, path: Path, record: dict) -> None:
+    def _notify_record(self, path: Path, record: dict, checkpoint=None) -> None:
         if not self._telegram_enabled:
             return
         target_key = self._telegram_target_key()
         if record.get("telegram_sent") and record.get("telegram_target") == target_key:
             return
-        record["telegram_sent"] = self._send_telegram(path, record["link"])
+        targets = self._telegram_targets()
+        deliveries = record.setdefault("telegram_deliveries", {})
+        if record.get("telegram_sent") and record.get("telegram_target"):
+            from .user_account import TelegramUserAccount
+            identity = TelegramUserAccount(Path(self.get_data_path())).identity()
+            for destination, thread_id in targets:
+                aliases = {destination, destination.lstrip("@"), f"https://t.me/{destination.lstrip('@')}", f"t.me/{destination.lstrip('@')}"}
+                if destination.startswith("@"):
+                    for host in ("t.me", "telegram.me", "www.t.me"):
+                        for scheme in ("http://", "https://"):
+                            address = f"{scheme}{host}/{destination.lstrip('@')}"
+                            aliases.update({address, f"{address}/"})
+                if len(targets) == 1:
+                    aliases.add(self._telegram_chat_id)
+                for alias in aliases:
+                    legacy = f"user|{identity}|{alias}|{thread_id or ''}"
+                    if hashlib.sha256(legacy.encode("utf-8")).hexdigest() == record["telegram_target"]:
+                        deliveries[self._telegram_delivery_key(destination, thread_id)] = True
+        record["telegram_sent"] = False
+        record["telegram_target"] = ""
+        for target in targets:
+            delivery_key = self._telegram_delivery_key(*target)
+            if deliveries.get(delivery_key):
+                continue
+            sent = self._send_telegram(path, record["link"]) if len(targets) == 1 else self._send_telegram(path, record["link"], target=target)
+            if sent:
+                deliveries[delivery_key] = True
+                if checkpoint is not None:
+                    checkpoint()
+        record["telegram_sent"] = all(deliveries.get(self._telegram_delivery_key(*target)) for target in targets)
         record["telegram_target"] = target_key if record["telegram_sent"] else ""
 
     def _iter_files(self, folder: Path):
@@ -549,7 +582,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 records[key] = record
                 logger.info(f"自动生成ED2K链接：生成完成：{path}")
             self._write_results(output, cache_path, records)
-            self._notify_record(path, record)
+            self._notify_record(path, record, checkpoint=lambda: self._write_results(output, cache_path, records))
             self._write_results(output, cache_path, records)
             delivered = not self._telegram_enabled or record.get("telegram_sent")
             if not delivered:
@@ -668,7 +701,7 @@ class Ed2kFolderWatcher(_PluginBase):
             # field("VSelect", "telegram_mode", "Telegram 发送方式", items=[{"title": "Bot Token（机器人）", "value": "bot"}, {"title": "个人账号（Telethon）", "value": "user"}]),
             # field("VTextField", "telegram_token", "Telegram Bot Token", type="password"),
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-5"}, "text": "仅使用个人账号发送，可在插件页面完成授权；请使用可信网络或 HTTPS。"},
-            field("VTextField", "telegram_chat_id", "Telegram 接收目标", placeholder="数字 Chat ID、@用户名 或公开 t.me 链接", hint="可直接填接收机器人 @用户名；数字目标须是该账号已认识的聊天，推荐使用 @用户名。", persistent_hint=True),
+            field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
         ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False}
