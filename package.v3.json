@@ -203,6 +203,23 @@
       "v2.1.0": "首发独立运行的媒体清理与文件转存工具"
     }
   },
+  "MessageMerge": {
+    "name": "通知合并",
+    "description": "同剧同季入库通知智能聚合：合并集数、汇总大小和媒体信息，其他通知按标题合并。",
+    "labels": "通知",
+    "version": "1.5.2",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
+    "author": "helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "history": {
+      "v1.5.2": "完整线上发布包自带通知拦截模块，支持直接从仓库安装，无需本地插件或补丁；保留原有发送范围配置。",
+      "v1.5.1": "移除剧集聚合标题中的通知条数后缀。",
+      "v1.5.0": "同剧同季入库通知智能聚合，保留实际集数范围，累加文件大小并去重展示媒体信息。"
+    }
+  },
   "NotificationBlocker": {
     "name": "通知消息屏蔽",
     "description": "按正则关键词屏蔽消息通知，标题或正文命中时不推送，但保留历史记录。",
