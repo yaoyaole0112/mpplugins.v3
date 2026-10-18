@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
+import Panel from './Panel.vue'
 
 const props = defineProps({ api: { type: Object, default: () => ({}) }, pluginId: { type: String, default: 'Ed2kFolderWatcher' } })
 const emit = defineEmits(['close', 'layout'])
@@ -9,6 +10,7 @@ const deleteEnabled = ref(false)
 const busy = ref(false)
 const error = ref('')
 const loaded = ref(false)
+const configOpen = ref(false)
 let timer
 let disposed = false
 const statuses = { deleted: '已删除源文件', retained: '未删除源文件', delete_failed: '删除失败，源文件保留', unknown: '历史记录：删源状态未记录' }
@@ -16,8 +18,12 @@ const statuses = { deleted: '已删除源文件', retained: '未删除源文件'
 function formatTime(value) {
   return value ? new Date(value * 1000).toLocaleString() : '历史记录：生成时间未记录'
 }
+function openSettings() {
+  clearInterval(timer)
+  configOpen.value = true
+}
 async function refresh() {
-  if (busy.value || disposed) return
+  if (busy.value || disposed || configOpen.value) return
   busy.value = true
   try {
     const response = await props.api.get(`plugin/${props.pluginId}/records`)
@@ -46,12 +52,13 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
 </script>
 
 <template>
-  <section class="records-page" :aria-busy="busy">
+  <Panel v-if="configOpen" :api="api" :plugin-id="pluginId" @close="emit('close')" />
+  <section v-else class="records-page" :aria-busy="busy">
     <header class="records-header">
       <div><h2>自动生成ED2K链接</h2><p>最近生成记录 · 共 {{ total }} 条 · 显示最近 {{ items.length }} 条</p></div>
-      <div class="records-actions"><button type="button" :disabled="busy" @click="refresh">刷新记录</button><button type="button" @click="emit('close')">关闭</button></div>
+      <div class="records-actions"><button type="button" :disabled="busy" @click="refresh">刷新记录</button><button type="button" @click="openSettings">设置</button><button type="button" @click="emit('close')">关闭</button></div>
     </header>
-    <p class="help">查看页每 15 秒刷新一次，不触发扫描或生成。修改设置请在插件卡片右上角「⋮ → 设置」进入配置页。</p>
+    <p class="help">查看页每 15 秒刷新一次，不触发扫描或生成。点击右上角“设置”进入配置页，也可通过插件卡片「⋮ → 设置」进入。</p>
     <p class="policy">当前删源开关：{{ deleteEnabled ? '开启（所选输出成功后才删除）' : '关闭（保留源文件）' }}。每条状态以处理时的实际记录为准，不代表源文件之后未被其他程序移动或删除。</p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-if="!loaded && busy" role="status">正在加载记录…</p>
