@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 
 from emetools.data_enrichment import DataEnrichment
-from emetools.emby_guard import ENRICHMENT_SLOT, EmbyClient, REQUEST_SLOTS, reserve_delay
+from emetools.emby_guard import ENRICHMENT_SLOT, EmbyClient, ReadRetryClient, REQUEST_SLOTS, reserve_delay
 from emetools.media_cleanup import DEFAULT_CONFIG, MediaCleanup, REFRESH_PENDING
 
 
@@ -30,6 +30,125 @@ class EmbyLoadTests(unittest.TestCase):
                              {"Name": "old"}, {"Name": "新标题"})))
         client.post.assert_awaited_once()
         sleep.assert_awaited_once_with(0.5)
+
+    def test_read_disconnect_recovers_and_releases_slots_between_attempts(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            if len(requests) < 3:
+                raise httpx.RemoteProtocolError('signed-secret', request=request)
+            return httpx.Response(200, json={'Name': '剧集'})
+
+        async def check_backoff(seconds):
+            if seconds in (1, 2):
+                self.assertTrue(REQUEST_SLOTS.acquire(blocking=False))
+                self.assertTrue(REQUEST_SLOTS.acquire(blocking=False))
+                REQUEST_SLOTS.release()
+                REQUEST_SLOTS.release()
+
+        async def run():
+            async with EmbyClient(active=self.enrichment._ensure_active, base_url='http://emby/',
+                                  transport=httpx.MockTransport(handler)) as client:
+                self.assertEqual((await client.get('Items/1')).json(), {'Name': '剧集'})
+
+        with patch('emetools.emby_guard.reserve_delay', return_value=0), \
+                patch('emetools.emby_guard.asyncio.sleep', side_effect=check_backoff):
+            asyncio.run(run())
+        self.assertEqual(len(requests), 3)
+
+    def test_read_retries_are_bounded_and_errors_do_not_leak_secrets(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            raise httpx.RemoteProtocolError('https://secret/?api_key=secret', request=request)
+
+        async def run():
+            async with ReadRetryClient(service_name='TMDB', base_url='https://tmdb/',
+                                       transport=httpx.MockTransport(handler)) as client:
+                with self.assertRaisesRegex(httpx.RemoteProtocolError, 'TMDB GET') as error:
+                    await client.get('tv/1', params={'api_key': 'secret'})
+                self.assertNotIn('secret', str(error.exception))
+
+        with patch('emetools.emby_guard.asyncio.sleep', new_callable=AsyncMock):
+            asyncio.run(run())
+        self.assertEqual(len(requests), 3)
+
+    def test_http_status_errors_are_not_retried(self):
+        handler = Mock(return_value=httpx.Response(403))
+
+        async def run():
+            async with ReadRetryClient(transport=httpx.MockTransport(handler)) as client:
+                self.assertEqual((await client.get('https://emby/Items')).status_code, 403)
+
+        asyncio.run(run())
+        handler.assert_called_once()
+
+    def test_write_disconnect_is_not_replayed_and_saved_data_is_verified(self):
+        methods = []
+
+        def handler(request):
+            methods.append(request.method)
+            if request.method == 'POST':
+                raise httpx.RemoteProtocolError('secret', request=request)
+            self.assertEqual(request.url.path, '/Users/user123/Items/1')
+            return httpx.Response(200, json={'Name': '新标题', 'People': [
+                {'Id': '1', 'Name': '演员', 'Type': 'Actor', 'Role': '饰 主角'}]})
+
+        async def run():
+            async with EmbyClient(active=self.enrichment._ensure_active, base_url='http://emby/',
+                                  transport=httpx.MockTransport(handler)) as client:
+                self.assertTrue(await self.enrichment._save_item(client, '1',
+                    {'Name': '旧标题', 'UserData': {'Played': False}},
+                    {'Name': '新标题', 'UserData': {'Played': False},
+                     'People': [{'Name': '演员', 'Type': 'Actor', 'Role': '饰 主角'}]}, user='user123'))
+
+        with patch('emetools.emby_guard.asyncio.sleep', new_callable=AsyncMock), \
+                patch('emetools.emby_guard.reserve_delay', return_value=0):
+            asyncio.run(run())
+        self.assertEqual(methods, ['POST', 'GET'])
+
+    def test_unconfirmed_write_preserves_error_without_resubmitting(self):
+        methods = []
+
+        def handler(request):
+            methods.append(request.method)
+            if request.method == 'POST':
+                raise httpx.ReadTimeout('secret', request=request)
+            return httpx.Response(200, json={'Name': '旧标题'})
+
+        async def run():
+            async with EmbyClient(active=self.enrichment._ensure_active, base_url='http://emby/',
+                                  transport=httpx.MockTransport(handler)) as client:
+                with self.assertRaisesRegex(ValueError, '未能确认保存结果'):
+                    await self.enrichment._save_item(client, '1', {'Name': '旧标题'}, {'Name': '新标题'}, user='user123')
+
+        with patch('emetools.emby_guard.asyncio.sleep', new_callable=AsyncMock), \
+                patch('emetools.emby_guard.reserve_delay', return_value=0):
+            asyncio.run(run())
+        self.assertEqual(methods, ['POST', 'GET'])
+
+    def test_retry_stops_when_plugin_closes(self):
+        def disconnect(request):
+            raise httpx.RemoteProtocolError('disconnected', request=request)
+
+        handler = Mock(side_effect=disconnect)
+
+        async def close(seconds):
+            if seconds == 1:
+                self.enrichment.close()
+
+        async def run():
+            async with EmbyClient(active=self.enrichment._ensure_active,
+                                  transport=httpx.MockTransport(handler)) as client:
+                with self.assertRaises(asyncio.CancelledError):
+                    await client.get('https://emby/Items')
+
+        with patch('emetools.emby_guard.asyncio.sleep', side_effect=close), \
+                patch('emetools.emby_guard.reserve_delay', return_value=0):
+            asyncio.run(run())
+        handler.assert_called_once()
 
     def test_closed_instance_cannot_write(self):
         self.enrichment.close()

@@ -552,7 +552,7 @@ class EnrichmentTests(unittest.TestCase):
         with patch('emetools.data_enrichment.settings.TMDB_API_DOMAIN', 'api.tmdb.org'), \
              patch('emetools.data_enrichment.get_runtime_setting', return_value={
                  'http': 'http://proxy.example:1080', 'https': 'http://proxy.example:1080'}), \
-             patch('emetools.data_enrichment.httpx.AsyncClient') as client:
+             patch('emetools.data_enrichment.ReadRetryClient') as client:
             self.enrichment._tmdb_client()
         self.assertEqual(client.call_args.kwargs['base_url'], 'https://api.tmdb.org/3/')
         self.assertEqual(client.call_args.kwargs['proxy'], 'http://proxy.example:1080')
@@ -562,7 +562,7 @@ class EnrichmentTests(unittest.TestCase):
         with patch('emetools.data_enrichment.settings.TMDB_API_DOMAIN',
                    'https://mirror.example/tmdb/3/'), \
              patch('emetools.data_enrichment.get_runtime_setting', return_value=None), \
-             patch('emetools.data_enrichment.httpx.AsyncClient') as client:
+             patch('emetools.data_enrichment.ReadRetryClient') as client:
             self.enrichment._tmdb_client()
         self.assertEqual(client.call_args.kwargs['base_url'], 'https://mirror.example/tmdb/3/')
 
@@ -1220,7 +1220,7 @@ class EnrichmentTests(unittest.TestCase):
         with patch.object(self.enrichment, '_services', return_value={'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
              patch.object(self.enrichment, '_server', return_value=emby), \
              patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'), \
-             patch('emetools.data_enrichment.httpx.AsyncClient', return_value=tmdb):
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb):
             asyncio.run(self.enrichment._enrich('Q4', '73025', 'credits', options))
         self.assertEqual([person['Name'] for person in saved[0]['People']], ['甲演员', '丙演员'])
         self.assertEqual(saved[0]['People'][0]['Role'], '饰 主角')
@@ -1882,7 +1882,7 @@ class EnrichmentTests(unittest.TestCase):
         with patch.object(self.enrichment, '_services', return_value={'Q4': server}), \
              patch.object(self.enrichment, '_server', return_value=emby), \
              patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'), \
-             patch('emetools.data_enrichment.httpx.AsyncClient', return_value=tmdb):
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb):
             asyncio.run(self.enrichment._enrich('Q4', '73025', 'metadata'))
         self.assertIn(('GET', '/emby/Users/user123/Items/73025'), seen)
         self.assertIn(('POST', '/emby/Items/73025'), seen)
@@ -1918,7 +1918,7 @@ class EnrichmentTests(unittest.TestCase):
         with patch.object(self.enrichment, '_services', return_value={'Q4': SimpleNamespace(get_user=lambda: 'user123')}), \
              patch.object(self.enrichment, '_server', return_value=emby), \
              patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'), \
-             patch('emetools.data_enrichment.httpx.AsyncClient', return_value=tmdb):
+             patch.object(self.enrichment, '_tmdb_client', return_value=tmdb):
             asyncio.run(self.enrichment._enrich('Q4', '73025', 'episodes'))
         self.assertIn(('GET', '/emby/Users/user123/Items/9'), seen)
         self.assertIn(('POST', '/emby/Items/9'), seen)

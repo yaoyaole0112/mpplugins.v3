@@ -31,7 +31,7 @@ from app.runtime.settings import get_runtime_setting
 from .tvmao_client import fetch_tvmao_cast
 from .baike_cast import fetch_baike_cast
 from .episode_plots import fetch_episode_plots, missing_episode_title, missing_episode_overview
-from .emby_guard import EmbyClient, ENRICHMENT_SLOT, RESOLVE_SLOTS
+from .emby_guard import EmbyClient, ReadRetryClient, ENRICHMENT_SLOT, RESOLVE_SLOTS
 
 
 FRAME_FILTER = ("libplacebo=w=1280:h=720:force_original_aspect_ratio=decrease:force_divisible_by=2:"
@@ -635,8 +635,8 @@ class DataEnrichment:
         base_path = "/" + base_path.strip("/") if base_path.strip("/") else ""
         proxies = get_runtime_setting("PROXY", None)
         proxy = proxies.get("https") if isinstance(proxies, dict) else proxies
-        return httpx.AsyncClient(base_url=f"https://{domain}{base_path}/3/", proxy=proxy,
-                                 timeout=30, trust_env=False)
+        return ReadRetryClient(base_url=f"https://{domain}{base_path}/3/", proxy=proxy,
+                               service_name="TMDB", timeout=30, trust_env=False)
 
     async def _tmdb_json(self, client, path, params):
         try:
@@ -645,6 +645,8 @@ class DataEnrichment:
             raise ValueError("TMDB 连接失败：请检查 MoviePilot 的 TMDB 域名和代理设置") from None
         except httpx.TimeoutException:
             raise ValueError("TMDB 请求超时：请检查 MoviePilot 的 TMDB 域名和代理设置") from None
+        except httpx.RequestError as error:
+            raise ValueError(f"TMDB 读取失败（{type(error).__name__}），有限重试后仍未恢复；已完成的补全保留，请稍后重试") from None
         except httpx.HTTPStatusError as error:
             # Never include the request URL: the API key is in its query string.
             if error.response.status_code == 404:
@@ -1376,7 +1378,7 @@ class DataEnrichment:
             raise ValueError("所选 Emby 服务器不可用")
         return self._begin("媒体补全", self._enrich, name, identifier, mode, self.options())
 
-    async def _enrich_movie(self, emby, tmdb, identifier, item, mode, options, api_key):
+    async def _enrich_movie(self, emby, tmdb, identifier, item, mode, options, api_key, user=None):
         self.log(f"电影主数据源：{'TMDB' if options['metadata_source'] == 'tmdb' else '豆瓣优先'}；演职上限 {options['max_actors']} 人")
         provider = item.get("ProviderIds") or {}
         tmdb_id = provider.get("Tmdb") or provider.get("TMDB")
@@ -1509,7 +1511,7 @@ class DataEnrichment:
                     else:
                         hint = "AI 智能补齐未开启，可靠中文资料不足时保留原文"
                     self.log(f"仍有 {len(unresolved)} 位演职的姓名或角色含外文；{hint}")
-        if not await self._save_item(emby, identifier, item, update):
+        if not await self._save_item(emby, identifier, item, update, user=user):
             self.log("电影资料未变化，跳过重复写入")
             return
         self.log("电影资料及演职人员已更新" if mode == "all" else "电影资料已更新" if mode == "metadata" else "电影演职人员已更新")
@@ -1530,7 +1532,7 @@ class DataEnrichment:
                 if not episode_id:
                     continue
                 full = await self._item(emby, user, episode_id)
-                changed += await self._save_item(emby, episode_id, full, {**full, "People": people})
+                changed += await self._save_item(emby, episode_id, full, {**full, "People": people}, user=user)
                 if changed % 20 == 0:
                     self.log(f"已同步 {changed} 集演职人员")
             offset += len(page)
@@ -1545,15 +1547,31 @@ class DataEnrichment:
                     for person in value or []]
         return value
 
-    async def _save_item(self, emby, identifier, original, update):
+    async def _save_item(self, emby, identifier, original, update, *, user=None):
         self._ensure_active()
-        changed = any(self._metadata_value(field, original.get(field)) !=
-                      self._metadata_value(field, value)
-                      for field, value in update.items() if value is not None)
-        if not changed:
+        changed_fields = [field for field, value in update.items() if value is not None and
+                          self._metadata_value(field, original.get(field)) != self._metadata_value(field, value)]
+        if not changed_fields:
             return False
-        response = await emby.post(f"Items/{identifier}", json={
-            key: value for key, value in update.items() if value is not None})
+        payload = {key: value for key, value in update.items() if value is not None}
+        try:
+            response = await emby.post(f"Items/{identifier}", json=payload)
+        except (httpx.RemoteProtocolError, httpx.NetworkError, httpx.TimeoutException):
+            self.log(f"Emby 条目 {identifier} 写入响应中断，正在只读核验是否已保存；不重放写入")
+            try:
+                if not user:
+                    raise ValueError("缺少用户上下文，无法核验写入结果")
+                current = await self._item(emby, user, identifier)
+                confirmed = isinstance(current, dict) and all(
+                    self._metadata_value(field, current.get(field)) == self._metadata_value(field, payload[field])
+                    for field in changed_fields)
+            except (httpx.HTTPError, ValueError):
+                confirmed = False
+            if confirmed:
+                self.log(f"Emby 条目 {identifier} 已核验保存成功，继续补全")
+                await asyncio.sleep(0.5)
+                return True
+            raise ValueError(f"Emby 条目 {identifier} 写入响应中断，未能确认保存结果；未重复提交，已完成的补全保留，请稍后重新补全") from None
         response.raise_for_status()
         await asyncio.sleep(0.5)
         return True
@@ -1575,7 +1593,7 @@ class DataEnrichment:
             if item.get("Type") == "Movie":
                 if mode == "episodes":
                     raise ValueError("电影没有分集信息")
-                await self._enrich_movie(emby, tmdb, identifier, item, mode, options, api_key)
+                await self._enrich_movie(emby, tmdb, identifier, item, mode, options, api_key, user=user)
                 return
             if item.get("Type") != "Series":
                 raise ValueError("选中项目不是 Emby 电影或剧集")
@@ -1689,7 +1707,7 @@ class DataEnrichment:
                                     person['Type'] != 'Actor' or person["Role"].startswith(("饰", "配")) for person in people))):
                             locked.append("Cast")
                         update["LockedFields"] = locked
-                saved = await self._save_item(emby, identifier, original_item, update)
+                saved = await self._save_item(emby, identifier, original_item, update, user=user)
                 self.log({"all": "剧集元数据及演职人员已更新", "metadata": "剧集资料已更新",
                           "credits": "剧集演职人员已更新"}[mode] if saved else "剧集资料未变化，跳过重复写入")
                 if mode == "credits" and options["episode_cast"]:
@@ -1790,7 +1808,7 @@ class DataEnrichment:
                         full["People"] = series_people
                     missing_titles += int(missing_episode_title(full.get("Name")))
                     missing_overviews += int(missing_episode_overview(full.get("Overview")))
-                    saved = await self._save_item(emby, episode["Id"], original_episode, full)
+                    saved = await self._save_item(emby, episode["Id"], original_episode, full, user=user)
                     changed += saved
                     if saved and changed % 20 == 0: self.log(f"已补全 {changed} 集")
                 self.log(f"分集信息补全完成：{changed} 集")
