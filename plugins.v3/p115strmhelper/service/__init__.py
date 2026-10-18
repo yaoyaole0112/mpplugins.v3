@@ -108,8 +108,6 @@ class ServiceHelper:
         self._sync_condition = Condition()
         self._sync_operations: Dict[Thread, int] = {}
         self._sync_stopping = False
-        self._lifecycle_lock = Lock()
-        self._monitor_resume_pending = False
 
     def init_service(self) -> bool:
         """
@@ -284,9 +282,6 @@ class ServiceHelper:
         """
         检查并守护生活事件监控线程
         """
-        with self._sync_condition:
-            if self._sync_stopping:
-                return
         should_run = (
             configer.monitor_life_enabled
             and configer.monitor_life_paths
@@ -304,10 +299,6 @@ class ServiceHelper:
                         logger.debug("【监控生活事件】线程运行正常，清除失败时间记录")
                         self.monitor_life_fail_time = None
                 else:
-                    if self._monitor_resume_pending:
-                        self._start_monitor_life_internal()
-                        self._monitor_resume_pending = False
-                        return
                     current_time = time()
                     if self.monitor_life_fail_time is None:
                         self.monitor_life_fail_time = current_time
@@ -850,61 +841,12 @@ class ServiceHelper:
                 self._sync_condition.wait(remaining)
             return True
 
-    def stop(self, *, for_reconfigure: bool = False) -> bool:
-        """
-        串行处理停止请求，配置重载预检失败时保持旧实例可用
-        """
-        with self._sync_condition:
-            owns_sync = current_thread() in self._sync_operations
-        if not self._lifecycle_lock.acquire(blocking=not owns_sync):
-            return False
-        try:
-            if for_reconfigure and not self._prepare_reconfigure():
-                return False
-            return self._stop()
-        finally:
-            self._lifecycle_lock.release()
-
-    def _prepare_reconfigure(self) -> bool:
-        """
-        拆卸资源前排空同步调用和生活事件线程，超时则取消本次重载
-        """
-        with self._sync_condition:
-            was_stopping = self._sync_stopping
-            if self._sync_operations:
-                logger.warning("【同步服务】旧任务仍在运行，取消配置重载，请任务结束后重试")
-                return False
-        prepared = False
-        try:
-            with self.monitor_life_lock:
-                if self.monitor_life_thread:
-                    if self._stop_monitor_life_internal() is False:
-                        logger.warning("【监控生活事件】旧线程仍在运行，取消配置重载")
-                        return False
-                with self._sync_condition:
-                    if not self._sync_operations:
-                        self._sync_stopping = True
-                        prepared = True
-                if not prepared:
-                    if not was_stopping:
-                        self._start_monitor_life_internal(register_guard_service=False)
-                    logger.warning("【同步服务】预检期间有新任务进入，取消配置重载")
-                    return False
-            self._monitor_resume_pending = False
-            return True
-        finally:
-            if not prepared and not was_stopping:
-                if self.monitor_stop_event:
-                    self.monitor_stop_event.clear()
-                self._monitor_resume_pending = True
-
-    def _stop(self) -> bool:
+    def stop(self) -> bool:
         """
         停止服务并报告已知的关停失败
 
         :return bool: 已检查的停止步骤成功返回 True，显式失败或异常时返回 False
         """
-        self._monitor_resume_pending = False
         all_stopped = True
         try:
             if not self._stop_sync_operations():

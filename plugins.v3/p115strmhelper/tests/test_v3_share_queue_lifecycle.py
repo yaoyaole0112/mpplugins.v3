@@ -193,7 +193,7 @@ class TestV3ShareQueueLifecycle(TestCase):
             "sync_del_webhook_queue": MagicMock(),
             "TransferChainPatcher": patcher,
         }
-        stop = _method(self.plugin_root / "service/__init__.py", "_stop", namespace)
+        stop = _method(self.plugin_root / "service/__init__.py", "stop", namespace)
         manager = MagicMock()
         service = SimpleNamespace(
             _stop_sync_operations=MagicMock(return_value=True),
@@ -235,7 +235,7 @@ class TestV3ShareQueueLifecycle(TestCase):
             )
         }
         path = self.plugin_root / "service/__init__.py"
-        stop = _method(path, "_stop", namespace)
+        stop = _method(path, "stop", namespace)
         stop_life = _method(path, "_stop_monitor_life_internal", namespace)
         watcher = SimpleNamespace(
             thread=MagicMock(), stop_event=Event(), mon_path="test"
@@ -287,7 +287,7 @@ class TestV3ShareQueueLifecycle(TestCase):
                 "TransferChainPatcher",
             )
         }
-        stop = _method(self.plugin_root / "service/__init__.py", "_stop", namespace)
+        stop = _method(self.plugin_root / "service/__init__.py", "stop", namespace)
         manager = MagicMock()
         manager.shutdown.side_effect = [OSError("failure"), None]
         service = SimpleNamespace(
@@ -404,7 +404,7 @@ class TestV3ShareQueueLifecycle(TestCase):
                 )
                 plugin = SimpleNamespace(
                     stop_service=MagicMock(
-                        side_effect=lambda **kwargs: events.append("stop") or stopped
+                        side_effect=lambda: events.append("stop") or stopped
                     ),
                     init_plugin=MagicMock(
                         side_effect=lambda **kwargs: events.append("init")
@@ -422,7 +422,6 @@ class TestV3ShareQueueLifecycle(TestCase):
                 if not valid:
                     self.assertEqual(events, ["validate"])
                 elif not stopped:
-                    plugin.stop_service.assert_called_once_with(for_reconfigure=True)
                     self.assertEqual(events, ["validate", "stop"])
                 elif not saved:
                     self.assertEqual(events, ["validate", "stop", "publish", "save"])

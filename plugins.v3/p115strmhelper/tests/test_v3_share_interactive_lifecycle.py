@@ -217,8 +217,9 @@ class TestV3ShareInteractiveLifecycle(TestCase):
             share_interactive_gen_strm_queue=self.queue,
             sharetransferhelper=None,
         )
-        stop = _method(self.root / "service/__init__.py", "_stop", namespace)
-        service.stop = MagicMock(side_effect=lambda **kwargs: stop(service))
+        service.stop = MethodType(
+            _method(self.root / "service/__init__.py", "stop", namespace), service
+        )
         plugin_namespace = {
             name: MagicMock()
             for name in (
