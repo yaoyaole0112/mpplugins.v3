@@ -52,7 +52,7 @@ class TestV3FullWorkerLifecycle(TestCase):
             MediaInfoDownloader=object, CBase64=MagicMock(),
             StrmExecHistoryManager=MagicMock(), sentry_manager=MagicMock(),
             get_pid_by_path=MagicMock(return_value=1),
-            iter_files_skim=MagicMock(return_value=iter(())),
+            iter_files_skim_serial=MagicMock(return_value=iter(())),
             retry_read_request=MagicMock(),
             ProcessResult=namedtuple(
                 "ProcessResult", ["status", "path", "message", "data", "path_entry"]
@@ -168,7 +168,7 @@ class TestV3FullWorkerLifecycle(TestCase):
             owner.write_queue.put((Path(self.temporary.name) / "a.strm", "url", "a.mkv"))
             return self.namespace["ProcessResult"]("submitted", None, None, None, None)
 
-        self.namespace["iter_files_skim"] = iterate
+        self.namespace["iter_files_skim_serial"] = iterate
         self.helper._FullSyncStrmHelper__process_single_item = MethodType(submit, self.helper)
         self.helper._FullSyncStrmHelper__flush_write_buffer = self._block
         self._assert_waits()
@@ -188,10 +188,15 @@ class TestV3FullWorkerLifecycle(TestCase):
             return {"id": page, "path": f"/media/{page}.mkv"}
 
         def iterate(client, **kwargs):
+            if self.config.full_sync_iter_function == "iter_files":
+                self.assertEqual(kwargs["max_workers"], 0)
+                self.assertEqual(kwargs["page_size"], 500)
+                self.assertEqual(kwargs["first_page_size"], 500)
+                self.assertTrue(kwargs["path_already"])
             for page in (1, 2):
                 yield kwargs["request"]("https://example.invalid/list", params={"page": page})
 
-        self.namespace["iter_files_skim"] = iterate
+        self.namespace["iter_files_skim_serial"] = iterate
         self.namespace["iter_files"] = iterate
         self.namespace["retry_read_request"] = retry.retry_read_request
         self.helper._FullSyncStrmHelper__process_db_item = MagicMock(return_value=(set(), set()))
@@ -219,7 +224,7 @@ class TestV3FullWorkerLifecycle(TestCase):
             kwargs["request"]("https://example.invalid/list", params={"page": 2})
 
         self.helper.remove_unless_strm = True
-        self.namespace["iter_files_skim"] = iterate
+        self.namespace["iter_files_skim_serial"] = iterate
         self.namespace["retry_read_request"] = retry.retry_read_request
         self.helper._FullSyncStrmHelper__process_db_item = MagicMock(return_value=(set(), set()))
         self.helper._FullSyncStrmHelper__process_single_item = MagicMock(return_value=None)

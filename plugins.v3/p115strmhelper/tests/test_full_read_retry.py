@@ -124,6 +124,42 @@ class TestFullReadRetry(TestCase):
                     )
                 self.assertEqual(request.call_count, 2)
 
+    def test_read_only_metadata_post_timeout_is_retried(self):
+        error = ReadTimeoutError(None, "/files/file", "Read timed out")
+        response = {"state": True, "data": [{"file_name": "a.mkv"}]}
+        data = {"file_id": "1,2"}
+        with patch.object(self.module, "request", side_effect=[error, response]) as request:
+            result = self.module.retry_read_request(
+                "https://webapi.115.com/files/file", "POST", data=data
+            )
+        self.assertIs(result, response)
+        self.assertEqual(request.call_count, 2)
+        for invocation in request.call_args_list:
+            self.assertIs(invocation.kwargs["data"], data)
+        self.sleep.assert_called_once_with(1)
+
+    def test_post_allowlist_never_retries_mutations_or_streams(self):
+        from io import BytesIO
+
+        cases = [
+            ("https://webapi.115.com/files/move", {"file_id": "1"}),
+            ("https://webapi.115.com/files/delete", {"file_id": "1"}),
+            ("https://webapi.115.com/files/file/", {"file_id": "1"}),
+            ("https://example.invalid/files/file", {"file_id": "1"}),
+            ("http://webapi.115.com/files/file", {"file_id": "1"}),
+            ("https://webapi.115.com:444/files/file", {"file_id": "1"}),
+            ("https://webapi.115.com/files/file?op=delete", {"file_id": "1"}),
+            ("https://webapi.115.com/files/file", {"file_id": "1", "op": "delete"}),
+            ("https://webapi.115.com/files/file", BytesIO(b"file_id=1")),
+        ]
+        for url, data in cases:
+            with self.subTest(url=url, data=type(data).__name__):
+                with patch.object(self.module, "request", side_effect=ProtocolError("closed")) as request:
+                    with self.assertRaises(ProtocolError):
+                        self.module.retry_read_request(url, "POST", data=data)
+                request.assert_called_once()
+        self.sleep.assert_not_called()
+
     def test_business_response_is_returned_unchanged_without_retry(self):
         response = {"state": False, "errno": 405}
         with patch.object(self.module, "request", return_value=response) as request:

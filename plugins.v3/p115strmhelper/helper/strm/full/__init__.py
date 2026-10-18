@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from orjson import dumps
 from p115client import P115Client
-from p115client.tool.iterdir import iter_files, iter_files_skim
+from p115client.tool.iterdir import iter_files
 
 from app.sdk.config import settings
 from app.sdk.logging import logger
@@ -43,6 +43,7 @@ from ....utils.math import MathUtils
 from ....helper.mediaserver import MediaServerRefresh
 
 from .interaction import strm_cleanup_interaction
+from .iterator import iter_files_skim_serial
 
 
 ProcessResult = namedtuple(
@@ -719,7 +720,7 @@ class FullSyncStrmHelper:
                     configer.get_config("full_sync_iter_function")
                     == "iter_files_with_path_skim"
                 ):
-                    iter_func = iter_files_skim
+                    iter_func = iter_files_skim_serial
                     iter_kwargs = {
                         "with_path": True,
                         "cid": parent_id,
@@ -731,7 +732,10 @@ class FullSyncStrmHelper:
                     iter_kwargs = {
                         "with_path": True,
                         "order": "user_ptime",
-                        "max_workers": None,
+                        "max_workers": 0,
+                        "page_size": 500,
+                        "first_page_size": 500,
+                        "path_already": True,
                         "cid": parent_id,
                         "with_ancestors": True,
                         "cooldown": 1.5,
@@ -890,7 +894,7 @@ class FullSyncStrmHelper:
                             configer.get_config("full_sync_iter_function")
                             == "iter_files_with_path_skim"
                         ):
-                            iter_func = iter_files_skim
+                            iter_func = iter_files_skim_serial
                             iter_kwargs = {
                                 "with_path": True,
                                 "cid": parent_id,
@@ -902,7 +906,10 @@ class FullSyncStrmHelper:
                             iter_kwargs = {
                                 "with_path": True,
                                 "order": "user_ptime",
-                                "max_workers": None,
+                                "max_workers": 0,
+                                "page_size": 500,
+                                "first_page_size": 500,
+                                "path_already": True,
                                 "cid": parent_id,
                                 "with_ancestors": True,
                                 "cooldown": 1.5,
