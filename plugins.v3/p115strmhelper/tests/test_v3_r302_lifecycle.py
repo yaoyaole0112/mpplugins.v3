@@ -247,7 +247,7 @@ class TestV3R302Lifecycle(IsolatedAsyncioTestCase):
         }
         stop = _method(
             Path(__file__).resolve().parents[1] / "service/__init__.py",
-            "stop",
+            "_stop",
             namespace,
         )
         service = SimpleNamespace(
@@ -292,7 +292,7 @@ class TestV3R302Lifecycle(IsolatedAsyncioTestCase):
             },
         )
         plugin = SimpleNamespace(
-            stop_service=redirect.close_http_client_sync,
+            stop_service=lambda **kwargs: redirect.close_http_client_sync(),
             get_config=MagicMock(return_value={}),
             init_plugin=MagicMock(),
         )

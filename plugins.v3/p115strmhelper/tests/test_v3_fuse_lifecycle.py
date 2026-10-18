@@ -159,7 +159,7 @@ class TestV3FuseLifecycle(TestCase):
                 "TransferChainPatcher",
             )
         }
-        stop = _method(self.root / "service/__init__.py", "stop", namespace)
+        stop = _method(self.root / "service/__init__.py", "_stop", namespace)
         service = SimpleNamespace(
             _stop_sync_operations=MagicMock(return_value=True),
             backup_service=MagicMock(),

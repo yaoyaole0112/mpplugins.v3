@@ -189,7 +189,7 @@ class P115StrmHelper(_PluginBase):
         """
         初始化插件
         """
-        if self.stop_service() is False:
+        if self.stop_service(for_reconfigure=True) is False:
             raise RuntimeError("旧插件任务尚未退出，暂不应用新配置，请稍后重试")
         if config and not configer.update_config(config):
             raise RuntimeError("插件配置加载失败，后台服务未启动")
@@ -2281,13 +2281,16 @@ class P115StrmHelper(_PluginBase):
                     exc_info=True,
                 )
 
-    def stop_service(self) -> bool:
+    def stop_service(self, *, for_reconfigure: bool = False) -> bool:
         """
         退出插件并向宿主报告已知的关停失败
 
         :return bool: 后台服务停止步骤返回且资源已释放时为 True
         """
-        if servicer.stop() is False:
+        stopped = (
+            servicer.stop(for_reconfigure=True) if for_reconfigure else servicer.stop()
+        )
+        if stopped is False:
             return False
         try:
             type(self)._rename_media_fields_cache.clear()
@@ -2307,7 +2310,7 @@ class P115StrmHelper(_PluginBase):
             data = await request.json()
             if not configer.validate_updates(data):
                 return {"code": 1, "msg": "配置无效，请查看详细日志"}
-            if await to_thread(self.stop_service) is False:
+            if await to_thread(self.stop_service, for_reconfigure=True) is False:
                 return {"code": 1, "msg": "旧插件任务尚未退出，请稍后重试"}
             if not configer.update_config(data):
                 return {"code": 1, "msg": "保存失败，请查看详细日志"}

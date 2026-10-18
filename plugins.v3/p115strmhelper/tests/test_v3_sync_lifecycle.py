@@ -108,6 +108,152 @@ class TestV3SyncLifecycle(TestCase):
             worker.join(timeout=2)
         self.service._stop_sync_operations(timeout=2)
 
+    def test_busy_reconfigure_restores_old_service_without_teardown(self) -> None:
+        self.service._run_full_sync = self._block
+        worker = self._start(self.service.full_sync_strm_files)
+        self.assertTrue(self.entered.wait(timeout=2))
+        client = self.service.client
+        stop = self.service._stop_sync_operations
+        with patch.object(
+            self.service, "_stop_sync_operations", side_effect=lambda: stop(0)
+        ):
+            self.assertFalse(self.service.stop(for_reconfigure=True))
+        self.assertFalse(self.service._sync_stopping)
+        self.assertIs(self.service.client, client)
+        self.service.backup_service.stop.assert_not_called()
+        self.namespace["directory_upload_queue"].stop.assert_not_called()
+        with self.service.sync_operation():
+            pass
+        self.service.offlinehelper = MagicMock()
+        self.service.offline_status()
+        self.service.offlinehelper.pull_status_to_task.assert_called_once()
+        self.release.set()
+        worker.join(timeout=2)
+        self.assertEqual(self.errors, [])
+
+    def test_reconfigure_does_not_reopen_a_real_shutdown(self) -> None:
+        self.service._run_full_sync = self._block
+        worker = self._start(self.service.full_sync_strm_files)
+        self.assertTrue(self.entered.wait(timeout=2))
+        self.assertFalse(self.service._stop_sync_operations(timeout=0))
+        stop = self.service._stop_sync_operations
+        with patch.object(
+            self.service, "_stop_sync_operations", side_effect=lambda: stop(0)
+        ):
+            self.assertFalse(self.service.stop(for_reconfigure=True))
+        self.assertTrue(self.service._sync_stopping)
+        with self.assertRaisesRegex(RuntimeError, "同步服务已停止"):
+            with self.service.sync_operation():
+                pass
+        self.release.set()
+        worker.join(timeout=2)
+
+    def test_monitor_timeout_cancels_reconfigure_before_resource_teardown(self) -> None:
+        self.service.monitor_life_thread = MagicMock()
+        self.service.monitor_stop_event = Event()
+
+        def stop_monitor():
+            self.service.monitor_stop_event.set()
+            return False
+
+        with patch.object(
+            self.service, "_stop_monitor_life_internal", side_effect=stop_monitor
+        ):
+            self.assertFalse(self.service.stop(for_reconfigure=True))
+        self.assertFalse(self.service._sync_stopping)
+        self.assertFalse(self.service.monitor_stop_event.is_set())
+        self.service.backup_service.stop.assert_not_called()
+        self.namespace["directory_upload_queue"].stop.assert_not_called()
+        self.assertTrue(self.service._monitor_resume_pending)
+        self.service.monitor_life_thread.is_alive.return_value = False
+        with patch.object(self.service, "_start_monitor_life_internal") as restart:
+            self.service.check_monitor_life_guard()
+        restart.assert_called_once_with()
+        self.assertFalse(self.service._monitor_resume_pending)
+
+    def test_reconfigure_preserves_existing_monitor_stop_signal(self) -> None:
+        self.service._sync_stopping = True
+        self.service.monitor_life_thread = MagicMock()
+        self.service.monitor_stop_event = Event()
+        self.service.monitor_stop_event.set()
+        with patch.object(
+            self.service, "_stop_monitor_life_internal", return_value=False
+        ):
+            self.assertFalse(self.service.stop(for_reconfigure=True))
+        self.assertTrue(self.service._sync_stopping)
+        self.assertTrue(self.service.monitor_stop_event.is_set())
+
+    def test_new_sync_during_monitor_drain_cancels_reconfigure(self) -> None:
+        self.service._run_full_sync = self._block
+        self.service.monitor_life_thread = MagicMock()
+
+        def stop_monitor():
+            self.assertFalse(self.service._sync_stopping)
+            self._start(self.service.full_sync_strm_files)
+            self.assertTrue(self.entered.wait(timeout=2))
+            self.service.monitor_life_thread = None
+            return True
+
+        with patch.object(
+            self.service, "_stop_monitor_life_internal", side_effect=stop_monitor
+        ), patch.object(self.service, "_start_monitor_life_internal") as restart:
+            self.assertFalse(self.service.stop(for_reconfigure=True))
+        restart.assert_called_once_with(register_guard_service=False)
+        self.assertFalse(self.service._sync_stopping)
+        self.service.backup_service.stop.assert_not_called()
+        self.namespace["directory_upload_queue"].stop.assert_not_called()
+        self.release.set()
+
+    def test_plugin_init_rejects_busy_reload_without_poisoning_service(self) -> None:
+        namespace = {
+            name: MagicMock()
+            for name in (
+                "ct_db_manager", "configer", "U115Patcher", "P115DiskPatcher",
+                "AppVerPatcher", "upload_notifier",
+            )
+        }
+        namespace["servicer"] = self.service
+        stop = _method(self.root / "__init__.py", "stop_service", namespace)
+        initialize = _method(self.root / "__init__.py", "init_plugin", namespace)
+        plugin = type("Plugin", (), {"_rename_media_fields_cache": {}})()
+        plugin.stop_service = MethodType(stop, plugin)
+        with self.service.sync_operation():
+            with self.assertRaisesRegex(RuntimeError, "旧插件任务尚未退出"):
+                initialize(plugin, {"cookies": "replacement"})
+        self.assertFalse(self.service._sync_stopping)
+        namespace["configer"].update_config.assert_not_called()
+        namespace["ct_db_manager"].close_database.assert_not_called()
+        with self.service.sync_operation():
+            pass
+
+    def test_reconfigure_success_keeps_admission_closed_until_init(self) -> None:
+        self.service._init_transfer_enhancement = MagicMock()
+        self.namespace["configer"].get_config.side_effect = lambda key: (
+            "/synthetic" if key == "plugin_aligo_path" else None
+        )
+        self.assertTrue(self.service.stop(for_reconfigure=True))
+        self.assertTrue(self.service._sync_stopping)
+        self.assertTrue(self.service.init_service())
+        with self.service.sync_operation():
+            pass
+
+    def test_monitor_guard_does_not_restart_during_real_shutdown(self) -> None:
+        self.service._sync_stopping = True
+        self.service._monitor_resume_pending = True
+        self.service.monitor_life_thread = None
+        with patch.object(self.service, "_start_monitor_life_internal") as restart:
+            self.service.check_monitor_life_guard()
+        restart.assert_not_called()
+
+    def test_sync_owner_does_not_wait_on_external_stop_lock(self) -> None:
+        with self.service.sync_operation():
+            self.service._lifecycle_lock.acquire()
+            try:
+                self.assertFalse(self.service.stop())
+                self.assertFalse(self.service.stop(for_reconfigure=True))
+            finally:
+                self.service._lifecycle_lock.release()
+
     def test_full_sync_keeps_database_and_downstream_until_exit(self) -> None:
         """
         全量扫描未退出时真实插件停止与配置入口保留数据库及下游资源
