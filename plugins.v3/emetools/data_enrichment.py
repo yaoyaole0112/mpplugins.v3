@@ -53,6 +53,12 @@ DEFAULT_ENRICH_CONFIG = {
 }
 
 
+class PreviewFrameError(ValueError):
+    def __init__(self, message, *, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
 def validate_enrich_config(values):
     if not isinstance(values, dict) or set(values) - DEFAULT_ENRICH_CONFIG.keys():
         raise ValueError("补全设置包含不支持的选项")
@@ -166,28 +172,36 @@ def _docker_job(image, config, *, timeout=240, binary=False):
                     oom_killed = details.get("State", {}).get("OOMKilled") is True
                 except (httpx.HTTPError, ValueError, TypeError):
                     pass
+            retryable = False
             if oom_killed:
                 hint = "容器内存超限（OOM），请释放宿主机内存后重试"
             elif "VK_ERROR" in diagnostics or "Vulkan device" in diagnostics:
                 hint = "Vulkan 不可用，请检查宿主机 /dev/dri 设备映射"
             elif re.search(r"(?:HTTP|Server returned).*?(?:401|403)", diagnostics, re.I):
                 hint = "远程视频链接拒绝访问（HTTP 401/403）"
+                retryable = True
+            elif re.search(r"timed? out|connection (?:reset|refused)|end of file|HTTP.*?5\d\d|Server returned.*?5\d\d|I/O error", diagnostics, re.I):
+                hint = "远程视频读取中断或超时"
+                retryable = True
             elif "No such filter" in diagnostics:
                 hint = "截帧镜像缺少所需 FFmpeg 滤镜"
             elif re.search(r"Invalid (?:color|data)|Error (?:while|during) decoding|corrupt", diagnostics, re.I):
                 hint = "视频解码或色彩信息异常，请检查视频源是否完整"
+                retryable = True
             elif re.search(r"Cannot allocate memory|out of memory", diagnostics, re.I):
                 hint = "解码或滤镜内存分配失败，请释放宿主机内存后重试"
             elif status.get("StatusCode") == 137:
                 hint = "截帧进程被强制终止，未确认 OOM；请检查宿主机资源与容器状态"
             elif status.get("StatusCode") == 187:
                 hint = "解码或滤镜处理失败，不能仅凭退出码认定为显卡故障"
+                retryable = True
             else:
                 hint = "请检查视频链接、设备及截帧容器日志"
-            raise ValueError(f"独立截帧容器退出码 {status.get('StatusCode')}：{hint}")
+            raise PreviewFrameError(f"独立截帧容器退出码 {status.get('StatusCode')}：{hint}", retryable=retryable)
         return stdout if binary else stdout.decode("utf-8").strip()
     except httpx.TimeoutException as error:
-        raise ValueError(f"{phase}超时；请检查 Docker 响应、宿主机负载及远程视频连接") from error
+        raise PreviewFrameError(f"{phase}超时；请检查 Docker 响应、宿主机负载及远程视频连接",
+                                retryable=phase == "等待视频截帧完成") from error
     finally:
         try:
             _docker("DELETE", f"/containers/{container_id or container_name}", params={"force": "1"})
@@ -1155,9 +1169,16 @@ class DataEnrichment:
                 green_strength = purple_strength = 0.0
                 mean_r = mean_g = mean_b = 0.0
                 sampled = 0
+                tiles = [[0, 0, 0] for _ in range(16)]
                 for y in range(step // 2, height, step):
                     for x in range(step // 2, width, step):
                         red, g, blue = pixels[x, y]
+                        tile = tiles[min(3, y * 4 // height) * 4 + min(3, x * 4 // width)]
+                        tile[0] += 1
+                        if g > red + 6 and g > blue + 6:
+                            tile[1] += 1
+                        elif red > g + 6 and blue > g + 6:
+                            tile[2] += 1
                         mean_r += red
                         mean_g += g
                         mean_b += blue
@@ -1183,6 +1204,10 @@ class DataEnrichment:
                             purple_strength += ((red + blue) / 2 - g) / 255.0
                 if sampled < 80:
                     return ""
+                active_tiles = [tile for tile in tiles if tile[0]]
+                green_spread = sum(tile[1] / tile[0] >= .18 for tile in active_tiles) / len(active_tiles)
+                purple_spread = sum(tile[2] / tile[0] >= .18 for tile in active_tiles) / len(active_tiles)
+                mixed_spread = sum((tile[1] + tile[2]) / tile[0] >= .12 for tile in active_tiles) / len(active_tiles)
                 mean_r /= sampled
                 mean_g /= sampled
                 mean_b /= sampled
@@ -1193,24 +1218,24 @@ class DataEnrichment:
                 purple_mean_cast = (mean_r + mean_b) / 2 - mean_g
                 green_tint_ratio = green_tint / max(sampled, 1)
                 purple_tint_ratio = purple_tint / max(sampled, 1)
-                if (total >= 80 and green_ratio >= .18 and green_strength / max(green, 1) >= .04
+                if (green_spread >= .65 and total >= 80 and green_ratio >= .18 and green_strength / max(green, 1) >= .04
                         and green >= purple + .04 * total
                         and (green_mean_cast >= 3 or green_ratio >= .28)):
                     return "green"
-                if (dovi and green_tint_ratio >= .34 and green_mean_cast >= 2.0 and
+                if (dovi and green_spread >= .65 and green_tint_ratio >= .34 and green_mean_cast >= 2.0 and
                         green_tint_ratio >= purple_tint_ratio + .08):
                     return "green"
-                if (total >= 80 and purple_ratio >= .18 and purple_strength / max(purple, 1) >= .035
+                if (purple_spread >= .65 and total >= 80 and purple_ratio >= .18 and purple_strength / max(purple, 1) >= .035
                         and purple >= green + .04 * total
                         and (purple_mean_cast >= 3 or purple_ratio >= .28)):
                     return "purple"
-                if (dovi and purple_tint_ratio >= .34 and purple_mean_cast >= 2.0 and
+                if (dovi and purple_spread >= .65 and purple_tint_ratio >= .34 and purple_mean_cast >= 2.0 and
                         purple_tint_ratio >= green_tint_ratio + .08):
                     return "purple"
-                if (dovi and green_tint_ratio >= .15 and purple_tint_ratio >= .05 and
+                if (dovi and mixed_spread >= .65 and green_tint_ratio >= .15 and purple_tint_ratio >= .05 and
                         green_tint_ratio + purple_tint_ratio >= .23):
                     return "mixed"
-                if (dovi and faint_green / sampled >= .06 and faint_purple / sampled >= .045
+                if (dovi and mixed_spread >= .65 and faint_green / sampled >= .06 and faint_purple / sampled >= .045
                         and (faint_green + faint_purple) / sampled >= .12):
                     return "mixed"
         except (OSError, ValueError):
@@ -2186,6 +2211,18 @@ class DataEnrichment:
             self.log("本次已修复的剧集与分集见运行进度下方的修复清单")
 
     async def _generate_preview(self, path, thumb):
+        for attempt, seek in enumerate(("00:05:00", "00:01:00", "00:00:10"), 1):
+            self._ensure_active()
+            try:
+                await self._generate_preview_attempt(path, thumb, seek)
+                return
+            except PreviewFrameError as error:
+                if not error.retryable or attempt == 3:
+                    raise
+                self.log(f"截帧第 {attempt} 次未成功：{error}；重新读取 STRM，并更换截帧位置后重试")
+                await asyncio.sleep(2)
+
+    async def _generate_preview_attempt(self, path, thumb, seek):
         host_root = await asyncio.to_thread(_frame_host_root)
         try:
             await asyncio.to_thread(_docker, "GET", "/images/%s/json" % quote(FRAME_IMAGE, safe=""))
@@ -2200,7 +2237,7 @@ class DataEnrichment:
             output_bind = f"{host_root}/{Path(frame_dir).name}:/out:rw"
             command = ["-v", "error", "-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk",
                 "-threads", "1", "-filter_threads", "1", "-rw_timeout", "20000000",
-                "-ss", "00:05:00", "-i", url, "-an", "-sn", "-frames:v", "1",
+                "-ss", seek, "-i", url, "-an", "-sn", "-frames:v", "1",
                 "-vf", FRAME_FILTER, "-threads", "1", "-f", "image2", "-update", "1",
                 "-y", "/out/frame.png"]
             config = {"Entrypoint": [FRAME_EXECUTABLE], "Cmd": command,
@@ -2213,16 +2250,19 @@ class DataEnrichment:
             await asyncio.to_thread(_docker_job, FRAME_IMAGE, config, timeout=240)
             frame = Path(frame_dir) / "frame.png"
             if not frame.is_file() or frame.stat().st_size > 32 * 1024 * 1024:
-                raise ValueError("独立截帧容器未生成有效图片")
-            with Image.open(frame) as image:
-                rgb = image.convert("RGB")
-                rgb = ImageOps.fit(rgb, (1280, 720), method=Image.Resampling.LANCZOS)
-                temporary = thumb + ".emetools-tmp"
-                try:
-                    rgb.save(temporary, format="JPEG", quality=92)
-                    os.replace(temporary, thumb)
-                finally:
-                    if os.path.exists(temporary): os.unlink(temporary)
+                raise PreviewFrameError("独立截帧容器未生成有效图片", retryable=True)
+            try:
+                with Image.open(frame) as image:
+                    rgb = image.convert("RGB")
+                    rgb = ImageOps.fit(rgb, (1280, 720), method=Image.Resampling.LANCZOS)
+            except (OSError, ValueError):
+                raise PreviewFrameError("截帧图片不完整或无法解码", retryable=True) from None
+            temporary = thumb + ".emetools-tmp"
+            try:
+                rgb.save(temporary, format="JPEG", quality=92)
+                os.replace(temporary, thumb)
+            finally:
+                if os.path.exists(temporary): os.unlink(temporary)
 
     async def _repair_preview(self, series_id, targets, force):
         name, _ = self._split(series_id)
@@ -2275,9 +2315,11 @@ class DataEnrichment:
                 self.log(f"[{position}/{len(targets)}] 已修复并刷新 Emby：{detail}，耗时 {time.monotonic() - started:.1f} 秒")
             except Exception as error:
                 failed += 1
-                reason = f"HTTP {error.response.status_code}" if isinstance(error, httpx.HTTPStatusError) else type(error).__name__
+                reason = (f"HTTP {error.response.status_code}" if isinstance(error, httpx.HTTPStatusError)
+                          else str(error) if isinstance(error, PreviewFrameError) else type(error).__name__)
                 retry = "；图片已生成，再次点击修复图片仅重试同步，不重新截帧" if phase == "刷新 Emby 分集" else ""
-                self.log(f"[{position}/{len(targets)}] {phase}失败：{reason}{retry}")
+                self.log(f"[{position}/{len(targets)}] Emby 分集 ID {key.split('::', 1)[1]}，"
+                         f"S{int(target.get('season') or 0):02d}E{int(target.get('episode') or 0):02d} {phase}失败：{reason}{retry}")
         with self.lock:
             self.state["preview_result"] = {"ok": completed, "fail": failed}
         self.log(f"预览图修复完成：成功 {completed} 集，失败 {failed} 集")

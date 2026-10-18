@@ -1180,7 +1180,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
           <div class="eme-enrich-search"><input v-model.trim="enrich.previewQuery" placeholder="输入要修复的剧集名称" @keyup.enter="searchEnrichment('preview')" /><button class="eme-button secondary" :disabled="enrich.searching" @click="searchEnrichment('preview')">搜索剧集</button></div>
           <div v-if="enrich.previewItems.length" class="eme-enrich-results"><button v-for="item in enrich.previewItems" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.previewSelected?.id === item.id }" @click="enrich.previewSelected = item; enrich.previewEpisodes = []; enrich.previewChecked = []">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.server }}</button></div>
           <label class="eme-switch-label"><input  :checked="enrich.force" :disabled="!enrich.forceLoaded || enrich.forceSaving" @change="savePreviewForce" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>强制覆盖已有预览图</span></label>
-          <p class="eme-hint">偏色检测为启发式判断，可能漏检。人工确认仍有偏色时，可开启“强制覆盖已有预览图”，再勾选已有图片的 DoVi 分集修复；不会自动覆盖所有分集。开关切换后立即保存；缺图补全无需开启此开关。</p>
+          <p class="eme-hint">偏色检测为启发式判断，可能漏检或误判；已增加分区覆盖校验，减少草地、衣服等局部颜色引起的误判，请确认预览后修复。人工确认仍有偏色时，可开启“强制覆盖已有预览图”，再勾选已有图片的 DoVi 分集修复；不会自动覆盖所有分集。开关切换后立即保存；缺图补全无需开启此开关。</p>
           <div v-if="enrich.previewEpisodes.length" class="eme-enrich-episodes"><label v-for="episode in enrich.previewEpisodes" :key="episode.id" class="eme-enrich-episode"><input type="checkbox" :disabled="!['candidate', 'missing', 'size', 'pending'].includes(episode.status) && !(enrich.force && episode.dovi && episode.has_thumb)" :checked="enrich.previewChecked.includes(episode.id)" @change="togglePreviewEpisode(episode.id)" /><span>S{{ String(episode.season).padStart(2, '0') }}E{{ String(episode.episode).padStart(2, '0') }} · {{ episode.name || '未命名' }}</span><small>{{ episode.width ? `${episode.width}×${episode.height} · ` : '' }}{{ episode.dovi ? 'DoVi · ' : '' }}{{ { missing: '缺少缩略图，可补全', candidate: '疑似偏色，可修复', size: '尺寸比例异常，可优化', fixed: '已修复', keep: '正常', pending: '图片已修复，待同步 Emby' }[episode.status] || '待核实' }}</small></label></div>
           <p v-if="enrich.status.preview_result" class="eme-hint">上次修复：成功 {{ enrich.status.preview_result.ok }} 集，失败 {{ enrich.status.preview_result.fail }} 集。</p>
         </section>
@@ -1444,9 +1444,9 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-brand,.eme-shell--app .eme-brand{box-sizing:border-box;display:flex;align-items:center;flex:none;gap:12px;min-height:48px;margin:0 0 16px;padding:0}
 .eme-brand-icon{width:28px;height:28px;flex:none;border-radius:0;background:rgb(var(--v-theme-primary));mask:url('./brand-stars.svg') center/contain no-repeat}
 .eme-brand-icon{display:block}
-:global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg){background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
-:global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon svg > *){display:none}
-:global(.layout-vertical-nav .nav-link a[href*="/plugin-app/EmeTools/" i] .nav-item-icon::before){content:"";display:block;width:1em;height:1em;background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
+:global(a[href*="EmeTools" i] :is(.nav-item-icon,.v-icon)){display:inline-block;width:1em;height:1em;flex-shrink:0;border-radius:0;background:currentColor;mask:url('./brand-stars.svg') center/contain no-repeat}
+:global(a[href*="EmeTools" i] :is(.nav-item-icon,.v-icon) > *){visibility:hidden}
+:global(a[href*="EmeTools" i] :is(.nav-item-icon,.v-icon)::before){content:none!important}
 .eme-brand-copy{min-width:0}.eme-brand strong{font-size:1.35rem;line-height:1.3;font-weight:600;letter-spacing:0}
 .eme-sidebar-card{box-sizing:border-box;display:flex;flex-direction:column;gap:3px;min-height:0;overflow:visible;overscroll-behavior:contain;padding:12px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:16px;background:rgb(var(--v-theme-surface));box-shadow:0 1px 2px rgba(32,35,42,.03)}
 .eme-sidebar-card .eme-nav{flex:none;padding:11px 10px;border:1px solid transparent}
@@ -1462,7 +1462,8 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
 .eme-enrich-source-options label{display:flex;align-items:center;gap:5px;cursor:pointer}
 .eme-enrich-source-options input{accent-color:rgb(var(--v-theme-primary))}
 .eme-enrich-model{margin:4px 0 0;font-size:13px;overflow-wrap:anywhere}
-.eme-enrich-settings-body .eme-hint{font-size:12px;line-height:1.6;margin:5px 0 10px}
+.eme-enrich-settings-body .eme-hint{font-size:12px;line-height:1.65;margin:14px 0 12px}
+.eme-card p.eme-hint{margin:14px 0 12px;line-height:1.65}
 .eme-enrich-settings-body label.eme-switch-label{display:flex;align-items:center;position:relative;gap:11px;min-height:29px;cursor:pointer;font-size:13px}
 .eme-enrich-settings-group{display:flex;flex-direction:column;gap:7px;margin-top:14px;padding:12px 14px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px}
 .eme-enrich-settings-group>strong{font-size:13px;margin-bottom:2px}

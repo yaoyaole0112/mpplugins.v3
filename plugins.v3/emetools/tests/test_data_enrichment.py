@@ -14,7 +14,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from emetools.data_enrichment import (DB_SCRIPT, DEFAULT_ENRICH_CONFIG, DataEnrichment,
-                                      _docker_job, _frame_host_root, validate_enrich_config)
+                                      PreviewFrameError, _docker_job, _frame_host_root, validate_enrich_config)
 
 
 class EnrichmentTests(unittest.TestCase):
@@ -1378,8 +1378,10 @@ class EnrichmentTests(unittest.TestCase):
         from PIL import Image
         thumb = str(self.strm)[:-5] + '-thumb.png'
         image = Image.new('RGB', (400, 240), (100, 100, 100))
-        image.paste((80, 95, 80), (0, 0, 100, 240))
-        image.paste((110, 95, 105), (100, 0, 160, 240))
+        for top in range(0, 240, 60):
+            for left in range(0, 400, 100):
+                image.paste((80, 95, 80), (left, top, left + 25, top + 60))
+                image.paste((110, 95, 105), (left + 25, top, left + 40, top + 60))
         image.save(thumb)
         self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), 'mixed')
         self.assertEqual(self.enrichment._color_cast(thumb), '')
@@ -1393,17 +1395,47 @@ class EnrichmentTests(unittest.TestCase):
         from PIL import Image
         thumb = str(self.strm)[:-5] + '-thumb.png'
         image = Image.new('RGB', (800, 480), (150, 150, 145))
-        image.paste((100, 108, 100), (0, 0, 64, 480))
-        image.paste((108, 100, 108), (64, 0, 112, 480))
+        for top in range(0, 480, 120):
+            for left in range(0, 800, 200):
+                image.paste((100, 108, 100), (left, top, left + 16, top + 120))
+                image.paste((108, 100, 108), (left + 16, top, left + 32, top + 120))
         image.save(thumb)
         self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), 'mixed')
         self.assertEqual(self.enrichment._color_cast(thumb), '')
-        image.paste((150, 150, 145), (64, 0, 112, 480))
+        image = Image.new('RGB', (800, 480), (150, 150, 145))
+        image.paste((100, 108, 100), (0, 0, 64, 480))
         image.save(thumb)
         self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), '')
         image.paste((108, 100, 108), (64, 0, 80, 480))
         image.save(thumb)
         self.assertEqual(self.enrichment._color_cast(thumb, dovi=True), '')
+
+    def test_local_foliage_and_clothes_are_not_global_color_casts(self):
+        from PIL import Image
+        thumb = str(self.strm)[:-5] + '-thumb.png'
+        for color in ((30, 150, 40), (160, 40, 150)):
+            image = Image.new('RGB', (800, 480), (155, 155, 150))
+            image.paste(color, (0, 0, 800, 160))
+            image.paste((190, 150, 125), (200, 160, 600, 480))
+            image.save(thumb)
+            for dovi in (True, False):
+                self.assertEqual(self.enrichment._color_cast(thumb, dovi=dovi), '')
+
+    def test_generation_retries_transient_failures_with_different_seek(self):
+        attempt = AsyncMock(side_effect=[PreviewFrameError('视频读取中断', retryable=True), None])
+        with patch.object(self.enrichment, '_generate_preview_attempt', attempt), \
+                patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock):
+            asyncio.run(self.enrichment._generate_preview(str(self.strm), 'thumb'))
+        self.assertEqual([call.args[2] for call in attempt.call_args_list], ['00:05:00', '00:01:00'])
+
+    def test_generation_does_not_retry_device_errors_and_limits_network_retries(self):
+        for retryable, count in ((False, 1), (True, 3)):
+            attempt = AsyncMock(side_effect=PreviewFrameError('安全诊断', retryable=retryable))
+            with patch.object(self.enrichment, '_generate_preview_attempt', attempt), \
+                    patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock):
+                with self.assertRaises(PreviewFrameError):
+                    asyncio.run(self.enrichment._generate_preview(str(self.strm), 'thumb'))
+            self.assertEqual(attempt.call_count, count)
 
     def test_manual_force_allows_existing_dovi_and_missing_needs_no_force(self):
         from PIL import Image
@@ -1675,6 +1707,45 @@ class EnrichmentTests(unittest.TestCase):
                 _docker_job('image', {})
         self.assertNotIn('secret', str(error.exception))
         self.assertEqual(docker.call_args.args, ('DELETE', '/containers/cid'))
+
+    def test_frame_network_error_is_retryable_without_leaking_signed_url(self):
+        responses = [SimpleNamespace(json=lambda: {'Id': 'cid'}), SimpleNamespace(),
+                     SimpleNamespace(json=lambda: {'StatusCode': 1}),
+                     SimpleNamespace(content=b''),
+                     SimpleNamespace(content=b'I/O error https://video.example/?token=secret'),
+                     SimpleNamespace()]
+        with patch('emetools.data_enrichment._docker', side_effect=responses):
+            with self.assertRaisesRegex(PreviewFrameError, '远程视频读取中断') as error:
+                _docker_job('image', {})
+        self.assertTrue(error.exception.retryable)
+        self.assertNotIn('secret', str(error.exception))
+
+    def test_generation_rereads_link_and_preserves_old_thumbnail_until_success(self):
+        from PIL import Image
+        real_tempdir = tempfile.TemporaryDirectory
+        thumb = str(self.strm)[:-5] + '-thumb.jpg'
+        Image.new('RGB', (1280, 720), (50, 60, 70)).save(thumb)
+        original = Path(thumb).read_bytes()
+        urls = []
+
+        def job(_image, config, **kwargs):
+            urls.append(config['Cmd'][config['Cmd'].index('-i') + 1])
+            self.assertEqual(Path(thumb).read_bytes(), original)
+            if len(urls) == 1:
+                self.strm.write_text('https://example.org/refreshed.mp4', encoding='utf8')
+                raise PreviewFrameError('远程视频读取中断', retryable=True)
+            frame_dir = Path(self.temp.name) / config['HostConfig']['Binds'][0].split(':')[0].rsplit('/', 1)[-1]
+            Image.new('RGB', (320, 180), (110, 120, 130)).save(frame_dir / 'frame.png')
+
+        with patch('emetools.data_enrichment._frame_host_root', return_value=self.temp.name), \
+                patch('emetools.data_enrichment._docker', return_value=SimpleNamespace()), \
+                patch('emetools.data_enrichment._docker_job', side_effect=job), \
+                patch('emetools.data_enrichment.tempfile.TemporaryDirectory',
+                      side_effect=lambda **kwargs: real_tempdir(prefix=kwargs['prefix'], dir=self.temp.name)), \
+                patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock):
+            asyncio.run(self.enrichment._generate_preview(str(self.strm), thumb))
+        self.assertEqual(urls, ['https://example.org/video.mp4', 'https://example.org/refreshed.mp4'])
+        self.assertNotEqual(Path(thumb).read_bytes(), original)
 
     def test_frame_137_checks_docker_oom_state_before_reporting_memory_failure(self):
         for oom in (True, False):
