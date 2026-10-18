@@ -57,7 +57,10 @@ try {
     }
     if (!document.querySelector('#app').innerText.includes('Telegram 账号')) throw Error(`${name}: account panel missing`)
     const targets = document.querySelector('#app textarea')
-    if (!targets || targets.rows < 3 || !document.querySelector('#app').innerText.includes('接收目标（支持多个）')) throw Error(`${name}: multiple target textarea missing`)
+    if (!targets || targets.rows !== 1 || !document.querySelector('#app').innerText.includes('接收目标（支持多个）')) throw Error(`${name}: compact multiple target textarea missing`)
+    const threadInput = document.querySelector('#app .telegram-targets input')
+    if (!threadInput || Math.abs(targets.getBoundingClientRect().height - threadInput.getBoundingClientRect().height) > 1) throw Error(`${name}: target and thread input heights differ`)
+    if (targets.getBoundingClientRect().height !== 48) throw Error(`${name}: target input not compact`)
     targets.value = '@receiver_bot\n@channel\n-1001234567890'
     targets.dispatchEvent(new Event('input', { bubbles: true }))
     await vue.nextTick()
