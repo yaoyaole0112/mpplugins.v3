@@ -118,7 +118,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.13"
+    plugin_version = "2.10.14"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -662,6 +662,12 @@ class EmeTools(_PluginBase):
     def _client(self) -> P115Client:
         return P115Client(self._source_cookie())
 
+    def _p115_cooldown_remaining(self) -> int:
+        return P115Client.cooldown_remaining_for_cookie(self._source_cookie())
+
+    def _p115_deferred_message(self, remaining: int) -> str:
+        return f"115 网络暂不可用，约 {remaining} 秒后自动复查；本轮未发送请求"
+
     def _locked(self, section: str, callback):
         lock = self._locks[section]
         if not lock.acquire(blocking=False):
@@ -1072,6 +1078,28 @@ class EmeTools(_PluginBase):
         if not identifiers:
             logger.info("ME工具 清理文件：没有配置目录，跳过预览")
             return {"ok": False, "message": "请先保存 115 清理目录"}
+        remaining = self._p115_cooldown_remaining()
+        if remaining:
+            message = self._p115_deferred_message(remaining)
+            logger.info("ME工具 清理文件：%s", message)
+            names = configured.get("dir_names") or []
+            return {
+                "ok": False,
+                "deferred": True,
+                "message": message,
+                "file_count": 0,
+                "dir_count": 0,
+                "total_bytes": 0,
+                "folders": [{
+                    "cid": cid,
+                    "name": (names[index] if index < len(names) else "") or cid,
+                    "files": 0,
+                    "dirs": 0,
+                    "size": 0,
+                    "error": message,
+                } for index, cid in enumerate(identifiers)],
+                "snapshots": {},
+            }
         logger.info("ME工具 清理文件：开始预览 %d 个目录", len(identifiers))
         folders, snapshots = [], {}
         with self._client() as client:
@@ -1253,8 +1281,14 @@ class EmeTools(_PluginBase):
 
         def move():
             if time.monotonic() < getattr(self, "_move_retry_after", 0):
-                return {"ok": False, "moved": 0, "errors": [], "details": [],
+                return {"ok": False, "deferred": True, "moved": 0, "errors": [], "details": [],
                         "message": "115 目录接口暂不可用，退避等待中；5 分钟后自动复查"}
+            remaining = self._p115_cooldown_remaining()
+            if remaining:
+                message = self._p115_deferred_message(remaining)
+                logger.info("ME工具 文件转存：%s", message)
+                return {"ok": False, "deferred": True, "moved": 0, "errors": [], "details": [],
+                        "message": message}
             moved, errors, details, copy_records = 0, [], [], self._load_move_copy_records()
             with self._client() as client:
                 for rule in rules:
@@ -1335,7 +1369,7 @@ class EmeTools(_PluginBase):
                                        _log_label(detail["src_name"] or source),
                                        _log_label(detail["dst_name"] or destination), stage, type(error).__name__, reason)
                         if isinstance(error, P115DirectoryUnavailable):
-                            self._move_retry_after = time.monotonic() + 300
+                            self._move_retry_after = time.monotonic() + max(60, self._p115_cooldown_remaining())
                             break
             self._last_run["p115_move"] = datetime.now().isoformat()
             logger.info("ME工具 文件转存：本次完成，已处理=%d，失败=%d，空目录=%d",
@@ -1538,8 +1572,11 @@ class EmeTools(_PluginBase):
                 else:
                     preview = self._cleanup_preview()
                     if not preview.get("ok"):
-                        logger.warning("ME工具 清理文件：目录预览未完整通过，本轮未执行任何清理")
-                        notification = notices.file_cleanup({}, preview)
+                        if preview.get("deferred"):
+                            logger.info("ME工具 清理文件：115 正在退避，本轮不发送重复失败通知")
+                        else:
+                            logger.warning("ME工具 清理文件：目录预览未完整通过，本轮未执行任何清理")
+                            notification = notices.file_cleanup({}, preview)
                     elif preview.get("file_count") or preview.get("dir_count"):
                         result = self._cleanup_confirm(self._remember("cleanup", preview["snapshots"]))
                         if "deleted" in result:
@@ -1572,7 +1609,7 @@ class EmeTools(_PluginBase):
                     notification = ("", "⏰ 115 监控转存跳过：未配置源/目标文件夹")
                 else:
                     result = self._move_run()
-                    if "moved" in result:
+                    if "moved" in result and not result.get("deferred"):
                         notification = notices.file_move(result)
             self._last_run[section] = datetime.now().isoformat()
             if notification:

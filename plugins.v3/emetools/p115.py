@@ -26,9 +26,12 @@ class P115RequestGate:
         self.list_endpoint = 0
 
     def check(self):
-        remaining = math.ceil(self.retry_at - time.monotonic())
+        remaining = self.remaining()
         if remaining > 0:
             raise P115DirectoryUnavailable(f"115 请求已暂停，约 {remaining} 秒后复查；本轮不再提交请求")
+
+    def remaining(self):
+        return max(0, math.ceil(self.retry_at - time.monotonic()))
 
     def defer(self, minimum=300, retry_after=0):
         self.failures += 1
@@ -74,6 +77,16 @@ class P115Client:
 
     def __exit__(self, exc_type, exc, traceback):
         self.client.close()
+
+    @staticmethod
+    def cooldown_remaining_for_cookie(cookie: str) -> int:
+        """Return the shared cooldown without opening a network connection."""
+        if not str(cookie or "").strip():
+            return 0
+        return _request_gate(cookie).remaining()
+
+    def cooldown_remaining(self) -> int:
+        return self._gate.remaining()
 
     def _request(self, method, url, **kwargs):
         endpoint = httpx.URL(url)

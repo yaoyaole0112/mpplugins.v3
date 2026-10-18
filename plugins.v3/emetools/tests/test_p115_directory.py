@@ -80,6 +80,15 @@ class DirectoryFailureTests(unittest.TestCase):
                     operation()
         self.assertEqual(len(calls), 1)
 
+    def test_cooldown_can_be_checked_without_network_request(self):
+        client = self.make_client(lambda request: httpx.Response(405))
+        with self.assertRaises(P115DirectoryUnavailable):
+            client.list_children("123")
+        self.assertGreater(P115Client.cooldown_remaining_for_cookie("test-cookie"), 0)
+        self.assertGreater(client.cooldown_remaining(), 0)
+        client.client.close()
+        self.assertGreater(P115Client.cooldown_remaining_for_cookie("test-cookie"), 0)
+
     def test_http_auth_status_without_business_code_is_not_claimed_expired(self):
         for status in (401, 403):
             with self.subTest(status=status), patch.dict(_REQUEST_GATES, clear=True):

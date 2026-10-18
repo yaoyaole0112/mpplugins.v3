@@ -246,6 +246,17 @@ class ScheduledNotificationTests(unittest.TestCase):
         self.plugin._move_run()
         client.list_children.assert_called_once_with("1")
 
+    def test_shared_115_cooldown_defers_move_without_request_or_notification(self):
+        from emetools.p115 import _request_gate
+
+        self.plugin._schedule["p115_move"]["rules"] = [{"src_id": "1", "dst_id": "2"}]
+        _request_gate("test").retry_at = 200
+        with patch("emetools.p115.time.monotonic", return_value=100), \
+                patch.object(self.plugin, "_client") as client:
+            result = self.plugin._move_run()
+        self.assertTrue(result["deferred"])
+        client.assert_not_called()
+
     def test_manual_file_cleanup_confirmation_and_result(self):
         preview = {"ok": True, "folders": [{"name": "旧文件", "files": 1, "dirs": 0,
                                                "size": 1024, "error": ""}],
