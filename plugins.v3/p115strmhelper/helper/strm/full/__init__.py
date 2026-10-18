@@ -37,6 +37,7 @@ from ....utils.sentry import sentry_manager
 from ....utils.strm import StrmUrlGetter, StrmGenerater
 from ....utils.tree import DirectoryTree
 from ....utils.http import check_iter_path_data
+from ....utils.read_retry import retry_read_request
 from ....utils.base64 import CBase64
 from ....utils.math import MathUtils
 from ....helper.mediaserver import MediaServerRefresh
@@ -737,6 +738,7 @@ class FullSyncStrmHelper:
                         "use_media_api": False,
                         **configer.get_ios_ua_app(),
                     }
+                iter_kwargs["request"] = retry_read_request
                 logger.debug(
                     f"【全量STRM生成】迭代函数 {iter_func}; 参数 {iter_kwargs}"
                 )
@@ -907,6 +909,7 @@ class FullSyncStrmHelper:
                                 "use_media_api": False,
                                 **configer.get_ios_ua_app(),
                             }
+                        iter_kwargs["request"] = retry_read_request
                         logger.debug(
                             f"【全量STRM生成】迭代函数 {iter_func}; 参数 {iter_kwargs}"
                         )
@@ -1169,7 +1172,7 @@ class FullSyncStrmHelper:
 
             self._flush_deferred_strm_cleanup_batch()
         finally:
-            logger.info("【全量STRM生成】所有文件处理任务已提交，等待文件写入完成...")
+            logger.info("【全量STRM生成】等待已提交文件写入完成并关闭工作线程...")
             self.write_queue.join()
             for _ in range(num_io_workers):
                 self.write_queue.put(None)

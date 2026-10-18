@@ -453,7 +453,7 @@ class ServiceHelper:
             mediainfodownloader=self.mediainfodownloader,
         )
         strm_helper.strm_exec_history_kind = "full"
-        strm_helper.generate_strm_files(
+        completed = strm_helper.generate_strm_files(
             full_sync_strm_paths=configer.get_config("full_sync_strm_paths"),
         )
         (
@@ -464,6 +464,8 @@ class ServiceHelper:
             remove_unless_strm_count,
             strm_cleanup_deferred_count,
         ) = strm_helper.get_generate_total()
+        if completed is False:
+            logger.error("【全量同步】云端扫描未完成，已保留已生成文件；请查看错误日志后重试")
         if configer.get_config("notify"):
             text = f"""
 📄 生成STRM文件 {strm_count} 个
@@ -477,8 +479,19 @@ class ServiceHelper:
                 text += f"\n⏳ 待二次确认清理无效 STRM {strm_cleanup_deferred_count} 个"
             post_message(
                 mtype=MessageType.Plugin,
-                title=i18n.translate("full_sync_done_title"),
-                text=text,
+                title=(
+                    "115网盘全量同步未完成"
+                    if completed is False
+                    else i18n.translate("full_sync_done_title")
+                ),
+                text=(
+                    (
+                        "云端扫描未完成，以下为已处理数量，并非完整同步结果。请查看错误日志后重试。\n"
+                        + text
+                    )
+                    if completed is False
+                    else text
+                ),
             )
 
     def start_full_sync(self):

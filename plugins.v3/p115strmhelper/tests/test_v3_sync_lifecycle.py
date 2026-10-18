@@ -108,6 +108,16 @@ class TestV3SyncLifecycle(TestCase):
             worker.join(timeout=2)
         self.service._stop_sync_operations(timeout=2)
 
+    def test_failed_full_scan_does_not_send_success_notification(self) -> None:
+        full = self.namespace["FullSyncStrmHelper"].return_value
+        full.generate_strm_files.return_value = False
+        self.service.full_sync_strm_files()
+        message = self.namespace["post_message"].call_args.kwargs
+        self.assertEqual(message["title"], "115网盘全量同步未完成")
+        self.assertIn("并非完整同步结果", message["text"])
+        self.namespace["logger"].error.assert_called_once()
+        self.assertFalse(self.service._full_sync_running)
+
     def test_full_sync_keeps_database_and_downstream_until_exit(self) -> None:
         """
         全量扫描未退出时真实插件停止与配置入口保留数据库及下游资源
