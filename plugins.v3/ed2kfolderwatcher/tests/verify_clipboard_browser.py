@@ -67,28 +67,35 @@ def verify():
             ):
                 command("Page.navigate", {"url": f"http://{host}:{port}/tests/clipboard-dialog.html{query}"})
                 wait_for("window.fixtureReady && !!document.querySelector('.copy-link')")
+                wait_for("document.querySelector('.copy-feedback')?.getBoundingClientRect().height === 40")
+                evaluate("document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))")
                 assert evaluate("window.isSecureContext") is secure
                 if secure:
                     command("Browser.grantPermissions", {"origin": f"http://{host}:{port}", "permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"]})
                 else:
                     assert evaluate("typeof navigator.clipboard") == "undefined"
                 evaluate("document.querySelector('.copy-link').scrollIntoView({block: 'center'})")
+                layout_expression = "JSON.stringify([...document.querySelectorAll('.record, .record-heading, .record h3, .record-time, .copy-link, .source-status, .copy-feedback')].map(element => { const bounds = element.getBoundingClientRect(); return [bounds.top, bounds.left, bounds.width, bounds.height] }))"
+                initial_layout = evaluate(layout_expression)
                 coordinates = evaluate("(() => { const bounds = document.querySelector('.copy-link').getBoundingClientRect(); return {x: bounds.left + 20, y: bounds.top + bounds.height / 2} })()")
                 command("Input.dispatchMouseEvent", {"type": "mousePressed", "button": "left", "clickCount": 1, **coordinates})
                 command("Input.dispatchMouseEvent", {"type": "mouseReleased", "button": "left", "clickCount": 1, **coordinates})
                 if success:
-                    wait_for("document.querySelector('.notice')?.textContent.includes('已复制')")
+                    wait_for("document.querySelector('.copy-feedback')?.textContent.includes('已复制')")
+                    assert evaluate(layout_expression) == initial_layout, (initial_layout, evaluate(layout_expression))
                     evaluate("document.querySelector('#paste-check').focus()")
                     command("Input.dispatchKeyEvent", {"type": "rawKeyDown", "key": "v", "code": "KeyV", "windowsVirtualKeyCode": 86, "modifiers": 2})
                     command("Input.dispatchKeyEvent", {"type": "keyUp", "key": "v", "code": "KeyV", "windowsVirtualKeyCode": 86, "modifiers": 2})
                     wait_for("document.querySelector('#paste-check').value === window.expectedLink")
                     print(f"PASS real clipboard copy and paste in modal: secure={secure}")
                 else:
-                    wait_for("document.querySelector('[role=alert]')?.textContent.includes('浏览器禁止自动复制')")
+                    wait_for("document.querySelector('.copy-feedback')?.textContent.includes('复制受限')")
+                    assert evaluate(layout_expression) == initial_layout, (initial_layout, evaluate(layout_expression))
                     assert evaluate("window.getSelection().toString() === window.expectedLink")
                     assert not evaluate("document.querySelector('.notice')?.textContent.includes('已复制') || false")
                     print("PASS blocked clipboard selects link without claiming success")
                 assert evaluate("document.querySelectorAll('.records-page > textarea').length") == 0
+                assert evaluate("document.querySelector('.records-page > .notice') === null")
         finally:
             if connection is not None:
                 connection.close()

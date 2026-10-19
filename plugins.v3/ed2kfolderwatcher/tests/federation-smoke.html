@@ -88,22 +88,38 @@ try {
       if (!invalid?.textContent.includes('历史链接无效') || invalid.querySelector('.copy-link') || invalid.querySelector('.delete-source')) throw Error(`${name}: invalid link actions available`)
       const link = document.querySelector('#app .copy-link')
       if (document.querySelector('#app details') || getComputedStyle(link).display === 'none') throw Error(`${name}: ED2K links are collapsed`)
+      const recordLayout = () => [...document.querySelectorAll('#app .record, #app .record-heading, #app .record h3, #app .record-time, #app .copy-link, #app .source-status, #app .copy-feedback')].map(element => {
+        const bounds = element.getBoundingClientRect()
+        return [bounds.top, bounds.left, bounds.width, bounds.height]
+      })
+      const initialLayout = JSON.stringify(recordLayout())
+      const assertStableCopy = () => {
+        if (JSON.stringify(recordLayout()) !== initialLayout) throw Error(`${name}: record dimensions or text positions changed during copying`)
+        if (document.querySelector('#app .records-page > .notice') || document.querySelector('#app .records-page > [role=alert]')) throw Error(`${name}: copy feedback leaked above records`)
+      }
       copyFails = true
       link.click()
       await new Promise(resolve => setTimeout(resolve, 50))
-      if (copied !== rows[0].link || !document.querySelector('#app').innerText.includes('ED2K 链接已复制')) throw Error(`${name}: clipboard copy failed`)
+      if (copied !== rows[0].link || !link.nextElementSibling.textContent.includes('链接已复制')) throw Error(`${name}: clipboard copy failed`)
+      assertStableCopy()
       copyFails = false
       fallbackWorks = false
       copied = ''
       link.click()
       await new Promise(resolve => setTimeout(resolve, 50))
       if (copied !== rows[0].link || document.querySelector('#app .records-page > textarea')) throw Error(`${name}: modern copy failed or leaked textarea`)
+      assertStableCopy()
       copyFails = true
       link.click()
       await new Promise(resolve => setTimeout(resolve, 50))
-      if (!document.querySelector('#app [role=alert]')?.textContent.includes('浏览器禁止自动复制') || window.getSelection().toString() !== rows[0].link) throw Error(`${name}: clipboard failure not reported or link not selected`)
+      if (!link.nextElementSibling.textContent.includes('复制受限') || window.getSelection().toString() !== rows[0].link) throw Error(`${name}: clipboard failure not reported or link not selected`)
+      assertStableCopy()
       copyFails = false
       fallbackWorks = true
+      document.querySelectorAll('#app .copy-link')[1].click()
+      await new Promise(resolve => setTimeout(resolve, 50))
+      assertStableCopy()
+      if (link.nextElementSibling.textContent) throw Error(`${name}: previous copy feedback not cleared`)
       const deleteButton = document.querySelector('#app .delete-source')
       const sourceStatus = deleteButton.nextElementSibling
       const deleteRect = deleteButton.getBoundingClientRect()
