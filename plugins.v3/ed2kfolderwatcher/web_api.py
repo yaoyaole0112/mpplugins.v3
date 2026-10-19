@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Depends, HTTPException, Request
@@ -78,6 +79,12 @@ def build_routes(plugin):
     async def recent(principal=Depends(get_current_active_superuser)):
         return response(await asyncio.to_thread(plugin.recent_records))
 
+    async def delete_source(request: Request, principal=Depends(get_current_active_superuser)):
+        values = await read_body(request)
+        if set(values) != {"id", "confirm"} or values.get("confirm") is not True or not isinstance(values.get("id"), str) or not re.fullmatch(r"[0-9a-f]{64}", values["id"]):
+            raise HTTPException(status_code=400, detail="请确认删除并提供有效的记录 ID")
+        return response(await asyncio.to_thread(plugin.delete_source, values["id"]))
+
     async def status(principal=Depends(get_current_active_superuser)):
         return response({"ok": True, "settings": settings_snapshot(plugin)})
 
@@ -128,6 +135,7 @@ def build_routes(plugin):
     return [{"path": path, "endpoint": endpoint, "methods": [method], "auth": "bear", "summary": summary}
             for path, endpoint, method, summary in (
                 ("/records", recent, "GET", "最近生成链接与删源状态"),
+                ("/records/delete-source", delete_source, "POST", "确认后手动删除记录对应的源文件"),
                 ("/settings", status, "GET", "读取安全配置"), ("/settings", save, "POST", "保存插件配置"),
                 ("/telegram/status", telegram_status, "GET", "个人账号登录状态"),
                 ("/telegram/action", telegram_action, "POST", "个人账号网页授权"), ("/run", run, "POST", "增量补扫与补发"))]

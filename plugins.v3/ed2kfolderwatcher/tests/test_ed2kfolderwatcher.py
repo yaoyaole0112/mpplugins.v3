@@ -43,6 +43,172 @@ class Ed2kTests(unittest.TestCase):
         path.write_bytes(data)
         return path
 
+    def test_empty_file_never_hashes_sends_or_deletes(self):
+        path = self.create(data=b"")
+        self.plugin._delete_source = True
+        self.plugin._telegram_enabled = True
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("hashed")), patch.object(self.plugin, "_send_telegram", side_effect=AssertionError("sent")):
+            self.plugin._process_file(path)
+        self.assertTrue(path.exists())
+        self.assertFalse((self.root / "data/records.json").exists())
+        self.assertIn(str(path), self.plugin._pending)
+
+    def test_empty_file_later_filled_is_processed(self):
+        path = self.create(data=b"")
+        self.plugin._process_file(path)
+        path.write_bytes(b"complete file")
+        self.plugin._process_file(path)
+        self.assertGreater(self.records()[str(path)]["size"], 0)
+
+    def test_invalid_empty_hash_not_published_or_deleted(self):
+        path = self.create()
+        self.plugin._delete_source = True
+        with patch.object(self.module, "ed2k_hash", return_value=self.module.EMPTY_MD4), patch.object(self.plugin, "_send_telegram", side_effect=AssertionError("sent")):
+            self.plugin._process_file(path)
+        self.assertTrue(path.exists())
+        self.assertFalse((self.root / "data/records.json").exists())
+
+    def test_hash_rejects_short_read(self):
+        path = self.create()
+        handle = Mock()
+        with path.open("rb") as original:
+            handle.fileno.return_value = original.fileno()
+            handle.read.return_value = b""
+            manager = Mock()
+            manager.__enter__ = Mock(return_value=handle)
+            manager.__exit__ = Mock(return_value=False)
+            with patch.object(Path, "open", return_value=manager), self.assertRaises(OSError):
+                self.module.ed2k_hash(path)
+
+    def test_invalid_history_excluded_from_txt_and_marked(self):
+        path = self.create()
+        self.plugin._process_file(path)
+        records = self.records()
+        invalid = dict(records[str(path)])
+        invalid.update(size=0, link=f"ed2k://|file|empty.mkv|0|{self.module.EMPTY_MD4}|/", source_deleted=True)
+        records[str(self.folder / "empty.mkv")] = invalid
+        self.plugin._write_results(self.folder / "ed2k.txt", self.root / "data/records.json", records)
+        self.assertNotIn("|0|", (self.folder / "ed2k.txt").read_text())
+        item = next(item for item in self.plugin.recent_records()["items"] if not item["link_valid"])
+        self.assertIn("0", item["link_error"])
+        self.assertFalse(item["can_delete"])
+        self.assertIn(str(self.folder / "empty.mkv"), self.records())
+
+    def test_invalid_history_regenerates_with_delivery_reset(self):
+        path = self.create()
+        self.plugin._process_file(path)
+        records = self.records()
+        records[str(path)].update(link=f"ed2k://|file|test.bin|0|{self.module.EMPTY_MD4}|/", telegram_sent=True)
+        self.plugin._write_results(None, self.root / "data/records.json", records)
+        self.plugin._process_file(path)
+        self.assertFalse(self.module.record_problem(self.records()[str(path)]))
+        self.assertFalse(self.records()[str(path)]["telegram_sent"])
+
+    def test_manual_delete_preserves_link_record(self):
+        path = self.create()
+        self.plugin._process_file(path)
+        item = self.plugin.recent_records()["items"][0]
+        self.assertTrue(item["can_delete"])
+        result = self.plugin.delete_source(item["id"])
+        self.assertTrue(result["ok"])
+        self.assertFalse(path.exists())
+        record = self.records()[str(path)]
+        self.assertEqual(record["link"], item["link"])
+        self.assertEqual(record["delete_method"], "manual")
+        self.assertFalse(self.plugin.delete_source(item["id"])["ok"])
+
+    def test_manual_delete_modified_source_rejected(self):
+        path = self.create()
+        self.plugin._process_file(path)
+        item = self.plugin.recent_records()["items"][0]
+        path.write_bytes(b"new content")
+        self.assertFalse(self.plugin.delete_source(item["id"])["ok"])
+        self.assertTrue(path.exists())
+
+    def test_manual_delete_legacy_same_metadata_wrong_content_rejected(self):
+        import os
+        path = self.create()
+        self.plugin._process_file(path)
+        records = self.records()
+        record = records[str(path)]
+        for name in ("inode", "device", "ctime_ns"):
+            record.pop(name)
+        self.plugin._write_results(None, self.root / "data/records.json", records)
+        path.write_bytes(b"other")
+        os.utime(path, ns=(record["mtime_ns"], record["mtime_ns"]))
+        item = self.plugin.recent_records()["items"][0]
+        self.assertFalse(self.plugin.delete_source(item["id"])["ok"])
+        self.assertTrue(path.exists())
+
+    def test_manual_delete_outside_monitor_or_symlink_rejected(self):
+        path = self.create()
+        self.plugin._process_file(path)
+        item = self.plugin.recent_records()["items"][0]
+        outside = self.root / "outside.bin"
+        path.rename(outside)
+        path.symlink_to(outside)
+        self.assertFalse(self.plugin.delete_source(item["id"])["ok"])
+        self.assertTrue(outside.exists())
+        self.plugin._folder = str(self.root / "different")
+        self.assertFalse(self.plugin.delete_source(item["id"])["ok"])
+
+    def test_manual_delete_rechecks_after_hash(self):
+        path = self.create()
+        self.plugin._process_file(path)
+        item = self.plugin.recent_records()["items"][0]
+        digest = item["link"].split("|")[4]
+        def change(*args):
+            path.write_bytes(b"changed")
+            return digest
+        with patch.object(self.module, "ed2k_hash", side_effect=change):
+            self.assertFalse(self.plugin.delete_source(item["id"])["ok"])
+        self.assertTrue(path.exists())
+
+    def test_manual_delete_storage_failure_does_not_delete(self):
+        path = self.create()
+        self.plugin._process_file(path)
+        item = self.plugin.recent_records()["items"][0]
+        with patch.object(self.plugin, "_write_results", side_effect=OSError("disk full")):
+            self.assertFalse(self.plugin.delete_source(item["id"])["ok"])
+        self.assertTrue(path.exists())
+
+    def test_manual_delete_invalid_history_rejected(self):
+        path = self.create(data=b"")
+        record = {"name": path.name, "size": 0, "mtime_ns": path.stat().st_mtime_ns,
+                  "link": f"ed2k://|file|test.bin|0|{self.module.EMPTY_MD4}|/", "source_deleted": False}
+        self.plugin._write_results(None, self.root / "data/records.json", {str(path): record})
+        item = self.plugin.recent_records()["items"][0]
+        self.assertFalse(item["link_valid"])
+        self.assertFalse(item["can_delete"])
+        self.assertFalse(self.plugin.delete_source(item["id"])["ok"])
+        self.assertTrue(path.exists())
+
+    def test_manual_delete_directory_symlink_swap_rejected(self):
+        folder = self.folder / "subdir"
+        folder.mkdir()
+        path = folder / "test.bin"
+        path.write_bytes(b"hello")
+        self.plugin._process_file(path)
+        item = self.plugin.recent_records()["items"][0]
+        outside = self.root / "outside"
+        digest = item["link"].split("|")[4]
+        def replace_parent(*args):
+            folder.rename(outside)
+            folder.symlink_to(outside, target_is_directory=True)
+            return digest
+        with patch.object(self.module, "ed2k_hash", side_effect=replace_parent):
+            self.assertFalse(self.plugin.delete_source(item["id"])["ok"])
+        self.assertTrue((outside / "test.bin").exists())
+
+    def test_configured_monitor_symlink_still_deletes_correct_file(self):
+        alias = self.root / "alias"
+        alias.symlink_to(self.folder, target_is_directory=True)
+        self.plugin._folder = str(alias)
+        self.plugin._delete_source = True
+        path = self.create()
+        self.plugin._process_file(alias / path.name)
+        self.assertFalse(path.exists())
+
     def test_multiple_targets_normalize_and_deduplicate(self):
         self.plugin._telegram_chat_id = "@Receiver\nhttps://t.me/receiver, -100123；@group|123;@other|"
         self.plugin._telegram_thread_id = "456"
@@ -441,14 +607,7 @@ class Ed2kTests(unittest.TestCase):
     def test_delete_failure_recorded_and_retry_success(self):
         self.plugin._delete_source = True
         path = self.create()
-        original_unlink = Path.unlink
-
-        def fail_source(target, *args, **kwargs):
-            if target == path:
-                raise PermissionError("denied")
-            return original_unlink(target, *args, **kwargs)
-
-        with patch.object(Path, "unlink", new=fail_source):
+        with patch.object(self.plugin, "_unlink_source", side_effect=PermissionError("denied")):
             with self.assertRaises(PermissionError):
                 self.plugin._process_file(path)
         self.assertTrue(path.exists())

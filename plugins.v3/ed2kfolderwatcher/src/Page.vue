@@ -11,6 +11,8 @@ const busy = ref(false)
 const error = ref('')
 const loaded = ref(false)
 const configOpen = ref(false)
+const deleting = ref('')
+const notice = ref('')
 let timer
 let disposed = false
 const statuses = { deleted: '已删除源文件', retained: '未删除源文件', delete_failed: '删除失败，源文件保留', unknown: '历史记录：删源状态未记录' }
@@ -22,8 +24,57 @@ function openSettings() {
   clearInterval(timer)
   configOpen.value = true
 }
+function unpack(response) {
+  const result = response?.success === undefined && response?.data?.success !== undefined ? response.data : response
+  if (result?.success === false) throw new Error(result.message || '请求失败')
+  return result?.success !== undefined ? result.data : result?.data ?? result
+}
+async function copyLink(item) {
+  if (item.link_valid === false) return
+  notice.value = error.value = ''
+  try {
+    if (navigator.clipboard?.writeText) {
+      try { await navigator.clipboard.writeText(item.link) } catch { copyFallback(item.link) }
+    } else copyFallback(item.link)
+    notice.value = 'ED2K 链接已复制'
+  } catch {
+    error.value = '自动复制失败，请长按或选中链接手动复制'
+  }
+}
+function copyFallback(link) {
+  const previous = document.activeElement
+  const field = document.createElement('textarea')
+  field.value = link
+  field.readOnly = true
+  field.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'
+  document.body.appendChild(field)
+  try {
+    field.select()
+    if (!document.execCommand('copy')) throw new Error('复制失败')
+  } finally {
+    field.remove()
+    previous?.focus?.()
+  }
+}
+async function deleteSource(item) {
+  if (deleting.value || !item.can_delete) return
+  if (!window.confirm(`确定永久删除源文件“${item.name}”？\n将先校验文件内容，删除后不可恢复；ED2K 链接和记录保留。`)) return
+  deleting.value = item.id
+  notice.value = error.value = ''
+  try {
+    const result = unpack(await props.api.post(`plugin/${props.pluginId}/records/delete-source`, { id: item.id, confirm: true }))
+    if (!result?.ok) throw new Error(result?.message || '删除失败')
+    notice.value = result.message
+    item.can_delete = false
+    item.source_status = 'deleted'
+  } catch (failure) {
+    error.value = failure?.message || '删除请求失败，请刷新核对实际状态'
+  } finally {
+    deleting.value = ''
+  }
+}
 async function refresh() {
-  if (busy.value || disposed || configOpen.value) return
+  if (busy.value || disposed || configOpen.value || deleting.value) return
   busy.value = true
   try {
     const response = await props.api.get(`plugin/${props.pluginId}/records`)
@@ -58,21 +109,25 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
       <div><h2>自动生成ED2K链接</h2><p>最近生成记录 · 共 {{ total }} 条 · 显示最近 {{ items.length }} 条</p></div>
       <div class="records-actions"><button type="button" :disabled="busy" @click="refresh">刷新记录</button><button type="button" @click="openSettings">设置</button><button type="button" @click="emit('close')">关闭</button></div>
     </header>
-    <p class="help">查看页每 15 秒刷新一次，不触发扫描或生成。点击右上角“设置”进入配置页，也可通过插件卡片「⋮ → 设置」进入。</p>
+    <p class="help">每 15 秒刷新记录；点击有效 ED2K 链接即可复制。“手动删除源文件”需确认并校验内容，不会自动执行。点击右上角“设置”进入配置页。</p>
     <p class="policy">当前删源开关：{{ deleteEnabled ? '开启（所选输出成功后才删除）' : '关闭（保留源文件）' }}。每条状态以处理时的实际记录为准，不代表源文件之后未被其他程序移动或删除。</p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <p v-if="!loaded && busy" role="status">正在加载记录…</p>
     <p v-else-if="loaded && !items.length" class="empty">暂无生成记录。新增文件生成成功后会显示在这里。</p>
     <ol v-if="items.length" class="records-list">
       <li v-for="(item, index) in items" :key="`${item.link}-${index}`" class="record">
         <div class="record-heading"><h3>{{ item.name }}</h3><span class="source-status" :class="item.source_status">{{ statuses[item.source_status] || statuses.unknown }}</span></div>
         <p class="record-time">生成时间：{{ formatTime(item.generated_at) }}<span v-if="item.deleted_at"> · 删除时间：{{ formatTime(item.deleted_at) }}</span></p>
-        <details><summary>查看 ED2K 链接</summary><pre>{{ item.link }}</pre></details>
+        <p v-if="item.link_valid === false" class="error">{{ item.link_error || '链接无效，需要完整源文件重新生成' }}</p>
+        <details><summary>{{ item.link_valid === false ? '查看无效历史链接（勿使用）' : '查看 ED2K 链接' }}</summary><pre v-if="item.link_valid === false">{{ item.link }}</pre><button v-else type="button" class="copy-link" title="点击复制 ED2K 链接" @click="copyLink(item)">{{ item.link }}</button></details>
+        <button v-if="item.can_delete && item.source_status !== 'deleted'" type="button" class="delete-source" :disabled="!!deleting" @click="deleteSource(item)">{{ deleting === item.id ? '正在校验并删除…' : '手动删除源文件' }}</button>
       </li>
     </ol>
   </section>
 </template>
 
 <style scoped>
+.copy-link{display:block;width:100%;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font-family:monospace;font-size:13px;background:transparent;padding:14px 0;color:inherit}.copy-link:hover{text-decoration:underline}.delete-source{margin-top:14px;background:rgba(220,60,60,.13);color:#df7b7b}.notice{color:#57b985}.records-actions{flex-wrap:wrap}
 .records-page{padding:24px;max-width:1220px;margin:auto;max-height:85dvh;overflow:auto;color:rgb(var(--v-theme-on-surface));font-size:15px}.records-header,.record-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.records-actions{display:flex;gap:12px;margin-left:auto}h2,h3{margin:0}h2{font-size:24px}h3{font-size:17px;overflow-wrap:anywhere;flex:1;min-width:160px}p{line-height:1.7;margin:12px 0;color:rgba(var(--v-theme-on-surface),.7)}button{font:inherit;border:0;border-radius:9px;padding:12px 18px;cursor:pointer;background:rgba(var(--v-theme-primary),.13);color:rgb(var(--v-theme-primary))}button:disabled{opacity:.5;cursor:not-allowed}.policy,.help{padding:12px 16px;background:rgba(var(--v-theme-on-surface),.04);border-radius:10px}.records-list{list-style:none;padding:0;margin:20px 0}.record{padding:20px;margin-bottom:16px;border:1px solid rgba(var(--v-theme-on-surface),.16);border-radius:12px}.source-status{font-size:13px;border-radius:7px;padding:6px 10px;background:rgba(var(--v-theme-on-surface),.08)}.deleted{background:rgba(220,150,60,.15);color:#dba34b}.retained{background:rgba(60,180,110,.13);color:#57b985}.delete_failed,.error{color:#df7b7b}.unknown{color:rgba(var(--v-theme-on-surface),.6)}.record-time{font-size:13px}.empty{text-align:center;padding:40px 10px}summary{cursor:pointer;color:rgb(var(--v-theme-primary))}pre{white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font-size:13px;margin:14px 0 0}@media(max-width:650px){.records-page{padding:14px}.record{padding:16px}.records-actions{width:100%;justify-content:flex-end}}
 </style>

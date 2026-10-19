@@ -1,6 +1,8 @@
 import json
 import hashlib
 import os
+import re
+import stat as stat_module
 import threading
 import time
 from pathlib import Path
@@ -33,6 +35,18 @@ except ImportError:
 ED2K_PART_SIZE = 9_728_000
 DEFAULT_CRON = "*/10 * * * *"
 DEFAULT_EXTENSIONS = ""
+EMPTY_MD4 = "31d6cfe0d16ae931b73c59d7e0c089c0"
+
+
+def record_problem(record: dict) -> str:
+    parts = str(record.get("link", "")).split("|")
+    if record.get("size") == 0 or (len(parts) == 6 and parts[3] == "0"):
+        return "历史链接无效：当时文件大小为 0；需要原始完整文件重新生成"
+    if len(parts) != 6 or parts[:2] != ["ed2k://", "file"] or parts[-1] != "/" or not parts[3].isdigit() or int(parts[3]) <= 0 or not re.fullmatch(r"[0-9a-fA-F]{32}", parts[4]):
+        return "链接格式或文件大小无效，需要重新生成"
+    if parts[4].lower() == EMPTY_MD4 or (record.get("size") is not None and int(parts[3]) != record["size"]):
+        return "链接哈希或大小不一致，需要原始完整文件重新生成"
+    return ""
 
 
 def _left_rotate(value: int, amount: int) -> int:
@@ -95,14 +109,20 @@ def _md4(data: bytes) -> bytes:
 def ed2k_hash(path: Path, stop_event=None) -> str:
     part_hashes = []
     with path.open("rb") as file_handle:
+        initial = os.fstat(file_handle.fileno())
+        bytes_read = 0
         while True:
             if stop_event is not None and stop_event.is_set():
                 raise InterruptedError("任务已停止")
             chunk = file_handle.read(ED2K_PART_SIZE)
+            bytes_read += len(chunk)
             digest = _CryptoMD4.new(chunk).digest() if _CryptoMD4 else _md4(chunk)
             part_hashes.append(digest)
             if len(chunk) < ED2K_PART_SIZE:
                 break
+        final = os.fstat(file_handle.fileno())
+        if bytes_read != initial.st_size or (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns) != (final.st_size, final.st_mtime_ns, final.st_ctime_ns):
+            raise OSError("读取字节数或文件状态变化，拒绝生成链接")
     if len(part_hashes) == 1:
         return part_hashes[0].hex()
     combined = b"".join(part_hashes)
@@ -113,8 +133,8 @@ def ed2k_filename(name: str) -> str:
     return "".join(character if character.isprintable() and character not in "|%/\\?#" else quote(character, safe="") for character in name)
 
 
-def ed2k_link(path: Path, file_hash: str) -> str:
-    return f"ed2k://|file|{ed2k_filename(path.name)}|{path.stat().st_size}|{file_hash}|/"
+def ed2k_link(path: Path, file_hash: str, size=None) -> str:
+    return f"ed2k://|file|{ed2k_filename(path.name)}|{path.stat().st_size if size is None else size}|{file_hash}|/"
 
 
 def telegram_destination(value: str) -> str:
@@ -139,7 +159,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.7.2"
+    plugin_version = "1.8.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -530,7 +550,7 @@ class Ed2kFolderWatcher(_PluginBase):
     def _write_results(self, output: Optional[Path], cache_path: Path, records: dict) -> None:
         self._atomic_write(cache_path, json.dumps(records, ensure_ascii=False, indent=2))
         if output is not None:
-            links = sorted({item["link"] for item in records.values()})
+            links = sorted({item["link"] for item in records.values() if not record_problem(item)})
             self._atomic_write(output, "\n".join(links) + ("\n" if links else ""))
 
     def _refresh_link_names(self) -> None:
@@ -558,6 +578,10 @@ class Ed2kFolderWatcher(_PluginBase):
             folder, output, cache_path = self._paths()
             output = output if self._output_enabled else None
             stat = path.stat()
+            if stat.st_size <= 0:
+                logger.warning(f"自动生成ED2K链接：跳过空文件，保留源文件并等待后续写入：{path.name}")
+                self._queue_event(path, delay=max(60, self._min_age))
+                return
             if stat.st_mtime + self._min_age > time.time():
                 self._queue_event(path)
                 return
@@ -565,7 +589,9 @@ class Ed2kFolderWatcher(_PluginBase):
             key = str(path.resolve())
             record = records.get(key)
             signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_dev)
-            unchanged = record and (record.get("size"), record.get("mtime_ns")) == signature[:2]
+            unchanged = record and not record_problem(record) and (record.get("size"), record.get("mtime_ns")) == signature[:2]
+            if unchanged and record.get("inode") is not None:
+                unchanged = (record.get("inode"), record.get("device"), record.get("ctime_ns")) == (stat.st_ino, stat.st_dev, stat.st_ctime_ns)
             legacy_boundary = record and stat.st_size > 0 and stat.st_size % ED2K_PART_SIZE == 0 and record.get("hash_version") != 2
             if unchanged and not legacy_boundary and not self._delete_source:
                 if not self._telegram_enabled or (record.get("telegram_sent") and record.get("telegram_target") == self._telegram_target_key()):
@@ -573,12 +599,17 @@ class Ed2kFolderWatcher(_PluginBase):
             if not unchanged or legacy_boundary:
                 file_hash = ed2k_hash(path, self._stopping)
                 final = path.stat()
-                if signature != (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev):
+                if signature != (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) or stat.st_ctime_ns != final.st_ctime_ns:
                     self._queue_event(path)
                     return
                 record = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "name": path.name,
-                          "link": ed2k_link(path, file_hash), "hash_version": 2, "telegram_sent": False, "telegram_target": "",
+                          "link": ed2k_link(path, file_hash, size=stat.st_size), "hash_version": 2, "telegram_sent": False, "telegram_target": "",
+                          "inode": stat.st_ino, "device": stat.st_dev, "ctime_ns": stat.st_ctime_ns,
                           "generated_at": time.time(), "source_deleted": False}
+                if record_problem(record):
+                    logger.warning(f"自动生成ED2K链接：大小或哈希校验失败，保留源文件：{path.name}")
+                    self._queue_event(path, delay=60)
+                    return
                 records[key] = record
                 logger.info(f"自动生成ED2K链接：生成完成：{path}")
             self._write_results(output, cache_path, records)
@@ -589,9 +620,9 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._queue_event(path, delay=60)
             if self._delete_source and delivered and (output is not None or self._telegram_enabled):
                 final = path.stat()
-                if signature == (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) and not self._stopping.is_set():
+                if signature == (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) and stat.st_ctime_ns == final.st_ctime_ns and not self._stopping.is_set():
                     try:
-                        path.unlink()
+                        self._unlink_source(path, final)
                     except OSError:
                         record["delete_failed"] = True
                         self._write_results(output, cache_path, records)
@@ -632,6 +663,79 @@ class Ed2kFolderWatcher(_PluginBase):
         return [{"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
                  "text": "最近生成的 ED2K 链接记录请使用新版查看页面；修改配置请在插件卡片三个点菜单中选择设置。"}]
 
+    @staticmethod
+    def _record_id(path: str, record: dict) -> str:
+        value = [path, record.get("size"), record.get("mtime_ns"), record.get("link"), record.get("generated_at")]
+        return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    def _source_matches(self, path: Path, record: dict) -> bool:
+        if record_problem(record) or record.get("source_deleted") is True or not self._folder or not self._eligible(path):
+            return False
+        current = path.stat()
+        if (record.get("size"), record.get("mtime_ns")) != (current.st_size, current.st_mtime_ns):
+            return False
+        if record.get("inode") is not None:
+            return (record.get("inode"), record.get("device"), record.get("ctime_ns")) == (current.st_ino, current.st_dev, current.st_ctime_ns)
+        return True
+
+    def _unlink_source(self, path: Path, expected) -> None:
+        folder = Path(self._folder).expanduser().resolve()
+        try:
+            relative = path.absolute().relative_to(Path(self._folder).expanduser().absolute())
+        except ValueError:
+            relative = path.absolute().relative_to(folder)
+        if not relative.parts or ".." in relative.parts:
+            raise ValueError("源文件路径不安全")
+        descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for component in relative.parts[:-1]:
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            current = os.stat(relative.name, dir_fd=descriptor, follow_symlinks=False)
+            if not stat_module.S_ISREG(current.st_mode) or (current.st_size, current.st_mtime_ns, current.st_ctime_ns, current.st_ino, current.st_dev) != (expected.st_size, expected.st_mtime_ns, expected.st_ctime_ns, expected.st_ino, expected.st_dev):
+                raise ValueError("源文件已变化或不是普通文件，取消删除")
+            os.unlink(relative.name, dir_fd=descriptor)
+        finally:
+            os.close(descriptor)
+
+    def delete_source(self, record_id: str) -> dict:
+        with self._lock:
+            try:
+                folder, output, cache_path = self._paths()
+                records = json.loads(cache_path.read_text(encoding="utf-8"))
+                if not isinstance(records, dict) or any(not isinstance(record, dict) for record in records.values()):
+                    raise ValueError("记录格式错误")
+                entry = next(((path, record) for path, record in records.items() if self._record_id(path, record) == record_id), None)
+                if entry is None:
+                    return {"ok": False, "message": "记录不存在或已更新，请刷新后重试"}
+                key, record = entry
+                path = Path(key)
+                if not self._source_matches(path, record):
+                    return {"ok": False, "message": "源文件不存在、已变化、链接无效或不在当前监控目录，拒绝删除"}
+                expected = path.stat()
+                file_hash = ed2k_hash(path, self._stopping)
+                if file_hash.lower() != record["link"].split("|")[4].lower():
+                    return {"ok": False, "message": "源文件内容与链接不一致，拒绝删除，请重新生成"}
+                output = output if self._output_enabled else None
+                self._write_results(output, cache_path, records)
+                try:
+                    self._unlink_source(path, expected)
+                except OSError:
+                    record["delete_failed"] = True
+                    self._write_results(output, cache_path, records)
+                    raise
+                record["source_deleted"] = True
+                record["deleted_at"] = time.time()
+                record["delete_method"] = "manual"
+                record.pop("delete_failed", None)
+                self._write_results(output, cache_path, records)
+                logger.info(f"自动生成ED2K链接：用户手动删除源文件：{path.name}")
+                return {"ok": True, "message": "源文件已删除，ED2K 链接及记录已保留"}
+            except (OSError, ValueError, TypeError, InterruptedError) as failure:
+                logger.warning(f"自动生成ED2K链接：手动删除未完成：{type(failure).__name__}")
+                return {"ok": False, "message": "删除未完成，请刷新核对实际状态并检查日志、文件权限或文件是否变化"}
+
     def recent_records(self) -> dict:
         cache_path = Path(self.get_data_path()) / "records.json"
         try:
@@ -650,7 +754,14 @@ class Ed2kFolderWatcher(_PluginBase):
                     source_status = "retained"
                 else:
                     source_status = "unknown"
+                problem = record_problem(record)
+                try:
+                    can_delete = self._source_matches(Path(path), record)
+                except (OSError, ValueError):
+                    can_delete = False
                 items.append({"name": record.get("name") or Path(path).name, "link": record.get("link", ""),
+                              "id": self._record_id(path, record), "can_delete": can_delete,
+                              "link_valid": not problem, "link_error": problem,
                               "generated_at": record.get("generated_at"), "source_status": source_status,
                               "deleted_at": record.get("deleted_at")})
             return {"ok": True, "items": items, "total": len(records), "limit": 100,

@@ -53,6 +53,25 @@ class WebApiTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, {"telegram_enabled": True, "telegram_chat_id": value})
 
+    def test_manual_delete_requires_confirmation_and_record_id(self):
+        self.authorize()
+        for payload in ({"id": "a" * 64}, {"id": "a" * 64, "confirm": False}, {"id": "../file", "confirm": True}, {"id": "a" * 64, "confirm": True, "path": "/etc/passwd"}):
+            self.assertEqual(self.client.post("/records/delete-source", json=payload).status_code, 400)
+        self.plugin.delete_source.assert_not_called()
+        self.plugin.delete_source.return_value = {"ok": True, "message": "deleted"}
+        result = self.client.post("/records/delete-source", json={"id": "a" * 64, "confirm": True})
+        self.assertTrue(result.json()["ok"])
+        self.plugin.delete_source.assert_called_once_with("a" * 64)
+
+    def test_manual_delete_requires_authentication(self):
+        from app.api.dependencies.auth import get_current_active_user
+        def unauthenticated():
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        self.app.dependency_overrides[get_current_active_user] = unauthenticated
+        result = self.client.post("/records/delete-source", json={"id": "a" * 64, "confirm": True})
+        self.assertIn(result.status_code, (401, 403))
+        self.plugin.delete_source.assert_not_called()
+
     def test_every_route_declares_bearer_admin_auth(self):
         for route in self.routes:
             self.assertEqual(route["auth"], "bear")

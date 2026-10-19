@@ -12,6 +12,21 @@ const settings = { enabled: false, folder: '/media/test', recursive: true, monit
 let requests = []
 let mode = 'normal'
 let closes = 0
+let copied = ''
+let copyFails = false
+let fallbackWorks = true
+let confirmDelete = false
+const deletions = []
+Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => {
+  if (copyFails) throw Error('Clipboard denied')
+  copied = value
+} } })
+document.execCommand = command => {
+  if (command !== 'copy' || !fallbackWorks) return false
+  copied = document.querySelector('body > textarea').value
+  return true
+}
+window.confirm = () => confirmDelete
 const intervals = new Map()
 const originalSetInterval = window.setInterval.bind(window)
 const originalClearInterval = window.clearInterval.bind(window)
@@ -25,17 +40,24 @@ window.clearInterval = identifier => {
   originalClearInterval(identifier)
 }
 const rows = ['deleted', 'retained', 'delete_failed', 'unknown'].map((source_status, index) => ({
+  id: String(index).repeat(64), can_delete: index === 1 || index === 2, link_valid: true,
   name: `测试文件 ${index}.mkv`, link: `ed2k://|file|测试文件 ${index}.mkv|5|hash|/`,
   generated_at: index ? null : 1700000000, source_status,
 }))
+rows.push({ id: 'f'.repeat(64), name: '历史空文件.mkv', link: 'ed2k://|file|历史空文件.mkv|0|31d6cfe0d16ae931b73c59d7e0c089c0|/', link_valid: false, link_error: '历史链接无效：当时文件大小为 0', can_delete: false, source_status: 'retained' })
 const api = { get: async path => {
   requests.push(path)
   if (path.endsWith('/records')) return mode === 'error' ? { ok: false, message: '模拟读取失败' }
-    : { ok: true, items: mode === 'empty' ? [] : rows, total: mode === 'empty' ? 0 : 4, delete_source_enabled: false }
+    : { ok: true, items: mode === 'empty' ? [] : rows.map(row => ({ ...row })), total: mode === 'empty' ? 0 : rows.length, delete_source_enabled: false }
   return path.endsWith('/settings') ? { ok: true, settings }
     : { ok: true, logged_in: false, pending: false, api_id: '', api_hash_configured: false }
 }, post: async (path, body) => {
   requests.push(path)
+  if (path.endsWith('/records/delete-source')) {
+    if (body.id !== '1'.repeat(64) || body.confirm !== true || Object.keys(body).length !== 2) throw Error('Unsafe delete payload')
+    deletions.push(body)
+    return { ok: true, message: '源文件已删除，ED2K 链接及记录已保留' }
+  }
   if (!path.endsWith('/settings')) throw Error('Unexpected write request')
   return { ok: true, settings: body, message: '模拟保存成功' }
 } }
@@ -60,6 +82,35 @@ try {
       }
       if (text.includes('保存插件设置') || text.includes('保存账号设置') || document.querySelector('#app input')) throw Error(`${name}: configuration leaked into viewing page`)
       if (requests.some(path => !path.endsWith('/records'))) throw Error(`${name}: viewing page requested settings`)
+      const invalid = [...document.querySelectorAll('#app .record')].find(record => record.textContent.includes('历史空文件'))
+      if (!invalid?.textContent.includes('历史链接无效') || invalid.querySelector('.copy-link') || invalid.querySelector('.delete-source')) throw Error(`${name}: invalid link actions available`)
+      const link = document.querySelector('#app .copy-link')
+      link.closest('details').open = true
+      link.click()
+      await new Promise(resolve => setTimeout(resolve, 50))
+      if (copied !== rows[0].link || !document.querySelector('#app').innerText.includes('ED2K 链接已复制')) throw Error(`${name}: clipboard copy failed`)
+      copyFails = true
+      copied = ''
+      link.click()
+      await new Promise(resolve => setTimeout(resolve, 50))
+      if (copied !== rows[0].link || document.querySelector('body > textarea')) throw Error(`${name}: fallback copy failed or leaked textarea`)
+      fallbackWorks = false
+      link.click()
+      await new Promise(resolve => setTimeout(resolve, 50))
+      if (!document.querySelector('#app [role=alert]')?.textContent.includes('自动复制失败')) throw Error(`${name}: clipboard failure not reported`)
+      copyFails = false
+      fallbackWorks = true
+      const deleteButton = document.querySelector('#app .delete-source')
+      const previousDeletes = deletions.length
+      deleteButton.click()
+      await new Promise(resolve => setTimeout(resolve, 50))
+      if (deletions.length !== previousDeletes) throw Error(`${name}: deletion without confirmation`)
+      confirmDelete = true
+      const retainedRecord = deleteButton.closest('.record')
+      deleteButton.click()
+      await new Promise(resolve => setTimeout(resolve, 100))
+      confirmDelete = false
+      if (deletions.length !== previousDeletes + 1 || !retainedRecord.textContent.includes('已删除源文件') || retainedRecord.querySelector('.delete-source')) throw Error(`${name}: manual delete state not updated`)
       const actions = [...document.querySelectorAll('#app .records-actions button')]
       if (actions.map(button => button.textContent.trim()).join('|') !== '刷新记录|设置|关闭') throw Error(`${name}: record action order incorrect`)
       if (!Array.from(intervals.values()).includes(15000)) throw Error(`${name}: record polling missing`)
