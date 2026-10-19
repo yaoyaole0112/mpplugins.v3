@@ -23,7 +23,9 @@ Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { wri
 } } })
 document.execCommand = command => {
   if (command !== 'copy' || !fallbackWorks) return false
-  copied = document.querySelector('body > textarea').value
+  const field = document.querySelector('#app .records-page > textarea')
+  if (!field || document.activeElement !== field || field.selectionStart !== 0 || field.selectionEnd !== field.value.length) return false
+  copied = field.value
   return true
 }
 window.confirm = () => confirmDelete
@@ -85,22 +87,29 @@ try {
       const invalid = [...document.querySelectorAll('#app .record')].find(record => record.textContent.includes('历史空文件'))
       if (!invalid?.textContent.includes('历史链接无效') || invalid.querySelector('.copy-link') || invalid.querySelector('.delete-source')) throw Error(`${name}: invalid link actions available`)
       const link = document.querySelector('#app .copy-link')
-      link.closest('details').open = true
+      if (document.querySelector('#app details') || getComputedStyle(link).display === 'none') throw Error(`${name}: ED2K links are collapsed`)
+      copyFails = true
       link.click()
       await new Promise(resolve => setTimeout(resolve, 50))
       if (copied !== rows[0].link || !document.querySelector('#app').innerText.includes('ED2K 链接已复制')) throw Error(`${name}: clipboard copy failed`)
-      copyFails = true
+      copyFails = false
+      fallbackWorks = false
       copied = ''
       link.click()
       await new Promise(resolve => setTimeout(resolve, 50))
-      if (copied !== rows[0].link || document.querySelector('body > textarea')) throw Error(`${name}: fallback copy failed or leaked textarea`)
-      fallbackWorks = false
+      if (copied !== rows[0].link || document.querySelector('#app .records-page > textarea')) throw Error(`${name}: modern copy failed or leaked textarea`)
+      copyFails = true
       link.click()
       await new Promise(resolve => setTimeout(resolve, 50))
-      if (!document.querySelector('#app [role=alert]')?.textContent.includes('自动复制失败')) throw Error(`${name}: clipboard failure not reported`)
+      if (!document.querySelector('#app [role=alert]')?.textContent.includes('浏览器禁止自动复制') || window.getSelection().toString() !== rows[0].link) throw Error(`${name}: clipboard failure not reported or link not selected`)
       copyFails = false
       fallbackWorks = true
       const deleteButton = document.querySelector('#app .delete-source')
+      const sourceStatus = deleteButton.nextElementSibling
+      const deleteRect = deleteButton.getBoundingClientRect()
+      const statusRect = sourceStatus.getBoundingClientRect()
+      if (!sourceStatus.classList.contains('source-status') || sourceStatus.textContent !== '未删除源文件') throw Error(`${name}: delete button not before retained status`)
+      if (deleteRect.width !== statusRect.width || deleteRect.height !== statusRect.height || deleteRect.right > statusRect.left || deleteRect.top !== statusRect.top) throw Error(`${name}: source actions not aligned or equally sized`)
       const previousDeletes = deletions.length
       deleteButton.click()
       await new Promise(resolve => setTimeout(resolve, 50))

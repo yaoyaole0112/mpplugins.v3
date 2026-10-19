@@ -13,6 +13,8 @@ const loaded = ref(false)
 const configOpen = ref(false)
 const deleting = ref('')
 const notice = ref('')
+const copiedId = ref('')
+const copyFailedId = ref('')
 let timer
 let disposed = false
 const statuses = { deleted: '已删除源文件', retained: '未删除源文件', delete_failed: '删除失败，源文件保留', unknown: '历史记录：删源状态未记录' }
@@ -29,31 +31,48 @@ function unpack(response) {
   if (result?.success === false) throw new Error(result.message || '请求失败')
   return result?.success !== undefined ? result.data : result?.data ?? result
 }
-async function copyLink(item) {
+async function copyLink(item, event) {
   if (item.link_valid === false) return
+  const source = event.currentTarget
   notice.value = error.value = ''
+  copiedId.value = copyFailedId.value = ''
   try {
-    if (navigator.clipboard?.writeText) {
-      try { await navigator.clipboard.writeText(item.link) } catch { copyFallback(item.link) }
-    } else copyFallback(item.link)
+    if (!copyFallback(item.link, source)) {
+      if (!navigator.clipboard?.writeText) throw new Error('剪贴板不可用')
+      await navigator.clipboard.writeText(item.link)
+    }
+    copiedId.value = item.id || item.link
     notice.value = 'ED2K 链接已复制'
   } catch {
-    error.value = '自动复制失败，请长按或选中链接手动复制'
+    copyFailedId.value = item.id || item.link
+    const selection = window.getSelection()
+    if (selection) {
+      const range = document.createRange()
+      range.selectNodeContents(source)
+      selection.removeAllRanges()
+      selection.addRange(range)
+    }
+    error.value = '浏览器禁止自动复制，已选中链接，请按 Ctrl+C／⌘C 或长按复制'
   }
 }
-function copyFallback(link) {
+function copyFallback(link, source) {
   const previous = document.activeElement
   const field = document.createElement('textarea')
   field.value = link
   field.readOnly = true
-  field.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'
-  document.body.appendChild(field)
+  field.tabIndex = -1
+  field.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px'
   try {
+    source.closest('.records-page').appendChild(field)
+    field.focus({ preventScroll: true })
     field.select()
-    if (!document.execCommand('copy')) throw new Error('复制失败')
+    field.setSelectionRange(0, link.length)
+    return document.execCommand('copy')
+  } catch {
+    return false
   } finally {
     field.remove()
-    previous?.focus?.()
+    previous?.focus?.({ preventScroll: true })
   }
 }
 async function deleteSource(item) {
@@ -117,17 +136,18 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
     <p v-else-if="loaded && !items.length" class="empty">暂无生成记录。新增文件生成成功后会显示在这里。</p>
     <ol v-if="items.length" class="records-list">
       <li v-for="(item, index) in items" :key="`${item.link}-${index}`" class="record">
-        <div class="record-heading"><h3>{{ item.name }}</h3><span class="source-status" :class="item.source_status">{{ statuses[item.source_status] || statuses.unknown }}</span></div>
+        <div class="record-heading"><h3>{{ item.name }}</h3><div class="record-actions"><button v-if="item.can_delete && item.source_status !== 'deleted'" type="button" class="delete-source" :disabled="!!deleting" @click="deleteSource(item)">{{ deleting === item.id ? '校验删除中…' : '手动删除源文件' }}</button><span class="source-status" :class="item.source_status">{{ statuses[item.source_status] || statuses.unknown }}</span></div></div>
         <p class="record-time">生成时间：{{ formatTime(item.generated_at) }}<span v-if="item.deleted_at"> · 删除时间：{{ formatTime(item.deleted_at) }}</span></p>
         <p v-if="item.link_valid === false" class="error">{{ item.link_error || '链接无效，需要完整源文件重新生成' }}</p>
-        <details><summary>{{ item.link_valid === false ? '查看无效历史链接（勿使用）' : '查看 ED2K 链接' }}</summary><pre v-if="item.link_valid === false">{{ item.link }}</pre><button v-else type="button" class="copy-link" title="点击复制 ED2K 链接" @click="copyLink(item)">{{ item.link }}</button></details>
-        <button v-if="item.can_delete && item.source_status !== 'deleted'" type="button" class="delete-source" :disabled="!!deleting" @click="deleteSource(item)">{{ deleting === item.id ? '正在校验并删除…' : '手动删除源文件' }}</button>
+        <pre v-if="item.link_valid === false">{{ item.link }}</pre><button v-else type="button" class="copy-link" title="点击复制 ED2K 链接" @click="copyLink(item, $event)">{{ item.link }}</button>
+        <small v-if="copiedId === (item.id || item.link)" class="notice" role="status">链接已复制</small>
+        <small v-if="copyFailedId === (item.id || item.link)" class="error">已选中链接，请按 Ctrl+C／⌘C 或长按复制</small>
       </li>
     </ol>
   </section>
 </template>
 
 <style scoped>
-.copy-link{display:block;width:100%;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font-family:monospace;font-size:13px;background:transparent;padding:14px 0;color:inherit}.copy-link:hover{text-decoration:underline}.delete-source{margin-top:14px;background:rgba(220,60,60,.13);color:#df7b7b}.notice{color:#57b985}.records-actions{flex-wrap:wrap}
+.copy-link{display:block;width:100%;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font-family:monospace;font-size:13px;background:transparent;padding:14px 0;color:inherit}.copy-link:hover{text-decoration:underline}.record-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-left:auto}.record-actions .delete-source,.record-actions .source-status{display:inline-flex;align-items:center;justify-content:center;min-width:120px;height:32px;padding:6px 10px;font-size:13px;line-height:20px;white-space:nowrap;box-sizing:border-box}.delete-source{background:rgba(220,60,60,.13);color:#df7b7b}.notice{color:#57b985}.records-actions{flex-wrap:wrap}
 .records-page{padding:24px;max-width:1220px;margin:auto;max-height:85dvh;overflow:auto;color:rgb(var(--v-theme-on-surface));font-size:15px}.records-header,.record-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.records-actions{display:flex;gap:12px;margin-left:auto}h2,h3{margin:0}h2{font-size:24px}h3{font-size:17px;overflow-wrap:anywhere;flex:1;min-width:160px}p{line-height:1.7;margin:12px 0;color:rgba(var(--v-theme-on-surface),.7)}button{font:inherit;border:0;border-radius:9px;padding:12px 18px;cursor:pointer;background:rgba(var(--v-theme-primary),.13);color:rgb(var(--v-theme-primary))}button:disabled{opacity:.5;cursor:not-allowed}.policy,.help{padding:12px 16px;background:rgba(var(--v-theme-on-surface),.04);border-radius:10px}.records-list{list-style:none;padding:0;margin:20px 0}.record{padding:20px;margin-bottom:16px;border:1px solid rgba(var(--v-theme-on-surface),.16);border-radius:12px}.source-status{font-size:13px;border-radius:7px;padding:6px 10px;background:rgba(var(--v-theme-on-surface),.08)}.deleted{background:rgba(220,150,60,.15);color:#dba34b}.retained{background:rgba(60,180,110,.13);color:#57b985}.delete_failed,.error{color:#df7b7b}.unknown{color:rgba(var(--v-theme-on-surface),.6)}.record-time{font-size:13px}.empty{text-align:center;padding:40px 10px}summary{cursor:pointer;color:rgb(var(--v-theme-primary))}pre{white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font-size:13px;margin:14px 0 0}@media(max-width:650px){.records-page{padding:14px}.record{padding:16px}.records-actions{width:100%;justify-content:flex-end}}
 </style>

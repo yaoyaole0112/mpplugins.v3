@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>ED2K clipboard dialog regression</title>
+<style>dialog{width:90vw;max-width:1200px;padding:0}#paste-check{display:block;margin:12px;width:90%;height:48px}</style>
+</head><body><dialog id="dialog"><main id="app"></main><textarea id="paste-check" aria-label="Clipboard verification"></textarea></dialog>
+<script type="module">
+import * as vue from '../node_modules/vue/dist/vue.esm-browser.prod.js'
+import * as remote from '../dist/assets/remoteEntry.js'
+
+window.expectedLink = 'ed2k://|file|复制验证 (2026).S01E01.mkv|5|866437cb7a794bce2b727acc0362ee27|/'
+const query = new URLSearchParams(location.search)
+if (query.has('modern') || query.has('deny')) document.execCommand = () => false
+if (query.has('deny')) Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+const dialog = document.querySelector('#dialog')
+dialog.showModal()
+document.addEventListener('focusin', event => {
+  if (!dialog.contains(event.target)) document.querySelector('#app button')?.focus()
+})
+remote.init({ vue: { [vue.version]: { get: () => () => vue, loaded: true } } })
+const factory = await remote.get('./Page')
+const app = vue.createApp(factory(), {
+  pluginId: 'Ed2kFolderWatcher',
+  api: { get: async () => ({ ok: true, total: 1, delete_source_enabled: false, items: [{
+    id: 'a'.repeat(64), name: '复制验证 (2026).S01E01.mkv', link: window.expectedLink,
+    link_valid: true, can_delete: false, source_status: 'retained', generated_at: 1700000000,
+  }] }), post: async () => { throw Error('This fixture must not write data') } },
+})
+app.mount('#app')
+await vue.nextTick()
+window.fixtureReady = true
+</script></body></html>
