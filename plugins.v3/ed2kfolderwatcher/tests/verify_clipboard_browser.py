@@ -60,6 +60,7 @@ def verify():
                     time.sleep(0.1)
 
             command("Page.enable")
+            command("Emulation.setDeviceMetricsOverride", {"width": 1280, "height": 1000, "deviceScaleFactor": 1, "mobile": False})
             for host, query, secure, success in (
                 ("ed2k-http.test", "", False, True),
                 ("127.0.0.1", "?modern=1", True, True),
@@ -67,7 +68,7 @@ def verify():
             ):
                 command("Page.navigate", {"url": f"http://{host}:{port}/tests/clipboard-dialog.html{query}"})
                 wait_for("window.fixtureReady && !!document.querySelector('.copy-link')")
-                wait_for("document.querySelector('.copy-feedback')?.getBoundingClientRect().height === 40")
+                wait_for("document.querySelector('.copy-feedback')?.getBoundingClientRect().height === 20")
                 evaluate("document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))")
                 assert evaluate("window.isSecureContext") is secure
                 if secure:

@@ -84,6 +84,19 @@ try {
       }
       if (text.includes('保存插件设置') || text.includes('保存账号设置') || document.querySelector('#app input')) throw Error(`${name}: configuration leaked into viewing page`)
       if (requests.some(path => !path.endsWith('/records'))) throw Error(`${name}: viewing page requested settings`)
+      await document.fonts.ready
+      await new Promise(resolve => setTimeout(resolve, 100))
+      const page = document.querySelector('#app .records-page')
+      const list = page.querySelector('.records-list')
+      const firstCard = list.querySelector('.record')
+      if (page.getBoundingClientRect().height > innerHeight * .85 + 1 || page.scrollHeight > page.clientHeight + 1) throw Error(`${name}: outer page overflows`)
+      if (getComputedStyle(list).overflowY !== 'auto' || getComputedStyle(list).scrollbarGutter !== 'stable') throw Error(`${name}: list scrollbar missing reserved space`)
+      if (firstCard.querySelector('.copy-feedback').getBoundingClientRect().height !== 20 || parseFloat(getComputedStyle(firstCard).paddingBottom) > 12) throw Error(`${name}: card whitespace not compact`)
+      const headerTop = page.querySelector('.records-header').getBoundingClientRect().top
+      list.scrollTop = list.scrollHeight
+      if (list.scrollTop <= 0 || page.querySelector('.records-header').getBoundingClientRect().top !== headerTop || page.scrollTop !== 0) throw Error(`${name}: list does not scroll independently of header`)
+      if (list.lastElementChild.getBoundingClientRect().bottom > list.getBoundingClientRect().bottom + 1) throw Error(`${name}: last record is clipped`)
+      list.scrollTop = 0
       const invalid = [...document.querySelectorAll('#app .record')].find(record => record.textContent.includes('历史空文件'))
       if (!invalid?.textContent.includes('历史链接无效') || invalid.querySelector('.copy-link') || invalid.querySelector('.delete-source')) throw Error(`${name}: invalid link actions available`)
       const link = document.querySelector('#app .copy-link')
