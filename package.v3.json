@@ -205,9 +205,9 @@
   },
   "MessageMerge": {
     "name": "通知合并",
-    "description": "同剧同季入库通知智能聚合：合并集数、汇总大小和媒体信息，其他通知按标题合并。",
+    "description": "同剧同季入库通知智能聚合，支持自定义等待时间并汇总媒体信息。",
     "labels": "通知",
-    "version": "1.5.2",
+    "version": "1.5.3",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -215,6 +215,7 @@
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
+      "v1.5.3": "新增 1–3600 秒可配置的无同类消息等待时间，旧配置默认 60 秒且升级保留现有设置。",
       "v1.5.2": "完整线上发布包自带通知拦截模块，支持直接从仓库安装，无需本地插件或补丁；保留原有发送范围配置。",
       "v1.5.1": "移除剧集聚合标题中的通知条数后缀。",
       "v1.5.0": "同剧同季入库通知智能聚合，保留实际集数范围，累加文件大小并去重展示媒体信息。"

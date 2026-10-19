@@ -7,7 +7,7 @@
 实现方式：接管 MoviePilot 通知发送统一入口
 (NotificationMixin.post_message / async_post_message)，
 收到第一条消息后等待 _WINDOW_SECONDS（60 秒），期间有新的同类消息
-到达则重新计时；连续 60 秒没有同类消息后，自动合并成一条发送。
+到达则重新计时；达到配置的静默时间后，自动合并成一条发送。
 
 规则：
 - 剧集通知按剧名、年份、季合并，不同剧集或季不会混合；其他通知按完整标题合并
@@ -42,7 +42,9 @@ from app.schemas.types import MessageType
 from app.application.messaging.message import MessageTemplateHelper
 
 # 滚动等待时长（秒）：收到第一条消息后开始计时，期间有新同类消息则重新计时
-_WINDOW_SECONDS = 60
+_DEFAULT_WINDOW_SECONDS = 60
+_MIN_WINDOW_SECONDS = 1
+_MAX_WINDOW_SECONDS = 3600
 _SERIES_RE = re.compile(r"^(?:🎬\s*|📺\s*)?(?P<name>.+?)\s*[（(](?P<year>\d{4})[）)](?P<tail>.*)$")
 _EPISODES_RE = re.compile(r"S(?P<season>\d{1,2})\s*(?P<episodes>E\d{1,4}(?:\s*[-~～]\s*E?\d{1,4}|\s*[,、，]\s*E?\d{1,4}|\s*E\d{1,4})*)", re.IGNORECASE)
 _EPISODE_RANGE_RE = re.compile(r"E?(\d{1,4})(?:\s*[-~～]\s*E?(\d{1,4}))?", re.IGNORECASE)
@@ -63,16 +65,25 @@ class _Merger:
 
     def __init__(self) -> None:
         self.enabled: bool = False
-        self.window: int = _WINDOW_SECONDS
+        self.window: int = _DEFAULT_WINDOW_SECONDS
         self.ranges: Dict[str, str] = {}  # 消息类型name -> admin/user/all；空 = 跟随系统
         self._lock = threading.Lock()
         self._groups: Dict[Tuple, Dict[str, Any]] = {}
         self._flushing_ids = set()
 
-    def update(self, enabled: bool, ranges: Optional[Dict[str, str]] = None) -> None:
+    def update(
+        self,
+        enabled: bool,
+        ranges: Optional[Dict[str, str]] = None,
+        window_seconds: int = _DEFAULT_WINDOW_SECONDS,
+    ) -> None:
+        try:
+            window_seconds = int(window_seconds)
+        except (TypeError, ValueError):
+            window_seconds = _DEFAULT_WINDOW_SECONDS
         with self._lock:
             self.enabled = enabled
-            self.window = _WINDOW_SECONDS
+            self.window = max(_MIN_WINDOW_SECONDS, min(window_seconds, _MAX_WINDOW_SECONDS))
             self.ranges = dict(ranges or {})
 
     def _apply_send_scope(self, msg: Message) -> None:
@@ -408,7 +419,7 @@ class MessageMerge(_PluginBase):
     # 插件元信息
     plugin_name = "通知合并"
     plugin_desc = "同剧同季入库通知智能聚合：合并集数、汇总大小和媒体信息，其他通知按标题合并。"
-    plugin_version = "1.5.2"
+    plugin_version = "1.5.3"
     plugin_author = "helios"
     plugin_order = 50
     plugin_config_prefix = "messagemerge_"
@@ -422,6 +433,11 @@ class MessageMerge(_PluginBase):
         """插件启用 / 配置保存时调用"""
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
+        try:
+            self._window_seconds = int(config.get("window_seconds", _DEFAULT_WINDOW_SECONDS))
+        except (TypeError, ValueError):
+            self._window_seconds = _DEFAULT_WINDOW_SECONDS
+        self._window_seconds = max(_MIN_WINDOW_SECONDS, min(self._window_seconds, _MAX_WINDOW_SECONDS))
         # 表单配置为扁平结构 range_<类型name>=发送范围，还原为 {类型name: 范围}
         ranges: Dict[str, str] = {}
         raw_ranges = config.get("ranges")
@@ -435,11 +451,11 @@ class MessageMerge(_PluginBase):
                 if action in ("admin", "user", "all"):
                     ranges[item.name] = action
         self._ranges = ranges
-        _MERGER.update(self._enabled, self._ranges)
+        _MERGER.update(self._enabled, self._ranges, self._window_seconds)
         _hookchain.register("messagemerge", _merge_handler, priority=100)
         logger.info(
             f"通知合并: 初始化完成，状态={'启用' if self._enabled else '停用'}，"
-            f"等待={_WINDOW_SECONDS}s，发送范围={self._ranges or '跟随系统'}"
+            f"等待={self._window_seconds}s，发送范围={self._ranges or '跟随系统'}"
         )
 
     def get_state(self) -> bool:
@@ -476,7 +492,7 @@ class MessageMerge(_PluginBase):
                 title=title,
                 text=f"测试消息第 {i} 条（{time.strftime('%H:%M:%S')}）。\n用于验证通知合并插件效果。",
             ))
-        return {"success": True, "message": f"已发送 {n} 条标题相同的测试消息，60 秒内无同类消息后会自动合并发送"}
+        return {"success": True, "message": f"已发送 {n} 条标题相同的测试消息，{self._window_seconds} 秒内无同类消息后会自动合并发送"}
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """插件配置表单 (Vuetify JSON)：按消息类型设置合并通知发送范围"""
@@ -530,6 +546,24 @@ class MessageMerge(_PluginBase):
                                     }
                                 ],
                             },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "window_seconds",
+                                            "label": "无同类消息等待时间（秒）",
+                                            "type": "number",
+                                            "min": _MIN_WINDOW_SECONDS,
+                                            "max": _MAX_WINDOW_SECONDS,
+                                            "hint": "每收到一条同类消息重新计时，范围 1–3600 秒",
+                                            "persistentHint": True,
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     },
                     *form_rows,
@@ -537,6 +571,7 @@ class MessageMerge(_PluginBase):
             },
         ], {
             "enabled": False,
+            "window_seconds": _DEFAULT_WINDOW_SECONDS,
             **defaults,
         }
 

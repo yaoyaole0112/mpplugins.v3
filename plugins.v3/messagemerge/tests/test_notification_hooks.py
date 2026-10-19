@@ -86,7 +86,7 @@ class NotificationHooksTests(unittest.TestCase):
             spec.loader.exec_module(plugin)
             self.assertTrue(plugin._hookchain.__file__.endswith("messagemerge/notification_hooks.py"))
             self.assertIs(sys.modules["app.plugins._hookchain"], plugin._hookchain)
-            self.assertEqual(plugin.MessageMerge.plugin_version, "1.5.2")
+            self.assertEqual(plugin.MessageMerge.plugin_version, "1.5.3")
 
 
 if __name__ == "__main__":

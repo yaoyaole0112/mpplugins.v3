@@ -198,6 +198,74 @@ class MessageMergeTests(unittest.TestCase):
         self.assertEqual(chain.messageoper.add.call_count, 2)
         self.assertEqual(timer.call_args.args[0], 60)
 
+    def test_configured_window_controls_timer_and_is_clamped(self):
+        merger = self.module._Merger()
+        merger.update(True, window_seconds=135)
+        chain = Mock()
+        message = self.make_message(1, "4G")
+        with patch.object(self.module.threading, "Timer") as timer:
+            merger.intercept(chain, message, None, None, None, None, {})
+        self.assertEqual(timer.call_args.args[0], 135)
+        merger.update(True, window_seconds=0)
+        self.assertEqual(merger.window, 1)
+        merger.update(True, window_seconds=99999)
+        self.assertEqual(merger.window, 3600)
+        merger.update(True, window_seconds="invalid")
+        self.assertEqual(merger.window, 60)
+
+    def test_plugin_config_and_form_expose_window_seconds(self):
+        plugin = self.module.MessageMerge()
+        plugin.init_plugin({"enabled": True, "window_seconds": "240"})
+        self.assertEqual(plugin._window_seconds, 240)
+        self.assertEqual(self.module._MERGER.window, 240)
+        forms, defaults = plugin.get_form()
+        self.assertEqual(defaults["window_seconds"], 60)
+        self.assertTrue(any(
+            component.get("component") == "VTextField"
+            and component.get("props", {}).get("model") == "window_seconds"
+            for component in self.iter_components(forms)
+        ))
+
+    @classmethod
+    def iter_components(cls, components):
+        for component in components:
+            yield component
+            yield from cls.iter_components(component.get("content", []))
+
+    def test_configured_window_controls_timer_and_is_clamped(self):
+        merger = self.module._Merger()
+        merger.update(True, window_seconds=135)
+        chain = Mock()
+        message = self.make_message(1, "4G")
+        with patch.object(self.module.threading, "Timer") as timer:
+            merger.intercept(chain, message, None, None, None, None, {})
+        self.assertEqual(timer.call_args.args[0], 135)
+        merger.update(True, window_seconds=0)
+        self.assertEqual(merger.window, 1)
+        merger.update(True, window_seconds=99999)
+        self.assertEqual(merger.window, 3600)
+        merger.update(True, window_seconds="invalid")
+        self.assertEqual(merger.window, 60)
+
+    def test_plugin_config_and_form_expose_window_seconds(self):
+        plugin = self.module.MessageMerge()
+        plugin.init_plugin({"enabled": True, "window_seconds": "240"})
+        self.assertEqual(plugin._window_seconds, 240)
+        self.assertEqual(self.module._MERGER.window, 240)
+        forms, defaults = plugin.get_form()
+        self.assertEqual(defaults["window_seconds"], 60)
+        self.assertTrue(any(
+            component.get("component") == "VTextField"
+            and component.get("props", {}).get("model") == "window_seconds"
+            for component in self.iter_components(forms)
+        ))
+
+    @classmethod
+    def iter_components(cls, components):
+        for component in components:
+            yield component
+            yield from cls.iter_components(component.get("content", []))
+
     def test_flush_all_drains_pending_messages_once(self):
         merger = self.module._Merger()
         merger.update(True)
