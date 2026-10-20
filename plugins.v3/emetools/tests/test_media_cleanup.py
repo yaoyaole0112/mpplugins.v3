@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from emetools.media_cleanup import DEFAULT_CONFIG, MediaCleanup, validate_rules
 from emetools.p115 import P115DirectoryUnavailable
@@ -36,7 +36,7 @@ class MediaCleanupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine.delete([str(self.good)])
 
-    def test_tied_best_versions_do_not_hide_or_become_deletion_candidates(self):
+    def test_unavailable_mp_naming_protects_ties_without_hiding_lower_versions(self):
         self.good.unlink()
         self.bad.unlink()
         (self.folder / "Movie.2160p.DolbyVision.strm").write_text("best-a", encoding="utf-8")
@@ -44,7 +44,8 @@ class MediaCleanupTests(unittest.TestCase):
         (self.folder / "Movie.1080p.HDR.strm").write_text("inferior-a", encoding="utf-8")
         (self.folder / "Movie.720p.SDR.strm").write_text("inferior", encoding="utf-8")
 
-        result = self.engine.scan(["emby::1"])
+        with patch.object(self.engine, "_matches_mp_name", side_effect=ValueError("unavailable")):
+            result = self.engine.scan(["emby::1"])
 
         self.assertEqual(result["duplicate_groups"], 1)
         self.assertEqual(result["total_inferior"], 2)
@@ -62,11 +63,134 @@ class MediaCleanupTests(unittest.TestCase):
         (self.folder / "Movie.2160p.HEVC.strm").write_text("first", encoding="utf-8")
         (self.folder / "Movie.2160p.H265.strm").write_text("second", encoding="utf-8")
 
-        result = self.engine.scan(["emby::1"])
+        with patch.object(self.engine, "_matches_mp_name", side_effect=ValueError("unavailable")):
+            result = self.engine.scan(["emby::1"])
 
         self.assertEqual(result["duplicate_groups"], 1)
         self.assertEqual(result["total_inferior"], 0)
         self.assertTrue(all(version["is_best"] for version in result["results"][0]["versions"]))
+
+    def _tie_files(self):
+        self.good.unlink()
+        self.bad.unlink()
+        canonical = self.folder / "Movie.2160p.H265.strm"
+        alternative = self.folder / "Movie.2160p.HEVC.strm"
+        canonical.write_text("https://example.com/redirect115/111", encoding="utf-8")
+        alternative.write_text("https://example.com/redirect115/222", encoding="utf-8")
+        return canonical, alternative
+
+    def test_mp_naming_match_wins_over_newer_nonmatching_version(self):
+        canonical, alternative = self._tie_files()
+        os.utime(canonical, ns=(1000000000, 1000000000))
+        os.utime(alternative, ns=(2000000000, 2000000000))
+        with patch.object(self.engine, "_matches_mp_name", side_effect=lambda version: version["file_path"] == str(canonical)):
+            result = self.engine.scan()
+        self.assertEqual(result["results"][0]["versions"][0]["file_path"], str(canonical))
+        self.assertEqual(result["total_inferior"], 1)
+
+    def test_matching_versions_keep_only_latest_modification_time(self):
+        canonical, alternative = self._tie_files()
+        os.utime(canonical, ns=(1000000000, 1000000000))
+        os.utime(alternative, ns=(2000000000, 2000000000))
+        with patch.object(self.engine, "_matches_mp_name", return_value=True):
+            result = self.engine.scan()
+        versions = result["results"][0]["versions"]
+        self.assertEqual(versions[0]["file_path"], str(alternative))
+        self.assertEqual(sum(version["is_best"] for version in versions), 1)
+
+    def test_nonmatching_versions_also_use_latest_date(self):
+        canonical, alternative = self._tie_files()
+        os.utime(canonical, ns=(2000000000, 2000000000))
+        os.utime(alternative, ns=(1000000000, 1000000000))
+        with patch.object(self.engine, "_matches_mp_name", return_value=False):
+            result = self.engine.scan()
+        self.assertEqual(result["results"][0]["versions"][0]["file_path"], str(canonical))
+        self.assertEqual(result["total_inferior"], 1)
+
+    def test_quality_wins_without_checking_naming(self):
+        with patch.object(self.engine, "_matches_mp_name") as naming:
+            result = self.engine.scan()
+        naming.assert_not_called()
+        self.assertEqual(result["results"][0]["versions"][0]["file_path"], str(self.good))
+
+    def test_mp_naming_uses_local_series_and_episode_metadata(self):
+        folder = self.root / "美人余 (2026)" / "Season 1"
+        folder.mkdir(parents=True)
+        filename = "美人余 - S01E10 - 第 10 集 - 2160p.DoVi.H265.DDP.strm"
+        path = folder / filename
+        path.write_text("link", encoding="utf-8")
+        path.with_suffix(".nfo").write_text("<episodedetails><title>第 10 集</title><aired>2026-10-12</aired></episodedetails>", encoding="utf-8")
+        (folder.parent / "tvshow.nfo").write_text("<tvshow><title>美人余</title><year>2026</year><uniqueid type='tmdb'>294446</uniqueid></tvshow>", encoding="utf-8")
+        self.engine._scan_root = str(self.root)
+        self.owner.chain = MagicMock()
+        self.owner.chain.run_module.return_value = f"美人余 (2026)/Season 1/{filename}"
+        self.assertTrue(self.engine._matches_mp_name({"file_path": str(path)}))
+        call = self.owner.chain.run_module.call_args
+        self.assertEqual(call.args, ("recommend_name",))
+        self.assertEqual(call.kwargs["mediainfo"].title, "美人余")
+        self.assertEqual(str(call.kwargs["mediainfo"].tmdb_id), "294446")
+        self.assertEqual(call.kwargs["episodes_info"][0].episode_number, 10)
+        self.owner.chain.run_module.return_value = f"美人余 (2026)/Season 1/{filename.replace('DoVi', 'DOVI')}"
+        self.assertFalse(self.engine._matches_mp_name({"file_path": str(path)}))
+
+    def test_duplicate_strm_source_does_not_delete_retained_cloud_file(self):
+        self.bad.write_text(self.good.read_text(encoding="utf-8"), encoding="utf-8")
+        self.engine.scan()
+        with patch("emetools.media_cleanup.P115Client") as client:
+            result = self.engine.delete([str(self.bad)])
+        client.assert_not_called()
+        self.assertFalse(result["deleted"][0]["cloud"])
+        self.assertTrue(self.good.exists())
+        self.assertFalse(self.bad.exists())
+
+    def test_movie_naming_passes_original_container_extension_to_mp(self):
+        (self.folder / "movie.nfo").write_text(
+            "<movie><title>电影名称</title><year>2025</year></movie>", encoding="utf-8")
+        self.owner.chain = MagicMock()
+        self.owner.chain.run_module.return_value = "电影名称 (2025)/Movie.2160p.mkv"
+        self.engine._scan_root = str(self.root)
+        self.assertTrue(self.engine._matches_mp_name(
+            {"file_path": str(self.good), "source_extension": ".mkv"}))
+        arguments = self.owner.chain.run_module.call_args.kwargs
+        self.assertEqual(arguments["mediainfo"].title, "电影名称")
+        self.assertTrue(arguments["meta"].title.endswith(".mkv"))
+        self.assertEqual(arguments["episodes_info"], [])
+
+    def test_three_matching_versions_and_equal_dates_choose_one_stable_keeper(self):
+        canonical, alternative = self._tie_files()
+        third = self.folder / "Movie.2160p.x265.strm"
+        third.write_text("third", encoding="utf-8")
+        for path in (canonical, alternative, third):
+            os.utime(path, ns=(1000000000, 1000000000))
+        with patch.object(self.engine, "_matches_mp_name", return_value=True):
+            first = self.engine.scan()
+            second = self.engine.scan()
+        self.assertEqual(first["total_inferior"], 2)
+        self.assertEqual(first["results"][0]["versions"][0]["file_path"],
+                         second["results"][0]["versions"][0]["file_path"])
+
+    def test_naming_change_after_scan_prevents_tied_version_deletion(self):
+        canonical, alternative = self._tie_files()
+        with patch.object(self.engine, "_matches_mp_name", side_effect=lambda version: version["file_path"] == str(canonical)):
+            self.engine.scan()
+        with patch.object(self.engine, "_matches_mp_name", side_effect=lambda version: version["file_path"] == str(alternative)), \
+                patch("emetools.media_cleanup.P115Client") as client:
+            with self.assertRaisesRegex(ValueError, "重新扫描"):
+                self.engine.delete([str(alternative)])
+        client.assert_not_called()
+        self.assertTrue(canonical.exists())
+        self.assertTrue(alternative.exists())
+
+    def test_tie_loser_can_be_deleted_after_naming_revalidation(self):
+        canonical, alternative = self._tie_files()
+        with patch.object(self.engine, "_matches_mp_name", side_effect=lambda version: version["file_path"] == str(canonical)), \
+                patch("emetools.media_cleanup.P115Client") as client:
+            self.engine.scan()
+            client.return_value.__enter__.return_value.delete_files.return_value = {"state": True}
+            result = self.engine.delete([str(alternative)])
+        self.assertTrue(result["ok"])
+        self.assertTrue(canonical.exists())
+        self.assertFalse(alternative.exists())
 
     def test_scan_sorts_chinese_series_by_pinyin_then_numeric_season_episode(self):
         episodes = [("云雀 (2026)", 1, 19), ("云雀 (2026)", 2, 1),

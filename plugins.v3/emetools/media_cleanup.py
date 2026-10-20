@@ -10,10 +10,14 @@ import json
 import os
 import re
 import threading
+import xml.etree.ElementTree as ET
 from datetime import datetime
+from pathlib import Path
 
 from app.sdk.logging import logger
 from app.sdk.services import MediaServerHelper
+from app.sdk.media import MediaInfo, MetaInfoPath
+from app.schemas.tmdb import TmdbEpisode
 from pypinyin import lazy_pinyin
 
 from .emby_guard import emby_request
@@ -241,6 +245,9 @@ class MediaCleanup:
                 if not video and isinstance(data.get("video"), dict):
                     video = data["video"]
                 fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
+                container = str(data.get("Container") or "").lower()
+                if container in {"mkv", "mp4", "avi", "ts", "m2ts", "mov", "wmv", "iso"}:
+                    version["source_extension"] = f".{container}"
                 numbers = {
                     "size": data.get("Size") or data.get("size") or fmt.get("size"),
                     "bitrate": data.get("Bitrate") or data.get("BitRate") or data.get("bitrate") or
@@ -272,6 +279,73 @@ class MediaCleanup:
                 continue
         return version
 
+    @staticmethod
+    def _nfo(path):
+        try:
+            if os.path.islink(path) or os.path.getsize(path) > 1024 * 1024:
+                return None
+            with open(path, "rb") as stream:
+                content = stream.read(1024 * 1024 + 1)
+            if len(content) > 1024 * 1024 or b"<!DOCTYPE" in content.upper() or b"<!ENTITY" in content.upper():
+                return None
+            return ET.fromstring(content)
+        except (OSError, ET.ParseError, ValueError):
+            return None
+
+    def _matches_mp_name(self, version):
+        path = Path(version["file_path"])
+        source_extension = version.get("source_extension") or path.suffix
+        meta = MetaInfoPath(path.with_suffix(source_extension))
+        episode = self._nfo(path.with_suffix(".nfo"))
+        details = episode
+        if meta.begin_episode is not None:
+            parent = path.parent
+            root = Path(self._scan_root)
+            while parent != root and root in parent.parents:
+                show = self._nfo(parent / "tvshow.nfo")
+                if show is not None:
+                    details = show
+                    break
+                parent = parent.parent
+        elif details is None:
+            details = self._nfo(path.parent / "movie.nfo")
+        title = details.findtext("title") if details is not None else None
+        year = details.findtext("year") if details is not None else None
+        if meta.begin_episode is not None and details is episode:
+            title = None
+        media = MediaInfo(type=meta.type, title=title or meta.name, year=year or meta.year, season=meta.begin_season,
+                          original_title=details.findtext("originaltitle") if details is not None else None)
+        if details is not None:
+            for field in ("tmdb", "imdb", "tvdb", "douban"):
+                value = details.findtext(f"uniqueid[@type='{field}']") or details.findtext(f"{field}id")
+                if value:
+                    setattr(media, f"{field}_id", value)
+        episodes = []
+        if episode is not None and meta.begin_episode is not None:
+            episodes.append(TmdbEpisode(episode_number=meta.begin_episode, season_number=meta.begin_season,
+                                        name=episode.findtext("title"), air_date=episode.findtext("aired")))
+        suggested = self.owner.chain.run_module("recommend_name", meta=meta, mediainfo=media,
+                                                episodes_info=episodes, raise_exception=True)
+        if not isinstance(suggested, str) or not suggested:
+            raise ValueError("MoviePilot 未返回建议名称")
+        return Path(suggested).stem == path.stem
+
+    def _select_best(self, ordered, rules):
+        tied = [version for version in ordered if compare_versions(version, ordered[0], rules) == 0]
+        if len(tied) == 1:
+            return ordered[0]
+        matches = []
+        for version in tied:
+            try:
+                if self._matches_mp_name(version):
+                    matches.append(version)
+            except Exception as error:
+                logger.warning("媒体增强 媒体清理：MP 命名校验不可用（%s），保留本组并列版本以免误删",
+                               type(error).__name__)
+                return None
+        candidates = matches or tied
+        return max(candidates, key=lambda version: (version["signature"][3], version["file_name"]))
+
     def scan(self, library_ids=None):
         if not self.lock.acquire(blocking=False):
             raise ValueError("媒体清理正在扫描或清理中")
@@ -283,6 +357,7 @@ class MediaCleanup:
         self.last_error = ""
         try:
             root = os.path.realpath(self.owner._strm_root)
+            self._scan_root = root
             if not os.path.isdir(root):
                 raise ValueError("STRM 根目录不存在")
             paths = self._scope_paths(root, library_ids)
@@ -322,16 +397,18 @@ class MediaCleanup:
                 if len(versions) < 2:
                     continue
                 ordered = sorted(versions, key=functools.cmp_to_key(lambda a, b: compare_versions(a, b, rules)), reverse=True)
-                best = ordered[0]
-                rankings = [compare_versions(version, best, rules) for version in ordered]
-                inferior_indexes = [index for index, ranking in enumerate(rankings) if ranking < 0]
+                best = self._select_best(ordered, rules)
+                keeper = best or ordered[0]
+                if best:
+                    ordered = [best, *(version for version in ordered if version is not best)]
                 for idx, version in enumerate(ordered):
-                    version["is_best"] = rankings[idx] >= 0
-                    version["best_path"] = best["file_path"]
+                    version["is_best"] = version is best if best else compare_versions(version, keeper, rules) >= 0
+                    version["best_path"] = keeper["file_path"]
                     snapshot[version["file_path"]] = version
+                inferior = [version for version in ordered if not version["is_best"]]
                 results.append({"name": name, "versions": [{k: v for k, v in item.items() if k != "signature"}
-                                  for item in ordered], "inferior_count": len(inferior_indexes),
-                                "total_space_savings": sum(ordered[index]["size"] for index in inferior_indexes)})
+                                  for item in ordered], "inferior_count": len(inferior),
+                                "total_space_savings": sum(version["size"] for version in inferior)})
             results.sort(key=_result_sort_key)
             self._snapshot = snapshot
             self._scan_inventory = {folder: {item["file_name"]: item["signature"] for versions in grouped.values()
@@ -403,6 +480,14 @@ class MediaCleanup:
                 stat = os.stat(path, follow_symlinks=False)
                 if os.path.islink(path) or (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != item["signature"]:
                     raise ValueError("文件已变化，请重新扫描")
+                if compare_versions(item, best, self._scan_rules) == 0:
+                    group = [version for version in self._snapshot.values()
+                             if version["best_path"] == item["best_path"]]
+                    ordered = sorted(group, key=functools.cmp_to_key(
+                        lambda first, second: compare_versions(first, second, self._scan_rules)), reverse=True)
+                    current_best = self._select_best(ordered, self._scan_rules)
+                    if current_best is None or current_best["file_path"] != best["file_path"]:
+                        raise ValueError("MP 重命名规则或保留版本判定已变化，请重新扫描")
                 selected.append(item)
             deleted, failures = [], []
             cookie = self.owner._source_cookie()
@@ -414,7 +499,8 @@ class MediaCleanup:
                     fid = self._file_id(path)
                     if not cookie or not fid:
                         raise ValueError("缺少 115 Cookie 或 STRM 文件 ID，已保留本地文件")
-                    if fid and cookie:
+                    shared_source = fid == self._file_id(item["best_path"])
+                    if not shared_source:
                         with P115Client(cookie) as client:
                             response = client.delete_files([fid])
                         if not response.get("state"):
@@ -425,10 +511,10 @@ class MediaCleanup:
                     for target in (path, *(base + suffix for suffix in COMPANIONS)):
                         if os.path.isfile(target) and not os.path.islink(target):
                             os.remove(target)
-                    deleted.append({"file_path": path, "size": item["size"], "cloud": bool(fid and cookie)})
+                    deleted.append({"file_path": path, "size": item["size"], "cloud": not shared_source})
                     self._snapshot.pop(path, None)
                     self._scan_inventory.get(os.path.dirname(path), {}).pop(os.path.basename(path), None)
-                    logger.info("增强工具 媒体清理：已清理低质版本 %s（115=%s）", os.path.basename(path), bool(fid and cookie))
+                    logger.info("增强工具 媒体清理：已清理低质版本 %s（115=%s）", os.path.basename(path), not shared_source)
                 except (OSError, RuntimeError, ValueError) as error:
                     failures.append({"file_path": path, "error": str(error)[:160]})
                     logger.warning("增强工具 媒体清理：跳过 %s：%s", os.path.basename(path), type(error).__name__)
