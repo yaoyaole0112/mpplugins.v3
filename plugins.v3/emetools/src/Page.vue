@@ -67,4 +67,7 @@ onMounted(() => {
   outline: 2px solid rgb(var(--v-theme-primary));
   outline-offset: 2px;
 }
+@media(max-width:760px){
+  .eme-dialog-page-root{display:block;min-height:0;height:100%;padding:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior-y:auto;scrollbar-gutter:auto;-webkit-overflow-scrolling:touch}
+}
 </style>

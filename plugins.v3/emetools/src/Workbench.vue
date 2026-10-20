@@ -25,6 +25,15 @@ const loading = ref(true)
 const settingsLoaded = ref(false)
 const error = ref('')
 const notice = ref('')
+const mobileViewport = ref(false)
+let mobileQuery = null
+function syncMobileViewport() { mobileViewport.value = !!mobileQuery?.matches }
+onMounted(() => {
+  mobileQuery = window.matchMedia('(max-width: 760px)')
+  syncMobileViewport()
+  mobileQuery.addEventListener('change', syncMobileViewport)
+})
+onUnmounted(() => { mobileQuery?.removeEventListener('change', syncMobileViewport) })
 const p115Tasks = ref([])
 let p115PollTimer = null
 let disposed = false
@@ -1356,9 +1365,11 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           <div class="eme-folder-list"><button v-for="item in folder.dirs" :key="item.path || item.cid" class="eme-folder" @click="enterFolder(item)">📁 {{ item.name }}</button><p v-if="folder.ready && !folder.dirs.length" class="eme-hint">没有子目录</p></div>
         </div>
       </div>
+    <Teleport to="body" :disabled="!mobileViewport">
     <div v-if="toast.visible" class="eme-toast" :class="toast.kind === 'error' ? 'eme-toast--error' : 'eme-toast--success'" :role="toast.kind === 'error' ? 'alert' : 'status'">
       <i class="mdi" :class="toast.kind === 'error' ? 'mdi-alert-circle' : 'mdi-check-circle'" aria-hidden="true" /><span>{{ toast.text }}</span><button type="button" aria-label="关闭提示" @click="toast.visible = false">×</button>
     </div>
+    </Teleport>
   </div>
 </template>
 
@@ -1555,5 +1566,16 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
   .eme-mobile-navigation>i{position:absolute;right:12px;top:10px;font-size:24px;line-height:24px;pointer-events:none;color:rgb(var(--v-theme-primary))}
   .eme-sidebar,.eme-shell--app .eme-sidebar,.eme-shell--dialog .eme-sidebar{flex-shrink:0;padding:8px 12px 0;overflow:visible}
   .eme-brand,.eme-shell--app .eme-brand,.eme-shell--dialog .eme-brand{padding:0 4px 8px;margin-bottom:0}
+}
+@media(max-width:760px){
+  .eme-shell,.eme-shell.eme-shell--app,.eme-shell.eme-shell--dialog{box-sizing:border-box;display:flex;flex-direction:column;width:100%;max-width:100%;height:auto;min-height:0;max-height:none;gap:0;padding:12px 0 0;overflow:visible;overscroll-behavior:auto}
+  .eme-sidebar,.eme-shell--app .eme-sidebar,.eme-shell--dialog .eme-sidebar{box-sizing:border-box;width:100%;padding:8px 16px 0;margin:0;overflow:visible}
+  .eme-main,.eme-shell--app .eme-main,.eme-shell--dialog .eme-main{box-sizing:border-box;flex:0 0 auto;width:100%;max-width:100%;height:auto;min-height:0;padding:18px 16px calc(112px + env(safe-area-inset-bottom,0px));overflow:visible;scrollbar-gutter:auto;overscroll-behavior:auto}
+  .eme-card{box-sizing:border-box;min-width:0;width:100%;margin-inline:auto}
+  :global(html:has(.eme-shell--app)){height:auto!important;overflow-x:clip!important;overflow-y:auto!important;overscroll-behavior:auto!important}
+  :global(body:has(.eme-shell--app)),:global(.v-application:has(.eme-shell--app)),:global(.v-layout:has(.eme-shell--app)),:global(.v-main:has(.eme-shell--app)){height:auto!important;max-height:none!important;overflow:visible!important;overscroll-behavior:auto!important}
+  :global(.eme-app-host-lock){box-sizing:border-box!important;width:100%!important;height:auto!important;max-height:none!important;margin-inline:0!important;padding-inline:0!important;overflow:visible!important;overscroll-behavior:auto!important}
+  :global(body.eme-app-document-lock){height:auto!important;overflow:visible!important;overscroll-behavior:auto!important}
+  .eme-toast{left:max(16px,env(safe-area-inset-left,0px));right:max(16px,env(safe-area-inset-right,0px));bottom:calc(96px + env(safe-area-inset-bottom,0px));width:auto;min-width:0;max-width:none;max-height:35dvh;overflow-y:auto;padding:12px 14px;z-index:10000}
 }
 </style>
