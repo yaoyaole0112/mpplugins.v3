@@ -187,6 +187,7 @@ test('saving only media cleanup rules leaves other unsaved settings visible as d
     active: { value: 'subscription' }, notice: { value: '' }, mediaSelection: { value: [] },
     post: async (path, body) => { calls.push({ path, body: structuredClone(body) }); return { message: '已保存' } },
     loadMedia: async () => {},
+    waitP115Task: async result => result,
     work: async callback => callback(),
   })
   vm.runInContext(`let mediaLoaded = false; ${mediaFunctions}`, context)

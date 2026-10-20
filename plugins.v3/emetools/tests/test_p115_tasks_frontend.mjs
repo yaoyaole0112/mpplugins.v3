@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import test from 'node:test'
+import vm from 'node:vm'
+
+const source = fs.readFileSync(new URL('../src/Workbench.vue', import.meta.url), 'utf8')
+
+test('queued actions poll status instead of replaying the original submission', () => {
+  const execute = source.slice(source.indexOf('async function execute('), source.indexOf('async function work('))
+  assert.ok(execute.includes("operation: 'p115_task_status', token: result.job_id"))
+  assert.ok(execute.includes('result = task.result'))
+  assert.ok(execute.includes("['queued', 'running'].includes(task.state)"))
+  assert.equal(execute.match(/post\('action', \{ operation, \.\.\.body \}\)/g)?.length, 1)
+})
+
+test('both entrypoints share queue visibility and stop polling on unmount', () => {
+  assert.ok(source.includes('手动任务优先于等待中的定时任务'))
+  assert.ok(source.includes('disposed = true; clearTimeout(p115PollTimer)'))
+  for (const entry of ['Page.vue', 'AppPage.vue']) {
+    assert.ok(fs.readFileSync(new URL(`../src/${entry}`, import.meta.url), 'utf8').includes('<Workbench'))
+  }
+})
+
+test('queued request returns the original confirmation result without resubmission', async () => {
+  const calls = []
+  let polls = 0
+  const context = vm.createContext({
+    disposed: false, notice: { value: '' },
+    setTimeout: callback => { callback(); return 1 },
+    post: async (path, body) => {
+      calls.push(body.operation)
+      if (body.operation === 'cleanup_request') return { queued: true, job_id: 'test-id' }
+      assert.equal(body.token, 'test-id')
+      polls++
+      return polls === 1 ? { state: 'running' } : { state: 'completed', result: { ok: true, token: 'confirm-id', file_count: 3 } }
+    },
+  })
+  vm.runInContext(source.slice(source.indexOf('async function execute('), source.indexOf('async function pollP115Tasks(')), context)
+  const result = await context.execute('cleanup_request')
+  assert.equal(result.token, 'confirm-id')
+  assert.deepEqual(calls, ['cleanup_request', 'p115_task_status', 'p115_task_status'])
+})

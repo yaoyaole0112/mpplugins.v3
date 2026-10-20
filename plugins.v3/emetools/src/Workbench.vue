@@ -25,6 +25,9 @@ const loading = ref(true)
 const settingsLoaded = ref(false)
 const error = ref('')
 const notice = ref('')
+const p115Tasks = ref([])
+let p115PollTimer = null
+let disposed = false
 const toast = reactive({ visible: false, text: '', kind: 'success' })
 let toastTimer = null
 function showToast(text, kind) {
@@ -393,7 +396,7 @@ async function mediaCommand(operation, extra = {}) {
   await work(async () => {
     if (operation === 'save' && !savedMediaConfig.value) throw new Error('媒体清理配置尚未加载，请稍后重试')
     const submittedConfig = operation === 'save' ? JSON.parse(JSON.stringify(extra.config)) : null
-    const response = await post('media-cleanup/action', { operation, ...extra })
+    const response = await waitP115Task(await post('media-cleanup/action', { operation, ...extra }))
     if (response?.ok === false) throw new Error(response.failures?.map(item => item.error).join('；') || '清理未完成')
     if (submittedConfig) {
       const saved = response.config || { ...JSON.parse(savedMediaConfig.value), ...submittedConfig }
@@ -419,7 +422,7 @@ async function deleteMedia() {
     const paths = [...mediaSelection.value]
     const preview = await post('media-cleanup/action', { operation: 'preview_delete', paths })
     if (!window.confirm(`确定永久删除 ${preview.count} 个低质版本及其 115 云端文件和本地 STRM/配套文件？此操作不可恢复。`)) return
-    const response = await post('media-cleanup/action', { operation: 'confirm_delete', token: preview.token })
+    const response = await waitP115Task(await post('media-cleanup/action', { operation: 'confirm_delete', token: preview.token }))
     const deleted = response.deleted || []
     const failures = response.failures || []
     notice.value = `已清理 ${deleted.length} 个版本；失败 ${failures.length} 个${failures.length ? '：' + failures.map(item => item.error).filter(Boolean).join('；') : ''}`
@@ -450,9 +453,34 @@ function unpack(response) {
 async function get(path) { return unpack(await props.api.get(`${base.value}/${path}`)) }
 async function post(path, body) { return unpack(await props.api.post(`${base.value}/${path}`, body)) }
 async function execute(operation, body = {}) {
-  const result = await post('action', { operation, ...body })
+  const result = await waitP115Task(await post('action', { operation, ...body }))
   if (result?.ok === false) throw new Error(result.message || '操作失败')
   return result
+}
+async function waitP115Task(result) {
+  if (result?.queued && result.job_id) {
+    notice.value = result.message || '已加入115任务队列，等待当前操作完成'
+    while (!disposed) {
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      if (disposed) break
+      const task = await post('action', { operation: 'p115_task_status', token: result.job_id })
+      if (['queued', 'running'].includes(task.state)) continue
+      if (task.state !== 'completed') throw new Error(task.result?.message || task.message || '115任务未完成，请核实结果')
+      result = task.result
+      break
+    }
+    if (disposed) throw new Error('页面已关闭；已提交任务不会重复执行，请重新打开页面核实结果')
+  }
+  return result
+}
+async function pollP115Tasks() {
+  try {
+    const result = await post('action', { operation: 'p115_tasks' })
+    if (!disposed) p115Tasks.value = result.tasks || []
+  } catch {}
+  finally {
+    if (!disposed) p115PollTimer = setTimeout(pollP115Tasks, 3000)
+  }
 }
 async function work(callback) {
   busy.value = true
@@ -1049,8 +1077,8 @@ function chooseSection(key) {
   if (key === 'media') loadMedia().catch(err => { error.value = err?.message || '读取媒体清理配置失败' })
   if (key === 'enrichment') { refreshEnrichment().catch(err => { error.value = err?.message || '读取数据补全状态失败' }); loadEnrichLibraries() }
 }
-onMounted(() => { load(); loadMissing().catch(() => {}) })
-onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer); clearTimeout(fillPollTimer); clearTimeout(enrichmentPollTimer); clearTimeout(toastTimer) })
+onMounted(() => { load(); loadMissing().catch(() => {}); pollP115Tasks() })
+onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer); clearTimeout(fillPollTimer); clearTimeout(enrichmentPollTimer); clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -1076,6 +1104,7 @@ onUnmounted(() => { clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer)
     </aside>
     <main class="eme-main">
       <div v-if="loading" class="eme-message">正在加载插件配置…</div>
+      <p v-if="p115Tasks.length && ['cleanup', 'move', 'trash', 'media'].includes(active)" class="eme-message" role="status">115任务：{{ p115Tasks.map(task => `${task.label}（${task.state === 'running' ? '执行中' : '排队中'}）`).join(' → ') }}。手动任务优先于等待中的定时任务，当前操作不会被中断。</p>
       <p v-if="busy" class="eme-message" role="status">正在处理页面请求，完成后即可继续保存；当前修改会保留。</p>
       <template v-if="active === 'missing'">
         <section class="eme-card">
