@@ -123,14 +123,15 @@ class MediaCleanupTests(unittest.TestCase):
         (folder.parent / "tvshow.nfo").write_text("<tvshow><title>美人余</title><year>2026</year><uniqueid type='tmdb'>294446</uniqueid></tvshow>", encoding="utf-8")
         self.engine._scan_root = str(self.root)
         self.owner.chain = MagicMock()
-        self.owner.chain.run_module.return_value = f"美人余 (2026)/Season 1/{filename}"
+        self.owner.chain.run_module_strict.return_value = f"美人余 (2026)/Season 1/{filename}"
         self.assertTrue(self.engine._matches_mp_name({"file_path": str(path)}))
-        call = self.owner.chain.run_module.call_args
+        call = self.owner.chain.run_module_strict.call_args
         self.assertEqual(call.args, ("recommend_name",))
         self.assertEqual(call.kwargs["mediainfo"].title, "美人余")
         self.assertEqual(str(call.kwargs["mediainfo"].tmdb_id), "294446")
         self.assertEqual(call.kwargs["episodes_info"][0].episode_number, 10)
-        self.owner.chain.run_module.return_value = f"美人余 (2026)/Season 1/{filename.replace('DoVi', 'DOVI')}"
+        self.assertNotIn("raise_exception", call.kwargs)
+        self.owner.chain.run_module_strict.return_value = f"美人余 (2026)/Season 1/{filename.replace('DoVi', 'DOVI')}"
         self.assertFalse(self.engine._matches_mp_name({"file_path": str(path)}))
 
     def test_duplicate_strm_source_does_not_delete_retained_cloud_file(self):
@@ -147,11 +148,11 @@ class MediaCleanupTests(unittest.TestCase):
         (self.folder / "movie.nfo").write_text(
             "<movie><title>电影名称</title><year>2025</year></movie>", encoding="utf-8")
         self.owner.chain = MagicMock()
-        self.owner.chain.run_module.return_value = "电影名称 (2025)/Movie.2160p.mkv"
+        self.owner.chain.run_module_strict.return_value = "电影名称 (2025)/Movie.2160p.mkv"
         self.engine._scan_root = str(self.root)
         self.assertTrue(self.engine._matches_mp_name(
             {"file_path": str(self.good), "source_extension": ".mkv"}))
-        arguments = self.owner.chain.run_module.call_args.kwargs
+        arguments = self.owner.chain.run_module_strict.call_args.kwargs
         self.assertEqual(arguments["mediainfo"].title, "电影名称")
         self.assertTrue(arguments["meta"].title.endswith(".mkv"))
         self.assertEqual(arguments["episodes_info"], [])

@@ -324,8 +324,8 @@ class MediaCleanup:
         if episode is not None and meta.begin_episode is not None:
             episodes.append(TmdbEpisode(episode_number=meta.begin_episode, season_number=meta.begin_season,
                                         name=episode.findtext("title"), air_date=episode.findtext("aired")))
-        suggested = self.owner.chain.run_module("recommend_name", meta=meta, mediainfo=media,
-                                                episodes_info=episodes, raise_exception=True)
+        suggested = self.owner.chain.run_module_strict("recommend_name", meta=meta, mediainfo=media,
+                                                       episodes_info=episodes)
         if not isinstance(suggested, str) or not suggested:
             raise ValueError("MoviePilot 未返回建议名称")
         return Path(suggested).stem == path.stem
