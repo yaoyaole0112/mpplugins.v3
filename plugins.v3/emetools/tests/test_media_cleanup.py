@@ -36,6 +36,38 @@ class MediaCleanupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine.delete([str(self.good)])
 
+    def test_tied_best_versions_do_not_hide_or_become_deletion_candidates(self):
+        self.good.unlink()
+        self.bad.unlink()
+        (self.folder / "Movie.2160p.DolbyVision.strm").write_text("best-a", encoding="utf-8")
+        (self.folder / "Movie.2160p.DoVi.strm").write_text("best-b", encoding="utf-8")
+        (self.folder / "Movie.1080p.HDR.strm").write_text("inferior-a", encoding="utf-8")
+        (self.folder / "Movie.720p.SDR.strm").write_text("inferior", encoding="utf-8")
+
+        result = self.engine.scan(["emby::1"])
+
+        self.assertEqual(result["duplicate_groups"], 1)
+        self.assertEqual(result["total_inferior"], 2)
+        versions = result["results"][0]["versions"]
+        tied_best = [version for version in versions if version["is_best"]]
+        inferior = [version for version in versions if not version["is_best"]]
+        self.assertEqual(len(tied_best), 2)
+        self.assertEqual(len(inferior), 2)
+        with self.assertRaises(ValueError):
+            self.engine.delete([tied_best[0]["file_path"]])
+
+    def test_identical_rank_versions_are_reported_as_a_duplicate_group(self):
+        self.good.unlink()
+        self.bad.unlink()
+        (self.folder / "Movie.2160p.HEVC.strm").write_text("first", encoding="utf-8")
+        (self.folder / "Movie.2160p.H265.strm").write_text("second", encoding="utf-8")
+
+        result = self.engine.scan(["emby::1"])
+
+        self.assertEqual(result["duplicate_groups"], 1)
+        self.assertEqual(result["total_inferior"], 0)
+        self.assertTrue(all(version["is_best"] for version in result["results"][0]["versions"]))
+
     def test_scan_sorts_chinese_series_by_pinyin_then_numeric_season_episode(self):
         episodes = [("云雀 (2026)", 1, 19), ("云雀 (2026)", 2, 1),
                     ("阿尔法 (2026)", 1, 10), ("云雀 (2026)", 1, 2),

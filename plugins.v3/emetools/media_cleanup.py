@@ -322,16 +322,16 @@ class MediaCleanup:
                 if len(versions) < 2:
                     continue
                 ordered = sorted(versions, key=functools.cmp_to_key(lambda a, b: compare_versions(a, b, rules)), reverse=True)
-                # Only a strictly better best version can justify deletion.
-                if compare_versions(ordered[0], ordered[1], rules) <= 0:
-                    continue
+                best = ordered[0]
+                rankings = [compare_versions(version, best, rules) for version in ordered]
+                inferior_indexes = [index for index, ranking in enumerate(rankings) if ranking < 0]
                 for idx, version in enumerate(ordered):
-                    version["is_best"] = idx == 0
-                    version["best_path"] = ordered[0]["file_path"]
+                    version["is_best"] = rankings[idx] >= 0
+                    version["best_path"] = best["file_path"]
                     snapshot[version["file_path"]] = version
                 results.append({"name": name, "versions": [{k: v for k, v in item.items() if k != "signature"}
-                                  for item in ordered], "inferior_count": len(ordered) - 1,
-                                "total_space_savings": sum(v["size"] for v in ordered[1:])})
+                                  for item in ordered], "inferior_count": len(inferior_indexes),
+                                "total_space_savings": sum(ordered[index]["size"] for index in inferior_indexes)})
             results.sort(key=_result_sort_key)
             self._snapshot = snapshot
             self._scan_inventory = {folder: {item["file_name"]: item["signature"] for versions in grouped.values()
@@ -445,7 +445,7 @@ class MediaCleanup:
                     group["versions"] = [v for v in group["versions"] if v["file_path"] not in removed]
                     group["inferior_count"] = sum(not v["is_best"] for v in group["versions"])
                     group["total_space_savings"] = sum(v["size"] for v in group["versions"] if not v["is_best"])
-                self.result["results"] = [g for g in self.result["results"] if g["inferior_count"]]
+                self.result["results"] = [g for g in self.result["results"] if len(g["versions"]) > 1]
                 self.result["duplicate_groups"] = len(self.result["results"])
                 self.result["total_inferior"] = sum(g["inferior_count"] for g in self.result["results"])
                 self.result["total_space_savings"] = sum(g["total_space_savings"] for g in self.result["results"])
