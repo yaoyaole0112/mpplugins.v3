@@ -125,7 +125,7 @@ def file_cleanup(result, preview):
     return "🗑 清理文件", "\n".join(lines).rstrip()
 
 
-def file_cleanup_confirmation(preview):
+def file_cleanup_confirmation(preview, telegram=False):
     folders = preview.get("folders") or []
     lines = [
         f"待清理：{_count_text(preview.get('file_count', 0), preview.get('dir_count', 0), preview.get('total_bytes', 0))}",
@@ -137,7 +137,8 @@ def file_cleanup_confirmation(preview):
         lines.append(f"📁{name}：{folder['error'] if folder.get('error') else _count_text(folder.get('files', 0), folder.get('dirs', 0), folder.get('size', 0))}")
     if len(folders) > 8:
         lines.append(f"…等共 {len(folders)} 个目录")
-    lines.extend(["", "请在ME工具页面确认或取消。"])
+    lines.extend(["", "请在此Bot管理员私聊中点击下方按钮，或在媒体增强页面确认或取消；两处共用一次性确认。"
+                  if telegram else "请在媒体增强页面确认或取消（Telegram按钮需要配置可接收插件通知的管理员Bot）。"])
     return "⚠️【清理文件】待确认", "\n".join(lines)
 
 

@@ -81,6 +81,7 @@ class P115Client:
     def _new_connection(self):
         return httpx.Client(
             headers=self._headers,
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
             timeout=20, follow_redirects=True,
         )
 
@@ -110,6 +111,8 @@ class P115Client:
 
     def _request(self, method, url, **kwargs):
         attempts = 3 if self._recover_reads and method.upper() in {"GET", "HEAD"} else 1
+        if attempts > 1:
+            kwargs.setdefault("timeout", httpx.Timeout(45, connect=15, write=20, pool=20))
         deadline = time.monotonic() + 240
         for attempt in range(attempts):
             if self._stop_event is not None and self._stop_event.is_set():
@@ -245,7 +248,8 @@ class P115Client:
     def _page(self, cid: str, offset: int):
         last_error = "目录接口异常或账号被风控"
         with self._gate.lock:
-            self._gate.check()
+            if not (self._recover_reads and self._gate.retry_reads):
+                self._gate.check()
             start = self._gate.list_endpoint
         endpoints = LIST_ENDPOINTS[start:] + LIST_ENDPOINTS[:start]
         for url, defaults in endpoints:

@@ -42,6 +42,29 @@ class DirectoryFailureTests(unittest.TestCase):
         self.addCleanup(reset.stop)
         client.enable_read_recovery()
 
+    def test_client_disables_idle_connection_reuse(self):
+        with patch('emetools.p115.httpx.Client') as connection:
+            client = P115Client('test-cookie')
+        limits = connection.call_args.kwargs['limits']
+        self.assertEqual(limits.max_connections, 1)
+        self.assertEqual(limits.max_keepalive_connections, 0)
+        client.client.close()
+
+    def test_cleanup_read_uses_longer_timeout_without_changing_write_timeout(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, json={'state': True, 'count': 0, 'data': []})
+
+        client = self.make_client(handler)
+        client.enable_read_recovery()
+        client.list_children('123')
+        client.delete_files(['456'])
+        self.assertEqual(requests[0].extensions['timeout']['read'], 45)
+        self.assertEqual(requests[0].extensions['timeout']['connect'], 15)
+        self.assertNotEqual(requests[1].extensions['timeout']['read'], 45)
+
     def test_all_405_stops_without_repeated_rounds(self):
         calls = []
 

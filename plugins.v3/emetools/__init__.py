@@ -119,7 +119,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.23"
+    plugin_version = "2.10.24"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -202,6 +202,7 @@ class EmeTools(_PluginBase):
         self._p115_tasks.reopen()
         self._pending_lock = threading.Lock()
         self._pending = {}
+        self._cleanup_telegram_sources = {}
         self._last_run = {}
         if "cookie" in config or "proxy" in config:
             self._persist()
@@ -712,6 +713,7 @@ class EmeTools(_PluginBase):
     def _consume(self, token: str, kind: str):
         with self._pending_lock:
             pending = self._pending.pop(token, None)
+            self._cleanup_telegram_sources.pop(token, None)
         if not pending or pending[1] != kind or time.monotonic() - pending[0] >= 1800:
             raise HTTPException(status_code=400, detail="确认已过期或已处理，请重新预览")
         return pending[2]
@@ -1180,7 +1182,23 @@ class EmeTools(_PluginBase):
         token = self._remember("cleanup", snapshot)
         logger.info("ME工具 清理文件：已生成二次确认，文件=%d，子目录=%d",
                     preview["file_count"], preview["dir_count"])
-        self._send_tool_notice(*notices.file_cleanup_confirmation(preview))
+        try:
+            sources = self._telegram_confirmation_sources()
+        except (RuntimeError, ValueError, OSError) as error:
+            logger.warning("媒体增强 清理文件：Telegram渠道读取失败：%s，保留网页确认", type(error).__name__)
+            sources = {}
+        buttons = None
+        if sources:
+            with self._pending_lock:
+                self._cleanup_telegram_sources = {key: value for key, value in self._cleanup_telegram_sources.items()
+                                                 if key in self._pending}
+                self._cleanup_telegram_sources[token] = set(sources)
+            buttons = [[{"text": "✅ 确认清理", "callback_data": f"[PLUGIN]EmeTools|files:{token}:y"},
+                        {"text": "取消", "callback_data": f"[PLUGIN]EmeTools|files:{token}:n"}]]
+        try:
+            self._send_tool_notice(*notices.file_cleanup_confirmation(preview, telegram=bool(buttons)), buttons=buttons)
+        except Exception as error:
+            logger.warning("媒体增强 清理文件：确认通知发送失败：%s，保留网页确认", type(error).__name__)
         return {"ok": True, "pending": True, "token": token,
                 "message": f"确认将 {preview['file_count']} 个文件及 {preview['dir_count']} 个文件夹移入回收站？"}
 
@@ -1441,11 +1459,11 @@ class EmeTools(_PluginBase):
                 size += known_size
         return count, size
 
-    def _send_tool_notice(self, title: str, text: str) -> None:
+    def _send_tool_notice(self, title: str, text: str, buttons=None) -> None:
         content = f"{title or ''}\n{text or ''}"
-        category = "move" if "转存" in content or "文件转存" in content else \
+        category = "cleanup" if "清理文件" in content else \
+            "move" if "转存" in content or "文件转存" in content else \
             "trash" if "回收站" in content else \
-            "cleanup" if "清理文件" in content else \
             "invalid" if "无效数据" in content else \
             "media" if "低质版本" in content or "去重" in content else \
             "missing" if "缺集" in content else \
@@ -1455,14 +1473,15 @@ class EmeTools(_PluginBase):
             logger.info("ME工具：通知已按设置跳过，类别=%s，标题=%s", category, _log_label(title or "无标题"))
             return
         has_failure = bool(re.search(r"失败(?!\s*0)", content)) or any(marker in content for marker in
-            ("错误", "异常", "跳过", "未配置", "超时"))
+            ("错误", "异常", "跳过", "未配置", "超时", "未完成"))
         if self._notifications.get("only_failures") and not has_failure and "待确认" not in content:
             logger.info("ME工具：仅失败通知已启用，跳过成功通知，类别=%s", category)
             return
         # Skip _PluginBase.post_message's automatic "查看详情" plugin link: EME's
         # Telegram notification contains only its configured title and body.
         self.chain.post_message(Message(channel=NotificationChannel.Telegram, mtype=MessageType.Plugin,
-                                        title=title or None, text=text, link=None))
+                                        title=title or None, text=text, link=None, buttons=buttons,
+                                        parse_mode="plain" if buttons else None))
         logger.info("ME工具：已提交 MP 插件类型通知，标题=%s（由通知渠道决定实际接收 Bot）",
                     _log_label(title or "无标题"))
 
@@ -1491,6 +1510,11 @@ class EmeTools(_PluginBase):
         data = event.event_data if event else None
         if not data or str(data.get("plugin_id") or "").lower() != "emetools":
             return
+        files_match = re.fullmatch(r"files:([a-f0-9]{32}):([yn])", str(data.get("text") or ""))
+        if files_match and self._enabled:
+            threading.Thread(target=self._handle_file_cleanup_confirmation,
+                             args=(files_match.group(1), files_match.group(2) == "y", data.copy()), daemon=True).start()
+            return
         media_match = re.fullmatch(r"media:([a-f0-9]{32}):([yn])", str(data.get("text") or ""))
         if media_match:
             threading.Thread(target=self._handle_media_bot_confirmation,
@@ -1501,6 +1525,44 @@ class EmeTools(_PluginBase):
             return
         threading.Thread(target=self._handle_scheduled_confirmation,
                          args=(match.group(1), match.group(2) == "y", data.copy()), daemon=True).start()
+
+    def _handle_file_cleanup_confirmation(self, token: str, approve: bool, data: dict) -> None:
+        source, user = str(data.get("source") or ""), str(data.get("userid") or "")
+        if (not self._enabled or data.get("channel") not in {NotificationChannel.Telegram, NotificationChannel.Telegram.value}
+                or not source or not user or str(data.get("original_chat_id") or "") != user
+                or not matches_channel_admin(NotificationChannel.Telegram,
+                                             self._telegram_confirmation_sources().get(source), user)):
+            logger.warning("媒体增强 清理文件：Telegram确认被拒绝（需要已配置Bot的管理员私聊）")
+            return
+        try:
+            with self._pending_lock:
+                pending = self._pending.get(token)
+                if (not pending or pending[1] != "cleanup" or time.monotonic() - pending[0] >= 1800
+                        or source not in self._cleanup_telegram_sources.get(token, set())):
+                    raise ValueError("确认已过期、已处理或Bot不匹配，请重新预览")
+            if not approve:
+                self._consume(token, "cleanup")
+                self._media_bot_reply(source, user, "媒体增强", "已取消本次文件清理；网页中的同一确认也已失效。")
+                return
+            self._media_bot_reply(source, user, "媒体增强", "已提交清理确认，正在排队复核目录；完成后会回复结果，请勿重复点击。")
+
+            def confirm():
+                if not self._enabled:
+                    return {"ok": False, "message": "插件已停用，未执行清理"}
+                if not matches_channel_admin(NotificationChannel.Telegram,
+                                             self._telegram_confirmation_sources().get(source), user):
+                    return {"ok": False, "message": "权限配置已变化，未执行清理"}
+                return self._cleanup_confirm(token)
+
+            result = self._p115_tasks.run("cleanup_confirm:" + token, "Telegram确认清理文件", confirm, manual=True)
+            if result.get("queued"):
+                return
+            notice = notices.file_cleanup(result, {"folders": []}) if "deleted" in result else None
+            title, text = notice or ("媒体增强", result.get("message") or "清理已结束")
+            self._media_bot_reply(source, user, title, text)
+        except (HTTPException, RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
+            logger.warning("媒体增强 清理文件：Telegram确认未完成：%s", type(error).__name__)
+            self._media_bot_reply(source, user, "媒体增强", "确认已过期、已处理或执行失败，请重新预览并检查日志；未自动重发删除请求。")
 
     def _handle_scheduled_confirmation(self, token: str, approve: bool, data: dict) -> None:
         source, user = str(data.get("source") or ""), str(data.get("userid") or "")
