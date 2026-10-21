@@ -10,14 +10,14 @@ const props = defineProps({
 const emit = defineEmits(['close'])
 const sections = [
   { key: 'subscription', title: '订阅监控', icon: 'mdi-television-play', detail: '订阅与频道监控' },
-  { key: 'missing', title: '缺集检测', icon: 'mdi-television-search', detail: 'Emby 剧集缺集检测与按季订阅' },
+  { key: 'missing', title: '缺集检测', icon: 'mdi-television-search', detail: '检测 Emby 缺集、搜索资源与管理订阅' },
   { key: 'media', title: '媒体清理', icon: 'mdi-movie-remove-outline', detail: '扫描并清理重复媒体的低质版本' },
-  { key: 'enrichment', title: '数据补全', icon: 'mdi-database-plus-outline', detail: '剧集资料、媒体信息与分集预览图' },
+  { key: 'enrichment', title: '数据补全', icon: 'mdi-database-plus-outline', detail: '电影/剧集资料、媒体信息与分集图片' },
   { key: 'invalid', title: '清理数据', icon: 'mdi-folder-search-outline', detail: '扫描与清理 STRM 独立资料' },
   { key: 'cleanup', title: '清理文件', icon: 'mdi-folder-remove-outline', detail: '115 文件夹清理' },
-  { key: 'move', title: '文件转存', icon: 'mdi-folder-swap-outline', detail: '115 文件夹监控转存' },
+  { key: 'move', title: '文件转存', icon: 'mdi-folder-swap-outline', detail: '按规则定时或手动移动/增量复制' },
   { key: 'trash', title: '清空回收站', icon: 'mdi-delete-alert-outline', detail: '不可恢复的彻底删除' },
-  { key: 'settings', title: '通用设置', icon: 'mdi-cog-outline', detail: '一些相关设置' },
+  { key: 'settings', title: '通用设置', icon: 'mdi-cog-outline', detail: '基础选项、通知与 Telegram 账号' },
 ]
 const active = ref('subscription')
 const busy = ref(false)
@@ -1004,7 +1004,9 @@ async function getMove() {
 async function runMove() {
   if (!settingsLoaded.value) { error.value = '转存规则尚未加载，请刷新后重试'; return }
   if (moveConfigDirty.value) { error.value = '转存规则有未保存的修改，请先保存后再执行'; return }
-  if (!window.confirm('按插件中已保存的转存规则立即移动源目录内容？未保存的修改不会生效。')) return
+  const modes = new Set(rules.value.map(rule => rule.mode === 'copy' ? '复制' : '移动'))
+  const modeSummary = [...modes].join('和') || '移动或复制'
+  if (!window.confirm(`按插件中已保存的转存规则立即${modeSummary}源目录内容？复制规则仅处理新增项目；未保存的修改不会生效。`)) return
   await work(async () => {
     const result = await execute('move_run')
     notice.value = result.message || '转存完成'
@@ -1318,7 +1320,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
         <section class="eme-card"><div class="eme-card-heading"><h3>定时清空</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_trash')">保存任务</button></div><p v-if="scheduleDirty('p115_trash')" class="eme-message eme-warning">回收站定时清空任务有未保存的修改；请点击“保存任务”。</p><label class="eme-switch-label"><input v-model="schedule.p115_trash.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清空（⚠️彻底删除，无法恢复）</span></label><label>执行周期（cron表达式）<input v-model.trim="schedule.p115_trash.cron" placeholder="0 3 * * *" /></label></section>
       </template>
       <template v-if="active === 'move'">
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>文件转存规则</h3><p>每条规则分别将源目录中的文件及子文件夹移动到对应目标目录。</p></div><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存规则</button></div>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>文件转存规则</h3><p>每条规则可选择移动或复制；复制只提交尚未成功复制过的新增项目，可清除复制记录以重新复制全部项目。</p></div><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存规则</button></div>
           <p v-if="moveConfigDirty" class="eme-message eme-warning">转存规则或监控配置有未保存的修改；请选择完整的源和目标目录并点击“保存规则”，才能查看或执行新规则。</p>
           <div v-for="(rule, index) in rules" :key="index" class="eme-move-row"><span class="eme-move-label">源</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.src_name || '选择源目录'" @click="browse('src', index)">{{ rule.src_name || '选择源目录' }}</button><span class="eme-move-arrow" aria-hidden="true">→</span><span class="eme-move-label">目标</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.dst_name || '选择目标目录'" @click="browse('dst', index)">{{ rule.dst_name || '选择目标目录' }}</button><div class="eme-move-mode-options" role="group" :aria-label="`转存方式 ${index + 1}`"><button v-for="item in moveModeOptions" :key="item.value" type="button" class="eme-move-mode-button" :class="{ selected: rule.mode === item.value }" :aria-pressed="rule.mode === item.value" @click="selectMoveMode(index, item.value)">{{ item.title }}</button></div><button class="eme-button text eme-remove" type="button" :aria-label="`移除转存规则 ${index + 1}`" @click="rules.splice(index, 1)">✕</button></div>
           <div class="eme-actions"><button class="eme-button secondary" @click="rules.push({ src_id: '', src_name: '', dst_id: '', dst_name: '', mode: 'move' })">添加规则</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty" @click="getMove">查看待转存</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !rules.length" @click="runMove">立即执行已保存规则</button><button class="eme-button text" :disabled="busy || !settingsLoaded" @click="resetMoveCopyRecords">清理复制记录</button></div>

@@ -85,7 +85,7 @@ def invalid_confirmation(snapshot):
         f"扫描目录：{root}\n待清理：{len(items)} 项\n"
         "确认有效期：发送后 30 分钟；服务重启后失效，过期请重新扫描。\n"
         "这些项目将在二次核验后移入隔离区，不会立即永久删除。\n\n"
-        f"{preview}\n\n请在ME工具的待办中确认或取消。"
+        f"{preview}\n\n请在媒体增强页面的待办中确认或取消。"
     )
 
 

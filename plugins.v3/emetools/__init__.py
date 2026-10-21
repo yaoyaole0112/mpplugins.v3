@@ -117,9 +117,9 @@ class EnrichmentAction(BaseModel):
 
 class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
-    plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
+    plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.25"
+    plugin_version = "2.10.26"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
