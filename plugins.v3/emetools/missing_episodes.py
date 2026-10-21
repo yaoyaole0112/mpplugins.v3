@@ -60,7 +60,7 @@ MISSING_SCAN_LOCK = threading.Lock()
 class MissingEpisodeDetector:
     """Runs locally under the ME plugin identity and owns its scan data."""
 
-    plugin_name = "ME工具 缺集检测"
+    plugin_name = "媒体增强 缺集检测"
     _DATA_KEY = "missing_episodes"
     _TIME_KEY = "last_scan_time"
     _CANCELLED_KEY = "missing_cancelled_subscriptions"

@@ -740,7 +740,7 @@ function downloadMissingCsv() {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 function clearMissing() {
-  if (window.confirm('清空 ME工具 的缺集检测记录？原插件记录不受影响。')) {
+  if (window.confirm('清空 媒体增强 的缺集检测记录？原插件记录不受影响。')) {
     missingResultsPage.value = 1
     missingCommand('clear')
   }

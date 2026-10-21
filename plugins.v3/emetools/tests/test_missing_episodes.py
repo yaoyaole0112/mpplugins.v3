@@ -351,7 +351,7 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
 
     def test_broadcast_status_uses_douban_progress_without_air_dates(self):
         detector = object.__new__(MissingEpisodeDetector)
-        detector.plugin_name = "ME工具 缺集检测"
+        detector.plugin_name = "媒体增强 缺集检测"
         detector._request_json = MagicMock(return_value={
             "is_tv": True, "episodes_count": "24", "episodes_info": "更新至12集", "is_released": True,
         })
@@ -364,7 +364,7 @@ class MissingEpisodeCompletionTests(unittest.TestCase):
 
     def test_backfill_airing_status_fills_old_results_once(self):
         detector = object.__new__(MissingEpisodeDetector)
-        detector.plugin_name = "ME工具 缺集检测"
+        detector.plugin_name = "媒体增强 缺集检测"
         detector._is_scanning = False
         detector._results = [{"SeriesName": "花儿与少年", "Year": "2014", "TmdbId": "121876",
                               "SeasonNum": 8, "TotalEpisodes": 20}]
