@@ -119,7 +119,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.22"
+    plugin_version = "2.10.23"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -195,6 +195,7 @@ class EmeTools(_PluginBase):
             if name == "tools" and "confirm_mode" not in saved:
                 defaults["confirm_mode"] = "moviepilot" if defaults["confirm_cleanup"] else "none"
         self._cleaner = InvalidDataCleaner(self._strm_root)
+        self._p115_stop = threading.Event()
         self._locks = {name: threading.Lock() for name in self._schedule}
         if not hasattr(self, "_p115_tasks"):
             self._p115_tasks = P115TaskCoordinator()
@@ -439,6 +440,8 @@ class EmeTools(_PluginBase):
 
     def stop_service(self) -> None:
         logger.info("ME工具：停止插件服务和 Telegram 监控")
+        if hasattr(self, "_p115_stop"):
+            self._p115_stop.set()
         if hasattr(self, "_p115_tasks"):
             self._p115_tasks.close()
         enrichment = getattr(self, "_enrichment", None)
@@ -1100,7 +1103,7 @@ class EmeTools(_PluginBase):
             logger.info("ME工具 清理文件：没有配置目录，跳过预览")
             return {"ok": False, "message": "请先保存 115 清理目录"}
         remaining = self._p115_cooldown_remaining()
-        if remaining:
+        if remaining and not P115Client.read_recovery_available_for_cookie(self._source_cookie()):
             message = self._p115_deferred_message(remaining)
             logger.info("ME工具 清理文件：%s", message)
             names = configured.get("dir_names") or []
@@ -1125,6 +1128,7 @@ class EmeTools(_PluginBase):
         folders, snapshots = [], {}
         deferred = False
         with self._client() as client:
+            client.enable_read_recovery(self._p115_stop)
             for index, cid in enumerate(identifiers):
                 names = configured.get("dir_names") or []
                 name = (names[index] if index < len(names) else "") or cid
@@ -1143,7 +1147,7 @@ class EmeTools(_PluginBase):
                     logger.warning("ME工具 清理文件：目录 %s（CID %s）预览失败：%s：%s",
                                    _log_label(name), cid, type(error).__name__, reason)
                     if isinstance(error, P115DirectoryUnavailable):
-                        deferred = True
+                        deferred = not error.exhausted
                         names = configured.get("dir_names") or []
                         for position in range(index + 1, len(identifiers)):
                             folders.append({"cid": identifiers[position],
@@ -1190,6 +1194,7 @@ class EmeTools(_PluginBase):
                 return {"ok": False, "message": "清理目录配置已变化，请重新预览"}
             deleted, deleted_dirs, errors, folders = 0, 0, [], []
             with self._client() as client:
+                client.enable_read_recovery(self._p115_stop)
                 for cid, expected in snapshot.items():
                     directory_failed = False
                     detail = {"name": expected.get("name") or cid, "files": 0, "dirs": 0,

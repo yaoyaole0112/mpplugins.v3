@@ -107,7 +107,8 @@ def file_cleanup(result, preview):
     if not (deleted or directories or failures):
         return None
     size = sum(int(item.get("size") or 0) for item in folders)
-    lines = [DIVIDER, f"✅已删除：{_count_text(deleted, directories, size)}"]
+    summary = f"✅已删除：{_count_text(deleted, directories, size)}" if deleted or directories else "⚠️清理未完成：本轮未删除任何项目"
+    lines = [DIVIDER, summary]
     details = []
     for item in preview.get("folders") or []:
         if item.get("error"):

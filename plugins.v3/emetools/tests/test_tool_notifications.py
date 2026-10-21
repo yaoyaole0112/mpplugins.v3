@@ -29,6 +29,9 @@ class NotificationTemplateTests(unittest.TestCase):
         self.assertEqual(title, "🗑 清理文件")
         self.assertEqual(text, "━━━━━━━━━━━━━━━\n✅已删除：2 个文件 + 1 个文件夹（1.00 KB）\n\n📁电影：2 个文件 + 1 个文件夹（1.00 KB）")
         self.assertIn("📁坏目录：读取失败", notices.file_cleanup({}, {"folders": [{"name": "坏目录", "error": "读取失败"}]})[1])
+        failed = notices.file_cleanup({}, {"folders": [{"name": "坏目录", "error": "读取失败"}]})[1]
+        self.assertIn("清理未完成", failed)
+        self.assertNotIn("✅已删除", failed)
 
     def test_trash_and_move_templates(self):
         self.assertIsNone(notices.empty_trash({"count": 0}))

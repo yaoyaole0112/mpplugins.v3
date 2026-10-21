@@ -14,7 +14,10 @@ API = "https://webapi.115.com"
 
 
 class P115DirectoryUnavailable(RuntimeError):
-    pass
+    def __init__(self, message, retryable=False, exhausted=False):
+        super().__init__(message)
+        self.retryable = retryable
+        self.exhausted = exhausted
 
 
 class P115RequestGate:
@@ -24,19 +27,22 @@ class P115RequestGate:
         self.retry_at = 0
         self.failures = 0
         self.list_endpoint = 0
+        self.retry_reads = False
 
     def check(self):
         remaining = self.remaining()
         if remaining > 0:
-            raise P115DirectoryUnavailable(f"115 请求已暂停，约 {remaining} 秒后复查；本轮不再提交请求")
+            raise P115DirectoryUnavailable(f"115 请求已暂停，约 {remaining} 秒后复查；本轮不再提交请求",
+                                          retryable=self.retry_reads)
 
     def remaining(self):
         return max(0, math.ceil(self.retry_at - time.monotonic()))
 
-    def defer(self, minimum=300, retry_after=0):
+    def defer(self, minimum=300, retry_after=0, retry_reads=False):
         self.failures += 1
         delay = min(3600, max(minimum * 2 ** min(self.failures - 1, 4), retry_after))
         self.retry_at = time.monotonic() + delay
+        self.retry_reads = retry_reads
         return delay
 
 
@@ -66,11 +72,25 @@ class P115Client:
         if not cookie.strip():
             raise ValueError("请先在 115 网盘 STRM 助手中配置 Cookie")
         self._gate = _request_gate(cookie)
-        self.client = httpx.Client(
-            headers={"Cookie": cookie.strip(), "Referer": "https://115.com/",
-                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/125.0 Safari/537.36"},
+        self._recover_reads = False
+        self._stop_event = None
+        self._headers = {"Cookie": cookie.strip(), "Referer": "https://115.com/",
+                         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/125.0 Safari/537.36"}
+        self.client = self._new_connection()
+
+    def _new_connection(self):
+        return httpx.Client(
+            headers=self._headers,
             timeout=20, follow_redirects=True,
         )
+
+    def enable_read_recovery(self, stop_event=None):
+        self._recover_reads = True
+        self._stop_event = stop_event
+
+    @staticmethod
+    def read_recovery_available_for_cookie(cookie):
+        return bool(str(cookie or "").strip()) and _request_gate(cookie).retry_reads
 
     def __enter__(self):
         return self
@@ -89,6 +109,41 @@ class P115Client:
         return self._gate.remaining()
 
     def _request(self, method, url, **kwargs):
+        attempts = 3 if self._recover_reads and method.upper() in {"GET", "HEAD"} else 1
+        deadline = time.monotonic() + 240
+        for attempt in range(attempts):
+            if self._stop_event is not None and self._stop_event.is_set():
+                raise P115DirectoryUnavailable("清理任务已停止，未继续读取或提交清理")
+            try:
+                return self._request_once(method, url, **kwargs)
+            except P115DirectoryUnavailable as error:
+                if attempts == 1 or not error.retryable:
+                    raise
+                if attempt == attempts - 1:
+                    raise P115DirectoryUnavailable("115 本轮读取恢复已尝试 3 次，仍未恢复；未重放任何写入请求",
+                                                  retryable=True, exhausted=True) from None
+                logger.info("媒体增强 115：本轮只读恢复 %d/2，等待共享退避 %d 秒后重新连接；不重放写入",
+                            attempt + 1, self._gate.remaining())
+                while self._gate.remaining():
+                    if self._stop_event is not None and self._stop_event.is_set():
+                        raise P115DirectoryUnavailable("清理任务已停止，未继续读取或提交清理")
+                    if not self._gate.retry_reads:
+                        self._gate.check()
+                    if time.monotonic() >= deadline:
+                        raise P115DirectoryUnavailable("115 本轮只读恢复已等待 240 秒，仍未恢复；未重放任何写入请求",
+                                                      retryable=True, exhausted=True)
+                    time.sleep(min(1, self._gate.remaining()))
+                self.client.close()
+                self.client = self._new_connection()
+                for position, (list_url, defaults) in enumerate(LIST_ENDPOINTS):
+                    if url == list_url:
+                        url, defaults = LIST_ENDPOINTS[(position + 1) % len(LIST_ENDPOINTS)]
+                        original = kwargs.get("params") or {}
+                        kwargs = {**kwargs, "params": {**defaults, **{key: original[key] for key in
+                                  ("cid", "limit", "offset") if key in original}}}
+                        break
+
+    def _request_once(self, method, url, **kwargs):
         endpoint = httpx.URL(url)
         params = kwargs.get("params") or {}
         cid = str(params.get("cid") or "")
@@ -99,15 +154,19 @@ class P115Client:
                 delay = 1 - (time.monotonic() - self._gate.last_finished)
                 if delay > 0:
                     time.sleep(delay)
+            if self._stop_event is not None and self._stop_event.is_set():
+                raise P115DirectoryUnavailable("清理任务已停止，未继续读取或提交清理")
             try:
                 response = self.client.request(method, url, **kwargs)
             except httpx.RequestError as error:
-                delay = self._gate.defer(minimum=60)
+                read_only = method.upper() in {"GET", "HEAD"}
+                delay = self._gate.defer(minimum=60, retry_reads=read_only)
                 logger.warning("媒体增强 115：%s %s%s CID=%s 网络异常=%s，共享退避 %d 秒；不重放提交",
                                method, endpoint.host, endpoint.path, safe_cid, type(error).__name__, delay)
+                reason = "目录或信息读取失败，未提交修改" if read_only else "提交结果可能不确定，请先核实，本轮不自动重试"
                 raise P115DirectoryUnavailable(
-                    f"115 网络请求失败（{type(error).__name__}），已暂停请求 {delay} 秒；"
-                    "提交结果可能不确定，请先核实，本轮不自动重试") from None
+                    f"115 网络请求失败（{type(error).__name__}），已暂停请求 {delay} 秒；{reason}",
+                    retryable=read_only) from None
             finally:
                 self._gate.last_finished = time.monotonic()
             try:
@@ -139,6 +198,11 @@ class P115Client:
                             method, endpoint.host, endpoint.path, response.status_code)
             self._gate.failures = 0
             self._gate.retry_at = 0
+            self._gate.retry_reads = False
+            for position, (list_url, defaults) in enumerate(LIST_ENDPOINTS):
+                if url == list_url:
+                    self._gate.list_endpoint = position
+                    break
             logger.debug("媒体增强 115：%s %s%s CID=%s HTTP=%d",
                          method, endpoint.host, endpoint.path, safe_cid, response.status_code)
             return response

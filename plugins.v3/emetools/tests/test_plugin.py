@@ -924,6 +924,42 @@ class PluginTests(unittest.TestCase):
         client.delete_files.assert_not_called()
         notify.assert_called_once()
 
+    def test_scheduled_cleanup_recovers_read_and_deletes_in_same_run(self):
+        self.plugin._enabled = True
+        self.plugin.get_config.return_value = {"cookies": "same-run-recovery"}
+        self.plugin._schedule["p115_cleanup"]["enabled"] = True
+        self.plugin._schedule["p115_cleanup"]["dir_ids"] = ["123"]
+        calls = []
+        clock = [100.0]
+
+        def handler(request):
+            calls.append(request)
+            if len(calls) == 1:
+                raise httpx.RemoteProtocolError("disconnected", request=request)
+            if request.method == "POST":
+                return httpx.Response(200, json={"state": True})
+            return httpx.Response(200, json={"state": True, "count": 1,
+                                  "data": [{"fid": "456", "fc": "1", "fs": 4}]})
+
+        def connection():
+            client = httpx.Client(transport=httpx.MockTransport(handler))
+            self.addCleanup(client.close)
+            return client
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        self.plugin._client = lambda: P115Client("same-run-recovery")
+        with patch("emetools.p115.P115Client._new_connection", side_effect=connection), \
+                patch("emetools.p115.time.monotonic", side_effect=lambda: clock[0]), \
+                patch("emetools.p115.time.sleep", side_effect=advance), \
+                patch.object(self.plugin, "_send_tool_notice") as notify:
+            self.plugin._run_scheduled("p115_cleanup")
+        self.assertEqual(sum(request.method == "POST" for request in calls), 1)
+        self.assertEqual(calls[-1].url.path, "/rb/delete")
+        notify.assert_called_once()
+        self.assertIn("1 个文件", str(notify.call_args))
+
     def test_manual_cleanup_network_failure_keeps_details_without_confirmation(self):
         self.plugin._schedule["p115_cleanup"]["dir_ids"] = ["123", "456", "789"]
         client = MagicMock()
@@ -939,6 +975,24 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(client.list_files_in_dir.call_count, 1)
         self.assertFalse(self.plugin._pending)
         client.delete_files.assert_not_called()
+
+    def test_scheduled_cleanup_reports_exhausted_recovery_instead_of_deferring(self):
+        self.plugin._enabled = True
+        self.plugin.get_config.return_value = {"cookies": "test"}
+        self.plugin._schedule["p115_cleanup"]["enabled"] = True
+        self.plugin._schedule["p115_cleanup"]["dir_ids"] = ["123"]
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.list_files_in_dir.side_effect = P115DirectoryUnavailable("本轮读取已尝试3次", exhausted=True)
+        self.plugin._client = lambda: client
+        with patch.object(self.plugin, "_cleanup_confirm") as confirm, \
+                patch.object(self.plugin, "_send_tool_notice") as notify:
+            self.plugin._run_scheduled("p115_cleanup")
+        confirm.assert_not_called()
+        client.delete_files.assert_not_called()
+        notify.assert_called_once()
+        self.assertIn("清理未完成", str(notify.call_args))
+        self.assertNotIn("✅已删除", str(notify.call_args))
 
     def test_directory_stats_propagate_shared_restriction(self):
         client = MagicMock()

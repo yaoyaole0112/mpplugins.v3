@@ -31,6 +31,17 @@ class DirectoryFailureTests(unittest.TestCase):
         self.addCleanup(client.client.close)
         return client
 
+    def enable_recovery(self, client, handler):
+        def reconnect():
+            connection = httpx.Client(transport=httpx.MockTransport(handler))
+            self.addCleanup(connection.close)
+            return connection
+
+        reset = patch.object(client, "_new_connection", side_effect=reconnect)
+        reset.start()
+        self.addCleanup(reset.stop)
+        client.enable_read_recovery()
+
     def test_all_405_stops_without_repeated_rounds(self):
         calls = []
 
@@ -192,6 +203,96 @@ class DirectoryFailureTests(unittest.TestCase):
         self.assertEqual(client.list_children("123"), ([], []))
         self.assertEqual(client.cooldown_remaining(), 0)
         self.assertEqual(len(calls), 2)
+
+    def test_read_recovery_reconnects_and_keeps_pagination_in_this_run(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            if len(calls) == 1:
+                raise httpx.RemoteProtocolError("disconnected", request=request)
+            return httpx.Response(200, json={"state": True, "count": 0, "data": []})
+
+        client = self.make_client(handler)
+        self.enable_recovery(client, handler)
+        self.assertEqual(client._page("123", 1000), ([], [], 0, 0))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1].url.host, "proapi.115.com")
+        self.assertEqual(calls[1].url.params["cid"], "123")
+        self.assertEqual(calls[1].url.params["offset"], "1000")
+        self.assertEqual(calls[1].url.params["app_ver"], "36.2.28")
+        self.assertEqual(client._gate.list_endpoint, 1)
+        self.assertGreaterEqual(self.clock, 160)
+
+    def test_read_recovery_is_bounded_and_reports_exhaustion(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            raise httpx.RemoteProtocolError("disconnected", request=request)
+
+        client = self.make_client(handler)
+        self.enable_recovery(client, handler)
+        with self.assertRaisesRegex(P115DirectoryUnavailable, "已尝试 3 次") as raised:
+            client.list_children("123")
+        self.assertTrue(raised.exception.exhausted)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([request.url.host for request in calls], ["115cdn.com", "proapi.115.com", "aps.115.com"])
+
+    def test_read_recovery_does_not_retry_access_restrictions_or_authentication(self):
+        for status in (401, 403, 405, 429):
+            with self.subTest(status=status), patch.dict(_REQUEST_GATES, clear=True):
+                client = self.make_client(lambda request: httpx.Response(status))
+                client.enable_read_recovery()
+                with patch("emetools.p115.time.sleep") as sleep:
+                    with self.assertRaises(P115DirectoryUnavailable):
+                        client.list_children("123")
+                    sleep.assert_not_called()
+
+    def test_recovery_enabled_still_never_replays_a_delete(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            raise httpx.RemoteProtocolError("disconnected", request=request)
+
+        client = self.make_client(handler)
+        self.enable_recovery(client, handler)
+        with self.assertRaisesRegex(P115DirectoryUnavailable, "结果可能不确定"):
+            client.delete_files(["123"])
+        self.assertEqual(len(calls), 1)
+
+    def test_stop_during_recovery_cancels_before_next_request(self):
+        calls = []
+        stop = threading.Event()
+
+        def handler(request):
+            calls.append(request)
+            raise httpx.RemoteProtocolError("disconnected", request=request)
+
+        client = self.make_client(handler)
+        client.enable_read_recovery(stop)
+        with patch("emetools.p115.time.sleep", side_effect=lambda delay: stop.set()):
+            with self.assertRaisesRegex(P115DirectoryUnavailable, "清理任务已停止"):
+                client.list_children("123")
+        self.assertEqual(len(calls), 1)
+
+    def test_preexisting_network_cooldown_is_waited_in_this_run(self):
+        client = self.make_client(lambda request: httpx.Response(200, json={"state": True, "count": 0, "data": []}))
+        self.enable_recovery(client, lambda request: httpx.Response(200, json={"state": True, "count": 0, "data": []}))
+        client._gate.defer(minimum=60, retry_reads=True)
+        self.assertTrue(P115Client.read_recovery_available_for_cookie("test-cookie"))
+        self.assertEqual(client.list_children("123"), ([], []))
+        self.assertGreaterEqual(self.clock, 160)
+
+    def test_extended_shared_cooldown_has_a_bounded_wait(self):
+        client = self.make_client(lambda request: httpx.Response(200))
+        client.enable_read_recovery()
+        client._gate.defer(minimum=3600, retry_reads=True)
+        with self.assertRaisesRegex(P115DirectoryUnavailable, "已等待 240 秒") as raised:
+            client.list_children("123")
+        self.assertTrue(raised.exception.exhausted)
+        self.assertEqual(self.clock, 340)
 
     def test_successful_requests_are_serialized_and_spaced_across_clients(self):
         active, peak, times = 0, 0, []
