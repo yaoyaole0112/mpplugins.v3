@@ -173,6 +173,26 @@ class DirectoryFailureTests(unittest.TestCase):
         self.assertNotIn("secret-cookie", str(raised.exception))
         self.assertNotIn("secret-cookie", str(logger.mock_calls))
 
+    def test_remote_disconnect_stops_reads_until_cooldown_then_recovers(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            if len(calls) == 1:
+                raise httpx.RemoteProtocolError("Server disconnected without sending a response.", request=request)
+            return httpx.Response(200, json={"state": True, "count": 0, "data": []})
+
+        client = self.make_client(handler)
+        with self.assertRaisesRegex(P115DirectoryUnavailable, "RemoteProtocolError"):
+            client.list_children("123")
+        with self.assertRaisesRegex(P115DirectoryUnavailable, "请求已暂停"):
+            client.list_children("456")
+        self.assertEqual(len(calls), 1)
+        self.advance(60)
+        self.assertEqual(client.list_children("123"), ([], []))
+        self.assertEqual(client.cooldown_remaining(), 0)
+        self.assertEqual(len(calls), 2)
+
     def test_successful_requests_are_serialized_and_spaced_across_clients(self):
         active, peak, times = 0, 0, []
         tracking = threading.Lock()

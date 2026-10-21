@@ -119,7 +119,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "订阅频道监控、缺集检测、媒体清理、数据补全、无效数据清理、115 文件清理、回收站清空与文件转存。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.21"
+    plugin_version = "2.10.22"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1123,6 +1123,7 @@ class EmeTools(_PluginBase):
             }
         logger.info("ME工具 清理文件：开始预览 %d 个目录", len(identifiers))
         folders, snapshots = [], {}
+        deferred = False
         with self._client() as client:
             for index, cid in enumerate(identifiers):
                 names = configured.get("dir_names") or []
@@ -1142,6 +1143,7 @@ class EmeTools(_PluginBase):
                     logger.warning("ME工具 清理文件：目录 %s（CID %s）预览失败：%s：%s",
                                    _log_label(name), cid, type(error).__name__, reason)
                     if isinstance(error, P115DirectoryUnavailable):
+                        deferred = True
                         names = configured.get("dir_names") or []
                         for position in range(index + 1, len(identifiers)):
                             folders.append({"cid": identifiers[position],
@@ -1153,7 +1155,9 @@ class EmeTools(_PluginBase):
                     sum(item["files"] for item in folders), sum(item["dirs"] for item in folders),
                     sum(bool(item["error"]) for item in folders))
         complete = len(snapshots) == len(identifiers)
-        return {"ok": complete, "message": "预览完成" if complete else "部分目录预览失败，本轮未执行任何清理，请稍后重新预览",
+        return {"ok": complete, "deferred": deferred,
+                "message": "预览完成" if complete else ("115 网络暂不可用，本轮未执行清理，等待下一轮自动复查"
+                                                           if deferred else "部分目录预览失败，本轮未执行任何清理，请稍后重新预览"),
                 "folders": folders, "file_count": sum(item["files"] for item in folders),
                 "dir_count": sum(item["dirs"] for item in folders), "total_bytes": sum(item["size"] for item in folders),
                 "snapshots": snapshots}

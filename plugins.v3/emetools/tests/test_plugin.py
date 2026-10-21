@@ -834,7 +834,7 @@ class PluginTests(unittest.TestCase):
         self.assertFalse(confirmed["ok"])
         client.delete_files.assert_not_called()
 
-    def test_scheduled_cleanup_stops_on_partial_preview_without_confirmation(self):
+    def test_scheduled_cleanup_defers_on_115_preview_failure_without_false_notification(self):
         self.plugin._enabled = True
         self.plugin.get_config.return_value = {"cookies": "test"}
         self.plugin._schedule["p115_cleanup"]["enabled"] = True
@@ -846,14 +846,19 @@ class PluginTests(unittest.TestCase):
             [{"fid": "file", "size": 4}], P115DirectoryUnavailable("HTTP 405；已暂停请求 300 秒")]
         client.list_children.return_value = ([], [])
         self.plugin._client = lambda: client
+        preview = self.plugin._cleanup_preview()
+        self.assertTrue(preview["deferred"])
+        self.assertIn("下一轮", preview["message"])
+        client.list_files_in_dir.reset_mock()
+        client.list_files_in_dir.side_effect = [
+            [{"fid": "file", "size": 4}], P115DirectoryUnavailable("HTTP 405；已暂停请求 300 秒")]
         with patch.object(self.plugin, "_cleanup_confirm") as confirm, \
                 patch.object(self.plugin, "_send_tool_notice") as notify, patch("emetools.logger") as logger:
             self.plugin._run_scheduled("p115_cleanup")
         confirm.assert_not_called()
         client.delete_files.assert_not_called()
         self.assertEqual(client.list_files_in_dir.call_count, 2)
-        notify.assert_called_once()
-        self.assertIn("blocked", str(notify.call_args))
+        notify.assert_not_called()
         self.assertNotIn("目录配置已变化", str(logger.mock_calls))
 
     def test_115_scheduled_jobs_queue_instead_of_overlapping(self):
@@ -897,8 +902,41 @@ class PluginTests(unittest.TestCase):
         self.plugin._client = lambda: client
         result = self.plugin._cleanup_request()
         self.assertFalse(result["ok"])
+        self.assertFalse(result["deferred"])
         self.assertIn("预览失败", result["message"])
         self.assertEqual(result["file_count"], 1)
+        self.assertFalse(self.plugin._pending)
+        client.delete_files.assert_not_called()
+
+    def test_scheduled_cleanup_still_notifies_on_non_deferred_preview_failure(self):
+        self.plugin._enabled = True
+        self.plugin.get_config.return_value = {"cookies": "test"}
+        self.plugin._schedule["p115_cleanup"]["enabled"] = True
+        self.plugin._schedule["p115_cleanup"]["dir_ids"] = ["123"]
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.list_files_in_dir.side_effect = RuntimeError("读取失败")
+        self.plugin._client = lambda: client
+        with patch.object(self.plugin, "_cleanup_confirm") as confirm, \
+                patch.object(self.plugin, "_send_tool_notice") as notify:
+            self.plugin._run_scheduled("p115_cleanup")
+        confirm.assert_not_called()
+        client.delete_files.assert_not_called()
+        notify.assert_called_once()
+
+    def test_manual_cleanup_network_failure_keeps_details_without_confirmation(self):
+        self.plugin._schedule["p115_cleanup"]["dir_ids"] = ["123", "456", "789"]
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.list_files_in_dir.side_effect = P115DirectoryUnavailable("RemoteProtocolError；已暂停请求 60 秒")
+        self.plugin._client = lambda: client
+        result = self.plugin._cleanup_request()
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["deferred"])
+        self.assertEqual(len(result["folders"]), 3)
+        self.assertIn("RemoteProtocolError", result["folders"][0]["error"])
+        self.assertIn("本轮未读取", result["folders"][1]["error"])
+        self.assertEqual(client.list_files_in_dir.call_count, 1)
         self.assertFalse(self.plugin._pending)
         client.delete_files.assert_not_called()
 
