@@ -1,0 +1,45 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --v-theme-background: 38,40,44; --v-theme-surface: 46,45,58; --v-theme-on-surface: 223,218,244; --v-theme-primary: 158,105,245; --v-theme-on-primary: 255,255,255; --v-border-color: 160,150,180; --v-border-opacity: .15; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: sans-serif; background: #333; }
+  .v-overlay { position: fixed; inset: 0; display: flex; justify-content: center; align-items: center; }
+  .v-overlay__content { width: 80vw; height: 70vh; max-height: 70vh; margin: 24px; overflow: hidden; }
+  .v-card { height: 85%; max-height: 85%; overflow: hidden; }
+  .v-card-text { height: 100%; max-height: 60vh; padding: 24px; overflow: auto; }
+</style>
+<div class="v-overlay"><div class="v-overlay__content" role="dialog"><div class="v-card"><div class="v-card-text"><div id="app"></div></div></div></div></div>
+<script type="module">
+  import { createApp } from 'vue'
+  import Page from '../../src/Page.vue'
+  const channels = ['115网盘影视热更频道', '115网盘资源分享频道', '115网盘资源收藏']
+  const scope = { enabled: true, channels, keywords: ['漫威'], blacklist: ['1080[Pp]', '720[Pp]'] }
+  const config = { enabled: false, cron: '35 3 * * *', server_names: ['Q4'], library_names: [], skip_series_ids: [], episode_overrides: [], auto_cancel_mode: 'ended_or_aired' }
+  const results = Array.from({ length: 9 }, (_, index) => ({ ServerName: 'Q4', LibraryName: '国产剧', SeriesName: `很长的测试剧集名称${index + 1}`, AiringStatus: '在播', SeasonFormatted: 'S1', SeasonNum: 1, MissingEpisodes: '11、12', TotalEpisodes: 24, TmdbId: String(100 + index) }))
+  const api = {
+    async get(path) {
+      if (path.endsWith('/monitor/status')) return { logged_in: true, sub: scope, kw: scope, hits: channels.map(channel => ({ time: '10-21 18:12:19', channel, matches: ['大展宏图'], delivery: '原消息转发' })) }
+      if (path.endsWith('/missing/fill/status')) return { tasks: [], max_points: 4, busy: false }
+      if (path.endsWith('/missing/status')) return { config, results, cancelled_subscriptions: [], scan_status: {}, last_scan_time: '2026-10-21 18:00:00' }
+      if (path.endsWith('/missing/options')) return { servers: [{ value: 'Q4', title: 'Q4' }], libraries: [], series: [] }
+      if (path.endsWith('/media-cleanup/status')) return { config: { rules: [], library_ids: [] }, running: false, result: null }
+      if (path.endsWith('/media-cleanup/libraries')) return { libraries: [] }
+      if (path.endsWith('/enrichment/status')) return { running: false }
+      if (path.endsWith('/enrichment/config')) return { config: {}, ai_available: true }
+      if (path.endsWith('/status')) return { settings: {}, schedule: { p115_move: { rules: [{ src_id: '1', src_name: '很长的源文件夹名称离线下载', dst_id: '2', dst_name: '资源池', mode: 'move' }] }, p115_cleanup: { dir_ids: ['1','2','3'], dir_names: channels } } }
+      throw new Error(`Unmocked GET ${path}`)
+    },
+    async post(path, body) {
+      if (body.operation === 'tv_libraries') return { items: [] }
+      if (['pending', 'p115_tasks'].includes(body.operation)) return { pending: [], tasks: [] }
+      if (['p115_dirs', 'root_dirs'].includes(body.operation)) return { path: '/strm', dirs: [] }
+      throw new Error(`No writes permitted in layout fixture: ${path}`)
+    },
+  }
+  const host = document.querySelector('.v-overlay__content')
+  window.originalHostStyle = host.getAttribute('style')
+  window.fixtureApp = createApp(Page, { api, onClose: () => window.fixtureApp.unmount() })
+  window.fixtureApp.mount('#app')
+  window.fixtureReady = true
+</script>

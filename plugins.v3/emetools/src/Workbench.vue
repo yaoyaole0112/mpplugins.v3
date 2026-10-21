@@ -1160,7 +1160,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
             <p v-if="missing.scan_status.error">{{ missing.scan_status.error }}</p>
             <details v-if="missing.scan_status.issues?.length"><summary>查看未完成项目</summary><p v-for="(issue, index) in missing.scan_status.issues" :key="index">{{ issue.server }} / {{ issue.library }} / {{ issue.series }}：{{ issue.reason }}</p></details>
           </div>
-          <div v-if="missing.results.length" class="eme-missing-results"><table><thead><tr><th>服务器</th><th>媒体库</th><th>剧集名称</th><th>在播状态</th><th>缺失季度</th><th>缺失集号</th><th>总集数</th><th>资源补全</th><th>跳过检测</th></tr></thead><tbody><tr v-for="item in missingResultsPageItems" :key="fillKey(item).join(':')"><td>{{ item.ServerName }}</td><td>{{ item.LibraryName }}</td><td>{{ item.SeriesName }}<small v-if="item.PendingReview" class="eme-missing-target" :title="item.ReviewReason"> · 待复查</small></td><td><span class="eme-air-status" :class="airingClass(item.AiringStatus)">{{ item.AiringStatus || '未知' }}</span></td><td>{{ item.SeasonFormatted }}</td><td>{{ item.MissingEpisodes }}</td><td>{{ item.TotalEpisodes }} 集</td><td><button class="eme-button secondary" :disabled="busy || !fillLoaded || fill.busy || missing.scanning || item.PendingReview || fillBlocked(item)" @click="fillCommand('start', { key: fillKey(item) })">{{ item.PendingReview ? '待复查' : fillBlocked(item) ? '已执行' : '搜索补全' }}</button></td><td><button class="eme-button secondary" :disabled="busy || missing.scanning || !item.TmdbId" @click="skipMissingSeries(item)">跳过检测</button></td></tr></tbody></table>
+          <div v-if="missing.results.length" class="eme-missing-results"><div class="eme-missing-table-scroll" tabindex="0" aria-label="检测结果表格，可左右滑动"><table><thead><tr><th>服务器</th><th>媒体库</th><th>剧集名称</th><th>在播状态</th><th>缺失季度</th><th>缺失集号</th><th>总集数</th><th>资源补全</th><th>跳过检测</th></tr></thead><tbody><tr v-for="item in missingResultsPageItems" :key="fillKey(item).join(':')"><td>{{ item.ServerName }}</td><td>{{ item.LibraryName }}</td><td>{{ item.SeriesName }}<small v-if="item.PendingReview" class="eme-missing-target" :title="item.ReviewReason"> · 待复查</small></td><td><span class="eme-air-status" :class="airingClass(item.AiringStatus)">{{ item.AiringStatus || '未知' }}</span></td><td>{{ item.SeasonFormatted }}</td><td>{{ item.MissingEpisodes }}</td><td>{{ item.TotalEpisodes }} 集</td><td><button class="eme-button secondary" :disabled="busy || !fillLoaded || fill.busy || missing.scanning || item.PendingReview || fillBlocked(item)" @click="fillCommand('start', { key: fillKey(item) })">{{ item.PendingReview ? '待复查' : fillBlocked(item) ? '已执行' : '搜索补全' }}</button></td><td><button class="eme-button secondary" :disabled="busy || missing.scanning || !item.TmdbId" @click="skipMissingSeries(item)">跳过检测</button></td></tr></tbody></table></div>
             <nav v-if="missingResultsPageCount > 1" class="eme-pagination" aria-label="检测结果分页"><button class="eme-button secondary" :disabled="missingResultsPage <= 1" @click="changeMissingResultsPage(-1)"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ missingResultsPage }} / {{ missingResultsPageCount }} 页 · 共 {{ missing.results.length }} 条</span><button class="eme-button secondary" :disabled="missingResultsPage >= missingResultsPageCount" @click="changeMissingResultsPage(1)">下一页<i class="mdi mdi-chevron-right" /></button></nav>
           </div><p v-else class="eme-hint">暂无缺失数据或尚未运行扫描。</p>
         </section>
@@ -1282,7 +1282,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           <p v-if="scope === 'kw'" class="eme-hint">添加或移除频道、关键词会立即保存；运行中的监控请先停止再修改。</p>
           <p v-else class="eme-hint">订阅名称和媒体资料自动从 MoviePilot「我的订阅」读取，每 5 分钟更新一次；订阅列表请在 MoviePilot 中查看。</p>
         </section>
-        <section v-if="monitor.hits?.length" class="eme-card"><h3>最近命中</h3><div v-for="(hit, index) in monitor.hits" :key="index" class="eme-result">{{ hit.time }} · {{ hit.channel }} · {{ hit.matches?.join('、') }}<span v-if="hit.delivery"> · {{ hit.delivery }}</span></div></section>
+        <section v-if="monitor.hits?.length" class="eme-card"><h3>最近命中</h3><div v-for="(hit, index) in monitor.hits" :key="index" class="eme-result eme-hit">{{ hit.time }} · {{ hit.channel }} · {{ hit.matches?.join('、') }}<span v-if="hit.delivery" class="eme-hit-delivery"> · {{ hit.delivery }}</span></div></section>
       </template>
       <template v-if="active === 'invalid'">
         <section class="eme-card">
@@ -1577,5 +1577,44 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
   :global(.eme-app-host-lock){box-sizing:border-box!important;width:100%!important;height:auto!important;max-height:none!important;margin-inline:0!important;padding-inline:0!important;overflow:visible!important;overscroll-behavior:auto!important}
   :global(body.eme-app-document-lock){height:auto!important;overflow:visible!important;overscroll-behavior:auto!important}
   .eme-toast{left:max(16px,env(safe-area-inset-left,0px));right:max(16px,env(safe-area-inset-right,0px));bottom:calc(96px + env(safe-area-inset-bottom,0px));width:auto;min-width:0;max-width:none;max-height:35dvh;overflow-y:auto;padding:12px 14px;z-index:10000}
+}
+@media(max-width:760px){
+  .eme-shell.eme-shell--dialog{min-height:0;height:100%;padding:8px 0 0;overflow:hidden}
+  .eme-shell--dialog .eme-sidebar{flex:0 0 auto;padding:4px 16px 0}
+  .eme-shell--dialog .eme-brand{min-height:46px;padding:0 4px 6px}
+  .eme-shell--dialog .eme-main{flex:1 1 0;min-height:0;height:auto;padding:10px 16px calc(20px + env(safe-area-inset-bottom,0px));overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+  .eme-shell--dialog .eme-card{padding:16px;margin-bottom:12px}
+  .eme-shell--dialog .eme-card-heading{align-items:flex-start;gap:10px}
+  .eme-shell--dialog .eme-card-heading>div:first-child{flex:1 1 100%;min-width:0}
+  .eme-shell--dialog .eme-header-actions,.eme-shell--dialog .eme-card-heading>.eme-inline{width:100%;min-width:0}
+  .eme-shell--dialog .eme-card-heading>.eme-inline>.eme-button{flex:1 1 auto}
+  .eme-shell--dialog .eme-hit{display:block;min-width:0;line-height:1.55;overflow-wrap:anywhere}
+  .eme-shell--dialog .eme-hit-delivery{display:block;min-width:0;max-width:100%}
+  .eme-shell--dialog .eme-hit-delivery{margin-top:4px;color:rgba(var(--v-theme-on-surface),.68)}
+  .eme-shell--dialog .eme-missing-results{overflow:visible;min-width:0}
+  .eme-shell--dialog .eme-missing-results::before{content:'左右滑动表格，查看全部信息与操作';display:block;margin-bottom:8px;font-size:12px;color:rgba(var(--v-theme-on-surface),.62)}
+  .eme-shell--dialog .eme-missing-table-scroll{max-width:100%;overflow-x:auto;overscroll-behavior-inline:contain;-webkit-overflow-scrolling:touch;scrollbar-gutter:auto;border-radius:8px}
+  .eme-shell--dialog .eme-missing-table-scroll:focus-visible{outline:2px solid rgb(var(--v-theme-primary));outline-offset:2px}
+  .eme-shell--dialog .eme-missing-results table{width:900px;min-width:900px}
+  .eme-shell--dialog .eme-pagination{flex-wrap:wrap;gap:8px}
+  .eme-shell--dialog .eme-pagination>span{flex:1 1 100%;order:-1;text-align:center}
+  .eme-shell--dialog .eme-move-row{display:grid;grid-template-columns:28px minmax(0,1fr) 28px;gap:8px;padding:10px;align-items:center}
+  .eme-shell--dialog .eme-move-row .eme-move-label:first-child{grid-column:1;grid-row:1}
+  .eme-shell--dialog .eme-move-row .eme-folder-choice:nth-child(2){grid-column:2/4;grid-row:1;width:100%;max-width:none;min-width:0}
+  .eme-shell--dialog .eme-move-row .eme-move-arrow{display:none}
+  .eme-shell--dialog .eme-move-row .eme-move-label:nth-child(4){grid-column:1;grid-row:2}
+  .eme-shell--dialog .eme-move-row .eme-folder-choice:nth-child(5){grid-column:2/4;grid-row:2;width:100%;max-width:none;min-width:0}
+  .eme-shell--dialog .eme-move-mode-options{grid-column:1/3;grid-row:3;width:100%;margin:0}
+  .eme-shell--dialog .eme-move-row>.eme-remove{grid-column:3;grid-row:3;justify-self:end}
+  .eme-shell--dialog .eme-actions,.eme-shell--dialog .eme-inline,.eme-shell--dialog .eme-options{min-width:0}
+  .eme-shell--dialog .eme-actions>.eme-button,.eme-shell--dialog .eme-inline>.eme-button{min-height:40px}
+  .eme-shell--dialog .eme-episode-override-row{align-items:flex-start;overflow-wrap:anywhere}
+  .eme-shell--dialog .eme-episode-override-row>span{min-width:0}
+  .eme-shell--dialog .eme-media-scan-actions{align-items:flex-start;flex-wrap:wrap}
+  .eme-shell--dialog .eme-media-scan-status{flex-basis:100%}
+  .eme-shell--dialog .eme-enrich-preview-actions{flex-wrap:wrap;overflow:visible;gap:8px}
+  .eme-shell--dialog .eme-enrich-preview-actions>.eme-button{flex:1 1 auto}
+  .eme-shell--dialog .eme-media-rule-footer{flex-wrap:wrap}
+  .eme-shell--dialog .eme-media-rule-footer>.eme-button{flex:1 1 auto}
 }
 </style>
