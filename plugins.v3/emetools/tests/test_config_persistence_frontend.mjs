@@ -7,7 +7,7 @@ const source = fs.readFileSync(new URL('../src/Workbench.vue', import.meta.url),
 const monitorFunctions = source.slice(source.indexOf('async function loadMonitor('), source.indexOf('async function loadMissing(')) +
   source.slice(source.indexOf('async function monitorCommand('), source.indexOf('function logoutTelegram('))
 const scheduleFunctions = source.slice(source.indexOf('async function saveSchedule('), source.indexOf('async function startScan(')) +
-  source.slice(source.indexOf('async function getPreview('), source.indexOf('async function requestCleanup('))
+  source.slice(source.indexOf('async function getPreview('), source.indexOf('async function confirmCleanup('))
 const mediaFunctions = source.slice(source.indexOf('function applyMediaStatus('), source.indexOf('function scheduleMediaPoll(')) +
   source.slice(source.indexOf('async function mediaCommand('), source.indexOf('async function deleteMedia('))
 
@@ -174,7 +174,7 @@ test('visible warnings distinguish drafts from saved actions in every affected p
   for (const section of ['tools', 'p115_cleanup', 'p115_trash']) {
     assert.ok(source.includes(`v-if="scheduleDirty('${section}')"`))
   }
-  assert.ok(source.includes(':disabled="busy || !settingsLoaded || cleanupDirsDirty" @click="getPreview"'))
+  assert.ok(source.includes(':disabled="busy || !settingsLoaded || cleanupDirsDirty || !!cleanupToken" @click="getPreview"'))
   assert.ok(source.includes(':disabled="busy || !settingsLoaded || moveConfigDirty || !rules.length" @click="runMove"'))
 })
 

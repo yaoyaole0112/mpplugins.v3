@@ -487,9 +487,23 @@ async function pollP115Tasks() {
     const result = await post('action', { operation: 'p115_tasks' })
     if (!disposed) p115Tasks.value = result.tasks || []
   } catch {}
-  finally {
-    if (!disposed) p115PollTimer = setTimeout(pollP115Tasks, 3000)
+  if (cleanupToken.value) {
+    try {
+      const token = cleanupToken.value
+      const status = await post('action', { operation: 'cleanup_status', token })
+      if (!disposed && cleanupToken.value === token) {
+        if (preview.value) preview.value.state = status.state
+        if (['completed', 'cancelled', 'failed', 'expired'].includes(status.state)) {
+          cleanupToken.value = ''
+          if (status.state === 'completed' || status.state === 'cancelled') preview.value = null
+          notice.value = status.state === 'completed' ? '清理已完成' :
+            status.state === 'cancelled' ? '本次清理已取消' :
+            status.state === 'failed' ? (status.message || '清理未完成，请重新预览') : '确认已失效，请重新预览'
+        }
+      }
+    } catch {}
   }
+  if (!disposed) p115PollTimer = setTimeout(pollP115Tasks, 3000)
 }
 async function work(callback) {
   busy.value = true
@@ -964,15 +978,11 @@ async function getPreview() {
   if (!settingsLoaded.value) { error.value = '清理目录尚未加载，请刷新后重试'; return }
   if (cleanupDirsDirty.value) { error.value = '清理目录有未保存的修改，请先保存配置后再预览'; return }
   cleanupToken.value = ''
-  await work(async () => { preview.value = await execute('cleanup_preview') })
-}
-async function requestCleanup() {
-  if (cleanupDirsDirty.value) { error.value = '请先保存清理目录再生成清理确认'; return }
-  if (!preview.value) return
+  preview.value = null
   await work(async () => {
-    const result = await execute('cleanup_request')
-    cleanupToken.value = result.token || ''
-    notice.value = result.message || '等待页面确认'
+    preview.value = await execute('cleanup_request')
+    cleanupToken.value = preview.value.token || ''
+    if (cleanupToken.value) notice.value = '预览完成，请确认清理；也可通过 Telegram 管理员私聊确认'
   })
 }
 async function confirmCleanup() {
@@ -1310,7 +1320,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
         <section class="eme-card"><div class="eme-card-heading"><div><h3>115 清理目录</h3><p>目录内的文件与子文件夹删除后进入 115 回收站。</p></div><div class="eme-inline"><button class="eme-button secondary" @click="cleanupDirs.push({ cid: '', name: '' })">添加目录</button><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_cleanup')">保存配置</button></div></div>
           <p v-if="cleanupDirsDirty" class="eme-message eme-warning">清理目录有未保存的修改；选择目录后请点击“保存配置”，未保存前不能预览或确认清理。</p>
           <div class="eme-cleanup-grid"><div v-for="(item, index) in cleanupDirs" :key="index" class="eme-cleanup-item"><button class="eme-button secondary eme-folder-choice" type="button" :title="item.name || '选择清理目录'" @click="browse('cleanup', index)">{{ item.name || '选择清理目录' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`移除清理目录 ${item.name || index + 1}`" @click="cleanupDirs.splice(index, 1)">✕</button></div></div><p v-if="!cleanupDirs.length" class="eme-hint">还没有清理目录。请添加并保存后再预览。</p>
-          <div class="eme-actions"><button class="eme-button secondary" :disabled="busy || !settingsLoaded || cleanupDirsDirty" @click="getPreview">预览待清理内容</button><template v-if="preview"><span>文件 {{ preview.file_count || 0 }} 个 · 文件夹 {{ preview.dir_count || 0 }} 个</span><button class="eme-button danger" :disabled="busy || !settingsLoaded || cleanupDirsDirty || !!cleanupToken || !(preview.file_count || preview.dir_count)" @click="requestCleanup">生成清理确认</button><button v-if="cleanupToken" class="eme-button danger" :disabled="busy || !settingsLoaded || cleanupDirsDirty" @click="confirmCleanup">确认清理文件</button></template></div>
+          <div class="eme-actions"><button class="eme-button secondary" :disabled="busy || !settingsLoaded || cleanupDirsDirty || !!cleanupToken" @click="getPreview">预览待清理内容</button><template v-if="preview"><span>文件 {{ preview.file_count || 0 }} 个 · 文件夹 {{ preview.dir_count || 0 }} 个</span><button v-if="cleanupToken" class="eme-button danger" :disabled="busy || !settingsLoaded || cleanupDirsDirty || ['processing', 'queued'].includes(preview.state)" @click="confirmCleanup">{{ ['processing', 'queued'].includes(preview.state) ? '⌛️ 清理中…' : '确认清理文件' }}</button></template></div>
           <p class="eme-hint">预览与清理仅针对已保存的目录，确认时将重新检查目录内容。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><h3>定时清理</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_cleanup')">保存任务</button></div><p v-if="scheduleDirty('p115_cleanup')" class="eme-message eme-warning">定时清理配置有未保存的修改；请点击“保存任务”。</p><div class="eme-options"><label class="eme-switch-label"><input v-model="schedule.p115_cleanup.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清理</span></label></div><label>执行周期（cron表达式）<input v-model.trim="schedule.p115_cleanup.cron" placeholder="0 */2 * * *" /></label></section>

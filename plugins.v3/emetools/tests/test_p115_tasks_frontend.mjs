@@ -40,3 +40,10 @@ test('queued request returns the original confirmation result without resubmissi
   assert.equal(result.token, 'confirm-id')
   assert.deepEqual(calls, ['cleanup_request', 'p115_task_status', 'p115_task_status'])
 })
+
+test('file cleanup preview creates one shared confirmation and removes the extra request step', () => {
+  assert.match(source, /preview\.value = await execute\('cleanup_request'\)/)
+  assert.doesNotMatch(source, /生成清理确认/)
+  assert.match(source, /operation: 'cleanup_status', token/)
+  assert.match(source, /status\.state === 'completed'.*preview\.value = null/s)
+})
