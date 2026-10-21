@@ -10,7 +10,7 @@ const props = defineProps({
 const emit = defineEmits(['close'])
 const sections = [
   { key: 'subscription', title: '订阅监控', icon: 'mdi-television-play', detail: '订阅与频道监控' },
-  { key: 'missing', title: '缺集检测', icon: 'mdi-television-search', detail: '检测 Emby 缺集、搜索资源与管理订阅' },
+  { key: 'missing', title: '缺集检测', icon: 'mdi-television-search', detail: '检测缺集、补全资源' },
   { key: 'media', title: '媒体清理', icon: 'mdi-movie-remove-outline', detail: '扫描并清理重复媒体的低质版本' },
   { key: 'enrichment', title: '数据补全', icon: 'mdi-database-plus-outline', detail: '电影/剧集资料、媒体信息与分集图片' },
   { key: 'invalid', title: '清理数据', icon: 'mdi-folder-search-outline', detail: '扫描与清理 STRM 独立资料' },
