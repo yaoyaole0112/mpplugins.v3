@@ -40,6 +40,104 @@ class FileCleanupTelegramTests(unittest.TestCase):
         self.data = {'channel': NotificationChannel.Telegram, 'source': '管理员Bot',
                      'userid': '123', 'original_chat_id': '123', 'original_message_id': 101}
 
+    def command(self, **overrides):
+        data = {'channel': NotificationChannel.Telegram, 'source': '管理员Bot', 'user': '123'}
+        data.update(overrides)
+        self.plugin._run_tool_command_serial('emetools_cleanfiles', data)
+        return data
+
+    def test_command_replies_once_with_private_shared_confirmation(self):
+        with patch.object(self.plugin, '_send_tool_notice') as broadcast:
+            self.command()
+        broadcast.assert_not_called()
+        self.plugin.chain.post_message.assert_called_once()
+        reply = self.plugin.chain.post_message.call_args.args[0]
+        self.assertEqual((reply.source, reply.userid), ('管理员Bot', '123'))
+        token = reply.buttons[0][0]['callback_data'].split(':')[1]
+        self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'pending')
+        self.assertIn('两处共用一次性确认', reply.text)
+        self.client.delete_files.assert_not_called()
+        self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
+        self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'completed')
+        self.client.delete_files.assert_called_once_with(['222'])
+        self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
+        self.client.delete_files.assert_called_once()
+
+    def test_command_works_when_routine_plugin_notifications_are_disabled(self):
+        self.conf.switchs = []
+        self.plugin._notifications['enabled'] = False
+        self.command()
+        reply = self.plugin.chain.post_message.call_args.args[0]
+        token = reply.buttons[0][0]['callback_data'].split(':')[1]
+        self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
+        self.client.delete_files.assert_called_once_with(['222'])
+
+    def test_command_rejects_non_admin_before_preview(self):
+        self.command(user='999')
+        self.client.list_files_in_dir.assert_not_called()
+        self.assertIn('没有清理权限', self.plugin.chain.post_message.call_args.args[0].text)
+        self.assertFalse(self.plugin._pending)
+
+    def test_command_confirmation_cannot_be_used_from_another_bot_or_user(self):
+        self.command()
+        token = next(iter(self.plugin._pending))
+        with patch.object(self.plugin, '_telegram_command_sources', return_value={
+                '其他Bot': {'TELEGRAM_ADMINS': '123'}, '管理员Bot': {'TELEGRAM_ADMINS': '456'}}):
+            self.plugin._handle_file_cleanup_confirmation(token, True, {**self.data, 'source': '其他Bot'})
+            self.plugin._handle_file_cleanup_confirmation(token, True, {
+                **self.data, 'userid': '456', 'original_chat_id': '456'})
+        self.assertIn(token, self.plugin._pending)
+        self.client.delete_files.assert_not_called()
+
+    def test_command_rechecks_admin_permission_after_queue_wait(self):
+        self.command()
+        token = next(iter(self.plugin._pending))
+        def run(key, label, callback, manual=False):
+            with patch.object(self.plugin, '_telegram_command_sources', return_value={}):
+                return callback()
+        with patch.object(self.plugin._p115_tasks, 'run', side_effect=run):
+            self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
+        self.client.delete_files.assert_not_called()
+
+    def test_command_empty_preview_sends_no_confirmation(self):
+        self.client.list_files_in_dir.return_value = []
+        self.command()
+        reply = self.plugin.chain.post_message.call_args.args[0]
+        self.assertIn('均为空', reply.text)
+        self.assertIsNone(reply.buttons)
+        self.assertFalse(self.plugin._pending)
+
+    def test_command_cancel_invalidates_web_confirmation(self):
+        self.command()
+        token = next(iter(self.plugin._pending))
+        self.plugin._handle_file_cleanup_confirmation(token, False, self.data)
+        self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'cancelled')
+        self.assertNotIn(token, self.plugin._pending)
+        self.assertNotIn(token, self.plugin._cleanup_command_origins)
+        self.client.delete_files.assert_not_called()
+
+    def test_command_confirmation_in_group_cannot_delete(self):
+        self.command()
+        token = next(iter(self.plugin._pending))
+        self.plugin._handle_file_cleanup_confirmation(token, True, {**self.data, 'original_chat_id': '-100123'})
+        self.client.delete_files.assert_not_called()
+        self.assertIn(token, self.plugin._pending)
+
+    def test_command_failed_preview_sends_no_confirmation(self):
+        with patch.object(self.plugin, '_cleanup_preview', return_value={'ok': False, 'message': '目录读取失败'}):
+            self.command()
+        reply = self.plugin.chain.post_message.call_args.args[0]
+        self.assertEqual(reply.text, '目录读取失败')
+        self.assertIsNone(reply.buttons)
+        self.assertFalse(self.plugin._pending)
+
+    def test_command_failed_confirmation_delivery_invalidates_token(self):
+        self.plugin.chain.post_message.side_effect = [RuntimeError('delivery failed'), None]
+        self.command()
+        self.assertFalse(self.plugin._pending)
+        self.assertFalse(self.plugin._cleanup_command_origins)
+        self.client.delete_files.assert_not_called()
+
     def request(self):
         response = self.plugin._cleanup_request()
         self.assertTrue(response['pending'])

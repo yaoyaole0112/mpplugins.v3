@@ -119,7 +119,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.29"
+    plugin_version = "2.10.30"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -203,6 +203,7 @@ class EmeTools(_PluginBase):
         self._pending_lock = threading.Lock()
         self._pending = {}
         self._cleanup_telegram_sources = {}
+        self._cleanup_command_origins = {}
         self._cleanup_status = {}
         self._last_run = {}
         if "cookie" in config or "proxy" in config:
@@ -306,7 +307,7 @@ class EmeTools(_PluginBase):
                  "category": "工具", "data": {"action": f"emetools_{action}"}}
                 for command, action, description in (
                     ("/cleanup", "cleanup", "扫描无效数据（在插件页面确认清理）"),
-                    ("/cleanfiles", "cleanfiles", "预览 115 清理目录（在插件页面确认）"),
+                    ("/cleanfiles", "cleanfiles", "预览 115 清理目录并确认清理"),
                     ("/cleartrash", "cleartrash", "查看 115 回收站（在插件页面确认清空）"),
                     ("/cleandupes", "cleandupes", "扫描并确认清理低质版本"),
                     ("/ememove", "move", "执行已保存的 115 文件转存规则"))]
@@ -336,9 +337,8 @@ class EmeTools(_PluginBase):
                 result = self._cleaner.start_scan(self._strm_root)
                 text = f"发现 {result['count']} 项无效数据。请在插件「清理无效数据」页面重新扫描并确认隔离。" if result["count"] else "未发现无效数据。"
             elif action == "emetools_cleanfiles":
-                result = self._cleanup_preview()
-                text = (f"待清理 {result['file_count']} 个文件、{result['dir_count']} 个文件夹。请在插件「清理文件」页面预览并二次确认。"
-                        if result.get("ok") else result.get("message", "预览失败"))
+                self._request_file_bot_cleanup(data)
+                return
             elif action == "emetools_cleartrash":
                 result = self._trash_info()
                 text = f"回收站有 {result['count']} 项；请在插件「清空回收站」页面重新查询并二次确认。" if result["count"] else "回收站为空。"
@@ -370,6 +370,29 @@ class EmeTools(_PluginBase):
     def _media_bot_reply(self, source: str, user: str, title: str, text: str, buttons=None) -> None:
         self.chain.post_message(Message(channel=NotificationChannel.Telegram, source=source, userid=user,
                                         title=title, text=text, buttons=buttons, parse_mode="plain"))
+
+    def _request_file_bot_cleanup(self, data: dict) -> None:
+        source, user = str(data["source"]), str(data["user"])
+        if data["channel"] not in {NotificationChannel.Telegram, NotificationChannel.Telegram.value}:
+            return
+        config = self._telegram_command_sources().get(source)
+        if not config or not matches_channel_admin(NotificationChannel.Telegram, config, user):
+            self._media_bot_reply(source, user, "媒体增强", "❌ 当前 Telegram 用户没有清理权限。")
+            return
+        result = self._cleanup_request(command_origin=(source, user))
+        if not result.get("pending"):
+            self._media_bot_reply(source, user, "媒体增强", result.get("message") or "预览失败，未执行清理。")
+
+    def _file_cleanup_actor_allowed(self, token: str, source: str, user: str) -> bool:
+        with self._pending_lock:
+            origin = self._cleanup_command_origins.get(token)
+        if origin is not None:
+            if origin != (source, user):
+                return False
+            config = self._telegram_command_sources().get(source)
+        else:
+            config = self._telegram_confirmation_sources().get(source)
+        return bool(config) and matches_channel_admin(NotificationChannel.Telegram, config, user)
 
     def _request_media_bot_cleanup(self, data: dict) -> None:
         source, user = str(data["source"]), str(data["user"])
@@ -737,6 +760,7 @@ class EmeTools(_PluginBase):
         with self._pending_lock:
             pending = self._pending.pop(token, None)
             self._cleanup_telegram_sources.pop(token, None)
+            self._cleanup_command_origins.pop(token, None)
         if not pending or pending[1] != kind or time.monotonic() - pending[0] >= 1800:
             raise HTTPException(status_code=400, detail="确认已过期或已处理，请重新预览")
         return pending[2]
@@ -1191,7 +1215,7 @@ class EmeTools(_PluginBase):
                 "dir_count": sum(item["dirs"] for item in folders), "total_bytes": sum(item["size"] for item in folders),
                 "snapshots": snapshots}
 
-    def _cleanup_request(self):
+    def _cleanup_request(self, command_origin=None):
         preview = self._cleanup_preview()
         if not preview.get("ok"):
             return preview
@@ -1206,7 +1230,7 @@ class EmeTools(_PluginBase):
         logger.info("媒体增强 清理文件：已生成二次确认，文件=%d，子目录=%d",
                     preview["file_count"], preview["dir_count"])
         try:
-            sources = self._telegram_confirmation_sources()
+            sources = ({command_origin[0]: True} if command_origin else self._telegram_confirmation_sources())
         except (RuntimeError, ValueError, OSError) as error:
             logger.warning("媒体增强 清理文件：Telegram渠道读取失败：%s，保留网页确认", type(error).__name__)
             sources = {}
@@ -1216,11 +1240,23 @@ class EmeTools(_PluginBase):
                 self._cleanup_telegram_sources = {key: value for key, value in self._cleanup_telegram_sources.items()
                                                  if key in self._pending}
                 self._cleanup_telegram_sources[token] = set(sources)
+                self._cleanup_command_origins = {key: value for key, value in self._cleanup_command_origins.items()
+                                                 if key in self._pending}
+                if command_origin:
+                    self._cleanup_command_origins[token] = command_origin
             buttons = [[{"text": "✅ 确认清理", "callback_data": f"[PLUGIN]EmeTools|files:{token}:y"},
                         {"text": "取消", "callback_data": f"[PLUGIN]EmeTools|files:{token}:n"}]]
         try:
-            self._send_tool_notice(*notices.file_cleanup_confirmation(preview, telegram=bool(buttons)), buttons=buttons)
+            notice = notices.file_cleanup_confirmation(preview, telegram=bool(buttons))
+            if command_origin:
+                self._media_bot_reply(*command_origin, *notice, buttons=buttons)
+            else:
+                self._send_tool_notice(*notice, buttons=buttons)
         except Exception as error:
+            if command_origin:
+                self._consume(token, "cleanup")
+                self._set_cleanup_status(token, "failed", "确认通知发送失败，请重新发送 /cleanfiles")
+                raise
             logger.warning("媒体增强 清理文件：确认通知发送失败：%s，保留网页确认", type(error).__name__)
         return {"ok": True, "pending": True, "token": token,
                 "file_count": preview["file_count"], "dir_count": preview["dir_count"],
@@ -1581,8 +1617,7 @@ class EmeTools(_PluginBase):
         source, user = str(data.get("source") or ""), str(data.get("userid") or "")
         if (not self._enabled or data.get("channel") not in {NotificationChannel.Telegram, NotificationChannel.Telegram.value}
                 or not source or not user or str(data.get("original_chat_id") or "") != user
-                or not matches_channel_admin(NotificationChannel.Telegram,
-                                             self._telegram_confirmation_sources().get(source), user)):
+                or not self._file_cleanup_actor_allowed(token, source, user)):
             logger.warning("媒体增强 清理文件：Telegram确认被拒绝（需要已配置Bot的管理员私聊）")
             return
         try:
@@ -1611,8 +1646,7 @@ class EmeTools(_PluginBase):
             def confirm():
                 if not self._enabled:
                     return {"ok": False, "message": "插件已停用，未执行清理"}
-                if not matches_channel_admin(NotificationChannel.Telegram,
-                                             self._telegram_confirmation_sources().get(source), user):
+                if not self._file_cleanup_actor_allowed(token, source, user):
                     return {"ok": False, "message": "权限配置已变化，未执行清理"}
                 return self._cleanup_confirm(token)
 
