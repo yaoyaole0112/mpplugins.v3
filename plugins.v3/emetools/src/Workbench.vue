@@ -1600,16 +1600,6 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
   .eme-shell--dialog .eme-card-heading>div:first-child{flex:1 1 100%;min-width:0}
   .eme-shell--dialog .eme-header-actions,.eme-shell--dialog .eme-card-heading>.eme-inline{width:100%;min-width:0}
   .eme-shell--dialog .eme-card-heading>.eme-inline>.eme-button{flex:1 1 auto}
-  .eme-shell--dialog .eme-hit{display:block;min-width:0;line-height:1.55;overflow-wrap:anywhere}
-  .eme-shell--dialog .eme-hit-delivery{display:block;min-width:0;max-width:100%}
-  .eme-shell--dialog .eme-hit-delivery{margin-top:4px;color:rgba(var(--v-theme-on-surface),.68)}
-  .eme-shell--dialog .eme-missing-results{overflow:visible;min-width:0}
-  .eme-shell--dialog .eme-missing-results::before{content:'左右滑动表格，查看全部信息与操作';display:block;margin-bottom:8px;font-size:12px;color:rgba(var(--v-theme-on-surface),.62)}
-  .eme-shell--dialog .eme-missing-table-scroll{max-width:100%;overflow-x:auto;overscroll-behavior-inline:contain;-webkit-overflow-scrolling:touch;scrollbar-gutter:auto;border-radius:8px}
-  .eme-shell--dialog .eme-missing-table-scroll:focus-visible{outline:2px solid rgb(var(--v-theme-primary));outline-offset:2px}
-  .eme-shell--dialog .eme-missing-results table{width:900px;min-width:900px}
-  .eme-shell--dialog .eme-pagination{flex-wrap:wrap;gap:8px}
-  .eme-shell--dialog .eme-pagination>span{flex:1 1 100%;order:-1;text-align:center}
   .eme-shell--dialog .eme-move-row{display:grid;grid-template-columns:28px minmax(0,1fr) 28px;gap:8px;padding:10px;align-items:center}
   .eme-shell--dialog .eme-move-row .eme-move-label:first-child{grid-column:1;grid-row:1}
   .eme-shell--dialog .eme-move-row .eme-folder-choice:nth-child(2){grid-column:2/4;grid-row:1;width:100%;max-width:none;min-width:0}
@@ -1628,5 +1618,16 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
   .eme-shell--dialog .eme-enrich-preview-actions>.eme-button{flex:1 1 auto}
   .eme-shell--dialog .eme-media-rule-footer{flex-wrap:wrap}
   .eme-shell--dialog .eme-media-rule-footer>.eme-button{flex:1 1 auto}
+}
+@media(max-width:760px){
+  .eme-shell .eme-hit{display:block;min-width:0;line-height:1.55;overflow-wrap:anywhere}
+  .eme-shell .eme-hit-delivery{display:block;min-width:0;max-width:100%;margin-top:4px;color:rgba(var(--v-theme-on-surface),.68)}
+  .eme-shell .eme-missing-results{overflow:visible;min-width:0}
+  .eme-shell .eme-missing-results::before{content:'左右滑动表格，查看全部信息与操作';display:block;margin-bottom:8px;font-size:12px;color:rgba(var(--v-theme-on-surface),.62)}
+  .eme-shell .eme-missing-table-scroll{max-width:100%;overflow-x:auto;overscroll-behavior-inline:contain;-webkit-overflow-scrolling:touch;scrollbar-gutter:auto;border-radius:8px}
+  .eme-shell .eme-missing-table-scroll:focus-visible{outline:2px solid rgb(var(--v-theme-primary));outline-offset:2px}
+  .eme-shell .eme-missing-results table{width:900px;min-width:900px}
+  .eme-shell .eme-pagination{flex-wrap:wrap;gap:8px}
+  .eme-shell .eme-pagination>span{flex:1 1 100%;order:-1;text-align:center}
 }
 </style>
