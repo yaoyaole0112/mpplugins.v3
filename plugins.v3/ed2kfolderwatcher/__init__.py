@@ -159,7 +159,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.9.0"
+    plugin_version = "1.9.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -488,7 +488,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._pending["__cloud_scan__"] = (time.monotonic() + 1, None)
 
     def _process_cloud_file(self, item: dict) -> None:
-        from .cloud_storage import CloudStorage, CloudError, fingerprint, hash_remote, record_key, allowed_item
+        from .cloud_storage import CloudStorage, CloudError, fingerprint, fingerprint_matches, hash_remote, record_key, allowed_item
         if not self._cloud_enabled or self._stopping.is_set() or not allowed_item(item, self._cloud_storage, self._cloud_folder):
             return
         import datetime
@@ -529,14 +529,18 @@ class Ed2kFolderWatcher(_PluginBase):
             if fingerprint(fresh) != fingerprint(item):
                 self._queue_cloud_file(fresh, delay=max(60, self._min_age))
                 return
+            item = fresh
             _, output, cache_path = self._paths()
             output = output if self._output_enabled else None
             records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
             key = record_key(item)
             record = records.get(key)
-            unchanged = record and not record_problem(record) and record.get("cloud_fingerprint") == fingerprint(item) and record.get("hash_version") == 2
+            unchanged = record and not record_problem(record) and fingerprint_matches(record.get("cloud_fingerprint"), item) and record.get("hash_version") == 2
+            migrated = unchanged and record.get("cloud_fingerprint") != fingerprint(item)
+            if migrated:
+                record["cloud_fingerprint"] = fingerprint(item)
             if unchanged and (not self._telegram_enabled or (record.get("telegram_sent") and record.get("telegram_target") == self._telegram_target_key())):
-                if output is not None:
+                if output is not None or migrated:
                     self._write_results(output, cache_path, records)
                 return
             self._cloud_status.update(file=item["name"], bytes_read=0, size=item["size"], error="")

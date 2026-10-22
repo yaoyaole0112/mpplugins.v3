@@ -20,6 +20,23 @@ def md4(data):
 
 
 class CloudStorageTests(unittest.TestCase):
+    def test_fingerprint_ignores_only_download_identifier(self):
+        item = {"storage": "115网盘Plus", "fileid": "1", "path": "/test/a.mkv", "name": "a.mkv", "size": 5, "modify_time": 1, "pickcode": "old"}
+        self.assertEqual(cloud.fingerprint(item), cloud.fingerprint({**item, "pickcode": "new"}))
+        for field, value in (("storage", "CloudDrive储存"), ("fileid", "2"), ("path", "/test/b.mkv"), ("name", "b.mkv"), ("size", 6), ("modify_time", 2)):
+            with self.subTest(field=field):
+                self.assertNotEqual(cloud.fingerprint(item), cloud.fingerprint({**item, field: value}))
+
+    def test_legacy_fingerprint_matches_without_download_identifier(self):
+        item = {"storage": "115网盘Plus", "fileid": "1", "path": "/test/a.mkv", "name": "a.mkv", "size": 5, "modify_time": 1, "pickcode": "new"}
+        current = cloud.fingerprint(item)
+        self.assertTrue(cloud.fingerprint_matches(current, item))
+        self.assertTrue(cloud.fingerprint_matches(current + ["old"], item))
+        self.assertFalse(cloud.fingerprint_matches(current + ["old"], {**item, "size": 6}))
+        for saved in (None, {}, "invalid", [], current[:-1], current + ["old", "extra"]):
+            with self.subTest(saved=saved):
+                self.assertFalse(cloud.fingerprint_matches(saved, item))
+
     def test_cloud_paths_reject_traversal_and_normalize(self):
         self.assertEqual(cloud.cloud_path("/media//shows/"), "/media/shows")
         for path in ("relative", "/../outside", "/media/../outside", "/media\\outside"):
@@ -79,6 +96,14 @@ class CloudStorageTests(unittest.TestCase):
         client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"hello")))
         with patch.object(cloud.httpx, "Client", return_value=client), self.assertRaises(cloud.CloudError):
             cloud.hash_remote(storage, item, threading.Event(), md4, 1024)
+
+    def test_remote_accepts_download_identifier_refresh_after_hashing(self):
+        storage, item = self.remote_fixture()
+        storage.fresh.return_value = {**item, "pickcode": "refreshed"}
+        client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"hello")))
+        with patch.object(cloud.httpx, "Client", return_value=client):
+            result = cloud.hash_remote(storage, item, threading.Event(), md4, 1024)
+        self.assertEqual(result, md4(b"hello").hex())
 
     def test_remote_cancel_remains_interrupted_instead_of_network_failure(self):
         storage, item = self.remote_fixture()

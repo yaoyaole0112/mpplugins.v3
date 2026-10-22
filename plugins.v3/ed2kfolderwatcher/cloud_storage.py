@@ -22,7 +22,11 @@ def cloud_path(value):
 
 
 def fingerprint(item):
-    return [item.get(field) for field in ("storage", "fileid", "path", "name", "size", "modify_time", "pickcode")]
+    return [item.get(field) for field in ("storage", "fileid", "path", "name", "size", "modify_time")]
+
+
+def fingerprint_matches(saved, item):
+    return isinstance(saved, (list, tuple)) and len(saved) in {6, 7} and list(saved[:6]) == fingerprint(item)
 
 
 def record_key(item):

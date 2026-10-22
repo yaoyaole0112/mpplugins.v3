@@ -78,6 +78,69 @@ class Ed2kTests(unittest.TestCase):
             self.plugin._process_cloud_file(item)
         self.assertIn(record["link"], (self.folder / "ed2k.txt").read_text())
 
+    def cloud_fixture(self):
+        self.plugin._cloud_enabled = True
+        self.plugin._cloud_storage = "115网盘Plus"
+        self.plugin._cloud_folder = "/cloud-test"
+        self.plugin._output_enabled = False
+        item = {"storage": "115网盘Plus", "fileid": "123", "type": "file", "name": "云端.mkv", "path": "/cloud-test/云端.mkv", "size": 5, "modify_time": 1, "pickcode": "old"}
+        storage = Mock()
+        storage.fresh.return_value = item
+        self.plugin._cloud_adapter = storage
+        return item, storage
+
+    def test_cloud_legacy_record_survives_repeated_pickcode_changes_without_hash_or_send(self):
+        item, storage = self.cloud_fixture()
+        cloud_storage = self.cloud_module
+        with patch.object(cloud_storage, "hash_remote", return_value=self.module._md4(b"hello").hex()):
+            self.plugin._process_cloud_file(item)
+        records = self.records()
+        key = cloud_storage.record_key(item)
+        record = records[key]
+        record["cloud_fingerprint"] = cloud_storage.fingerprint(item) + ["legacy-pickcode"]
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@receiver"
+        record["telegram_sent"] = True
+        record["telegram_target"] = self.plugin._telegram_target_key()
+        record["telegram_sent_at"] = 123
+        expected = {**record, "cloud_fingerprint": cloud_storage.fingerprint(item)}
+        _, _, cache_path = self.plugin._paths()
+        self.plugin._write_results(None, cache_path, records)
+        with patch.object(cloud_storage, "hash_remote", side_effect=AssertionError("unnecessary download")) as hashing, patch.object(self.plugin, "_notify_record") as notify:
+            for pickcode in ("new", "newer", "latest"):
+                current = {**item, "pickcode": pickcode}
+                storage.fresh.return_value = current
+                self.plugin._process_cloud_file(current)
+        hashing.assert_not_called()
+        notify.assert_not_called()
+        self.assertEqual(self.records()[key], expected)
+        self.assertFalse(self.plugin._pending)
+
+    def test_cloud_first_hash_uses_latest_pickcode_from_fresh_listing(self):
+        item, storage = self.cloud_fixture()
+        latest = {**item, "pickcode": "latest"}
+        storage.fresh.return_value = latest
+        with patch.object(self.cloud_module, "hash_remote", return_value=self.module._md4(b"hello").hex()) as hashing:
+            self.plugin._process_cloud_file(item)
+        hashing.assert_called_once()
+        self.assertEqual(hashing.call_args.args[1]["pickcode"], "latest")
+        self.assertEqual(len(self.records()), 1)
+        self.assertFalse(self.plugin._pending)
+
+    def test_cloud_changed_size_or_modify_time_still_rehashes(self):
+        item, storage = self.cloud_fixture()
+        with patch.object(self.cloud_module, "hash_remote", return_value=self.module._md4(b"hello").hex()):
+            self.plugin._process_cloud_file(item)
+        for field, value in (("size", 6), ("modify_time", 2)):
+            with self.subTest(field=field):
+                item = {**item, field: value, "pickcode": "new"}
+                storage.fresh.return_value = item
+                with patch.object(self.cloud_module, "hash_remote", return_value=self.module._md4(b"hello!").hex()) as hashing:
+                    self.plugin._process_cloud_file(item)
+                hashing.assert_called_once()
+                record = self.records()[self.cloud_module.record_key(item)]
+                self.assertEqual(record["cloud_fingerprint"], self.cloud_module.fingerprint(item))
+
     def test_cloud_failure_does_not_save_or_send_link(self):
         self.plugin._cloud_enabled = True
         self.plugin._cloud_storage = "115网盘Plus"
