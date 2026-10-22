@@ -89,6 +89,58 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._cloud_adapter = storage
         return item, storage
 
+    def test_life_events_only_trigger_new_relevant_events_and_coalesce_scans(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._enabled = True
+        self.plugin._worker = threading.current_thread()
+        self.plugin._cloud_monitor_enabled = True
+        self.plugin._cloud_life_started = 10
+        storage.life_events.return_value = [{"id": 3, "type": 1, "update_time": 11}, {"id": 2, "type": 1, "update_time": 9}, {"id": 1, "type": 3, "update_time": 11}]
+        self.plugin.poll_cloud_events()
+        self.plugin.poll_cloud_events()
+        self.assertEqual(list(self.plugin._pending), ["__cloud_scan__"])
+        self.assertEqual(self.plugin._cloud_status["life_events"], 1)
+        self.assertEqual(self.plugin._cloud_life_cursor, 3)
+        self.assertEqual(self.plugin.get_service()[-1]["id"], "Ed2kFolderWatcherLife")
+        self.plugin._cloud_status["scanning"] = True
+        storage.life_events.return_value = [{"id": 4, "type": 5, "update_time": 12}]
+        self.plugin.poll_cloud_events()
+        self.assertTrue(self.plugin._cloud_rescan_requested)
+        self.plugin._cloud_iterator = iter(())
+        self.plugin._cloud_scan_step()
+        self.assertFalse(self.plugin._cloud_rescan_requested)
+        self.assertIn("__cloud_scan__", self.plugin._pending)
+
+    def test_life_disabled_or_failure_does_not_start_downloads(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._enabled = True
+        self.plugin.poll_cloud_events()
+        storage.life_events.assert_not_called()
+        self.plugin._cloud_monitor_enabled = True
+        storage.life_events.side_effect = RuntimeError("secret url")
+        self.plugin.poll_cloud_events()
+        self.assertIn("RuntimeError", self.plugin._cloud_status["life_error"])
+        self.assertNotIn("secret", self.plugin._cloud_status["life_error"])
+        self.assertFalse(self.plugin._pending)
+        self.plugin.poll_cloud_events()
+        storage.life_events.assert_called_once()
+        self.assertIsNotNone(self.plugin._cloud_status["life_retry_at"])
+
+    def test_cloud_failures_back_off_and_success_clears_stale_error(self):
+        item, storage = self.cloud_fixture()
+        key = self.cloud_module.record_key(item)
+        for delay in (300, 600, 1200, 2400, 3600):
+            self.plugin._stopping.clear()
+            self.plugin._pending = {key: (0, item)}
+            with patch.object(self.plugin, "_process_cloud_file", side_effect=self.cloud_module.CloudError("ReadTimeout")), patch.object(self.plugin, "_queue_cloud_file", side_effect=lambda *args, **kwargs: self.plugin._stopping.set()) as retry:
+                self.plugin._work()
+            retry.assert_called_once_with(item, delay=delay)
+            self.assertIsNotNone(self.plugin._cloud_status["retry_at"])
+        self.plugin._cloud_succeeded(key)
+        self.assertEqual(self.plugin._cloud_status["error"], "")
+        self.assertIsNone(self.plugin._cloud_status["retry_at"])
+        self.assertNotIn(key, self.plugin._cloud_failures)
+
     def test_cloud_legacy_record_survives_repeated_pickcode_changes_without_hash_or_send(self):
         item, storage = self.cloud_fixture()
         cloud_storage = self.cloud_module
@@ -113,6 +165,7 @@ class Ed2kTests(unittest.TestCase):
                 self.plugin._process_cloud_file(current)
         hashing.assert_not_called()
         notify.assert_not_called()
+        self.assertEqual(storage.fresh.call_count, 1)
         self.assertEqual(self.records()[key], expected)
         self.assertFalse(self.plugin._pending)
 

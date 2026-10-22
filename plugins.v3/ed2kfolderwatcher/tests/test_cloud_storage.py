@@ -20,6 +20,131 @@ def md4(data):
 
 
 class CloudStorageTests(unittest.TestCase):
+    def retry_fixture(self, handler):
+        storage, item = self.remote_fixture()
+        stopping = Mock()
+        stopping.is_set.return_value = False
+        stopping.wait.return_value = False
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        return storage, item, stopping, client
+
+    def test_timeout_resumes_at_exact_offset_without_rehashing_prefix(self):
+        requests = []
+        class BrokenStream(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b"hell"
+                raise httpx.ReadTimeout("private signed URL must not leak")
+        def handler(request):
+            requests.append(request)
+            if len(requests) == 1:
+                return httpx.Response(200, headers={"ETag": '"same-file"', "Content-Length": "5"}, stream=BrokenStream())
+            return httpx.Response(206, content=b"o", headers={"ETag": '"same-file"', "Content-Range": "bytes 4-4/5"})
+        storage, item, stopping, client = self.retry_fixture(handler)
+        callback = Mock()
+        with patch.object(cloud, "READ_SIZE", 4), patch.object(cloud.httpx, "Client", return_value=client):
+            digest = cloud.hash_remote(storage, item, stopping, md4, 3, on_retry=callback)
+        self.assertEqual(digest, md4(md4(b"hel") + md4(b"lo")).hex())
+        self.assertEqual(requests[1].headers["Range"], "bytes=4-")
+        self.assertEqual(requests[1].headers["If-Range"], '"same-file"')
+        self.assertEqual(storage.download_request.call_count, 2)
+        callback.assert_called_once_with(1)
+
+    def test_resume_rejects_ignored_range_wrong_offset_or_changed_etag(self):
+        class BrokenStream(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b"hell"
+                raise httpx.ReadTimeout("timeout")
+        for status, headers in ((200, {}), (206, {"Content-Range": "bytes 0-0/5", "ETag": '"same"'}), (206, {"Content-Range": "bytes 4-4/5", "ETag": '"changed"'})):
+            responses = [httpx.Response(200, headers={"ETag": '"same"'}, stream=BrokenStream()), httpx.Response(status, content=b"o", headers=headers)]
+            storage, item, stopping, client = self.retry_fixture(lambda request: responses.pop(0))
+            with self.subTest(status=status, headers=headers), patch.object(cloud, "READ_SIZE", 4), patch.object(cloud.httpx, "Client", return_value=client), self.assertRaises(cloud.CloudError):
+                cloud.hash_remote(storage, item, stopping, md4, 3)
+
+    def test_partial_timeout_without_validator_never_splices_unverified_data(self):
+        class BrokenStream(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b"hell"
+                raise httpx.ReadTimeout("timeout")
+        storage, item, stopping, client = self.retry_fixture(lambda request: httpx.Response(200, stream=BrokenStream()))
+        with patch.object(cloud, "READ_SIZE", 4), patch.object(cloud.httpx, "Client", return_value=client), self.assertRaises(cloud.CloudError) as failure:
+            cloud.hash_remote(storage, item, stopping, md4, 3)
+        self.assertIn("不能安全续读", str(failure.exception))
+        storage.download_request.assert_called_once()
+
+    def test_network_retries_are_bounded_and_use_configured_timeout(self):
+        def handler(request):
+            raise httpx.ReadTimeout("private url")
+        storage, item, stopping, client = self.retry_fixture(handler)
+        with patch.object(cloud.httpx, "Client", return_value=client) as factory, self.assertRaises(cloud.CloudError):
+            cloud.hash_remote(storage, item, stopping, md4, 3, read_timeout=600)
+        self.assertEqual(storage.download_request.call_count, 3)
+        self.assertEqual(factory.call_args.kwargs["timeout"].read, 600)
+        self.assertEqual(stopping.wait.call_count, 2)
+
+    def test_life_direct_request_is_bounded_and_sanitizes_failure(self):
+        storage = object.__new__(cloud.CloudStorage)
+        storage.storage = "115网盘Plus"
+        storage.oper = Mock()
+        storage.oper.client.life_behavior_detail.return_value = {"state": True, "data": {"list": [{"id": "42", "type": 1, "update_time": 123, "private": "secret"}]}}
+        self.assertEqual(storage.life_events("direct"), [{"id": "42", "type": 1, "update_time": 123}])
+        storage.oper.client.life_behavior_detail.assert_called_once_with({"limit": 64, "offset": 0})
+        storage.oper.client.life_behavior_detail.return_value = {"state": False, "error": "secret"}
+        with self.assertRaises(cloud.CloudError) as failure:
+            storage.life_events("direct")
+        self.assertNotIn("secret", str(failure.exception))
+
+    def test_shared_life_never_falls_back_to_network_when_unavailable(self):
+        storage = object.__new__(cloud.CloudStorage)
+        storage.storage = "115网盘Plus"
+        storage.oper = Mock()
+        with patch.dict(sys.modules, {"app.plugins.p115strmhelper.service": None}), self.assertRaises(cloud.CloudError):
+            storage.life_events("shared")
+        storage.oper.client.life_behavior_detail.assert_not_called()
+
+    def test_shared_life_reads_existing_database_without_calling_115(self):
+        from sqlalchemy import create_engine, Integer
+        from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+        class Base(DeclarativeBase):
+            pass
+        class LifeEvent(Base):
+            __tablename__ = "life_event"
+            id: Mapped[int] = mapped_column(Integer, primary_key=True)
+            type: Mapped[int] = mapped_column(Integer)
+            update_time: Mapped[int] = mapped_column(Integer)
+        engine = create_engine("sqlite://")
+        self.addCleanup(engine.dispose)
+        Base.metadata.create_all(engine)
+        with Session(engine) as session:
+            session.add(LifeEvent(id=7, type=1, update_time=123))
+            session.commit()
+        storage = object.__new__(cloud.CloudStorage)
+        storage.storage = "115网盘Plus"
+        storage.oper = Mock()
+        storage.oper.client.user_id = 42
+        worker = Mock()
+        worker.client.user_id = 42
+        database = Mock()
+        database.ct_db_manager.get_database.return_value.session.side_effect = lambda: Session(engine)
+        modules = {"app.plugins.p115strmhelper.service": types.SimpleNamespace(servicer=worker), "app.plugins.p115strmhelper.db_manager": database, "app.plugins.p115strmhelper.db_manager.models.life_event": types.SimpleNamespace(LifeEvent=LifeEvent)}
+        with patch.dict(sys.modules, modules):
+            self.assertEqual(storage.life_events("shared"), [{"id": 7, "type": 1, "update_time": 123}])
+            worker.client.user_id = 99
+            with self.assertRaises(cloud.CloudError):
+                storage.life_events("shared")
+        storage.oper.client.life_behavior_detail.assert_not_called()
+
+    def test_timeout_retry_stops_if_metadata_changes_or_cancelled(self):
+        def handler(request):
+            raise httpx.ReadTimeout("timeout")
+        for cancelled in (False, True):
+            storage, item, stopping, client = self.retry_fixture(handler)
+            storage.fresh.return_value = {**item, "size": 6}
+            stopping.wait.return_value = cancelled
+            expected = InterruptedError if cancelled else cloud.CloudError
+            with self.subTest(cancelled=cancelled), patch.object(cloud.httpx, "Client", return_value=client), self.assertRaises(expected):
+                cloud.hash_remote(storage, item, stopping, md4, 3)
+            storage.download_request.assert_called_once()
+
     def test_fingerprint_ignores_only_download_identifier(self):
         item = {"storage": "115网盘Plus", "fileid": "1", "path": "/test/a.mkv", "name": "a.mkv", "size": 5, "modify_time": 1, "pickcode": "old"}
         self.assertEqual(cloud.fingerprint(item), cloud.fingerprint({**item, "pickcode": "new"}))

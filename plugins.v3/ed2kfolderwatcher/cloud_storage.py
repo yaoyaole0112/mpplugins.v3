@@ -1,5 +1,8 @@
 import hashlib
 import posixpath
+import re
+import sys
+from contextlib import closing
 from pathlib import PurePosixPath
 from urllib.parse import urljoin, urlsplit
 
@@ -106,6 +109,36 @@ class CloudStorage:
             if stopping.wait(.1):
                 raise InterruptedError("任务已停止")
 
+    def life_events(self, source):
+        if self.storage != "115网盘Plus":
+            raise CloudError("115生活事件仅支持115网盘Plus；CloudDrive请使用定时补扫")
+        if source == "shared":
+            service = sys.modules.get("app.plugins.p115strmhelper.service")
+            database = sys.modules.get("app.plugins.p115strmhelper.db_manager")
+            models = sys.modules.get("app.plugins.p115strmhelper.db_manager.models.life_event")
+            worker = getattr(service, "servicer", None)
+            thread = getattr(worker, "monitor_life_thread", None)
+            if not thread or not thread.is_alive() or not database or not models:
+                raise CloudError("未检测到运行中的115插件生活事件监听；请先开启该监听，或手动选择独立轮询")
+            shared_user = getattr(getattr(worker, "client", None), "user_id", None)
+            own_user = getattr(self.oper.client, "user_id", None)
+            if not shared_user or not own_user or str(shared_user) != str(own_user):
+                raise CloudError("115生活事件监听与当前存储账号不一致，不能复用")
+            from sqlalchemy import select
+            model = models.LifeEvent
+            with database.ct_db_manager.get_database().session() as session:
+                return [{"id": row.id, "type": row.type, "update_time": row.update_time}
+                        for row in session.scalars(select(model).order_by(model.id.desc()).limit(64))]
+        if source != "direct":
+            raise CloudError("生活事件来源无效")
+        result = self.oper.client.life_behavior_detail({"limit": 64, "offset": 0})
+        if not isinstance(result, dict) or result.get("state") is False or not isinstance(result.get("data"), dict):
+            raise CloudError("115生活事件读取失败，请检查登录状态或稍后重试")
+        events = result["data"].get("list")
+        if not isinstance(events, list) or any(not isinstance(entry, dict) for entry in events):
+            raise CloudError("115生活事件响应格式无效")
+        return [{key: entry.get(key) for key in ("id", "type", "update_time")} for entry in events[:64]]
+
     def download_request(self, item):
         from app.core.config import settings
         headers = {"User-Agent": settings.USER_AGENT, "Accept-Encoding": "identity"}
@@ -170,50 +203,91 @@ def hash_stream(chunks, size, stopping, md4, part_size, progress=None, sha1=None
     return digest.hex()
 
 
-def hash_remote(storage, item, stopping, md4, part_size, progress=None):
-    url, headers = storage.download_request(item)
-    try:
-        with httpx.Client(timeout=httpx.Timeout(30, connect=15, read=120), trust_env=False) as client:
-            request_headers = dict(headers)
-            for _ in range(6):
-                if stopping.is_set():
+def open_stream(client, url, headers, stopping):
+    request_headers = dict(headers)
+    for _ in range(6):
+        if stopping.is_set():
+            raise InterruptedError("任务已停止")
+        response = client.send(client.build_request("GET", url, headers=request_headers), stream=True)
+        if response.status_code not in {301, 302, 303, 307, 308}:
+            return response
+        location = response.headers.get("Location")
+        response.close()
+        if not location:
+            raise CloudError("网盘下载重定向缺少地址")
+        next_url = urljoin(url, location)
+        current_origin = urlsplit(url)
+        next_origin = urlsplit(next_url)
+        if next_origin.scheme not in {"http", "https"} or not next_origin.hostname:
+            raise CloudError("网盘下载地址重定向到不安全地址")
+        if current_origin.scheme == "https" and next_origin.scheme != "https":
+            raise CloudError("网盘下载地址不允许从 HTTPS 降级到 HTTP")
+        if (current_origin.scheme, current_origin.hostname, current_origin.port) != (next_origin.scheme, next_origin.hostname, next_origin.port):
+            request_headers = {key: value for key, value in request_headers.items() if key.lower() not in {"authorization", "cookie", "proxy-authorization"}}
+        url = next_url
+    raise CloudError("网盘下载重定向次数过多")
+
+
+def remote_chunks(storage, item, stopping, read_timeout, on_retry):
+    offset = 0
+    validator = None
+    with httpx.Client(timeout=httpx.Timeout(30, connect=15, read=read_timeout), trust_env=False) as client:
+        for attempt in range(3):
+            if attempt:
+                if on_retry:
+                    on_retry(attempt)
+                if stopping.wait(5 * attempt):
                     raise InterruptedError("任务已停止")
-                response = client.send(client.build_request("GET", url, headers=request_headers), stream=True)
-                if response.status_code not in {301, 302, 303, 307, 308}:
-                    break
-                location = response.headers.get("Location")
-                response.close()
-                if not location:
-                    raise CloudError("网盘下载重定向缺少地址")
-                next_url = urljoin(url, location)
-                current_origin = urlsplit(url)
-                next_origin = urlsplit(next_url)
-                if next_origin.scheme not in {"http", "https"} or not next_origin.hostname:
-                    raise CloudError("网盘下载地址重定向到不安全地址")
-                if current_origin.scheme == "https" and next_origin.scheme != "https":
-                    raise CloudError("网盘下载地址不允许从 HTTPS 降级到 HTTP")
-                if (current_origin.scheme, current_origin.hostname, current_origin.port) != (next_origin.scheme, next_origin.hostname, next_origin.port):
-                    request_headers = {key: value for key, value in request_headers.items() if key.lower() not in {"authorization", "cookie", "proxy-authorization"}}
-                url = next_url
-            else:
-                raise CloudError("网盘下载重定向次数过多")
+                fresh = storage.fresh(item)
+                if fingerprint(fresh) != fingerprint(item):
+                    raise CloudError("断线后网盘文件状态变化，拒绝续读")
+                item = {**fresh, "sha1": item.get("sha1")}
+            url, headers = storage.download_request(item)
+            headers = {key: value for key, value in headers.items() if key.lower() not in {"range", "if-range"}}
+            if offset:
+                headers["Range"] = f"bytes={offset}-"
+                if validator:
+                    headers["If-Range"] = validator
             try:
-                response.raise_for_status()
-                if response.status_code != 200 or response.headers.get("Content-Range"):
-                    raise CloudError("存储未返回完整文件响应，拒绝生成 ED2K")
-                length = response.headers.get("Content-Length")
-                if length is not None and (not length.isdigit() or int(length) != item["size"]):
-                    raise CloudError("下载响应大小与网盘记录不一致，拒绝生成 ED2K")
-                content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
-                if content_type in {"text/html", "application/json", "application/xml", "text/xml"} and PurePosixPath(item["path"]).suffix.lower() not in {".html", ".htm", ".json", ".xml"}:
-                    raise CloudError("存储返回登录页或错误内容，不是原文件")
-                digest = hash_stream(response.iter_bytes(READ_SIZE), item["size"], stopping, md4, part_size, progress, item.get("sha1"))
-            finally:
-                response.close()
-    except InterruptedError:
-        raise
-    except (httpx.HTTPError, OSError) as failure:
-        raise CloudError(f"网盘读取失败（{type(failure).__name__}），不保存临时下载文件，稍后重试") from None
+                response = open_stream(client, url, headers, stopping)
+                try:
+                    response.raise_for_status()
+                    if offset:
+                        match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("Content-Range", ""))
+                        if response.status_code != 206 or not match or tuple(map(int, match.groups())) != (offset, item["size"] - 1, item["size"]):
+                            raise CloudError("下载服务不支持正确的断点续读，已停止，绝不拼接重复数据")
+                        if validator and response.headers.get("ETag") != validator:
+                            raise CloudError("断点续读文件校验标识变化，拒绝生成 ED2K")
+                    elif response.status_code != 200 or response.headers.get("Content-Range"):
+                        raise CloudError("存储未返回完整文件响应，拒绝生成 ED2K")
+                    length = response.headers.get("Content-Length")
+                    if length is not None and (not length.isdigit() or int(length) != item["size"] - offset):
+                        raise CloudError("下载响应大小与网盘记录不一致，拒绝生成 ED2K")
+                    if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                        raise CloudError("下载返回压缩传输内容，拒绝按字节偏移续读")
+                    content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                    if content_type in {"text/html", "application/json", "application/xml", "text/xml"} and PurePosixPath(item["path"]).suffix.lower() not in {".html", ".htm", ".json", ".xml"}:
+                        raise CloudError("存储返回登录页或错误内容，不是原文件")
+                    if not offset:
+                        candidate = response.headers.get("ETag", "")
+                        validator = candidate if candidate.startswith('"') and candidate.endswith('"') else None
+                    for chunk in response.iter_bytes(READ_SIZE):
+                        offset += len(chunk)
+                        yield chunk
+                    return
+                finally:
+                    response.close()
+            except (httpx.TransportError, OSError) as failure:
+                if attempt == 2 or (offset and not validator and not item.get("sha1")):
+                    reason = "；服务未提供强校验标识，不能安全续读" if offset and not validator and not item.get("sha1") else "；已达到本次重连上限"
+                    raise CloudError(f"网盘读取失败（{type(failure).__name__}）{reason}，保留记录并退避重试") from None
+            except httpx.HTTPStatusError as failure:
+                raise CloudError(f"网盘下载返回 HTTP {failure.response.status_code}，请检查登录状态、权限或服务限流") from None
+
+
+def hash_remote(storage, item, stopping, md4, part_size, progress=None, read_timeout=300, on_retry=None):
+    with closing(remote_chunks(storage, item, stopping, read_timeout, on_retry)) as chunks:
+        digest = hash_stream(chunks, item["size"], stopping, md4, part_size, progress, item.get("sha1"))
     if fingerprint(storage.fresh(item)) != fingerprint(item):
         raise CloudError("计算期间网盘文件状态变化，拒绝保存或发送链接")
     return digest

@@ -32,6 +32,8 @@ class WebApiTests(unittest.TestCase):
             setattr(self.plugin, f"_{name}", False if name in web_api.BOOLEAN_FIELDS else "")
         self.plugin._telegram_mode = "user"
         self.plugin._min_age = 60
+        self.plugin._cloud_read_timeout = 300
+        self.plugin._cloud_life_source = "shared"
         self.plugin._cron = "*/10 * * * *"
         self.plugin._telegram_token = "secret-bot-token"
         self.plugin.telegram_account_action = AsyncMock(return_value={"ok": True, "logged_in": True})
@@ -52,6 +54,18 @@ class WebApiTests(unittest.TestCase):
         for value in ("", "@valid\ninvalid target", "@group|0"):
             with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, {"telegram_enabled": True, "telegram_chat_id": value})
+
+    def test_cloud_timeout_and_life_source_validation(self):
+        for value in (30, 300, 1800, "600"):
+            result = web_api.validate_settings(self.plugin, {"cloud_read_timeout": value})
+            self.assertEqual(result["cloud_read_timeout"], int(value))
+        for value in (0, 29, 1801, True, "1.5", None):
+            with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"cloud_read_timeout": value})
+        with self.assertRaises(web_api.UserAccountError):
+            web_api.validate_settings(self.plugin, {"cloud_life_source": "unknown"})
+        with self.assertRaises(web_api.UserAccountError):
+            web_api.validate_settings(self.plugin, {"cloud_monitor_enabled": True, "cloud_storage": "CloudDrive储存"})
 
     def test_manual_delete_requires_confirmation_and_record_id(self):
         self.authorize()
