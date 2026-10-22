@@ -9,7 +9,7 @@ const settings = { enabled: false, folder: '/media/test', recursive: true, monit
   output_enabled: true, output: '', extensions: '', min_age: 60, delete_source: false,
   scan_enabled: false, cron: '*/10 * * * *', telegram_enabled: false, telegram_mode: 'user',
   telegram_chat_id: '', telegram_thread_id: '', telegram_token: '' }
-Object.assign(settings, { cloud_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
+Object.assign(settings, { cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
 let requests = []
 let mode = 'normal'
 let closes = 0
@@ -64,6 +64,7 @@ const api = { get: async path => {
     return { ok: true, message: '源文件已删除，ED2K 链接及记录已保留' }
   }
   if (!path.endsWith('/settings')) throw Error('Unexpected write request')
+  if (typeof body.cloud_scan_enabled !== 'boolean') throw Error('Cloud schedule switch missing from save payload')
   return { ok: true, settings: body, message: '模拟保存成功' }
 } }
 
@@ -176,6 +177,19 @@ try {
     if (!cloudPanel || !cloudPanel.textContent.includes('不会删除云端文件') || cloudPanel.querySelector('input[type=checkbox]').checked) throw Error(`${name}: cloud defaults are unsafe or panel missing`)
     const commonPanel = document.querySelector('#app [data-testid=common-settings]')
     const localPanel = document.querySelector('#app [data-testid=local-source]')
+    for (const heading of ['通用设置', '本地监控', '网盘监控', 'ED2K链接自动转发']) {
+      if (![...document.querySelectorAll('#app h3')].some(element => element.textContent === heading)) throw Error(`${name}: missing heading ${heading}`)
+    }
+    const scheduleSwitch = [...cloudPanel.querySelectorAll('label')].find(label => label.textContent.trim() === '网盘定时增量补扫').querySelector('input')
+    const scheduleInput = [...cloudPanel.querySelectorAll('label')].find(label => label.textContent.startsWith('网盘补扫计划')).querySelector('input')
+    if (scheduleSwitch.checked || !scheduleInput.disabled) throw Error(`${name}: cloud schedule input enabled while switch off`)
+    scheduleSwitch.click()
+    await vue.nextTick()
+    if (scheduleInput.disabled) throw Error(`${name}: cloud schedule input disabled while switch on`)
+    scheduleSwitch.click()
+    await vue.nextTick()
+    if (!scheduleInput.disabled) throw Error(`${name}: cloud schedule input did not disable`)
+    if (![...cloudPanel.querySelectorAll('label')].some(label => label.textContent.startsWith('网盘监控目录'))) throw Error(`${name}: cloud folder label not renamed`)
     if (!commonPanel || !localPanel || !commonPanel.textContent.includes('扩展名过滤') || !commonPanel.textContent.includes('TXT 输出路径') || commonPanel.textContent.includes('删除本地源文件') || !localPanel.textContent.includes('删除本地源文件') || localPanel.textContent.includes('TXT 输出路径')) throw Error(`${name}: common and local settings are mixed`)
     const lifeSwitch = [...cloudPanel.querySelectorAll('label')].find(label => label.textContent.includes('115生活事件监控')).querySelector('input')
     if (lifeSwitch.checked || cloudPanel.querySelector('input[max="1800"]').value !== '300') throw Error(`${name}: unsafe life or timeout defaults`)

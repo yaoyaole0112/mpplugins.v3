@@ -56,6 +56,12 @@ class WebApiTests(unittest.TestCase):
                 web_api.validate_settings(self.plugin, {"telegram_enabled": True, "telegram_chat_id": value})
 
     def test_cloud_timeout_and_life_source_validation(self):
+        for enabled in (True, False):
+            result = web_api.validate_settings(self.plugin, {"cloud_scan_enabled": enabled})
+            self.assertIs(result["cloud_scan_enabled"], enabled)
+        for value in ("true", 1, None):
+            with self.subTest(scan_enabled=value), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"cloud_scan_enabled": value})
         for value in (30, 300, 1800, "600"):
             result = web_api.validate_settings(self.plugin, {"cloud_read_timeout": value})
             self.assertEqual(result["cloud_read_timeout"], int(value))

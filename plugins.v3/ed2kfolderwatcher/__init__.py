@@ -159,7 +159,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.10.0"
+    plugin_version = "1.10.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -189,6 +189,7 @@ class Ed2kFolderWatcher(_PluginBase):
     _condition = None
     _scan_enabled = False
     _cloud_enabled = False
+    _cloud_scan_enabled = False
     _cloud_storage = "115网盘Plus"
     _cloud_folder = ""
     _cloud_recursive = True
@@ -248,6 +249,7 @@ class Ed2kFolderWatcher(_PluginBase):
             logger.error(f"本地文件夹 ED2K 链接：配置无效：{err}")
         self._scan_enabled = bool(config.get("scan_enabled", False))
         self._cloud_enabled = bool(config.get("cloud_enabled", False))
+        self._cloud_scan_enabled = bool(config.get("cloud_scan_enabled", self._cloud_enabled))
         self._cloud_storage = str(config.get("cloud_storage") or "115网盘Plus").strip()
         self._cloud_folder = str(config.get("cloud_folder") or "").strip()
         self._cloud_recursive = bool(config.get("cloud_recursive", True))
@@ -462,7 +464,7 @@ class Ed2kFolderWatcher(_PluginBase):
         with self._condition:
             pending = sum(key.startswith("cloud:") for key in self._pending)
         return {"ok": True, "storages": storages, "enabled": self._cloud_enabled,
-                "pending": pending, "life_enabled": self._cloud_monitor_enabled,
+                "pending": pending, "scan_enabled": self._cloud_scan_enabled, "life_enabled": self._cloud_monitor_enabled,
                 "life_source": self._cloud_life_source, **self._cloud_status}
 
     def poll_cloud_events(self) -> None:
@@ -928,7 +930,8 @@ class Ed2kFolderWatcher(_PluginBase):
         if self._folder and self._scan_enabled:
             services.append({"id": "Ed2kFolderWatcher", "name": "扫描本地文件夹并生成 ED2K", "trigger": CronTrigger.from_crontab(self._cron), "func": self.scan})
         if self._cloud_enabled:
-            services.append({"id": "Ed2kFolderWatcherCloud", "name": "网盘文件增量生成 ED2K（只读）", "trigger": CronTrigger.from_crontab(self._cloud_cron), "func": self.queue_cloud_scan})
+            if self._cloud_scan_enabled:
+                services.append({"id": "Ed2kFolderWatcherCloud", "name": "网盘定时增量补扫", "trigger": CronTrigger.from_crontab(self._cloud_cron), "func": self.queue_cloud_scan})
             if self._cloud_monitor_enabled:
                 services.append({"id": "Ed2kFolderWatcherLife", "name": "115生活事件触发ED2K增量补扫", "trigger": CronTrigger.from_crontab("* * * * *"), "func": self.poll_cloud_events})
         return services
@@ -1069,7 +1072,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._web_login = None
 
     def _save_config(self) -> None:
-        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "delete_source", "telegram_enabled", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
+        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "delete_source", "telegram_enabled", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
         config = {name: getattr(self, f"_{name}") for name in fields}
         config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce)
         self.update_config(config)
@@ -1082,29 +1085,30 @@ class Ed2kFolderWatcher(_PluginBase):
             return {"component": component, "props": props}
 
         return [{"component": "VForm", "content": [
-            {"component": "VCardTitle", "text": "公共设置 · 本地与网盘共用"},
+            {"component": "VCardTitle", "text": "通用设置"},
             field("VSwitch", "enabled", "启用插件"),
             field("VSwitch", "output_enabled", "生成本地 TXT 文件", hint="本地与网盘链接合并输出；关闭仍保留内部记录。", persistent_hint=True),
             field("VTextField", "output", "TXT 输出路径", placeholder="留空自动选择 ed2k.txt 路径"),
             field("VTextField", "extensions", "公共扩展名过滤", placeholder="留空处理全部文件，例如 mkv,mp4,flac"),
             field("VTextField", "min_age", "公共稳定等待秒数", type="number", hint="本地和网盘共用，请选择上传完成目录。", persistent_hint=True),
-            {"component": "VCardTitle", "text": "本地目录监控"},
+            {"component": "VCardTitle", "text": "本地监控"},
             field("VTextField", "folder", "本地监控目录", placeholder="/downloads/complete", hint="MoviePilot 容器内可见的本地路径；留空可仅处理网盘。", persistent_hint=True),
             field("VSwitch", "recursive", "包含本地子目录"),
             field("VSwitch", "monitor_enabled", "本地实时监控文件"),
             field("VSwitch", "delete_source", "成功后删除本地源文件", hint="对网盘无效；两种输出都关闭时不删除。", persistent_hint=True),
             field("VSwitch", "scan_enabled", "本地定时增量补扫"),
             field("VTextField", "cron", "本地补扫计划", hint="默认每 10 分钟：*/10 * * * *", persistent_hint=True),
-            {"component": "VCardTitle", "text": "115／CloudDrive 网盘来源（只读）"},
+            {"component": "VCardTitle", "text": "网盘监控"},
             field("VSwitch", "cloud_enabled", "启用网盘增量生成（只读，不删源）"),
             field("VSelect", "cloud_storage", "网盘存储", items=[{"title": "115网盘Plus", "value": "115网盘Plus"}, {"title": "CloudDrive储存", "value": "CloudDrive储存"}]),
-            field("VTextField", "cloud_folder", "网盘目录", hint="网盘内绝对路径，不能使用根目录；可在新版插件设置页面浏览选择。", persistent_hint=True),
+            field("VTextField", "cloud_folder", "网盘监控目录", hint="网盘内绝对路径，不能使用根目录；可在新版插件设置页面浏览选择。", persistent_hint=True),
             field("VSwitch", "cloud_recursive", "包含网盘子目录"),
-            field("VTextField", "cloud_cron", "网盘定时兜底计划", hint="默认每10分钟；弥补生活事件漏报。", persistent_hint=True),
+            field("VSwitch", "cloud_scan_enabled", "网盘定时增量补扫", hint="开启后才按网盘补扫计划执行；关闭不影响手动补扫或生活事件触发。", persistent_hint=True),
+            field("VTextField", "cloud_cron", "网盘补扫计划", hint="仅开启网盘定时增量补扫时生效，默认每10分钟。", persistent_hint=True),
             field("VTextField", "cloud_read_timeout", "网盘读取超时（秒）", type="number", hint="30至1800秒，默认300；临时断线最多重连两次，满足强校验条件才续读。", persistent_hint=True),
             field("VSwitch", "cloud_monitor_enabled", "115生活事件监控（近实时）", hint="仅支持115网盘Plus，每分钟检查一次；仍需定时兜底。", persistent_hint=True),
             field("VSelect", "cloud_life_source", "生活事件来源", items=[{"title": "复用115插件监听（不额外请求生活接口）", "value": "shared"}, {"title": "独立轮询（每分钟一次生活接口）", "value": "direct"}]),
-            {"component": "VCardTitle", "text": "公共发送设置 · Telegram"},
+            {"component": "VCardTitle", "text": "ED2K链接自动转发"},
             field("VSwitch", "telegram_enabled", "发送 ED2K 链接到 Telegram"),
             # field("VSelect", "telegram_mode", "Telegram 发送方式", items=[{"title": "Bot Token（机器人）", "value": "bot"}, {"title": "个人账号（Telethon）", "value": "user"}]),
             # field("VTextField", "telegram_token", "Telegram Bot Token", type="password"),
@@ -1112,4 +1116,4 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}

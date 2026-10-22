@@ -7,7 +7,7 @@ const busy = ref(false)
 const loaded = ref(false)
 const error = ref('')
 const notice = ref('')
-const settings = reactive({ telegram_mode: 'user', cloud_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
+const settings = reactive({ telegram_mode: 'user', cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
 const cloud = reactive({ storages: [], folders: [], browsing: '', scanning: false, pending: 0, file: '', bytes_read: 0, size: 0, error: '' })
 const account = reactive({ api_id: '', api_hash: '', phone: '', code: '', password: '' })
 const auth = reactive({ logged_in: false, pending: false, password_required: false, api_hash_configured: false, expires_in: 0, retry_in: 0 })
@@ -15,7 +15,7 @@ let timer
 let savedDelete = false
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || !loaded.value)
-const configFields = ['enabled', 'folder', 'recursive', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'delete_source', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'cloud_enabled', 'cloud_storage', 'cloud_folder', 'cloud_recursive', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
+const configFields = ['enabled', 'folder', 'recursive', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'delete_source', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_recursive', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
 const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '本地与网盘共用；留空处理全部文件，例如 mkv,mp4' }, { key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '本地与网盘共用；稳定等待不能保证上传已经完成，请选择完成目录' }]
 
 function unpack(response) {
@@ -145,7 +145,7 @@ onUnmounted(() => {
     <p v-if="!loaded">正在加载设置…</p>
 
     <article class="card" data-testid="common-settings">
-      <h3>公共设置 · 本地与网盘共用</h3>
+      <h3>通用设置</h3>
       <div class="switches"><label class="switch"><input v-model="settings.enabled" type="checkbox" :disabled="disabled">启用插件</label><label class="switch"><input v-model="settings.output_enabled" type="checkbox" :disabled="disabled">生成本地 TXT</label></div>
       <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :min="field.type === 'number' ? 0 : undefined" :disabled="disabled"><small>{{ field.hint }}</small></label></div>
       <div class="fields"><label>TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；有本地目录时默认写入该目录，仅网盘时写入插件数据目录。关闭 TXT 不删除已有文件。</small></label></div>
@@ -153,18 +153,18 @@ onUnmounted(() => {
     </article>
 
     <article class="card" data-testid="local-source">
-      <h3>本地目录监控</h3>
+      <h3>本地监控</h3>
       <div class="switches"><label class="switch"><input v-model="settings.monitor_enabled" type="checkbox" :disabled="disabled">实时监控文件</label><label class="switch"><input v-model="settings.recursive" type="checkbox" :disabled="disabled">包含本地子目录</label><label class="switch"><input v-model="settings.delete_source" type="checkbox" :disabled="disabled">成功后删除本地源文件</label><label class="switch"><input v-model="settings.scan_enabled" type="checkbox" :disabled="disabled">本地定时增量补扫</label></div>
       <div class="fields"><label>本地监控目录<input v-model="settings.folder" :disabled="disabled" placeholder="/media/movies"><small>MoviePilot 容器内路径；留空可仅处理网盘来源。</small></label><label>本地补扫计划<input v-model="settings.cron" :disabled="disabled || !settings.scan_enabled" placeholder="*/10 * * * *"><small>默认关闭，网络挂载漏事件时可启用兜底。</small></label></div>
       <p v-if="settings.delete_source" class="warning">已开启本地删除源文件：仅在所选输出成功且文件未变化时删除；两种输出都关闭时不删除。此开关对网盘无效，网盘文件始终保留。</p>
     </article>
 
     <article class="card" data-testid="cloud-source">
-      <h3>115／CloudDrive 网盘来源（只读）</h3>
+      <h3>网盘监控</h3>
       <p>无需将网盘挂载为本地目录；复用已登录的存储插件，完整数据经网络分块读取计算，不保存完整临时文件。本地和网盘共用一个工作线程；不会并发计算多个文件，也不会删除云端文件。</p>
-      <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_recursive" type="checkbox" :disabled="disabled">包含网盘子目录</label><label class="switch"><input v-model="settings.cloud_monitor_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">115生活事件监控（近实时）</label></div>
-      <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''; if (settings.cloud_storage !== '115网盘Plus') settings.cloud_monitor_enabled = false"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>当前已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储，请先启用并登录对应插件' }}</small></label><label>网盘目录<input v-model.trim="settings.cloud_folder" :disabled="disabled" placeholder="/待生成链接"><small>网盘内的绝对路径，不是容器本地路径。首次扫描处理目录内现有文件，建议先选小目录测试。</small></label><label>网盘定时兜底计划<input v-model.trim="settings.cloud_cron" :disabled="disabled" placeholder="*/10 * * * *"><small>默认每 10 分钟；弥补生活事件漏报，已有链接不重复下载计算。</small></label><label>网盘读取超时（秒）<input v-model="settings.cloud_read_timeout" type="number" min="30" max="1800" :disabled="disabled"><small>单次网络读取等待上限，默认 300 秒，不是整个文件计算时限。临时断线最多重连两次；服务提供强校验标识或SHA1时尝试安全续读。</small></label><label v-if="settings.cloud_monitor_enabled">115生活事件来源<select v-model="settings.cloud_life_source" :disabled="disabled"><option value="shared">复用115插件监听（不额外请求生活接口）</option><option value="direct">独立轮询（每分钟一次生活接口）</option></select><small>复用模式要求115插件生活事件监听正在运行，且与当前存储登录同一账号；不会擅自切换为独立请求。</small></label></div>
-      <p v-if="settings.cloud_monitor_enabled">每分钟检查一次新生活事件，合并触发所选目录的增量补扫；不是115服务器主动推送。账号其他目录的相关事件也可能触发所选目录补扫；不会扫描网盘根目录。复制、改名或部分上传可能没有事件，因此仍保留定时兜底。任务繁忙时排队处理。</p>
+      <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_recursive" type="checkbox" :disabled="disabled">包含网盘子目录</label><label class="switch"><input v-model="settings.cloud_scan_enabled" type="checkbox" :disabled="disabled">网盘定时增量补扫</label><label class="switch"><input v-model="settings.cloud_monitor_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">115生活事件监控（近实时）</label></div>
+      <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''; if (settings.cloud_storage !== '115网盘Plus') settings.cloud_monitor_enabled = false"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>当前已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储，请先启用并登录对应插件' }}</small></label><label>网盘监控目录<input v-model.trim="settings.cloud_folder" :disabled="disabled" placeholder="/待生成链接"><small>网盘内的绝对路径，不是容器本地路径。首次扫描处理目录内现有文件，建议先选小目录测试。</small></label><label>网盘补扫计划<input v-model.trim="settings.cloud_cron" :disabled="disabled || !settings.cloud_scan_enabled" placeholder="*/10 * * * *"><small>仅开启“网盘定时增量补扫”后生效；关闭不影响手动补扫和生活事件触发。默认计划每 10 分钟。</small></label><label>网盘读取超时（秒）<input v-model="settings.cloud_read_timeout" type="number" min="30" max="1800" :disabled="disabled"><small>单次网络读取等待上限，默认 300 秒，不是整个文件计算时限。临时断线最多重连两次；服务提供强校验标识或SHA1时尝试安全续读。</small></label><label v-if="settings.cloud_monitor_enabled">115生活事件来源<select v-model="settings.cloud_life_source" :disabled="disabled"><option value="shared">复用115插件监听（不额外请求生活接口）</option><option value="direct">独立轮询（每分钟一次生活接口）</option></select><small>复用模式要求115插件生活事件监听正在运行，且与当前存储登录同一账号；不会擅自切换为独立请求。</small></label></div>
+      <p v-if="settings.cloud_monitor_enabled">每分钟检查一次新生活事件，合并触发所选目录的增量补扫；不是115服务器主动推送。账号其他目录的相关事件也可能触发所选目录补扫；不会扫描网盘根目录。复制、改名或部分上传可能没有事件，建议开启“网盘定时增量补扫”兜底。任务繁忙时排队处理。</p>
       <div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud()">浏览网盘目录</button><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.cloud_enabled" @click="runCloud">立即网盘增量扫描／补发</button><button type="button" class="secondary" :disabled="disabled" @click="work(refreshCloud)">刷新网盘进度</button></div>
       <div v-if="cloud.browsing" class="cloud-browser"><p>当前浏览：{{ cloud.browsing }}</p><div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud(cloud.browsing.split('/').slice(0, -1).join('/') || '/')">上一级</button><button type="button" :disabled="disabled" @click="settings.cloud_folder = cloud.browsing">选择此目录</button></div><div class="cloud-folders"><button v-for="folder in cloud.folders" :key="folder.path" type="button" class="secondary" :disabled="disabled" @click="browseCloud(folder.path)">{{ folder.name }}</button><small v-if="!cloud.folders.length">此目录下没有子目录。</small></div></div>
       <p role="status">{{ cloud.scanning ? '正在发现文件' : '等待下一次扫描' }} · 待处理 {{ cloud.pending }} 个<span v-if="cloud.file"> · {{ cloud.reconnecting ? '断线重连／续读中' : '正在计算' }}：{{ cloud.file }}（{{ cloud.size ? Math.floor(cloud.bytes_read / cloud.size * 100) : 0 }}%）<span v-if="cloud.stream_retries"> · 已重连 {{ cloud.stream_retries }} 次</span></span></p>
@@ -174,11 +174,11 @@ onUnmounted(() => {
       <p v-if="cloud.life_error" class="warning">{{ cloud.life_error }}</p>
       <p v-if="cloud.life_retry_at" class="warning">生活事件下次允许检查：{{ new Date(cloud.life_retry_at * 1000).toLocaleString() }}；失败时自动退避，不持续请求。</p>
       <p v-if="cloud.life_truncated" class="warning">本次生活事件达到64条上限，可能遗漏更早事件；请保留定时兜底，必要时手动补扫。</p>
-      <small>网盘复用“公共设置”及 Telegram 设置。修改后先点右上角“保存插件设置”。续读只保留内存中的哈希状态，不保存完整临时文件；服务不支持安全续读、重连耗尽或插件重启后，下次任务仍需从头读取，不生成不完整链接。</small>
+      <small>网盘复用“通用设置”及“ED2K链接自动转发”设置。修改后先点右上角“保存插件设置”。关闭定时补扫不会取消已排队任务或失败重试。续读只保留内存中的哈希状态，不保存完整临时文件；服务不支持安全续读、重连耗尽或插件重启后，下次任务仍需从头读取，不生成不完整链接。</small>
     </article>
 
     <article class="card">
-      <h3>公共发送设置 · Telegram</h3>
+      <h3>ED2K链接自动转发</h3>
       <div class="switches"><label class="switch"><input v-model="settings.telegram_enabled" type="checkbox" :disabled="disabled">发送 ED2K 链接到 Telegram</label></div>
       <!-- <select v-model="settings.telegram_mode"><option value="bot">Bot Token（机器人）</option></select> -->
       <!-- <label>发送机器人 Token<input v-model="settings.telegram_token" type="password" autocomplete="new-password"></label> -->

@@ -218,7 +218,44 @@ class Ed2kTests(unittest.TestCase):
         self.assertTrue(self.plugin.queue_cloud_scan()["ok"])
         self.assertTrue(self.plugin.queue_cloud_scan()["ok"])
         self.assertEqual(list(self.plugin._pending), ["__cloud_scan__"])
+        self.assertEqual(self.plugin.get_service(), [])
+        self.plugin._cloud_scan_enabled = True
         self.assertEqual(self.plugin.get_service()[0]["id"], "Ed2kFolderWatcherCloud")
+
+    def test_cloud_schedule_switch_does_not_disable_manual_or_life_events(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._enabled = True
+        self.plugin._worker = threading.current_thread()
+        self.plugin._cloud_scan_enabled = False
+        self.plugin._cloud_monitor_enabled = True
+        self.assertEqual([service["id"] for service in self.plugin.get_service()], ["Ed2kFolderWatcherLife"])
+        self.assertTrue(self.plugin.queue_cloud_scan()["ok"])
+        self.plugin._pending.clear()
+        storage.life_events.return_value = [{"id": 99, "type": 1, "update_time": self.plugin._cloud_life_started + 1}]
+        self.plugin.poll_cloud_events()
+        self.assertIn("__cloud_scan__", self.plugin._pending)
+        self.plugin._cloud_enabled = False
+        self.assertEqual(self.plugin.get_service(), [])
+
+    def test_cloud_schedule_defaults_and_legacy_upgrade(self):
+        self.assertFalse(self.plugin._cloud_scan_enabled)
+        with patch.object(self.plugin, "_refresh_link_names"):
+            self.plugin.init_plugin({"cloud_enabled": True, "cloud_folder": "/cloud-test"})
+        self.assertTrue(self.plugin._cloud_scan_enabled)
+        self.plugin.init_plugin({"cloud_enabled": True, "cloud_folder": "/cloud-test", "cloud_scan_enabled": False})
+        self.assertFalse(self.plugin._cloud_scan_enabled)
+        self.plugin._save_config()
+        self.assertIs(self.plugin.update_config.call_args.args[0]["cloud_scan_enabled"], False)
+
+    def test_form_uses_updated_headings_and_cloud_schedule_switch(self):
+        form, defaults = self.plugin.get_form()
+        fields = form[0]["content"]
+        self.assertEqual([field["text"] for field in fields if field["component"] == "VCardTitle"], ["通用设置", "本地监控", "网盘监控", "ED2K链接自动转发"])
+        models = {field.get("props", {}).get("model"): field for field in fields}
+        self.assertEqual(models["cloud_scan_enabled"]["props"]["label"], "网盘定时增量补扫")
+        self.assertEqual(models["cloud_folder"]["props"]["label"], "网盘监控目录")
+        self.assertEqual(models["cloud_cron"]["props"]["label"], "网盘补扫计划")
+        self.assertFalse(defaults["cloud_scan_enabled"])
 
     def test_empty_file_never_hashes_sends_or_deletes(self):
         path = self.create(data=b"")
