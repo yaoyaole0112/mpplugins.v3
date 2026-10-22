@@ -163,19 +163,58 @@ class FileCleanupTelegramTests(unittest.TestCase):
         self.assertEqual((reply.source, reply.userid), ('管理员Bot', '123'))
         self.assertIn('1 个文件', reply.text)
         self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'completed')
+        message_count = self.plugin.chain.post_message.call_count
         self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
         self.client.delete_files.assert_called_once()
+        self.assertEqual(self.plugin.chain.post_message.call_count, message_count)
+        self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'completed')
         self.assertNotIn(token, self.plugin._pending)
         self.assertNotIn(token, self.plugin._cleanup_telegram_sources)
         edited = next(call.args[0] for call in self.plugin.chain.post_message.call_args_list
                       if getattr(call.args[0], 'original_message_id', None) == 101
-                      and getattr(call.args[0], 'buttons', None) is None)
+                      and getattr(call.args[0], 'buttons', None)
+                      and call.args[0].buttons[0][0]['text'] == '🗑️清理完成')
         self.assertEqual(edited.original_message_id, 101)
         self.assertEqual(edited.original_chat_id, '123')
-        self.assertIsNone(edited.buttons)
+        self.assertEqual(edited.buttons, [[{
+            'text': '🗑️清理完成', 'callback_data': f'[PLUGIN]EmeTools|files:{token}:p'}]])
+        self.assertNotIn('已删除', edited.text)
+
+    def test_confirmation_sends_only_one_new_result_without_queue_reply(self):
+        token = self.request()
+        self.plugin.chain.post_message.reset_mock()
+        self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
+        messages = [call.args[0] for call in self.plugin.chain.post_message.call_args_list]
+        new_messages = [message for message in messages if not message.original_message_id]
+        self.assertEqual(len(new_messages), 1)
+        self.assertIn('已删除', new_messages[0].text)
+        self.assertEqual(sum('已删除' in message.text for message in messages), 1)
+        self.assertFalse(any('已提交清理确认' in message.text for message in messages))
+
+    def test_failed_cleanup_does_not_show_completed_button(self):
+        token = self.request()
+        self.client.delete_files.return_value = {'state': False, 'msg': '删除失败'}
+        self.plugin.chain.post_message.reset_mock()
+        self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
+        messages = [call.args[0] for call in self.plugin.chain.post_message.call_args_list]
+        self.assertFalse(any(message.buttons and message.buttons[0][0]['text'] == '🗑️清理完成'
+                             for message in messages))
+        self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'failed')
+
+    def test_completed_status_button_is_inert(self):
+        token = self.request()
+        self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
+        self.plugin.chain.post_message.reset_mock()
+        data = {**self.data, 'plugin_id': 'EmeTools', 'text': f'files:{token}:p'}
+        with patch('emetools.threading.Thread') as thread:
+            self.plugin.scheduled_confirmation_action(SimpleNamespace(event_data=data))
+        thread.assert_not_called()
+        self.plugin.chain.post_message.assert_not_called()
+        self.client.delete_files.assert_called_once()
 
     def test_telegram_approval_immediately_replaces_choices_with_processing_button(self):
         token = self.request()
+        self.plugin.chain.post_message.reset_mock()
         queued = {'queued': True, 'job_id': 'queued-job'}
         with patch.object(self.plugin._p115_tasks, 'run', return_value=queued):
             self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
@@ -185,6 +224,7 @@ class FileCleanupTelegramTests(unittest.TestCase):
         self.assertEqual(edited.buttons, [[{
             'text': '⌛️清理中', 'callback_data': f'[PLUGIN]EmeTools|files:{token}:p'}]])
         self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'processing')
+        self.plugin.chain.post_message.assert_called_once()
 
     def test_cancel_invalidates_web_confirmation_without_deletion(self):
         token = self.request()

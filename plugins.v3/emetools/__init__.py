@@ -119,7 +119,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.30"
+    plugin_version = "2.10.31"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1597,12 +1597,14 @@ class EmeTools(_PluginBase):
         threading.Thread(target=self._handle_scheduled_confirmation,
                          args=(match.group(1), match.group(2) == "y", data.copy()), daemon=True).start()
 
-    def _edit_file_cleanup_message(self, data: dict, token: str, text: str, processing: bool = False) -> None:
+    def _edit_file_cleanup_message(self, data: dict, token: str, text: str, processing: bool = False,
+                                   completed: bool = False) -> None:
         message_id = data.get("original_message_id")
         chat_id = data.get("original_chat_id")
         if not message_id or not chat_id:
             return
-        buttons = [[{"text": "⌛️清理中", "callback_data": f"[PLUGIN]EmeTools|files:{token}:p"}]] if processing else None
+        status_text = "🗑️清理完成" if completed else "⌛️清理中" if processing else None
+        buttons = [[{"text": status_text, "callback_data": f"[PLUGIN]EmeTools|files:{token}:p"}]] if status_text else None
         try:
             self.chain.post_message(Message(channel=NotificationChannel.Telegram, source=data.get("source"),
                                         userid=str(data.get("userid") or ""), title="⚠️【清理文件】",
@@ -1622,6 +1624,8 @@ class EmeTools(_PluginBase):
             return
         try:
             with self._pending_lock:
+                if self._cleanup_status.get(token, {}).get("state") in {"completed", "cancelled", "failed"}:
+                    return
                 pending = self._pending.get(token)
                 if (not pending or pending[1] != "cleanup" or time.monotonic() - pending[0] >= 1800
                         or source not in self._cleanup_telegram_sources.get(token, set())):
@@ -1641,7 +1645,6 @@ class EmeTools(_PluginBase):
                 self._cleanup_status[token] = {"state": "processing", "updated": time.monotonic()}
             self._set_cleanup_status(token, "processing", "已提交清理确认，正在排队复核目录")
             self._edit_file_cleanup_message(data, token, "⌛️ 清理中：正在排队复核目录；完成后会另行通知。", processing=True)
-            self._media_bot_reply(source, user, "媒体增强", "已提交清理确认，正在排队复核目录；完成后会回复结果，请勿重复点击。")
 
             def confirm():
                 if not self._enabled:
@@ -1657,7 +1660,9 @@ class EmeTools(_PluginBase):
                                      result.get("message", ""))
             notice = notices.file_cleanup(result, {"folders": []}) if "deleted" in result else None
             title, text = notice or ("媒体增强", result.get("message") or "清理已结束")
-            self._edit_file_cleanup_message(data, token, text)
+            self._edit_file_cleanup_message(data, token,
+                                           "🗑️ 清理完成，详细结果见下方通知。" if result.get("ok") else "清理未全部完成，详细结果见下方通知。",
+                                           completed=bool(result.get("ok")))
             self._media_bot_reply(source, user, title, text)
         except (HTTPException, RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
             logger.warning("媒体增强 清理文件：Telegram确认未完成：%s", type(error).__name__)
