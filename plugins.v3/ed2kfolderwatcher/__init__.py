@@ -159,7 +159,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.11.0"
+    plugin_version = "1.11.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -218,6 +218,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._cloud_life_started = time.time()
         self._cloud_life_failures = 0
         self._cloud_life_retry_after = 0
+        self._cloud_life_candidates = {}
         self._cloud_status.update(reconnecting=False, stream_retries=0, retry_at=None, error_key="", life_last_poll=None, life_error="", life_events=0, life_retry_at=None, life_truncated=False)
         self._lock = threading.RLock()
         self._web_login_lock = threading.Lock()
@@ -487,20 +488,63 @@ class Ed2kFolderWatcher(_PluginBase):
                     parsed.append((int(event["id"]), int(event["type"]), float(event.get("update_time") or 0), event))
                 except (ValueError, TypeError, KeyError):
                     continue
-            new = [entry for entry in parsed if entry[0] > self._cloud_life_cursor and (self._cloud_life_cursor or entry[2] >= self._cloud_life_started)]
+            new = [entry for entry in parsed if entry[0] > self._cloud_life_cursor and entry[2] >= self._cloud_life_started]
             if parsed:
                 self._cloud_life_cursor = max(self._cloud_life_cursor, max(entry[0] for entry in parsed))
+            self._cloud_status.update(life_last_poll=time.time(), life_truncated=len(events) >= 64)
+            now = time.monotonic()
+            for file_id, candidate in list(self._cloud_life_candidates.items()):
+                if candidate["expires"] <= now or candidate["attempts"] >= 10:
+                    self._cloud_life_candidates.pop(file_id, None)
+                    logger.info(f"自动生成ED2K链接：生活事件文件复查到期，未加入计算队列：文件ID {file_id}；可手动补扫")
+            for _, event_type, _, event in sorted(new, key=lambda entry: entry[0]):
+                try:
+                    file_id = str(int(event["file_id"]))
+                    is_file = int(event["file_category"]) != 0
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if event_type == 22:
+                    self._cloud_life_candidates.pop(file_id, None)
+                    continue
+                if not is_file:
+                    continue
+                candidate = self._cloud_life_candidates.get(file_id)
+                if event_type in {20, 24} and candidate:
+                    candidate["event"] = event
+                    candidate["due"] = min(candidate["due"], now)
+                elif event_type in {1, 2, 5, 6, 14, 23}:
+                    if candidate:
+                        candidate["event"] = event
+                    elif len(self._cloud_life_candidates) < 512:
+                        self._cloud_life_candidates[file_id] = {"event": event, "expires": now + 900, "attempts": 0, "due": now}
+                    else:
+                        logger.warning("自动生成ED2K链接：生活事件待复查文件达到512项上限，请按需手动补扫")
+            queued = 0
+            checks = 0
+            for file_id, candidate in sorted(self._cloud_life_candidates.items(), key=lambda entry: entry[1]["due"]):
+                if checks >= 8 or stopping.is_set() or stopping is not self._stopping:
+                    break
+                if candidate["due"] > now:
+                    continue
+                checks += 1
+                candidate["attempts"] += 1
+                candidate["due"] = now + 60
+                item = storage.item_from_life_event(candidate["event"])
+                if stopping.is_set() or stopping is not self._stopping:
+                    return
+                if item and self._cloud_item_is_eligible(item):
+                    if self._queue_cloud_file(item):
+                        queued += 1
+                    self._cloud_life_candidates.pop(file_id, None)
+                elif candidate["attempts"] >= 10:
+                    self._cloud_life_candidates.pop(file_id, None)
+                    logger.info(f"自动生成ED2K链接：生活事件文件复查10次仍未就绪或不在监控范围：文件ID {file_id}；可手动补扫")
+                elif candidate["attempts"] == 1:
+                    logger.info(f"自动生成ED2K链接：新增事件文件尚未就绪或不在监控范围，保留限次复查：文件ID {file_id}")
+            self._cloud_status["life_events"] += queued
             self._cloud_life_failures = 0
             self._cloud_life_retry_after = 0
-            self._cloud_status.update(life_last_poll=time.time(), life_error="", life_retry_at=None, life_truncated=len(events) >= 64)
-            queued = 0
-            for _, event_type, _, event in new:
-                if event_type not in {1, 2, 5, 6, 14, 18, 23}:
-                    continue
-                item = storage.item_from_life_event(event)
-                if item and self._cloud_item_is_eligible(item) and self._queue_cloud_file(item):
-                    queued += 1
-            self._cloud_status["life_events"] += queued
+            self._cloud_status.update(life_error="", life_retry_at=None)
         except Exception as failure:
             if stopping is self._stopping and not stopping.is_set():
                 self._cloud_status["life_error"] = str(failure) if isinstance(failure, CloudError) else f"生活事件读取失败（{type(failure).__name__}），定时补扫仍可用"

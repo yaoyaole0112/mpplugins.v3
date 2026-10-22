@@ -116,17 +116,16 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._cloud_monitor_enabled = True
         self.plugin._cloud_life_started = 10
         events = [
-            {"id": 6, "type": 2, "update_time": 11, "file_id": "dir", "file_category": 0},
-            {"id": 5, "type": 5, "update_time": 11, "file_id": "outside", "file_category": 1},
-            {"id": 4, "type": 1, "update_time": 11, "file_id": "empty", "file_category": 1},
-            {"id": 3, "type": 1, "update_time": 11, "file_id": "temp", "file_category": 1},
+            {"id": 6, "type": 2, "update_time": 11, "file_id": "126", "file_category": 0},
+            {"id": 5, "type": 5, "update_time": 11, "file_id": "125", "file_category": 1},
+            {"id": 4, "type": 1, "update_time": 11, "file_id": "124", "file_category": 1},
+            {"id": 3, "type": 1, "update_time": 11, "file_id": "123", "file_category": 1},
         ]
         storage.life_events.return_value = events
         storage.item_from_life_event.side_effect = [
-            None,
-            {**item, "fileid": "outside", "path": "/other/outside.mkv"},
-            {**item, "fileid": "empty", "size": 0},
-            {**item, "fileid": "temp", "name": "upload.part", "path": "/cloud-test/upload.part"},
+            {**item, "name": "upload.part", "path": "/cloud-test/upload.part"},
+            {**item, "fileid": "124", "size": 0},
+            {**item, "fileid": "125", "path": "/other/outside.mkv"},
         ]
         with patch.object(self.plugin, "queue_cloud_scan", side_effect=AssertionError("life events must not scan the directory")):
             self.plugin.poll_cloud_events()
@@ -143,10 +142,103 @@ class Ed2kTests(unittest.TestCase):
             {"id": 3, "type": 6, "update_time": 11, "file_id": "123", "file_category": 1},
             {"id": 2, "type": 6, "update_time": 11, "file_id": "124", "file_category": 1},
         ]
-        storage.item_from_life_event.side_effect = [item, item, {**item, "fileid": "124", "path": "/other/云端.mkv"}]
+        storage.item_from_life_event.side_effect = [{**item, "fileid": "124", "path": "/other/云端.mkv"}, item]
         self.plugin.poll_cloud_events()
         self.assertEqual(list(self.plugin._pending), [self.cloud_module.record_key(item)])
         self.assertEqual(self.plugin._cloud_status["life_events"], 1)
+
+    def life_fixture(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._enabled = True
+        self.plugin._cloud_monitor_enabled = True
+        self.plugin._cloud_life_started = 10
+        event = {"id": 1, "type": 14, "update_time": 11, "file_id": "123", "file_category": 1}
+        storage.life_events.return_value = [event]
+        return item, storage, event
+
+    def test_life_file_outside_then_renamed_inside_is_not_lost(self):
+        item, storage, event = self.life_fixture()
+        storage.item_from_life_event.side_effect = [{**item, "path": "/资源池/a.mkv"}, item]
+        with patch.object(self.plugin, "queue_cloud_scan", side_effect=AssertionError("must not scan")), patch.object(self.module.time, "monotonic", return_value=100):
+            self.plugin.poll_cloud_events()
+            self.assertFalse(self.plugin._pending)
+            self.assertIn("123", self.plugin._cloud_life_candidates)
+            storage.life_events.return_value = [{**event, "id": 2, "type": 24}]
+            self.plugin.poll_cloud_events()
+        self.assertIn(self.cloud_module.record_key(item), self.plugin._pending)
+        self.assertFalse(self.plugin._cloud_life_candidates)
+
+    def test_life_delayed_recheck_without_another_event(self):
+        item, storage, event = self.life_fixture()
+        storage.item_from_life_event.side_effect = [None, item]
+        with patch.object(self.module.time, "monotonic", return_value=100):
+            self.plugin.poll_cloud_events()
+            self.plugin.poll_cloud_events()
+        self.assertEqual(storage.item_from_life_event.call_count, 1)
+        with patch.object(self.module.time, "monotonic", return_value=160):
+            self.plugin.poll_cloud_events()
+        self.assertIn(self.cloud_module.record_key(item), self.plugin._pending)
+
+    def test_life_rename_only_never_processes_old_file(self):
+        item, storage, event = self.life_fixture()
+        storage.life_events.return_value = [{**event, "type": 24}]
+        self.plugin.poll_cloud_events()
+        storage.item_from_life_event.assert_not_called()
+        self.assertFalse(self.plugin._pending)
+
+    def test_life_late_old_event_is_not_replayed_after_cursor_advances(self):
+        item, storage, event = self.life_fixture()
+        storage.item_from_life_event.return_value = item
+        self.plugin.poll_cloud_events()
+        self.plugin._pending.clear()
+        storage.life_events.return_value = [{**event, "id": 2, "update_time": 9}]
+        self.plugin.poll_cloud_events()
+        self.assertFalse(self.plugin._pending)
+        storage.item_from_life_event.assert_called_once()
+
+    def test_life_rechecks_expire_and_have_attempt_limit(self):
+        item, storage, event = self.life_fixture()
+        storage.item_from_life_event.return_value = None
+        for attempt in range(11):
+            with patch.object(self.module.time, "monotonic", return_value=100 + 60 * attempt):
+                self.plugin.poll_cloud_events()
+        self.assertEqual(storage.item_from_life_event.call_count, 10)
+        self.assertFalse(self.plugin._cloud_life_candidates)
+        self.plugin._cloud_life_cursor = 0
+        with patch.object(self.module.time, "monotonic", return_value=1000):
+            self.plugin.poll_cloud_events()
+        with patch.object(self.module.time, "monotonic", return_value=1901):
+            self.plugin.poll_cloud_events()
+        self.assertFalse(self.plugin._cloud_life_candidates)
+        self.assertEqual(storage.item_from_life_event.call_count, 11)
+
+    def test_life_deleted_candidate_is_cancelled(self):
+        item, storage, event = self.life_fixture()
+        storage.item_from_life_event.return_value = None
+        self.plugin.poll_cloud_events()
+        storage.life_events.return_value = [{**event, "id": 2, "type": 22}]
+        self.plugin.poll_cloud_events()
+        self.assertFalse(self.plugin._cloud_life_candidates)
+        self.assertEqual(storage.item_from_life_event.call_count, 1)
+
+    def test_life_lookup_failure_retains_candidate_and_backs_off(self):
+        item, storage, event = self.life_fixture()
+        storage.item_from_life_event.side_effect = self.cloud_module.CloudError("safe failure")
+        for now, delay in ((100, 300), (400, 600)):
+            with patch.object(self.module.time, "monotonic", return_value=now):
+                self.plugin.poll_cloud_events()
+            self.assertEqual(self.plugin._cloud_life_retry_after, now + delay)
+            self.assertIn("123", self.plugin._cloud_life_candidates)
+        self.assertFalse(self.plugin._pending)
+
+    def test_life_lookup_budget_and_candidate_capacity_are_bounded(self):
+        item, storage, event = self.life_fixture()
+        storage.life_events.return_value = [{**event, "id": index, "file_id": str(index)} for index in range(1, 600)]
+        storage.item_from_life_event.return_value = None
+        with patch.object(self.module.time, "monotonic", return_value=100):
+            self.plugin.poll_cloud_events()
+        self.assertEqual(len(self.plugin._cloud_life_candidates), 512)
+        self.assertEqual(storage.item_from_life_event.call_count, 8)
 
     def test_life_disabled_or_failure_does_not_start_downloads(self):
         item, storage = self.cloud_fixture()

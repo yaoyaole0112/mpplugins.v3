@@ -141,6 +141,29 @@ class CloudStorageTests(unittest.TestCase):
         self.assertEqual(item["pickcode"], "pick")
         storage.oper.get_item_strict.assert_called_once_with(Path("/监控/新文件.mkv"))
 
+    def test_life_event_lookup_failures_are_sanitized_and_not_silently_discarded(self):
+        storage = object.__new__(cloud.CloudStorage)
+        storage.storage = "115网盘Plus"
+        storage.oper = Mock()
+        attr = types.ModuleType("p115client.tool.attr")
+        attr.get_path = Mock(side_effect=TimeoutError("secret signed URL"))
+        modules = {"p115client": types.ModuleType("p115client"), "p115client.tool": types.ModuleType("p115client.tool"), "p115client.tool.attr": attr}
+        event = self.life_event(file_id="123", file_category=1)
+        with patch.dict(sys.modules, modules):
+            with self.assertRaises(cloud.CloudError) as failure:
+                storage.item_from_life_event(event)
+            self.assertNotIn("secret", str(failure.exception))
+            self.assertIn("TimeoutError", str(failure.exception))
+            attr.get_path.side_effect = FileNotFoundError("secret path")
+            self.assertIsNone(storage.item_from_life_event(event))
+            attr.get_path.side_effect = None
+            attr.get_path.return_value = "/监控/新文件.mkv"
+            storage.oper.get_item_strict.side_effect = RuntimeError("secret cookie")
+            with self.assertRaises(cloud.CloudError) as failure:
+                storage.item_from_life_event(event)
+            self.assertNotIn("secret", str(failure.exception))
+            self.assertIn("RuntimeError", str(failure.exception))
+
     def test_shared_life_reads_existing_database_without_calling_115(self):
         from sqlalchemy import create_engine, Integer
         from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column

@@ -162,8 +162,10 @@ class CloudStorage:
                 refresh=True,
                 app="android",
             ))
-        except Exception:
+        except FileNotFoundError:
             return None
+        except Exception as failure:
+            raise CloudError(f"生活事件文件路径查询失败（{type(failure).__name__}），保留候选等待退避复查") from None
         try:
             size = int(event.get("file_size") or 0)
             modify_time = int(event.get("update_time") or event.get("create_time") or 0)
@@ -186,8 +188,8 @@ class CloudStorage:
             lookup = getattr(self.oper, "get_item_strict", None) or self.oper.get_item
             current = lookup(Path(path))
             current = current.model_dump() if hasattr(current, "model_dump") else dict(current) if current else None
-        except Exception:
-            return None
+        except Exception as failure:
+            raise CloudError(f"生活事件文件详情查询失败（{type(failure).__name__}），保留候选等待退避复查") from None
         if not current or current.get("type") != "file" or str(current.get("fileid") or "") != file_id:
             return None
         current.update(storage=self.storage, fileid=file_id, type="file", path=path,
