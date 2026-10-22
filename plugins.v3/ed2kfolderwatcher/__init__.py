@@ -159,7 +159,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.10.1"
+    plugin_version = "1.11.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -209,14 +209,13 @@ class Ed2kFolderWatcher(_PluginBase):
         self._condition = threading.Condition()
         self._pending = {}
         self._cloud_iterator = None
-        self._cloud_rescan_requested = False
         self._cloud_adapter = None
         self._cloud_status = {"scanning": False, "file": "", "bytes_read": 0, "size": 0, "error": "", "completed": 0, "last_scan": None}
         self._cloud_observed = {}
         self._cloud_failures = {}
         self._cloud_life_lock = threading.Lock()
         self._cloud_life_cursor = 0
-        self._cloud_life_started = int(time.time())
+        self._cloud_life_started = time.time()
         self._cloud_life_failures = 0
         self._cloud_life_retry_after = 0
         self._cloud_status.update(reconnecting=False, stream_retries=0, retry_at=None, error_key="", life_last_poll=None, life_error="", life_events=0, life_retry_at=None, life_truncated=False)
@@ -485,7 +484,7 @@ class Ed2kFolderWatcher(_PluginBase):
             parsed = []
             for event in events:
                 try:
-                    parsed.append((int(event["id"]), int(event["type"]), float(event.get("update_time") or 0)))
+                    parsed.append((int(event["id"]), int(event["type"]), float(event.get("update_time") or 0), event))
                 except (ValueError, TypeError, KeyError):
                     continue
             new = [entry for entry in parsed if entry[0] > self._cloud_life_cursor and (self._cloud_life_cursor or entry[2] >= self._cloud_life_started)]
@@ -494,14 +493,14 @@ class Ed2kFolderWatcher(_PluginBase):
             self._cloud_life_failures = 0
             self._cloud_life_retry_after = 0
             self._cloud_status.update(life_last_poll=time.time(), life_error="", life_retry_at=None, life_truncated=len(events) >= 64)
-            relevant = [entry for entry in new if entry[1] in {1, 2, 5, 6, 14, 18, 23}]
-            if relevant:
-                self._cloud_status["life_events"] += len(relevant)
-                with self._condition:
-                    if self._cloud_status["scanning"]:
-                        self._cloud_rescan_requested = True
-                    else:
-                        self.queue_cloud_scan()
+            queued = 0
+            for _, event_type, _, event in new:
+                if event_type not in {1, 2, 5, 6, 14, 18, 23}:
+                    continue
+                item = storage.item_from_life_event(event)
+                if item and self._cloud_item_is_eligible(item) and self._queue_cloud_file(item):
+                    queued += 1
+            self._cloud_status["life_events"] += queued
         except Exception as failure:
             if stopping is self._stopping and not stopping.is_set():
                 self._cloud_status["life_error"] = str(failure) if isinstance(failure, CloudError) else f"生活事件读取失败（{type(failure).__name__}），定时补扫仍可用"
@@ -526,15 +525,33 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._condition.notify_all()
         return {"ok": True, "message": "网盘增量扫描已加入后台队列；不会删除网盘文件，首次读取会消耗完整文件流量"}
 
-    def _queue_cloud_file(self, item: dict, delay=0) -> None:
+    def _queue_cloud_file(self, item: dict, delay=0) -> bool:
         from .cloud_storage import record_key
         if self._stopping.is_set():
-            return
+            return False
         key = record_key(item)
         with self._condition:
             if key not in self._pending:
                 self._pending[key] = (time.monotonic() + delay, item)
+                queued = True
+            else:
+                queued = False
             self._condition.notify_all()
+        return queued
+
+    def _cloud_item_is_eligible(self, item: dict) -> bool:
+        from .cloud_storage import allowed_item, cloud_path
+        if not allowed_item(item, self._cloud_storage, self._cloud_folder):
+            return False
+        if not self._cloud_recursive and Path(cloud_path(item.get("path"))).parent.as_posix() != self._cloud_folder:
+            return False
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            return False
+        suffix = Path(item.get("name") or item.get("path") or "").suffix.lower()
+        extensions = self._extension_set()
+        return size > 0 and suffix not in {".part", ".tmp", ".!qb", ".crdownload"} and (not extensions or suffix.lstrip(".") in extensions)
 
     def _cloud_scan_step(self) -> None:
         from .cloud_storage import CloudStorage
@@ -553,17 +570,10 @@ class Ed2kFolderWatcher(_PluginBase):
                 except StopIteration:
                     self._cloud_iterator = None
                     self._cloud_status.update(scanning=False, last_scan=time.time())
-                    with self._condition:
-                        if self._cloud_rescan_requested:
-                            self._cloud_rescan_requested = False
-                            self._pending["__cloud_scan__"] = (time.monotonic() + 60, None)
-                            self._condition.notify_all()
                     return
                 if item is None:
                     break
-                suffix = Path(item.get("name") or item["path"]).suffix.lower()
-                extensions = self._extension_set()
-                if item.get("size", 0) and item["size"] > 0 and suffix not in {".part", ".tmp", ".!qb", ".crdownload"} and (not extensions or suffix.lstrip(".") in extensions):
+                if self._cloud_item_is_eligible(item):
                     self._queue_cloud_file(item)
         with self._condition:
             self._pending["__cloud_scan__"] = (time.monotonic() + 1, None)
@@ -933,7 +943,7 @@ class Ed2kFolderWatcher(_PluginBase):
             if self._cloud_scan_enabled:
                 services.append({"id": "Ed2kFolderWatcherCloud", "name": "网盘定时增量补扫", "trigger": CronTrigger.from_crontab(self._cloud_cron), "func": self.queue_cloud_scan})
             if self._cloud_monitor_enabled:
-                services.append({"id": "Ed2kFolderWatcherLife", "name": "115生活事件触发ED2K增量补扫", "trigger": CronTrigger.from_crontab("* * * * *"), "func": self.poll_cloud_events})
+                services.append({"id": "Ed2kFolderWatcherLife", "name": "115生活事件新增文件监控", "trigger": CronTrigger.from_crontab("* * * * *"), "func": self.poll_cloud_events})
         return services
 
     def get_api(self) -> List[Dict[str, Any]]:
@@ -1106,7 +1116,7 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VSwitch", "cloud_scan_enabled", "网盘定时增量补扫", hint="开启后才按网盘补扫计划执行；关闭不影响手动补扫或生活事件触发。", persistent_hint=True),
             field("VTextField", "cloud_cron", "网盘补扫计划", hint="仅开启网盘定时增量补扫时生效，默认每10分钟。", persistent_hint=True),
             field("VTextField", "cloud_read_timeout", "网盘读取超时（秒）", type="number", hint="30至1800秒，默认300；临时断线最多重连两次，满足强校验条件才续读。", persistent_hint=True),
-            field("VSwitch", "cloud_monitor_enabled", "115生活事件监控（近实时）", hint="仅支持115网盘Plus，每分钟检查一次；仍需定时兜底。", persistent_hint=True),
+            field("VSwitch", "cloud_monitor_enabled", "115生活事件监控（近实时）", hint="仅处理开启后新增事件对应的单个文件，不扫描已有文件；每分钟检查一次。", persistent_hint=True),
             field("VSelect", "cloud_life_source", "生活事件来源", items=[{"title": "复用115插件监听（不额外请求生活接口）", "value": "shared"}, {"title": "独立轮询（每分钟一次生活接口）", "value": "direct"}]),
             {"component": "VCardTitle", "text": "ED2K链接自动转发"},
             field("VSwitch", "telegram_enabled", "发送 ED2K 链接到 Telegram"),

@@ -89,27 +89,64 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._cloud_adapter = storage
         return item, storage
 
-    def test_life_events_only_trigger_new_relevant_events_and_coalesce_scans(self):
+    def test_life_events_only_queue_the_new_event_file(self):
         item, storage = self.cloud_fixture()
         self.plugin._enabled = True
         self.plugin._worker = threading.current_thread()
         self.plugin._cloud_monitor_enabled = True
-        self.plugin._cloud_life_started = 10
-        storage.life_events.return_value = [{"id": 3, "type": 1, "update_time": 11}, {"id": 2, "type": 1, "update_time": 9}, {"id": 1, "type": 3, "update_time": 11}]
-        self.plugin.poll_cloud_events()
-        self.plugin.poll_cloud_events()
-        self.assertEqual(list(self.plugin._pending), ["__cloud_scan__"])
+        self.plugin._cloud_life_started = 10.5
+        storage.life_events.return_value = [
+            {"id": 3, "type": 1, "update_time": 11, "file_id": "123", "file_category": 1},
+            {"id": 2, "type": 1, "update_time": 10, "file_id": "old", "file_category": 1},
+            {"id": 1, "type": 3, "update_time": 11, "file_id": "ignored", "file_category": 1},
+        ]
+        storage.item_from_life_event.return_value = item
+        with patch.object(self.plugin, "queue_cloud_scan", side_effect=AssertionError("life events must not scan the directory")):
+            self.plugin.poll_cloud_events()
+            self.plugin.poll_cloud_events()
+        self.assertEqual(list(self.plugin._pending), [self.cloud_module.record_key(item)])
         self.assertEqual(self.plugin._cloud_status["life_events"], 1)
         self.assertEqual(self.plugin._cloud_life_cursor, 3)
+        storage.item_from_life_event.assert_called_once_with(storage.life_events.return_value[0])
         self.assertEqual(self.plugin.get_service()[-1]["id"], "Ed2kFolderWatcherLife")
-        self.plugin._cloud_status["scanning"] = True
-        storage.life_events.return_value = [{"id": 4, "type": 5, "update_time": 12}]
+
+    def test_life_events_skip_directories_outside_files_and_filters(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._enabled = True
+        self.plugin._cloud_monitor_enabled = True
+        self.plugin._cloud_life_started = 10
+        events = [
+            {"id": 6, "type": 2, "update_time": 11, "file_id": "dir", "file_category": 0},
+            {"id": 5, "type": 5, "update_time": 11, "file_id": "outside", "file_category": 1},
+            {"id": 4, "type": 1, "update_time": 11, "file_id": "empty", "file_category": 1},
+            {"id": 3, "type": 1, "update_time": 11, "file_id": "temp", "file_category": 1},
+        ]
+        storage.life_events.return_value = events
+        storage.item_from_life_event.side_effect = [
+            None,
+            {**item, "fileid": "outside", "path": "/other/outside.mkv"},
+            {**item, "fileid": "empty", "size": 0},
+            {**item, "fileid": "temp", "name": "upload.part", "path": "/cloud-test/upload.part"},
+        ]
+        with patch.object(self.plugin, "queue_cloud_scan", side_effect=AssertionError("life events must not scan the directory")):
+            self.plugin.poll_cloud_events()
+        self.assertFalse(self.plugin._pending)
+        self.assertEqual(self.plugin._cloud_status["life_events"], 0)
+
+    def test_life_move_into_folder_queues_once_and_move_out_skips(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._enabled = True
+        self.plugin._cloud_monitor_enabled = True
+        self.plugin._cloud_life_started = 10
+        storage.life_events.return_value = [
+            {"id": 4, "type": 6, "update_time": 11, "file_id": "123", "file_category": 1},
+            {"id": 3, "type": 6, "update_time": 11, "file_id": "123", "file_category": 1},
+            {"id": 2, "type": 6, "update_time": 11, "file_id": "124", "file_category": 1},
+        ]
+        storage.item_from_life_event.side_effect = [item, item, {**item, "fileid": "124", "path": "/other/云端.mkv"}]
         self.plugin.poll_cloud_events()
-        self.assertTrue(self.plugin._cloud_rescan_requested)
-        self.plugin._cloud_iterator = iter(())
-        self.plugin._cloud_scan_step()
-        self.assertFalse(self.plugin._cloud_rescan_requested)
-        self.assertIn("__cloud_scan__", self.plugin._pending)
+        self.assertEqual(list(self.plugin._pending), [self.cloud_module.record_key(item)])
+        self.assertEqual(self.plugin._cloud_status["life_events"], 1)
 
     def test_life_disabled_or_failure_does_not_start_downloads(self):
         item, storage = self.cloud_fixture()
@@ -231,9 +268,11 @@ class Ed2kTests(unittest.TestCase):
         self.assertEqual([service["id"] for service in self.plugin.get_service()], ["Ed2kFolderWatcherLife"])
         self.assertTrue(self.plugin.queue_cloud_scan()["ok"])
         self.plugin._pending.clear()
-        storage.life_events.return_value = [{"id": 99, "type": 1, "update_time": self.plugin._cloud_life_started + 1}]
+        storage.life_events.return_value = [{"id": 99, "type": 1, "update_time": self.plugin._cloud_life_started + 1, "file_id": "123", "file_category": 1}]
+        storage.item_from_life_event.return_value = item
         self.plugin.poll_cloud_events()
-        self.assertIn("__cloud_scan__", self.plugin._pending)
+        self.assertIn(self.cloud_module.record_key(item), self.plugin._pending)
+        self.assertNotIn("__cloud_scan__", self.plugin._pending)
         self.plugin._cloud_enabled = False
         self.assertEqual(self.plugin.get_service(), [])
 
@@ -255,6 +294,7 @@ class Ed2kTests(unittest.TestCase):
         self.assertEqual(models["cloud_scan_enabled"]["props"]["label"], "网盘定时增量补扫")
         self.assertEqual(models["cloud_folder"]["props"]["label"], "网盘监控目录")
         self.assertEqual(models["cloud_cron"]["props"]["label"], "网盘补扫计划")
+        self.assertIn("不扫描已有文件", models["cloud_monitor_enabled"]["props"]["hint"])
         self.assertFalse(defaults["cloud_scan_enabled"])
 
     def test_empty_file_never_hashes_sends_or_deletes(self):

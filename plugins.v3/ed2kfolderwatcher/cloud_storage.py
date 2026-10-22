@@ -3,7 +3,7 @@ import posixpath
 import re
 import sys
 from contextlib import closing
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -11,6 +11,10 @@ import httpx
 
 SUPPORTED_STORAGES = {"115网盘Plus", "CloudDrive储存"}
 READ_SIZE = 256 * 1024
+LIFE_EVENT_FIELDS = (
+    "id", "type", "file_id", "parent_id", "file_name", "file_category",
+    "file_type", "file_size", "sha1", "pick_code", "update_time", "create_time",
+)
 
 
 class CloudError(ValueError):
@@ -127,7 +131,7 @@ class CloudStorage:
             from sqlalchemy import select
             model = models.LifeEvent
             with database.ct_db_manager.get_database().session() as session:
-                return [{"id": row.id, "type": row.type, "update_time": row.update_time}
+                return [{field: getattr(row, field, None) for field in LIFE_EVENT_FIELDS}
                         for row in session.scalars(select(model).order_by(model.id.desc()).limit(64))]
         if source != "direct":
             raise CloudError("生活事件来源无效")
@@ -137,7 +141,60 @@ class CloudStorage:
         events = result["data"].get("list")
         if not isinstance(events, list) or any(not isinstance(entry, dict) for entry in events):
             raise CloudError("115生活事件响应格式无效")
-        return [{key: entry.get(key) for key in ("id", "type", "update_time")} for entry in events[:64]]
+        return [{key: entry.get(key) for key in LIFE_EVENT_FIELDS} for entry in events[:64]]
+
+    def item_from_life_event(self, event):
+        if self.storage != "115网盘Plus":
+            raise CloudError("115生活事件仅支持115网盘Plus")
+        try:
+            if int(event.get("file_category")) == 0:
+                return None
+            file_id = str(int(event["file_id"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+        try:
+            from p115client.tool.attr import get_path
+            path = cloud_path(get_path(
+                client=self.oper.client,
+                attr=file_id,
+                root_id=None,
+                ensure_file=True,
+                refresh=True,
+                app="android",
+            ))
+        except Exception:
+            return None
+        try:
+            size = int(event.get("file_size") or 0)
+            modify_time = int(event.get("update_time") or event.get("create_time") or 0)
+        except (TypeError, ValueError):
+            size = modify_time = 0
+        item = {
+            "storage": self.storage,
+            "fileid": file_id,
+            "type": "file",
+            "path": path,
+            "name": PurePosixPath(path).name,
+            "size": size,
+            "modify_time": modify_time,
+            "pickcode": str(event.get("pick_code") or ""),
+            "sha1": str(event.get("sha1") or ""),
+        }
+        if item["size"] > 0 and item["pickcode"]:
+            return item
+        try:
+            lookup = getattr(self.oper, "get_item_strict", None) or self.oper.get_item
+            current = lookup(Path(path))
+            current = current.model_dump() if hasattr(current, "model_dump") else dict(current) if current else None
+        except Exception:
+            return None
+        if not current or current.get("type") != "file" or str(current.get("fileid") or "") != file_id:
+            return None
+        current.update(storage=self.storage, fileid=file_id, type="file", path=path,
+                       name=current.get("name") or item["name"])
+        if item["sha1"]:
+            current["sha1"] = item["sha1"]
+        return current
 
     def download_request(self, item):
         from app.core.config import settings

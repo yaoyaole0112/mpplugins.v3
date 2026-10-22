@@ -195,6 +195,7 @@ try {
     if (lifeSwitch.checked || cloudPanel.querySelector('input[max="1800"]').value !== '300') throw Error(`${name}: unsafe life or timeout defaults`)
     lifeSwitch.click()
     await vue.nextTick()
+    if (!cloudPanel.textContent.includes('只将事件对应且位于监控目录内的单个文件加入队列') || !cloudPanel.textContent.includes('不扫描或补算目录中的已有文件')) throw Error(`${name}: strict life-event incremental explanation missing`)
     const lifeSelect = [...cloudPanel.querySelectorAll('label')].find(label => label.textContent.includes('115生活事件来源')).querySelector('select')
     if (lifeSelect.value !== 'shared' || !lifeSelect.textContent.includes('每分钟一次生活接口')) throw Error(`${name}: life source modes missing`)
     lifeSwitch.click()

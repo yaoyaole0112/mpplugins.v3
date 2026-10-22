@@ -20,6 +20,12 @@ def md4(data):
 
 
 class CloudStorageTests(unittest.TestCase):
+    @staticmethod
+    def life_event(**values):
+        event = {field: None for field in cloud.LIFE_EVENT_FIELDS}
+        event.update(values)
+        return event
+
     def retry_fixture(self, handler):
         storage, item = self.remote_fixture()
         stopping = Mock()
@@ -86,7 +92,7 @@ class CloudStorageTests(unittest.TestCase):
         storage.storage = "115网盘Plus"
         storage.oper = Mock()
         storage.oper.client.life_behavior_detail.return_value = {"state": True, "data": {"list": [{"id": "42", "type": 1, "update_time": 123, "private": "secret"}]}}
-        self.assertEqual(storage.life_events("direct"), [{"id": "42", "type": 1, "update_time": 123}])
+        self.assertEqual(storage.life_events("direct"), [self.life_event(id="42", type=1, update_time=123)])
         storage.oper.client.life_behavior_detail.assert_called_once_with({"limit": 64, "offset": 0})
         storage.oper.client.life_behavior_detail.return_value = {"state": False, "error": "secret"}
         with self.assertRaises(cloud.CloudError) as failure:
@@ -100,6 +106,40 @@ class CloudStorageTests(unittest.TestCase):
         with patch.dict(sys.modules, {"app.plugins.p115strmhelper.service": None}), self.assertRaises(cloud.CloudError):
             storage.life_events("shared")
         storage.oper.client.life_behavior_detail.assert_not_called()
+
+    def test_life_event_resolves_only_current_file_path(self):
+        storage = object.__new__(cloud.CloudStorage)
+        storage.storage = "115网盘Plus"
+        storage.oper = Mock()
+        resolver = Mock(return_value="/监控/新文件.mkv")
+        attr = types.ModuleType("p115client.tool.attr")
+        attr.get_path = resolver
+        modules = {
+            "p115client": types.ModuleType("p115client"),
+            "p115client.tool": types.ModuleType("p115client.tool"),
+            "p115client.tool.attr": attr,
+        }
+        event = self.life_event(file_id="123", file_category=1, file_name="旧名称.mkv", file_size="5", pick_code="pick", sha1="ABC", update_time="456")
+        with patch.dict(sys.modules, modules):
+            item = storage.item_from_life_event(event)
+        self.assertEqual(item, {"storage": "115网盘Plus", "fileid": "123", "type": "file", "path": "/监控/新文件.mkv", "name": "新文件.mkv", "size": 5, "modify_time": 456, "pickcode": "pick", "sha1": "ABC"})
+        resolver.assert_called_once_with(client=storage.oper.client, attr="123", root_id=None, ensure_file=True, refresh=True, app="android")
+        storage.oper.get_item_strict.assert_not_called()
+        self.assertIsNone(storage.item_from_life_event(self.life_event(file_id="124", file_category=0)))
+
+    def test_life_event_fetches_metadata_only_when_event_is_incomplete(self):
+        storage = object.__new__(cloud.CloudStorage)
+        storage.storage = "115网盘Plus"
+        storage.oper = Mock()
+        storage.oper.get_item_strict.return_value = {"storage": "u115", "fileid": "123", "type": "file", "path": "/监控/新文件.mkv", "name": "新文件.mkv", "size": 5, "modify_time": 456, "pickcode": "pick"}
+        attr = types.ModuleType("p115client.tool.attr")
+        attr.get_path = Mock(return_value="/监控/新文件.mkv")
+        modules = {"p115client": types.ModuleType("p115client"), "p115client.tool": types.ModuleType("p115client.tool"), "p115client.tool.attr": attr}
+        with patch.dict(sys.modules, modules):
+            item = storage.item_from_life_event(self.life_event(file_id="123", file_category=1))
+        self.assertEqual(item["size"], 5)
+        self.assertEqual(item["pickcode"], "pick")
+        storage.oper.get_item_strict.assert_called_once_with(Path("/监控/新文件.mkv"))
 
     def test_shared_life_reads_existing_database_without_calling_115(self):
         from sqlalchemy import create_engine, Integer
@@ -127,7 +167,7 @@ class CloudStorageTests(unittest.TestCase):
         database.ct_db_manager.get_database.return_value.session.side_effect = lambda: Session(engine)
         modules = {"app.plugins.p115strmhelper.service": types.SimpleNamespace(servicer=worker), "app.plugins.p115strmhelper.db_manager": database, "app.plugins.p115strmhelper.db_manager.models.life_event": types.SimpleNamespace(LifeEvent=LifeEvent)}
         with patch.dict(sys.modules, modules):
-            self.assertEqual(storage.life_events("shared"), [{"id": 7, "type": 1, "update_time": 123}])
+            self.assertEqual(storage.life_events("shared"), [self.life_event(id=7, type=1, update_time=123)])
             worker.client.user_id = 99
             with self.assertRaises(cloud.CloudError):
                 storage.life_events("shared")
