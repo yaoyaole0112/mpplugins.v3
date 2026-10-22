@@ -29,6 +29,9 @@
   }
 
   body:has(.v-dialog--fullscreen .ed2k-mobile-page) {
+    position: static !important;
+    inset: auto !important;
+    height: auto !important;
     overflow: visible !important;
   }
 

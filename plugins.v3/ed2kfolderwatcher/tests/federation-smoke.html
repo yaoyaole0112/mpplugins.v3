@@ -7,6 +7,8 @@ import * as remote from '../dist/assets/remoteEntry.js'
 
 const mobile = matchMedia('(max-width: 959px)').matches
 const dialogFixture = new URLSearchParams(location.search).has('dialog')
+const manual = new URLSearchParams(location.search).has('manual')
+const requestedComponent = new URLSearchParams(location.search).get('component')
 if (dialogFixture) {
   const stylesheet = document.createElement('link')
   stylesheet.rel = 'stylesheet'
@@ -90,12 +92,16 @@ const api = { get: async path => {
 
 try {
   remote.init({ vue: { [vue.version]: { get: () => () => vue, loaded: true } } })
-  for (const name of ['./Page', './Config', './AppPage']) {
+  for (const name of manual && ['Page', 'Config', 'AppPage'].includes(requestedComponent) ? [`./${requestedComponent}`] : ['./Page', './Config', './AppPage']) {
     const factory = await remote.get(name)
     requests = []
     const app = vue.createApp(factory(), { api, pluginId: 'Ed2kFolderWatcher', onClose: () => { closes++ } })
     app.mount('#app')
     await new Promise(resolve => setTimeout(resolve, 100))
+    if (manual) {
+      window.ed2kSmoke = { app, closeCount: () => closes }
+      break
+    }
     if (document.querySelector('#app [role=alert]')) throw Error(`${name}: API failed`)
     if (document.querySelector('#app').innerText.includes('Bot Token')) throw Error(`${name}: bot settings visible`)
     if (document.querySelector('#app option[value=bot]')) throw Error(`${name}: bot mode selectable`)
@@ -118,6 +124,7 @@ try {
         if (document.scrollingElement.scrollWidth > innerWidth + 1) throw Error(`${name}: mobile page overflows horizontally`)
         if (dialogFixture) {
           if (getComputedStyle(document.documentElement).position === 'fixed') throw Error(`${name}: document scrolling remains locked`)
+          if (getComputedStyle(document.body).position === 'fixed') throw Error(`${name}: host body scrolling remains locked`)
           for (const selector of ['.v-overlay', '.v-overlay__content', '.v-card', '.v-card-text']) {
             const element = document.querySelector(selector)
             if (element.scrollHeight > element.clientHeight + 1 && ['auto', 'scroll', 'hidden'].includes(getComputedStyle(element).overflowY)) throw Error(`${name}: host wrapper still clips: ${selector}`)
@@ -212,10 +219,17 @@ try {
       await new Promise(resolve => setTimeout(resolve, 100))
       if (!document.querySelector('#app [role=alert]')?.textContent.includes('模拟读取失败')) throw Error(`${name}: error state missing`)
       mode = 'normal'
+      if (mobile) {
+        buttons.find(button => button.textContent.trim() === '刷新记录').click()
+        await new Promise(resolve => setTimeout(resolve, 100))
+        window.scrollTo(0, 700)
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
       buttons.find(button => button.textContent.trim() === '设置').click()
       await new Promise(resolve => setTimeout(resolve, 100))
       if (document.querySelector('#app .records-page')) throw Error(`${name}: settings did not replace records page`)
       if (!requests.some(path => path.endsWith('/settings'))) throw Error(`${name}: settings not loaded after click`)
+      if (mobile && document.querySelector('#app .ed2k-panel').getBoundingClientRect().top < -2) throw Error(`${name}: settings open outside the viewport`)
       if (Array.from(intervals.values()).includes(15000)) throw Error(`${name}: record polling continued in settings`)
       buttons = [...document.querySelectorAll('#app button')]
     }
@@ -295,13 +309,14 @@ try {
     app.unmount()
     if (intervals.size) throw Error(`${name}: polling not cleaned up`)
     if (mobile && dialogFixture && getComputedStyle(document.documentElement).position !== 'fixed') throw Error(`${name}: host scroll lock not restored after unmount`)
+    if (mobile && dialogFixture && getComputedStyle(document.body).position !== 'fixed') throw Error(`${name}: host body lock not restored after unmount`)
   }
   await Promise.all([...document.querySelectorAll('link[rel=stylesheet]')].map(async link => {
     const response = await fetch(link.href)
     if (!response.ok) throw Error(`stylesheet failed: ${response.status}`)
   }))
-  document.body.dataset.result = 'passed'
-  document.querySelector('#result').textContent = 'PASS: Page/AppPage show records and source status only; Config keeps settings; empty/error states and CSS loaded'
+  document.body.dataset.result = manual ? 'ready' : 'passed'
+  document.querySelector('#result').textContent = manual ? 'Ready for touch input' : 'PASS: Page/AppPage show records and source status only; Config keeps settings; empty/error states and CSS loaded'
 } catch (error) {
   document.body.dataset.result = 'failed'
   document.querySelector('#result').textContent = String(error)
