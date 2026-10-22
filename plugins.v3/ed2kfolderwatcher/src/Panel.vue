@@ -7,14 +7,15 @@ const busy = ref(false)
 const loaded = ref(false)
 const error = ref('')
 const notice = ref('')
-const settings = reactive({ telegram_mode: 'user' })
+const settings = reactive({ telegram_mode: 'user', cloud_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *' })
+const cloud = reactive({ storages: [], folders: [], browsing: '', scanning: false, pending: 0, file: '', bytes_read: 0, size: 0, error: '' })
 const account = reactive({ api_id: '', api_hash: '', phone: '', code: '', password: '' })
 const auth = reactive({ logged_in: false, pending: false, password_required: false, api_hash_configured: false, expires_in: 0, retry_in: 0 })
 let timer
 let savedDelete = false
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || !loaded.value)
-const configFields = ['enabled', 'folder', 'recursive', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'delete_source', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id']
+const configFields = ['enabled', 'folder', 'recursive', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'delete_source', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'cloud_enabled', 'cloud_storage', 'cloud_folder', 'cloud_recursive', 'cloud_cron']
 const watchSwitches = [{ key: 'enabled', label: '启用插件' }, { key: 'monitor_enabled', label: '实时监控文件' }, { key: 'recursive', label: '包含子目录' }]
 const textFields = [{ key: 'folder', label: '监控目录', hint: 'MoviePilot 容器内路径，例如 /media/movies' }, { key: 'extensions', label: '扩展名过滤', hint: '留空处理全部文件，例如 mkv,mp4' }, { key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '持续写入时自动延后，避免处理未完成文件' }]
 
@@ -47,6 +48,28 @@ async function refreshAuth() {
   const result = await request('telegram/status')
   applyAuth(result)
   if (!result.ok) throw new Error(result.message || '状态查询失败')
+}
+async function refreshCloud() {
+  const result = await request('cloud/status')
+  if (!result.ok) throw new Error(result.message || '网盘状态读取失败')
+  Object.assign(cloud, result)
+}
+async function browseCloud(path = settings.cloud_folder || '/') {
+  await work(async () => {
+    const result = await request('cloud/browse', { storage: settings.cloud_storage, path })
+    if (!result.ok) throw new Error(result.message || '目录读取失败')
+    cloud.folders = result.folders
+    cloud.browsing = result.path
+  })
+}
+async function runCloud() {
+  if (!window.confirm('将按已保存的网盘目录增量读取完整文件内容。不会删除云端文件，但会消耗下载流量，确定继续？')) return
+  await work(async () => {
+    const result = await request('cloud/run', {})
+    if (!result.ok) throw new Error(result.message || '网盘扫描失败')
+    notice.value = result.message
+    await refreshCloud()
+  })
 }
 async function saveSettings() {
   if (auth.pending) { error.value = '请先完成或取消验证码登录，再保存其他设置'; return }
@@ -89,6 +112,7 @@ onMounted(() => {
     applySettings(await request('settings'))
     loaded.value = true
     await refreshAuth()
+    await refreshCloud()
   })
   timer = setInterval(() => {
     auth.retry_in = Math.max(0, (auth.retry_in || 0) - 1)
@@ -97,9 +121,12 @@ onMounted(() => {
       if (!auth.expires_in) { auth.pending = auth.password_required = false; account.code = account.password = ''; notice.value = '登录流程已过期，请重新发送验证码' }
     }
   }, 1000)
+  cloudTimer = setInterval(() => { if (!busy.value && loaded.value) refreshCloud().catch(() => {}) }, 5000)
 })
+let cloudTimer
 onUnmounted(() => {
   clearInterval(timer)
+  clearInterval(cloudTimer)
   account.api_hash = account.phone = account.code = account.password = ''
 })
 </script>
@@ -119,12 +146,24 @@ onUnmounted(() => {
     <p v-if="!loaded">正在加载设置…</p>
 
     <article class="card">
-      <h3>目录监控与输出</h3>
+      <h3>本地目录监控与公共输出</h3>
       <div class="switches"><label v-for="field in watchSwitches" :key="field.key" class="switch"><input v-model="settings[field.key]" type="checkbox" :disabled="disabled">{{ field.label }}</label></div>
       <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :min="field.type === 'number' ? 0 : undefined" :disabled="disabled"><small>{{ field.hint }}</small></label></div>
       <div class="switches"><label class="switch"><input v-model="settings.output_enabled" type="checkbox" :disabled="disabled">生成本地 TXT</label><label class="switch"><input v-model="settings.delete_source" type="checkbox" :disabled="disabled">成功后删除源文件</label><label class="switch"><input v-model="settings.scan_enabled" type="checkbox" :disabled="disabled">定时增量补扫</label></div>
       <div class="fields"><label>TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空使用监控目录/ed2k.txt"><small>关闭 TXT 不会删除已有文件；内部缓存独立保存。</small></label><label>补扫计划<input v-model="settings.cron" :disabled="disabled || !settings.scan_enabled" placeholder="*/10 * * * *"><small>默认关闭，网络挂载漏事件时可启用兜底。</small></label></div>
-      <p v-if="settings.delete_source" class="warning">已开启删除源文件：仅在所选输出成功且文件未变化时删除；两种输出都关闭时不删除。</p>
+      <p v-if="settings.delete_source" class="warning">已开启本地删除源文件：仅在所选输出成功且文件未变化时删除；两种输出都关闭时不删除。此开关对网盘无效，网盘文件始终保留。</p>
+    </article>
+
+    <article class="card" data-testid="cloud-source">
+      <h3>115／CloudDrive 网盘来源（只读）</h3>
+      <p>无需将网盘挂载为本地目录；复用已登录的存储插件，完整数据经网络分块读取计算，不保存完整临时文件。本地和网盘共用一个工作线程；不会并发计算多个文件，也不会删除云端文件。</p>
+      <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_recursive" type="checkbox" :disabled="disabled">包含网盘子目录</label></div>
+      <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>当前已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储，请先启用并登录对应插件' }}</small></label><label>网盘目录<input v-model.trim="settings.cloud_folder" :disabled="disabled" placeholder="/待生成链接"><small>网盘内的绝对路径，不是容器本地路径。首次扫描处理目录内现有文件，建议先选小目录测试。</small></label><label>网盘增量计划<input v-model.trim="settings.cloud_cron" :disabled="disabled" placeholder="*/10 * * * *"><small>独立于本地实时监控，默认每 10 分钟查询新增或变化文件，已有链接不重复下载计算。</small></label></div>
+      <div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud()">浏览网盘目录</button><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.cloud_enabled" @click="runCloud">立即网盘增量扫描／补发</button><button type="button" class="secondary" :disabled="disabled" @click="work(refreshCloud)">刷新网盘进度</button></div>
+      <div v-if="cloud.browsing" class="cloud-browser"><p>当前浏览：{{ cloud.browsing }}</p><div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud(cloud.browsing.split('/').slice(0, -1).join('/') || '/')">上一级</button><button type="button" :disabled="disabled" @click="settings.cloud_folder = cloud.browsing">选择此目录</button></div><div class="cloud-folders"><button v-for="folder in cloud.folders" :key="folder.path" type="button" class="secondary" :disabled="disabled" @click="browseCloud(folder.path)">{{ folder.name }}</button><small v-if="!cloud.folders.length">此目录下没有子目录。</small></div></div>
+      <p role="status">{{ cloud.scanning ? '正在发现文件' : '等待下一次扫描' }} · 待处理 {{ cloud.pending }} 个<span v-if="cloud.file"> · 正在计算：{{ cloud.file }}（{{ cloud.size ? Math.floor(cloud.bytes_read / cloud.size * 100) : 0 }}%）</span></p>
+      <p v-if="cloud.error" class="warning">{{ cloud.error }}</p>
+      <small>网盘复用上方扩展名、稳定等待、TXT 和 Telegram 设置。TXT 留空且无本地监控目录时写入插件数据目录/ed2k.txt；关闭 TXT 则只保存内部记录。修改后先点右上角“保存插件设置”。网络中断后从头重试，不生成不完整链接。</small>
     </article>
 
     <article class="card">
@@ -150,6 +189,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.cloud-browser{border:1px solid rgba(var(--v-theme-on-surface),.16);border-radius:10px;padding:12px}.cloud-folders{display:flex;flex-wrap:wrap;gap:10px;max-height:220px;overflow:auto}.cloud-folders button{overflow-wrap:anywhere;max-width:100%}
 .fields.telegram-targets textarea{line-height:20px;overflow:hidden;scrollbar-width:none}.telegram-targets textarea::-webkit-scrollbar{display:none}
 .fields textarea{width:100%;border:1px solid rgba(var(--v-theme-on-surface),.25);border-radius:9px;padding:13px 15px;background:rgba(var(--v-theme-on-surface),.025);color:inherit;font:inherit;resize:vertical}.telegram-targets textarea,.telegram-targets input{height:48px;min-height:48px;box-sizing:border-box}.fields textarea:focus{outline:2px solid rgb(var(--v-theme-primary));outline-offset:2px}
 .header-actions{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;margin-left:auto}.header-actions button{white-space:nowrap}

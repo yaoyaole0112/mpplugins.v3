@@ -134,3 +134,21 @@ class WebApiTests(unittest.TestCase):
         self.authorize()
         self.assertFalse(self.client.post("/run").json()["ok"])
         self.plugin.scan.assert_not_called()
+
+    def test_cloud_validation_rejects_root_traversal_and_unknown_storage(self):
+        from ed2k_api_test_package import cloud_storage
+        values = {"cloud_enabled": True, "cloud_storage": "115网盘Plus", "cloud_folder": "/test", "cloud_cron": "*/10 * * * *"}
+        with patch.object(cloud_storage, "available_storages", return_value=[{"type": "115网盘Plus"}]):
+            self.assertEqual(web_api.validate_settings(self.plugin, values)["cloud_folder"], "/test")
+            for changed in ({"cloud_folder": "/"}, {"cloud_folder": "/test/../other"}, {"cloud_storage": "local"}, {"cloud_cron": "invalid"}):
+                with self.subTest(changed=changed), self.assertRaises(web_api.UserAccountError):
+                    web_api.validate_settings(self.plugin, {**values, **changed})
+
+    def test_cloud_status_and_run_are_admin_only_and_read_only(self):
+        self.authorize()
+        self.plugin.cloud_status.return_value = {"ok": True, "storages": [], "pending": 0}
+        self.plugin.queue_cloud_scan.return_value = {"ok": True, "message": "queued"}
+        self.assertTrue(self.client.get("/cloud/status").json()["ok"])
+        self.assertTrue(self.client.post("/cloud/run").json()["ok"])
+        self.plugin.delete_source.assert_not_called()
+        self.plugin.scan.assert_not_called()

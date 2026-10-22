@@ -134,7 +134,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
     <ol v-if="items.length" class="records-list" tabindex="0" aria-label="最近生成的 ED2K 链接记录">
       <li v-for="(item, index) in items" :key="`${item.link}-${index}`" class="record">
         <div class="record-heading"><h3>{{ item.name }}</h3><div class="record-actions"><button v-if="item.can_delete && item.source_status !== 'deleted'" type="button" class="delete-source" :disabled="!!deleting" @click="deleteSource(item)">{{ deleting === item.id ? '校验删除中…' : '手动删除源文件' }}</button><span class="source-status" :class="item.source_status">{{ statuses[item.source_status] || statuses.unknown }}</span></div></div>
-        <p class="record-time">生成时间：{{ formatTime(item.generated_at) }}<span v-if="item.deleted_at"> · 删除时间：{{ formatTime(item.deleted_at) }}</span></p>
+        <p class="record-time">生成时间：{{ formatTime(item.generated_at) }}<span v-if="item.deleted_at"> · 删除时间：{{ formatTime(item.deleted_at) }}</span><span v-if="item.source_type === 'cloud'"> · 网盘：{{ item.storage }}（只读，不删源）</span></p>
         <p v-if="item.link_valid === false" class="error">{{ item.link_error || '链接无效，需要完整源文件重新生成' }}</p>
         <pre v-if="item.link_valid === false">{{ item.link }}</pre><button v-else type="button" class="copy-link" title="点击复制 ED2K 链接" @click="copyLink(item, $event)">{{ item.link }}</button>
         <div v-if="item.link_valid !== false" class="copy-feedback" role="status" aria-live="polite"><span v-if="copiedId === (item.id || item.link)" class="notice">链接已复制</span><span v-else-if="copyFailedId === (item.id || item.link)" class="error">复制受限：Ctrl+C／⌘C 或长按</span></div>

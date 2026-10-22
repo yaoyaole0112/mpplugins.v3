@@ -429,15 +429,16 @@
   },
   "Ed2kFolderWatcher": {
     "name": "自动生成ED2K链接",
-    "description": "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接，并可发送到 Telegram。",
+    "description": "监控本地目录或增量扫描115/CloudDrive存储，单线程流式生成ED2K链接并发送到Telegram。",
     "labels": "工具,文件管理",
-    "version": "1.8.3",
+    "version": "1.9.0",
     "icon": "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png",
     "author": "helios",
     "v3": true,
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
     "level": 1,
     "history": {
+      "v1.9.0": "新增115网盘Plus和CloudDrive只读网盘来源：无需挂载，目录浏览、独立定时增量扫描、单线程流式哈希，不保存完整临时文件；大小与前后元数据校验，网盘始终不删源，复用TXT及Telegram多目标发送。",
       "v1.8.3": "压缩记录卡片底部留白和内部间距；仅记录列表滚动，顶部操作固定可见；保留复制反馈且卡片文字位置不跳动。",
       "v1.8.2": "移除顶部复制提示，仅在记录内固定预留区反馈；复制成功、失败及切换记录时卡片高度和文字位置保持不变。",
       "v1.8.1": "查看页直接展示链接；手动删源按钮移至状态标签左侧并统一尺寸；兼容复制在当前弹窗内同步执行，避免焦点拦截和异步权限丢失，增加真实浏览器复制粘贴回归。",

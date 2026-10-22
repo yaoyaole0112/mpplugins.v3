@@ -2,6 +2,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -22,9 +23,13 @@ class Ed2kTests(unittest.TestCase):
         modules["ed2k_test_plugin"] = cls.module
         with patch.dict(sys.modules, modules):
             spec.loader.exec_module(cls.module)
+            cloud_spec = importlib.util.spec_from_file_location("ed2k_test_plugin.cloud_storage", plugin_path.with_name("cloud_storage.py"))
+            cls.cloud_module = importlib.util.module_from_spec(cloud_spec)
+            cloud_spec.loader.exec_module(cls.cloud_module)
+            cls.module.cloud_storage = cls.cloud_module
 
     def setUp(self):
-        module_patch = patch.dict(sys.modules, {"ed2k_test_plugin": self.module})
+        module_patch = patch.dict(sys.modules, {"ed2k_test_plugin": self.module, "ed2k_test_plugin.cloud_storage": self.cloud_module})
         module_patch.start()
         self.addCleanup(module_patch.stop)
         self.temporary = tempfile.TemporaryDirectory()
@@ -42,6 +47,62 @@ class Ed2kTests(unittest.TestCase):
         path = self.folder / name
         path.write_bytes(data)
         return path
+
+    def test_cloud_generation_is_incremental_and_never_deletes(self):
+        self.plugin._cloud_enabled = True
+        self.plugin._cloud_storage = "115网盘Plus"
+        self.plugin._cloud_folder = "/cloud-test"
+        self.plugin._delete_source = True
+        self.plugin._output_enabled = False
+        item = {"storage": "115网盘Plus", "fileid": "123", "type": "file", "name": "云端.mkv", "path": "/cloud-test/云端.mkv", "size": 5, "modify_time": 1, "pickcode": "pick"}
+        from ed2k_test_plugin import cloud_storage
+        storage = Mock()
+        storage.fresh.return_value = item
+        self.plugin._cloud_adapter = storage
+        with patch.object(cloud_storage, "hash_remote", return_value=self.module._md4(b"hello").hex()) as hashing, patch.object(self.plugin, "_unlink_source") as unlink:
+            self.plugin._process_cloud_file(item)
+            self.plugin._process_cloud_file(item)
+        hashing.assert_called_once()
+        unlink.assert_not_called()
+        records = self.records()
+        self.assertEqual(len(records), 1)
+        record = next(iter(records.values()))
+        self.assertEqual(record["source_type"], "cloud")
+        self.assertFalse(record["source_deleted"])
+        visible = self.plugin.recent_records()["items"][0]
+        self.assertFalse(visible["can_delete"])
+        self.assertEqual(visible["storage"], "115网盘Plus")
+        self.assertFalse(self.plugin.delete_source(visible["id"])["ok"])
+        self.plugin._output_enabled = True
+        with patch.object(cloud_storage, "hash_remote", side_effect=AssertionError("unnecessary download")):
+            self.plugin._process_cloud_file(item)
+        self.assertIn(record["link"], (self.folder / "ed2k.txt").read_text())
+
+    def test_cloud_failure_does_not_save_or_send_link(self):
+        self.plugin._cloud_enabled = True
+        self.plugin._cloud_storage = "115网盘Plus"
+        self.plugin._cloud_folder = "/cloud-test"
+        item = {"storage": "115网盘Plus", "fileid": "123", "type": "file", "name": "云端.mkv", "path": "/cloud-test/云端.mkv", "size": 5, "modify_time": 1, "pickcode": "pick"}
+        from ed2k_test_plugin import cloud_storage
+        storage = Mock()
+        storage.fresh.return_value = item
+        self.plugin._cloud_adapter = storage
+        with patch.object(cloud_storage, "hash_remote", side_effect=cloud_storage.CloudError("short read")), patch.object(self.plugin, "_notify_record") as notify:
+            with self.assertRaises(cloud_storage.CloudError):
+                self.plugin._process_cloud_file(item)
+        notify.assert_not_called()
+        self.assertFalse((self.root / "data/records.json").exists())
+
+    def test_cloud_scan_requires_enabled_and_has_own_schedule(self):
+        self.assertFalse(self.plugin.queue_cloud_scan()["ok"])
+        self.plugin._enabled = True
+        self.plugin._cloud_enabled = True
+        self.plugin._cloud_folder = "/cloud-test"
+        self.plugin._worker = threading.current_thread()
+        self.assertTrue(self.plugin.queue_cloud_scan()["ok"])
+        self.assertTrue(self.plugin.queue_cloud_scan()["ok"])
+        self.assertEqual(list(self.plugin._pending), ["__cloud_scan__"])
+        self.assertEqual(self.plugin.get_service()[0]["id"], "Ed2kFolderWatcherCloud")
 
     def test_empty_file_never_hashes_sends_or_deletes(self):
         path = self.create(data=b"")

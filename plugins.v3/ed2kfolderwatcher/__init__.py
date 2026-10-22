@@ -157,9 +157,9 @@ def telegram_error_hint(error: Exception) -> str:
 
 class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
-    plugin_desc = "监控本地文件夹，为新增且稳定的文件自动生成标准 ED2K 链接。"
+    plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.8.3"
+    plugin_version = "1.9.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -188,6 +188,11 @@ class Ed2kFolderWatcher(_PluginBase):
     _pending = None
     _condition = None
     _scan_enabled = False
+    _cloud_enabled = False
+    _cloud_storage = "115网盘Plus"
+    _cloud_folder = ""
+    _cloud_recursive = True
+    _cloud_cron = DEFAULT_CRON
     _onlyonce = False
     _running = False
     _lock = threading.Lock()
@@ -199,6 +204,10 @@ class Ed2kFolderWatcher(_PluginBase):
         self._stopping = threading.Event()
         self._condition = threading.Condition()
         self._pending = {}
+        self._cloud_iterator = None
+        self._cloud_adapter = None
+        self._cloud_status = {"scanning": False, "file": "", "bytes_read": 0, "size": 0, "error": "", "completed": 0, "last_scan": None}
+        self._cloud_observed = {}
         self._lock = threading.RLock()
         self._web_login_lock = threading.Lock()
         config = config or {}
@@ -227,18 +236,41 @@ class Ed2kFolderWatcher(_PluginBase):
             self._cron = DEFAULT_CRON
             logger.error(f"本地文件夹 ED2K 链接：配置无效：{err}")
         self._scan_enabled = bool(config.get("scan_enabled", False))
+        self._cloud_enabled = bool(config.get("cloud_enabled", False))
+        self._cloud_storage = str(config.get("cloud_storage") or "115网盘Plus").strip()
+        self._cloud_folder = str(config.get("cloud_folder") or "").strip()
+        self._cloud_recursive = bool(config.get("cloud_recursive", True))
+        self._cloud_cron = str(config.get("cloud_cron") or DEFAULT_CRON).strip()
+        try:
+            CronTrigger.from_crontab(self._cloud_cron)
+        except (ValueError, TypeError):
+            self._cloud_cron = DEFAULT_CRON
+        if self._cloud_enabled:
+            from .cloud_storage import SUPPORTED_STORAGES, cloud_path, CloudError
+            try:
+                if self._cloud_storage not in SUPPORTED_STORAGES:
+                    raise CloudError("不支持此网盘存储")
+                self._cloud_folder = cloud_path(self._cloud_folder)
+                if self._cloud_folder == "/":
+                    raise CloudError("请指定网盘子目录，不允许扫描整个网盘根目录")
+            except CloudError as failure:
+                self._cloud_enabled = False
+                self._cloud_status["error"] = str(failure)
+                logger.warning(f"自动生成ED2K链接：网盘来源配置无效：{failure}")
         self._onlyonce = bool(config.get("onlyonce", False))
-        if self._folder and (self._enabled or self._onlyonce):
+        if (self._folder or self._cloud_enabled) and (self._enabled or self._onlyonce):
             try:
                 self._refresh_link_names()
             except (OSError, ValueError) as err:
                 logger.warning(f"自动生成ED2K链接：更新历史链接文件名失败，保留原记录：{type(err).__name__}")
             self._worker = threading.Thread(target=self._work, name="ed2k-worker", daemon=True)
             self._worker.start()
-        if self._onlyonce and self._folder:
+        if self._onlyonce and (self._folder or self._cloud_enabled):
             self._onlyonce = False
             self._save_config()
             self.scan()
+            if self._cloud_enabled:
+                self.queue_cloud_scan()
         if self._enabled and self._folder and self._monitor_enabled:
             self._start_monitor()
 
@@ -274,7 +306,7 @@ class Ed2kFolderWatcher(_PluginBase):
 
     def _paths(self) -> Tuple[Path, Path, Path]:
         folder = Path(self._folder).expanduser()
-        output = Path(self._output).expanduser() if self._output else folder / "ed2k.txt"
+        output = Path(self._output).expanduser() if self._output else (folder if self._folder else Path(self.get_data_path())) / "ed2k.txt"
         cache = Path(self.get_data_path()) / "records.json"
         legacy = output.with_name(f".{output.name}.cache.json")
         if not cache.exists() and legacy.exists():
@@ -367,18 +399,168 @@ class Ed2kFolderWatcher(_PluginBase):
                 del self._pending[key]
             path = Path(key)
             try:
+                if key == "__cloud_scan__":
+                    self._cloud_scan_step()
+                    continue
+                if key.startswith("cloud:"):
+                    self._process_cloud_file(signature)
+                    continue
                 stat = path.stat()
                 if signature != (stat.st_size, stat.st_mtime_ns, stat.st_ino):
                     self._queue_event(path)
                     continue
                 self._process_file(path)
-            except FileNotFoundError:
-                pass
             except InterruptedError:
                 return
             except Exception as err:
+                if key == "__cloud_scan__" or key.startswith("cloud:"):
+                    from .cloud_storage import CloudError
+                    detail = str(err) if isinstance(err, CloudError) else f"网盘任务失败（{type(err).__name__}）"
+                    self._cloud_status.update(error=detail, file="")
+                    logger.warning(f"自动生成ED2K链接：{detail}")
+                    if key == "__cloud_scan__":
+                        self._cloud_iterator = None
+                        self._cloud_adapter = None
+                        self._cloud_status["scanning"] = False
+                    else:
+                        self._queue_cloud_file(signature, delay=300)
+                    continue
+                if isinstance(err, FileNotFoundError):
+                    continue
                 logger.warning(f"自动生成ED2K链接：处理失败，60秒后重试：{path}：{type(err).__name__}")
                 self._queue_event(path, delay=60)
+
+    def cloud_status(self) -> dict:
+        from .cloud_storage import available_storages
+        try:
+            storages = available_storages()
+        except Exception:
+            storages = []
+        with self._condition:
+            pending = sum(key.startswith("cloud:") for key in self._pending)
+        return {"ok": True, "storages": storages, "enabled": self._cloud_enabled,
+                "pending": pending, **self._cloud_status}
+
+    def queue_cloud_scan(self) -> dict:
+        if not self._enabled or not self._cloud_enabled or self._worker is None:
+            return {"ok": False, "message": "请先启用插件，并保存网盘来源、目录和增量计划"}
+        with self._condition:
+            if not self._cloud_status["scanning"] and "__cloud_scan__" not in self._pending:
+                self._pending["__cloud_scan__"] = (time.monotonic(), None)
+                self._condition.notify_all()
+        return {"ok": True, "message": "网盘增量扫描已加入后台队列；不会删除网盘文件，首次读取会消耗完整文件流量"}
+
+    def _queue_cloud_file(self, item: dict, delay=0) -> None:
+        from .cloud_storage import record_key
+        if self._stopping.is_set():
+            return
+        key = record_key(item)
+        with self._condition:
+            if key not in self._pending:
+                self._pending[key] = (time.monotonic() + delay, item)
+            self._condition.notify_all()
+
+    def _cloud_scan_step(self) -> None:
+        from .cloud_storage import CloudStorage
+        if self._stopping.is_set() or not self._cloud_enabled:
+            return
+        if self._cloud_iterator is None:
+            self._cloud_adapter = CloudStorage(self._cloud_storage)
+            self._cloud_iterator = self._cloud_adapter.walk(self._cloud_folder, self._cloud_recursive, self._stopping)
+            self._cloud_status.update(scanning=True, error="")
+        with self._condition:
+            count = sum(key.startswith("cloud:") for key in self._pending)
+        if count < 512:
+            for index in range(min(32, 512 - count)):
+                try:
+                    item = next(self._cloud_iterator)
+                except StopIteration:
+                    self._cloud_iterator = None
+                    self._cloud_status.update(scanning=False, last_scan=time.time())
+                    return
+                if item is None:
+                    break
+                suffix = Path(item.get("name") or item["path"]).suffix.lower()
+                extensions = self._extension_set()
+                if item.get("size", 0) and item["size"] > 0 and suffix not in {".part", ".tmp", ".!qb", ".crdownload"} and (not extensions or suffix.lstrip(".") in extensions):
+                    self._queue_cloud_file(item)
+        with self._condition:
+            self._pending["__cloud_scan__"] = (time.monotonic() + 1, None)
+
+    def _process_cloud_file(self, item: dict) -> None:
+        from .cloud_storage import CloudStorage, CloudError, fingerprint, hash_remote, record_key, allowed_item
+        if not self._cloud_enabled or self._stopping.is_set() or not allowed_item(item, self._cloud_storage, self._cloud_folder):
+            return
+        import datetime
+        modified = item.get("modify_time")
+        if isinstance(modified, (int, float)):
+            modified_at = modified / 1000 if modified > 10_000_000_000 else modified
+        elif isinstance(modified, str):
+            try:
+                modified_at = float(modified)
+                if modified_at > 10_000_000_000:
+                    modified_at /= 1000
+            except ValueError:
+                try:
+                    modified_at = datetime.datetime.fromisoformat(modified.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    modified_at = None
+        else:
+            modified_at = None
+        if self._min_age and modified_at is not None and modified_at + self._min_age > time.time():
+            self._queue_cloud_file(item, delay=max(60, min(self._min_age, int(modified_at + self._min_age - time.time()))))
+            return
+        if self._min_age and modified_at is None:
+            observation_key = record_key(item)
+            now = time.monotonic()
+            observed = self._cloud_observed.get(observation_key)
+            if not observed or observed[0] != fingerprint(item):
+                if len(self._cloud_observed) >= 2048:
+                    self._cloud_observed.pop(next(iter(self._cloud_observed)))
+                self._cloud_observed[observation_key] = (fingerprint(item), now)
+                self._queue_cloud_file(item, delay=max(60, self._min_age))
+                return
+            if now - observed[1] < self._min_age:
+                self._queue_cloud_file(item, delay=max(1, int(self._min_age - (now - observed[1]))))
+                return
+        with self._lock:
+            storage = self._cloud_adapter or CloudStorage(self._cloud_storage)
+            fresh = storage.fresh(item)
+            if fingerprint(fresh) != fingerprint(item):
+                self._queue_cloud_file(fresh, delay=max(60, self._min_age))
+                return
+            _, output, cache_path = self._paths()
+            output = output if self._output_enabled else None
+            records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+            key = record_key(item)
+            record = records.get(key)
+            unchanged = record and not record_problem(record) and record.get("cloud_fingerprint") == fingerprint(item) and record.get("hash_version") == 2
+            if unchanged and (not self._telegram_enabled or (record.get("telegram_sent") and record.get("telegram_target") == self._telegram_target_key())):
+                if output is not None:
+                    self._write_results(output, cache_path, records)
+                return
+            self._cloud_status.update(file=item["name"], bytes_read=0, size=item["size"], error="")
+            if not unchanged:
+                digest = lambda data: _CryptoMD4.new(data).digest() if _CryptoMD4 else _md4(data)
+                def progress(done, size):
+                    self._cloud_status.update(bytes_read=done, size=size)
+                file_hash = hash_remote(storage, item, self._stopping, digest, ED2K_PART_SIZE, progress)
+                record = {"name": item["name"], "size": item["size"], "link": ed2k_link(Path(item["name"]), file_hash, item["size"]),
+                          "source_type": "cloud", "storage": item["storage"], "source_path": item["path"],
+                          "cloud_fingerprint": fingerprint(item), "generated_at": time.time(), "source_deleted": False,
+                          "hash_version": 2, "telegram_sent": False, "telegram_target": ""}
+                if record_problem(record):
+                    raise CloudError("网盘链接校验失败，不保存或发送")
+                records[key] = record
+                self._cloud_status["completed"] += 1
+                logger.info(f"自动生成ED2K链接：网盘文件生成完成（不删源）：{item['storage']}：{item['name']}")
+            self._write_results(output, cache_path, records)
+            self._notify_record(Path(item["name"]), record, checkpoint=lambda: self._write_results(output, cache_path, records))
+            self._write_results(output, cache_path, records)
+            self._cloud_observed.pop(record_key(item), None)
+            self._cloud_status["file"] = ""
+            if self._telegram_enabled and not record.get("telegram_sent"):
+                self._queue_cloud_file(item, delay=300)
 
     def _extension_set(self) -> set[str]:
         return {item.strip().lower().lstrip(".") for item in self._extensions.split(",") if item.strip()}
@@ -651,9 +833,14 @@ class Ed2kFolderWatcher(_PluginBase):
         logger.info("自动生成ED2K链接：增量补扫已入队，已有链接不会重复计算")
 
     def get_service(self) -> List[Dict[str, Any]]:
-        if not self._enabled or not self._folder or not self._scan_enabled:
+        if not self._enabled:
             return []
-        return [{"id": "Ed2kFolderWatcher", "name": "扫描本地文件夹并生成 ED2K", "trigger": CronTrigger.from_crontab(self._cron), "func": self.scan}]
+        services = []
+        if self._folder and self._scan_enabled:
+            services.append({"id": "Ed2kFolderWatcher", "name": "扫描本地文件夹并生成 ED2K", "trigger": CronTrigger.from_crontab(self._cron), "func": self.scan})
+        if self._cloud_enabled:
+            services.append({"id": "Ed2kFolderWatcherCloud", "name": "网盘文件增量生成 ED2K（只读）", "trigger": CronTrigger.from_crontab(self._cloud_cron), "func": self.queue_cloud_scan})
+        return services
 
     def get_api(self) -> List[Dict[str, Any]]:
         from .web_api import build_routes
@@ -669,6 +856,8 @@ class Ed2kFolderWatcher(_PluginBase):
         return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode("utf-8")).hexdigest()
 
     def _source_matches(self, path: Path, record: dict) -> bool:
+        if record.get("source_type") == "cloud":
+            return False
         if record_problem(record) or record.get("source_deleted") is True or not self._folder or not self._eligible(path):
             return False
         current = path.stat()
@@ -763,6 +952,8 @@ class Ed2kFolderWatcher(_PluginBase):
                               "id": self._record_id(path, record), "can_delete": can_delete,
                               "link_valid": not problem, "link_error": problem,
                               "generated_at": record.get("generated_at"), "source_status": source_status,
+                              "source_type": record.get("source_type", "local"), "storage": record.get("storage", "local"),
+                              "source_path": record.get("source_path", path),
                               "deleted_at": record.get("deleted_at")})
             return {"ok": True, "items": items, "total": len(records), "limit": 100,
                     "delete_source_enabled": self._delete_source}
@@ -787,7 +978,10 @@ class Ed2kFolderWatcher(_PluginBase):
             self._web_login = None
 
     def _save_config(self) -> None:
-        self.update_config({"enabled": self._enabled, "folder": self._folder, "recursive": self._recursive, "cron": self._cron, "output": self._output, "output_enabled": self._output_enabled, "monitor_enabled": self._monitor_enabled, "scan_enabled": self._scan_enabled, "extensions": self._extensions, "min_age": self._min_age, "delete_source": self._delete_source, "telegram_enabled": self._telegram_enabled, "telegram_mode": self._telegram_mode, "telegram_token": self._telegram_token, "telegram_chat_id": self._telegram_chat_id, "telegram_thread_id": self._telegram_thread_id, "onlyonce": self._onlyonce})
+        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "delete_source", "telegram_enabled", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron")
+        config = {name: getattr(self, f"_{name}") for name in fields}
+        config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce)
+        self.update_config(config)
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         def field(component: str, model: str, label: str, **props: Any) -> dict:
@@ -798,6 +992,11 @@ class Ed2kFolderWatcher(_PluginBase):
 
         return [{"component": "VForm", "content": [
             field("VSwitch", "enabled", "启用插件"),
+            field("VSwitch", "cloud_enabled", "启用网盘增量生成（只读，不删源）"),
+            field("VSelect", "cloud_storage", "网盘存储", items=[{"title": "115网盘Plus", "value": "115网盘Plus"}, {"title": "CloudDrive储存", "value": "CloudDrive储存"}]),
+            field("VTextField", "cloud_folder", "网盘目录", hint="网盘内绝对路径，不能使用根目录；可在新版插件设置页面浏览选择。", persistent_hint=True),
+            field("VSwitch", "cloud_recursive", "包含网盘子目录"),
+            field("VTextField", "cloud_cron", "网盘增量计划", hint="默认每10分钟；本地与网盘共用单线程，不保存完整临时文件。", persistent_hint=True),
             field("VTextField", "folder", "监控目录", placeholder="/downloads/complete", hint="必须是 MoviePilot 容器内可见的本地路径。", persistent_hint=True),
             field("VSwitch", "recursive", "扫描子目录"),
             field("VSwitch", "monitor_enabled", "监控新增文件", hint="文件创建或移动到监控目录后自动处理；定时补扫仍可作为兜底。", persistent_hint=True),
@@ -815,4 +1014,4 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON}

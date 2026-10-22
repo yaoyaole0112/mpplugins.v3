@@ -14,8 +14,8 @@ from .telegram_targets import telegram_targets
 
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
                  "min_age", "delete_source", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
-                 "telegram_chat_id", "telegram_thread_id")
-BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "scan_enabled", "telegram_enabled"}
+                 "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron")
+BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "scan_enabled", "telegram_enabled", "cloud_enabled", "cloud_recursive"}
 
 
 def settings_snapshot(plugin):
@@ -49,6 +49,19 @@ def validate_settings(plugin, values):
     if result["telegram_thread_id"] and (not result["telegram_thread_id"].isdigit() or int(result["telegram_thread_id"]) <= 0):
         raise UserAccountError("话题线程 ID 必须为正整数或留空")
     result["telegram_token"] = plugin._telegram_token
+    if result["cloud_enabled"]:
+        from .cloud_storage import SUPPORTED_STORAGES, available_storages, cloud_path, CloudError
+        try:
+            if result["cloud_storage"] not in SUPPORTED_STORAGES:
+                raise CloudError("请选择 115网盘Plus 或 CloudDrive储存")
+            result["cloud_folder"] = cloud_path(result["cloud_folder"])
+            if result["cloud_folder"] == "/":
+                raise CloudError("请指定具体的网盘子目录，不允许扫描整个网盘根目录")
+            if result["cloud_storage"] not in {item["type"] for item in available_storages()}:
+                raise CloudError("所选网盘存储未配置，请先启用并登录对应插件")
+            CronTrigger.from_crontab(result["cloud_cron"])
+        except (CloudError, ValueError, TypeError) as error:
+            raise UserAccountError(f"网盘配置无效：{error}") from None
     if result["telegram_enabled"] or result["telegram_chat_id"]:
         try:
             telegram_targets(result["telegram_chat_id"], result["telegram_thread_id"])
@@ -87,6 +100,27 @@ def build_routes(plugin):
 
     async def status(principal=Depends(get_current_active_superuser)):
         return response({"ok": True, "settings": settings_snapshot(plugin)})
+
+    async def cloud_status(principal=Depends(get_current_active_superuser)):
+        return response(await asyncio.to_thread(plugin.cloud_status))
+
+    async def cloud_run(principal=Depends(get_current_active_superuser)):
+        return response(plugin.queue_cloud_scan())
+
+    async def cloud_browse(request: Request, principal=Depends(get_current_active_superuser)):
+        from .cloud_storage import CloudStorage, CloudError, cloud_path
+        values = await read_body(request)
+        if set(values) != {"storage", "path"} or any(not isinstance(value, str) for value in values.values()):
+            raise HTTPException(status_code=400, detail="请提供存储类型和目录")
+        try:
+            path = cloud_path(values["path"])
+            def browse():
+                storage = CloudStorage(values["storage"])
+                return [{"name": entry["name"], "path": entry["path"]} for entry in storage.list(path) if entry["type"] == "dir"]
+            return response({"ok": True, "path": path, "folders": await asyncio.to_thread(browse)})
+        except Exception as error:
+            detail = str(error) if isinstance(error, CloudError) else f"读取网盘目录失败（{type(error).__name__}），请检查存储插件登录状态"
+            return response({"ok": False, "message": detail})
 
     async def save(request: Request, principal=Depends(get_current_active_superuser)):
         try:
@@ -136,6 +170,9 @@ def build_routes(plugin):
             for path, endpoint, method, summary in (
                 ("/records", recent, "GET", "最近生成链接与删源状态"),
                 ("/records/delete-source", delete_source, "POST", "确认后手动删除记录对应的源文件"),
+                ("/cloud/status", cloud_status, "GET", "只读网盘来源及生成进度"),
+                ("/cloud/run", cloud_run, "POST", "网盘增量扫描与补发"),
+                ("/cloud/browse", cloud_browse, "POST", "浏览网盘子目录"),
                 ("/settings", status, "GET", "读取安全配置"), ("/settings", save, "POST", "保存插件配置"),
                 ("/telegram/status", telegram_status, "GET", "个人账号登录状态"),
                 ("/telegram/action", telegram_action, "POST", "个人账号网页授权"), ("/run", run, "POST", "增量补扫与补发"))]
