@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 import Panel from './Panel.vue'
+import './mobile-layout.css'
 
 const props = defineProps({ api: { type: Object, default: () => ({}) }, pluginId: { type: String, default: 'Ed2kFolderWatcher' } })
 const emit = defineEmits(['close', 'layout'])
@@ -120,7 +121,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
 
 <template>
   <Panel v-if="configOpen" :api="api" :plugin-id="pluginId" @close="emit('close')" />
-  <section v-else class="records-page" :aria-busy="busy">
+  <section v-else class="records-page ed2k-mobile-page" :aria-busy="busy">
     <header class="records-header">
       <div><h2>自动生成ED2K链接</h2><p>最近生成记录 · 共 {{ total }} 条 · 显示最近 {{ items.length }} 条</p></div>
       <div class="records-actions"><button type="button" :disabled="busy" @click="refresh">刷新记录</button><button type="button" @click="openSettings">设置</button><button type="button" @click="emit('close')">关闭</button></div>

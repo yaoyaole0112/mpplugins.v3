@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import './mobile-layout.css'
 
 const props = defineProps({ api: { type: Object, default: () => ({}) }, pluginId: { type: String, default: 'Ed2kFolderWatcher' } })
 const emit = defineEmits(['close'])
@@ -131,7 +132,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="ed2k-panel" :aria-busy="busy">
+  <section class="ed2k-panel ed2k-mobile-page" :aria-busy="busy">
     <header class="ed2k-header">
       <div><h2>自动生成ED2K链接</h2><p>实时目录监控 · 增量生成 · Telegram 自动发送</p></div>
       <div class="header-actions">

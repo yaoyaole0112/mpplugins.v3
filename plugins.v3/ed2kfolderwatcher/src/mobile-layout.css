@@ -1,0 +1,72 @@
+@media (max-width: 959px) {
+  :root .ed2k-mobile-page.records-page,
+  :root .ed2k-mobile-page.ed2k-panel {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    max-height: none;
+    overflow: visible;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .ed2k-mobile-page.records-page .records-list {
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+    scrollbar-gutter: auto;
+    overscroll-behavior: auto;
+  }
+
+  .ed2k-mobile-page :is(input, select, textarea) {
+    box-sizing: border-box;
+    max-width: 100%;
+  }
+
+  html.v-overlay-scroll-blocked:has(.v-dialog--fullscreen .ed2k-mobile-page) {
+    position: static !important;
+    height: auto !important;
+    overflow-y: auto !important;
+  }
+
+  body:has(.v-dialog--fullscreen .ed2k-mobile-page) {
+    overflow: visible !important;
+  }
+
+  .v-dialog--fullscreen:has(.ed2k-mobile-page) {
+    position: absolute !important;
+    display: block;
+    bottom: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
+  .v-dialog--fullscreen:has(.ed2k-mobile-page) > .v-overlay__scrim {
+    display: none;
+  }
+
+  .v-dialog--fullscreen:has(.ed2k-mobile-page) > .v-overlay__content {
+    position: relative;
+    inset: auto;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    min-height: 100dvh;
+    margin: 0;
+    overflow: visible;
+    contain: none;
+  }
+
+  .v-dialog--fullscreen:has(.ed2k-mobile-page) > .v-overlay__content > .v-card {
+    flex: none;
+    max-height: none;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
+  .v-dialog--fullscreen:has(.ed2k-mobile-page) > .v-overlay__content > .v-card > .v-card-text {
+    flex: none;
+    padding: 0;
+    overflow: visible;
+  }
+}

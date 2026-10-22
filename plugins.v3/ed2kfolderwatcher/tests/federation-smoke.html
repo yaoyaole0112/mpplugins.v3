@@ -1,9 +1,26 @@
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>ED2K federation smoke</title></head><body>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ED2K federation smoke</title></head><body>
 <main id="app"></main><pre id="result">running</pre>
 <script type="module">
 import * as vue from '../node_modules/vue/dist/vue.esm-browser.prod.js'
 import * as remote from '../dist/assets/remoteEntry.js'
+
+const mobile = matchMedia('(max-width: 959px)').matches
+const dialogFixture = new URLSearchParams(location.search).has('dialog')
+if (dialogFixture) {
+  const stylesheet = document.createElement('link')
+  stylesheet.rel = 'stylesheet'
+  stylesheet.href = './host-dialog.css'
+  document.head.appendChild(stylesheet)
+  await new Promise((resolve, reject) => { stylesheet.onload = resolve; stylesheet.onerror = reject })
+  document.documentElement.classList.add('v-overlay-scroll-blocked')
+  document.documentElement.style.setProperty('--v-body-scroll-y', '-120px')
+  const container = document.createElement('div')
+  container.className = 'v-overlay-container'
+  container.innerHTML = `<div class="v-overlay v-overlay--active v-dialog v-dialog--scrollable${mobile ? ' v-dialog--fullscreen' : ''}"><div class="v-overlay__scrim"></div><div class="v-overlay__content" style="max-width:78rem"><div class="v-card"><div class="v-card-text"></div></div></div></div>`
+  container.querySelector('.v-card-text').appendChild(document.querySelector('#app'))
+  document.body.appendChild(container)
+}
 
 const settings = { enabled: false, folder: '/media/test', recursive: true, monitor_enabled: true,
   output_enabled: true, output: '', extensions: '', min_age: 60, delete_source: false,
@@ -48,6 +65,9 @@ const rows = ['deleted', 'retained', 'delete_failed', 'unknown'].map((source_sta
   generated_at: index ? null : 1700000000, source_status,
 }))
 rows.push({ id: 'f'.repeat(64), name: '历史空文件.mkv', link: 'ed2k://|file|历史空文件.mkv|0|31d6cfe0d16ae931b73c59d7e0c089c0|/', link_valid: false, link_error: '历史链接无效：当时文件大小为 0', can_delete: false, source_status: 'retained' })
+for (let index = 5; index < 20; index++) {
+  rows.push({ id: String(index).padStart(64, '0'), name: `测试文件 ${index}.mkv`, link: `ed2k://|file|测试文件 ${index}.mkv|5|hash|/`, link_valid: true, can_delete: false, source_status: 'retained' })
+}
 const api = { get: async path => {
   requests.push(path)
   if (path.endsWith('/cloud/status')) return { ok: true, storages: [{ type: '115网盘Plus', name: '115网盘Plus' }], scanning: false, pending: 0, file: '', bytes_read: 0, size: 0, error: '' }
@@ -93,13 +113,40 @@ try {
       const page = document.querySelector('#app .records-page')
       const list = page.querySelector('.records-list')
       const firstCard = list.querySelector('.record')
-      if (page.getBoundingClientRect().height > innerHeight * .85 + 1 || page.scrollHeight > page.clientHeight + 1) throw Error(`${name}: outer page overflows`)
-      if (getComputedStyle(list).overflowY !== 'auto' || getComputedStyle(list).scrollbarGutter !== 'stable') throw Error(`${name}: list scrollbar missing reserved space`)
+      if (mobile) {
+        if (getComputedStyle(page).maxHeight !== 'none' || getComputedStyle(list).overflowY !== 'visible') throw Error(`${name}: mobile page still has nested scrolling`)
+        if (document.scrollingElement.scrollWidth > innerWidth + 1) throw Error(`${name}: mobile page overflows horizontally`)
+        if (dialogFixture) {
+          if (getComputedStyle(document.documentElement).position === 'fixed') throw Error(`${name}: document scrolling remains locked`)
+          for (const selector of ['.v-overlay', '.v-overlay__content', '.v-card', '.v-card-text']) {
+            const element = document.querySelector(selector)
+            if (element.scrollHeight > element.clientHeight + 1 && ['auto', 'scroll', 'hidden'].includes(getComputedStyle(element).overflowY)) throw Error(`${name}: host wrapper still clips: ${selector}`)
+          }
+          if (getComputedStyle(document.querySelector('.v-overlay__scrim')).display !== 'none') throw Error(`${name}: dialog scrim still covers mobile page`)
+        }
+        const help = page.querySelector('.help')
+        const policy = page.querySelector('.policy')
+        const before = [help, policy].map(element => element.getBoundingClientRect().top)
+        window.scrollTo(0, 180)
+        await new Promise(resolve => setTimeout(resolve, 50))
+        if (window.scrollY < 100 || [help, policy].some((element, index) => Math.abs(before[index] - element.getBoundingClientRect().top - window.scrollY) > 1)) throw Error(`${name}: help or policy does not scroll with document`)
+        const last = list.lastElementChild
+        last.scrollIntoView({ block: 'end' })
+        await new Promise(resolve => setTimeout(resolve, 50))
+        const bounds = last.getBoundingClientRect()
+        if (bounds.bottom > innerHeight + 1 || !last.contains(document.elementFromPoint(bounds.left + 20, Math.min(bounds.bottom - 10, innerHeight - 10)))) throw Error(`${name}: bottom record is masked`)
+        window.scrollTo(0, 0)
+      } else {
+        if (page.getBoundingClientRect().height > innerHeight * .85 + 1 || page.scrollHeight > page.clientHeight + 1) throw Error(`${name}: outer page overflows`)
+        if (getComputedStyle(list).overflowY !== 'auto' || getComputedStyle(list).scrollbarGutter !== 'stable') throw Error(`${name}: list scrollbar missing reserved space`)
+      }
       if (firstCard.querySelector('.copy-feedback').getBoundingClientRect().height !== 20 || parseFloat(getComputedStyle(firstCard).paddingBottom) > 12) throw Error(`${name}: card whitespace not compact`)
       const headerTop = page.querySelector('.records-header').getBoundingClientRect().top
-      list.scrollTop = list.scrollHeight
-      if (list.scrollTop <= 0 || page.querySelector('.records-header').getBoundingClientRect().top !== headerTop || page.scrollTop !== 0) throw Error(`${name}: list does not scroll independently of header`)
-      if (list.lastElementChild.getBoundingClientRect().bottom > list.getBoundingClientRect().bottom + 1) throw Error(`${name}: last record is clipped`)
+      if (!mobile) {
+        list.scrollTop = list.scrollHeight
+        if (list.scrollTop <= 0 || page.querySelector('.records-header').getBoundingClientRect().top !== headerTop || page.scrollTop !== 0) throw Error(`${name}: list does not scroll independently of header`)
+        if (list.lastElementChild.getBoundingClientRect().bottom > list.getBoundingClientRect().bottom + 1) throw Error(`${name}: last record is clipped`)
+      }
       list.scrollTop = 0
       const invalid = [...document.querySelectorAll('#app .record')].find(record => record.textContent.includes('历史空文件'))
       if (!invalid?.textContent.includes('历史链接无效') || invalid.querySelector('.copy-link') || invalid.querySelector('.delete-source')) throw Error(`${name}: invalid link actions available`)
@@ -231,11 +278,23 @@ try {
     const header = document.querySelector('#app .header-actions')
     if (header.scrollWidth > header.clientWidth + 2) throw Error(`${name}: header actions overflow`)
     if (document.querySelector('#app').innerText.includes('正在加载设置')) throw Error(`${name}: settings not loaded`)
+    if (mobile) {
+      const panel = document.querySelector('#app .ed2k-panel')
+      if (getComputedStyle(panel).maxHeight !== 'none' || getComputedStyle(panel).overflowY !== 'visible') throw Error(`${name}: settings retain nested scrolling`)
+      if (document.scrollingElement.scrollWidth > innerWidth + 1) throw Error(`${name}: settings overflow horizontally`)
+      const lastButton = [...panel.querySelectorAll('button')].at(-1)
+      lastButton.scrollIntoView({ block: 'center' })
+      await new Promise(resolve => setTimeout(resolve, 50))
+      const bounds = lastButton.getBoundingClientRect()
+      if (window.scrollY <= 0 || !lastButton.contains(document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2))) throw Error(`${name}: bottom settings are masked or not document-scrollable`)
+      window.scrollTo(0, 0)
+    }
     const previousCloses = closes
     buttons.find(button => button.textContent.trim() === '关闭').click()
     if (closes !== previousCloses + 1) throw Error(`${name}: config close event lost`)
     app.unmount()
     if (intervals.size) throw Error(`${name}: polling not cleaned up`)
+    if (mobile && dialogFixture && getComputedStyle(document.documentElement).position !== 'fixed') throw Error(`${name}: host scroll lock not restored after unmount`)
   }
   await Promise.all([...document.querySelectorAll('link[rel=stylesheet]')].map(async link => {
     const response = await fetch(link.href)

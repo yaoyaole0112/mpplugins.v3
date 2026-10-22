@@ -1,0 +1,12 @@
+html.v-overlay-scroll-blocked{position:fixed;top:var(--v-body-scroll-y);left:var(--v-body-scroll-x);width:100%;height:100%}
+body{margin:0;--v-theme-surface:40,42,46;--v-theme-on-surface:230,230,235;--v-theme-primary:157,105,230;--v-theme-on-primary:255,255,255;background:rgb(var(--v-theme-surface))}
+.v-overlay-container{display:contents}
+.v-overlay{display:flex;inset:0;pointer-events:none;position:fixed}
+.v-overlay__content{display:flex;flex-direction:column;outline:none;position:absolute;pointer-events:auto;contain:layout}
+.v-overlay__scrim{pointer-events:auto;background:black;inset:0;opacity:.5;position:fixed}
+.v-dialog>.v-overlay__content{max-height:calc(100% - 48px);width:calc(100% - 48px);max-width:calc(100% - 48px);margin:24px}
+.v-dialog>.v-overlay__content>.v-card{display:flex;flex-direction:column;overflow-y:auto;background:rgb(var(--v-theme-surface))}
+.v-dialog--fullscreen>.v-overlay__content{border-radius:0;margin:0;padding:0;width:100%;max-width:100%;max-height:100%;height:100%;overflow-y:auto;top:0;left:0}
+.v-dialog--fullscreen>.v-overlay__content>.v-card{min-height:100%;min-width:100%}
+.v-dialog--scrollable>.v-overlay__content>.v-card{display:flex;flex:1 1 100%;flex-direction:column;max-height:100%;max-width:100%}
+.v-dialog--scrollable>.v-overlay__content>.v-card>.v-card-text{backface-visibility:hidden;overflow-y:auto}
