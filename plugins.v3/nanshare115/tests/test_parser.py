@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 
@@ -55,6 +56,60 @@ class ParserTest(unittest.TestCase):
         offline, _, share = self.module.parse_input(text)
         self.assertEqual(len(offline), 2)
         self.assertIsNone(share)
+
+    def test_cookie_from_helper_and_refresh(self):
+        plugin = self.module.NanShare115()
+        plugin.get_config = Mock(return_value={"cookies": "first-cookie"})
+        with patch.object(self.module, "P115Client") as factory:
+            plugin._refresh_cookie()
+            factory.assert_called_once_with("first-cookie")
+            plugin._refresh_cookie()
+            self.assertEqual(factory.call_count, 1)
+            plugin.get_config.return_value = {"cookies": "new-cookie"}
+            plugin._refresh_cookie()
+            factory.assert_called_with("new-cookie")
+            plugin.get_config.return_value = {}
+            plugin._refresh_cookie()
+            self.assertIsNone(plugin._client)
+
+    def test_target_cid_and_offline_payload(self):
+        plugin = self.module.NanShare115()
+        plugin._target_cid = "12345"
+        client = Mock()
+        client.clouddownload_task_add_urls.return_value = {"state": True, "data": {"result": [{}]}}
+        plugin._offline(client, ["ed2k://|file|demo|4|ABC|/"])
+        self.assertEqual(client.clouddownload_task_add_urls.call_args.args[0]["wp_path_id"], 12345)
+        plugin._target_cid = "0"
+        self.assertEqual(plugin._path_id(client), 0)
+        plugin._target_cid = "invalid"
+        with self.assertRaises(ValueError):
+            plugin._path_id(client)
+
+    def test_custom_bot_authorization(self):
+        plugin = self.module.NanShare115()
+        plugin._allowed_users = {"123"}
+        plugin._handle = Mock()
+        client = Mock()
+        message = {"from": {"id": 999}, "chat": {"id": 123, "type": "private"}, "text": "/ns ed2k://|file|a|1|ABC|/"}
+        plugin._bot_message(client, message)
+        plugin._handle.assert_not_called()
+        message["from"]["id"] = 123
+        message["chat"]["type"] = "group"
+        plugin._bot_message(client, message)
+        plugin._handle.assert_not_called()
+        message["chat"]["type"] = "private"
+        plugin._bot_message(client, message)
+        self.assertEqual(plugin._handle.call_count, 1)
+
+    def test_no_duplicate_mp_command_or_custom_bot_consumption(self):
+        plugin = self.module.NanShare115()
+        plugin._enabled = True
+        plugin._handle = Mock()
+        plugin.handle_message(types.SimpleNamespace(event_data={"text": "/ns https://115.com/s/abc"}))
+        plugin._handle.assert_not_called()
+        plugin._bot_token = "configured"
+        plugin.handle_message(types.SimpleNamespace(event_data={"text": "https://115.com/s/abc"}))
+        plugin._handle.assert_not_called()
 
 
 if __name__ == "__main__":

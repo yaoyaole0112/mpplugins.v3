@@ -1,0 +1,2 @@
+p115client
+httpx>=0.27,<1

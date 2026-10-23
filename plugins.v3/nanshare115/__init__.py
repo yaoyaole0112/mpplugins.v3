@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from threading import Lock
+from threading import Event as StopEvent, Lock, Thread
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.event import Event, eventmanager
@@ -50,7 +50,7 @@ class NanShare115(_PluginBase):
     plugin_name = "NanShare 115转存"
     plugin_desc = "通过 MoviePilot Telegram Bot 接收 115分享、magnet、ed2k 或 torrent 链接并转存到指定115目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "nanshare115_"
@@ -64,17 +64,40 @@ class NanShare115(_PluginBase):
     _client: Optional[P115Client] = None
     _client_lock = Lock()
 
+    def __init__(self):
+        super().__init__()
+        self._stop = StopEvent()
+        self._worker = None
+        self._bot_token = ""
+        self._allowed_users = set()
+        self._target_cid = ""
+        self._bot_proxy = ""
+
+    def _refresh_cookie(self):
+        config = self.get_config("P115StrmHelper") or {}
+        cookie = str(config.get("cookies") or "").strip()
+        if cookie != self._cookie or self._client is None:
+            self._cookie = cookie
+            self._client = P115Client(cookie) if cookie else None
+
     def init_plugin(self, config: dict = None) -> None:
+        self.stop_service()
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
-        self._cookie = str(config.get("cookie") or "").strip()
         self._target_path = str(config.get("target_path") or "/NanShare").strip() or "/NanShare"
-        self._client = None
-        if self._enabled and self._cookie:
+        self._target_cid = str(config.get("target_cid") or "").strip()
+        self._bot_token = str(config.get("bot_token") or "").strip()
+        self._bot_proxy = str(config.get("bot_proxy") or "").strip()
+        self._allowed_users = {item for item in re.split(r"[,，\s]+", str(config.get("allowed_users") or "")) if item.isdecimal()}
+        if self._enabled:
             try:
-                self._client = P115Client(self._cookie)
+                self._refresh_cookie()
             except Exception as exc:
                 sdk_logger.error(f"NanShare 115：初始化客户端失败：{type(exc).__name__}")
+        if self._enabled and self._bot_token and self._allowed_users:
+            self._stop = StopEvent()
+            self._worker = Thread(target=self._poll_bot, args=(self._stop,), daemon=True, name="nanshare115-bot")
+            self._worker.start()
 
     def get_state(self) -> bool:
         return self._enabled and bool(self._cookie)
@@ -87,19 +110,28 @@ class NanShare115(_PluginBase):
         return [{"path": "/status", "endpoint": self.status, "methods": ["GET"], "summary": "查看 NanShare 115 状态"}]
 
     def status(self) -> Dict[str, Any]:
-        return {"enabled": self._enabled, "configured": bool(self._cookie), "target_path": self._target_path}
+        return {"enabled": self._enabled, "configured": bool(self._cookie), "target_path": self._target_path,
+                "target_cid": self._target_cid, "bot_running": bool(self._worker and self._worker.is_alive())}
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [{"component": "VForm", "content": [
             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
-            {"component": "VTextField", "props": {"model": "cookie", "label": "115 Cookie", "type": "password", "hint": "仅保存在 MoviePilot 插件配置中", "persistentHint": True}},
+            {"component": "VAlert", "props": {"type": "info", "text": "自动读取115网盘STRM助手的Cookie，不再单独保存。独立Bot需填写Token和允许的Telegram用户ID；勿与其他程序共用接收Bot。"}},
+            {"component": "VTextField", "props": {"model": "bot_token", "label": "自定义 Bot Token（留空使用MP Bot）", "type": "password"}},
+            {"component": "VTextField", "props": {"model": "allowed_users", "label": "允许的Telegram用户ID（逗号分隔，独立Bot必填）"}},
+            {"component": "VTextField", "props": {"model": "bot_proxy", "label": "Bot HTTPS代理（可选）", "placeholder": "http://127.0.0.1:7890"}},
             {"component": "VTextField", "props": {"model": "target_path", "label": "115目标目录", "placeholder": "/NanShare", "hint": "目录不存在时自动创建；TG 消息支持 /nanshare 链接"}},
-        ]}], {"enabled": False, "cookie": self._cookie, "target_path": self._target_path}
+            {"component": "VTextField", "props": {"model": "target_cid", "label": "目标目录CID（可选，填写后优先于路径，0为根目录）"}},
+        ]}], {"enabled": self._enabled, "target_path": self._target_path, "target_cid": self._target_cid,
+               "bot_token": self._bot_token, "allowed_users": ",".join(sorted(self._allowed_users)), "bot_proxy": self._bot_proxy}
 
     def get_page(self) -> Optional[List[dict]]:
         return None
 
     def _reply(self, data: Dict[str, Any], text: str) -> None:
+        if data.get("bot_client"):
+            self._bot_call(data["bot_client"], "sendMessage", {"chat_id": data["chat_id"], "text": text})
+            return
         try:
             channel = data.get("channel")
             source = data.get("source")
@@ -108,9 +140,13 @@ class NanShare115(_PluginBase):
                 return
         except Exception:
             pass
-        logger.info(f"NanShare 115 回复：{text}")
+        logger.info("NanShare 115：回复渠道不可用，未广播消息")
 
     def _path_id(self, client: P115Client) -> int:
+        if self._target_cid:
+            if not self._target_cid.isdecimal():
+                raise ValueError("目标目录CID必须为非负整数")
+            return int(self._target_cid)
         from p115client.tool.iterdir import iterdir
 
         parent_id = 0
@@ -142,7 +178,7 @@ class NanShare115(_PluginBase):
         response = client.share_receive(payload)
         if not response.get("state"):
             raise RuntimeError(str(response.get("error") or "115 转存接口返回失败"))
-        return f"115分享已转存到 {self._target_path}"
+        return f"115分享已转存到 {self._target_cid or self._target_path}"
 
     def _offline(self, client: P115Client, links: List[str]) -> str:
         payload = {f"url[{index}]": link for index, link in enumerate(links)}
@@ -152,16 +188,22 @@ class NanShare115(_PluginBase):
             raise RuntimeError(str(response.get("error") or "115 离线接口返回失败"))
         result = (response.get("data") or {}).get("result")
         count = len(result) if isinstance(result, list) else len(links)
-        return f"已提交 {count} 条离线任务，目标目录：{self._target_path}"
+        return f"已提交 {count} 条离线任务，目标目录：{self._target_cid or self._target_path}（尚未确认下载完成）"
 
     def _handle(self, data: Dict[str, Any], text: str) -> None:
         offline, _, share = parse_input(text)
         if not offline and not share:
             self._reply(data, "未识别链接。支持：115分享链接、magnet、ed2k、HTTP(S) .torrent。")
             return
-        client = self._client
+        try:
+            with self._client_lock:
+                self._refresh_cookie()
+                client = self._client
+        except Exception as exc:
+            self._reply(data, f"读取STRM助手登录状态失败：{type(exc).__name__}")
+            return
         if not client:
-            self._reply(data, "请先在插件设置中启用并填写115 Cookie。")
+            self._reply(data, "请先在115网盘STRM助手中登录或配置Cookie。")
             return
         try:
             results = []
@@ -173,27 +215,90 @@ class NanShare115(_PluginBase):
             self._reply(data, "\n".join(results))
         except Exception as exc:
             sdk_logger.error(f"NanShare 115 处理失败：{type(exc).__name__}")
-            self._reply(data, f"处理失败：{str(exc)[:200]}")
+            self._reply(data, f"处理失败：{type(exc).__name__}；请核实网盘状态后再试，插件不会自动重放提交。")
 
     @eventmanager.register(EventType.PluginAction)
     def handle_command(self, event: Event) -> None:
         data = event.event_data or {}
-        if data.get("action") != "nanshare115" or not self._enabled:
+        if data.get("action") != "nanshare115" or not self._enabled or self._bot_token:
             return
         self._handle(data, str(data.get("arg_str") or ""))
 
     @eventmanager.register(EventType.UserMessage)
     def handle_message(self, event: Event) -> None:
-        if not self.get_state():
+        if not self._enabled or self._bot_token:
             return
         data = event.event_data or {}
         text = str(data.get("text") or "").strip()
-        if text.startswith(self._commands):
-            parts = text.split(maxsplit=1)
-            self._handle(data, parts[1] if len(parts) == 2 else "")
+        if text.startswith("/"):
             return
         if U115_RE.search(text) or MAGNET_RE.search(text) or ED2K_RE.search(text) or TORRENT_RE.search(text):
             self._handle(data, text)
 
     def stop_service(self) -> None:
+        if hasattr(self, "_stop"):
+            self._stop.set()
+        if getattr(self, "_worker", None) and self._worker.is_alive():
+            self._worker.join(timeout=35)
+            if self._worker.is_alive():
+                raise RuntimeError("旧Bot任务尚未停止，请稍后重试")
+        self._worker = None
         self._client = None
+
+    def _bot_call(self, client, method, payload):
+        response = client.post(f"https://api.telegram.org/bot{self._bot_token}/{method}", json=payload)
+        if response.status_code in {401, 404, 409}:
+            raise ValueError("Bot认证失败或接收冲突")
+        response.raise_for_status()
+        result = response.json()
+        if not result.get("ok"):
+            raise RuntimeError("Telegram请求失败")
+        return result.get("result")
+
+    def _bot_message(self, client, message):
+        sender = str((message.get("from") or {}).get("id") or "")
+        chat = message.get("chat") or {}
+        if sender not in self._allowed_users or chat.get("type") != "private":
+            return
+        text = str(message.get("text") or message.get("caption") or "")
+        for entity in message.get("entities") or message.get("caption_entities") or []:
+            if entity.get("type") == "text_link" and entity.get("url"):
+                text += "\n" + entity["url"]
+        if text.startswith("/"):
+            parts = text.split(maxsplit=1)
+            if parts[0].split("@")[0] not in self._commands:
+                return
+            text = parts[1] if len(parts) > 1 else ""
+        if self._stop.is_set():
+            return
+        self._handle({"bot_client": client, "chat_id": chat["id"], "user": sender}, text)
+
+    def _poll_bot(self, stop):
+        import hashlib
+        import httpx
+
+        offset_key = "bot_offset_" + hashlib.sha256(self._bot_token.encode()).hexdigest()[:16]
+        offset = int(self.get_data(offset_key) or 0)
+        try:
+            with httpx.Client(timeout=25, proxy=self._bot_proxy or None) as client:
+                info = self._bot_call(client, "getWebhookInfo", {})
+                if info.get("url"):
+                    logger.warning("NanShare 115：Bot已配置webhook，停止接收；不会自动删除webhook")
+                    return
+                while not stop.is_set():
+                    try:
+                        updates = self._bot_call(client, "getUpdates", {"offset": offset, "timeout": 10, "allowed_updates": ["message"]})
+                        for update in updates:
+                            if stop.is_set():
+                                return
+                            offset = int(update["update_id"]) + 1
+                            self.save_data(offset_key, offset)
+                            self._bot_message(client, update.get("message") or {})
+                    except ValueError:
+                        logger.warning("NanShare 115：Bot认证或接收冲突，停止监听")
+                        return
+                    except Exception as exc:
+                        logger.warning("NanShare 115：Bot请求异常：%s，30秒后继续接收，不重放转存", type(exc).__name__)
+                        stop.wait(30)
+        except Exception as exc:
+            logger.warning("NanShare 115：Bot停止：%s", type(exc).__name__)
