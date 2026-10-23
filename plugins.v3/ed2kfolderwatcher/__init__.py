@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, unquote
 
 from apscheduler.triggers.cron import CronTrigger
+from .file_size import minimum_file_bytes
 
 try:
     from Crypto.Hash import MD4 as _CryptoMD4
@@ -159,7 +160,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.11.3"
+    plugin_version = "1.11.4"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -172,6 +173,7 @@ class Ed2kFolderWatcher(_PluginBase):
     _output = ""
     _extensions = DEFAULT_EXTENSIONS
     _min_age = 60
+    _min_file_size = ""
     _delete_source = False
     _telegram_enabled = False
     _telegram_mode = "user"
@@ -229,6 +231,12 @@ class Ed2kFolderWatcher(_PluginBase):
         self._cron = str(config.get("cron") or DEFAULT_CRON).strip()
         self._output = str(config.get("output") or "").strip()
         self._extensions = str(config.get("extensions") or DEFAULT_EXTENSIONS).strip()
+        self._min_file_size = str(config.get("min_file_size") or "").strip()
+        try:
+            minimum_file_bytes(self._min_file_size)
+        except ValueError as failure:
+            self._enabled = False
+            logger.error(f"自动生成ED2K链接：{failure}，已停止插件，请修正配置")
         self._delete_source = bool(config.get("delete_source", False))
         self._telegram_enabled = bool(config.get("telegram_enabled", False))
         self._telegram_mode = "user"
@@ -595,7 +603,7 @@ class Ed2kFolderWatcher(_PluginBase):
             return False
         suffix = Path(item.get("name") or item.get("path") or "").suffix.lower()
         extensions = self._extension_set()
-        return size > 0 and suffix not in {".part", ".tmp", ".!qb", ".crdownload"} and (not extensions or suffix.lstrip(".") in extensions)
+        return size > 0 and size >= minimum_file_bytes(self._min_file_size) and suffix not in {".part", ".tmp", ".!qb", ".crdownload"} and (not extensions or suffix.lstrip(".") in extensions)
 
     def _cloud_scan_step(self) -> None:
         from .cloud_storage import CloudStorage
@@ -624,7 +632,7 @@ class Ed2kFolderWatcher(_PluginBase):
 
     def _process_cloud_file(self, item: dict) -> None:
         from .cloud_storage import CloudStorage, CloudError, fingerprint, fingerprint_matches, hash_remote, record_key, allowed_item
-        if not self._cloud_enabled or self._stopping.is_set() or not allowed_item(item, self._cloud_storage, self._cloud_folder):
+        if not self._cloud_enabled or self._stopping.is_set() or not self._cloud_item_is_eligible(item):
             return
         import datetime
         modified = item.get("modify_time")
@@ -909,6 +917,8 @@ class Ed2kFolderWatcher(_PluginBase):
                 logger.warning(f"自动生成ED2K链接：跳过空文件，保留源文件并等待后续写入：{path.name}")
                 self._queue_event(path, delay=max(60, self._min_age))
                 return
+            if stat.st_size < minimum_file_bytes(self._min_file_size):
+                return
             if stat.st_mtime + self._min_age > time.time():
                 self._queue_event(path)
                 return
@@ -1126,7 +1136,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._web_login = None
 
     def _save_config(self) -> None:
-        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "delete_source", "telegram_enabled", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
+        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "telegram_enabled", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
         config = {name: getattr(self, f"_{name}") for name in fields}
         config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce)
         self.update_config(config)
@@ -1145,6 +1155,7 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextField", "output", "TXT 输出路径", placeholder="留空自动选择 ed2k.txt 路径"),
             field("VTextField", "extensions", "公共扩展名过滤", placeholder="留空处理全部文件，例如 mkv,mp4,flac"),
             field("VTextField", "min_age", "公共稳定等待秒数", type="number", hint="本地和网盘共用，请选择上传完成目录。", persistent_hint=True),
+            field("VTextField", "min_file_size", "生成链接最小文件大小", placeholder="例如100M、1.5G，留空或0不限制", hint="本地与网盘共用，小于此值不生成、不转发、不删源；单位B/K/M/G/T，按1024换算。", persistent_hint=True),
             {"component": "VCardTitle", "text": "本地监控"},
             field("VTextField", "folder", "本地监控目录", placeholder="/downloads/complete", hint="MoviePilot 容器内可见的本地路径；留空可仅处理网盘。", persistent_hint=True),
             field("VSwitch", "recursive", "包含本地子目录"),
@@ -1170,4 +1181,4 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "delete_source": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "delete_source": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}

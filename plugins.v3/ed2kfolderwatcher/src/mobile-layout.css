@@ -35,6 +35,11 @@
     overflow: visible !important;
   }
 
+  body:has(.v-dialog--fullscreen .ed2k-mobile-page) > #app:not(:has(.ed2k-mobile-page)),
+  body:has(.v-dialog--fullscreen .ed2k-mobile-page) > .ed2k-host-background {
+    display: none !important;
+  }
+
   .v-dialog--fullscreen:has(.ed2k-mobile-page) {
     position: absolute !important;
     display: block;
@@ -65,6 +70,7 @@
     max-height: none;
     min-height: 100dvh;
     overflow: visible;
+    background: rgb(var(--v-theme-surface)) !important;
   }
 
   .v-dialog--fullscreen:has(.ed2k-mobile-page) > .v-overlay__content > .v-card > .v-card-text {

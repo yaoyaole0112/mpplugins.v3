@@ -85,6 +85,8 @@ def verify():
                         time.sleep(.1)
                     if evaluate("innerWidth") != width:
                         raise RuntimeError("Mobile viewport was not applied")
+                    if not evaluate("getComputedStyle(document.querySelector('.ed2k-host-background')).display === 'none'"):
+                        raise RuntimeError("Background plugins remain in the scrolling document")
                     swipe()
                     if component == "Page":
                         evaluate("window.scrollTo({top:0,behavior:'instant'})")
@@ -100,6 +102,9 @@ def verify():
                     })()""")
                     if not visible:
                         raise RuntimeError("Bottom settings are obscured")
+                    evaluate("window.scrollTo({top:document.scrollingElement.scrollHeight,behavior:'instant'})")
+                    if not evaluate("document.querySelector('.ed2k-panel').getBoundingClientRect().bottom >= -1 && getComputedStyle(document.querySelector('.ed2k-host-background')).display === 'none'"):
+                        raise RuntimeError("Scrolling past settings reveals background plugins")
                     evaluate("window.scrollTo({top:0,behavior:'instant'})")
                     tap(".header-actions button", "关闭")
                     if evaluate("ed2kSmoke.closeCount()") != 1:
@@ -107,6 +112,8 @@ def verify():
                     evaluate("ed2kSmoke.app.unmount()")
                     if not evaluate("getComputedStyle(document.documentElement).position === 'fixed' && getComputedStyle(document.body).position === 'fixed'"):
                         raise RuntimeError("Host scroll locks were not restored")
+                    if evaluate("getComputedStyle(document.querySelector('.ed2k-host-background')).display") == 'none':
+                        raise RuntimeError("Background plugin list did not restore")
                     print(f"PASS {width}x{height} {component}: touch scroll, settings, bottom hit test, close and lock restoration", flush=True)
         finally:
             if connection:

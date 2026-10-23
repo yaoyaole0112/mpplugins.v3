@@ -89,6 +89,55 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._cloud_adapter = storage
         return item, storage
 
+    def test_minimum_size_skips_local_hash_send_and_delete_including_existing_record(self):
+        path = self.create("small.mkv", b"hello")
+        self.plugin._process_file(path)
+        before = self.records()
+        self.plugin._min_file_size = "6B"
+        self.plugin._telegram_enabled = True
+        self.plugin._delete_source = True
+        with patch.object(self.module, "ed2k_hash") as hashing, patch.object(self.plugin, "_notify_record") as notify, patch.object(self.plugin, "_unlink_source") as unlink:
+            self.plugin._process_file(path)
+        hashing.assert_not_called()
+        notify.assert_not_called()
+        unlink.assert_not_called()
+        self.assertEqual(self.records(), before)
+        self.assertTrue(path.exists())
+
+    def test_minimum_size_boundary_and_growing_local_file(self):
+        path = self.create("growing.mkv", b"hello")
+        self.plugin._min_file_size = "6B"
+        self.plugin._process_file(path)
+        self.assertFalse((self.root / "data" / "records.json").exists())
+        path.write_bytes(b"hello!")
+        self.plugin._process_file(path)
+        self.assertEqual(self.records()[str(path.resolve())]["size"], 6)
+
+    def test_minimum_size_configuration_round_trip(self):
+        self.plugin.init_plugin({"folder": str(self.folder), "min_file_size": "100M"})
+        self.plugin._save_config()
+        self.assertEqual(self.plugin.update_config.call_args.args[0]["min_file_size"], "100M")
+        self.assertEqual(self.module.minimum_file_bytes(self.plugin._min_file_size), 100 * 1024 ** 2)
+        self.assertEqual(self.plugin.get_form()[1]["min_file_size"], "")
+
+    def test_minimum_size_skips_cloud_hash_lookup_notify_and_existing_link_resend(self):
+        item, storage = self.cloud_fixture()
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32):
+            self.plugin._process_cloud_file(item)
+        before = self.records()
+        storage.reset_mock()
+        self.plugin._min_file_size = "6B"
+        self.plugin._telegram_enabled = True
+        self.assertFalse(self.plugin._cloud_item_is_eligible(item))
+        with patch.object(self.cloud_module, "hash_remote") as hashing, patch.object(self.plugin, "_notify_record") as notify:
+            self.plugin._process_cloud_file(item)
+        storage.fresh.assert_not_called()
+        hashing.assert_not_called()
+        notify.assert_not_called()
+        self.assertEqual(self.records(), before)
+        self.plugin._min_file_size = "5B"
+        self.assertTrue(self.plugin._cloud_item_is_eligible(item))
+
     def test_life_events_only_queue_the_new_event_file(self):
         item, storage = self.cloud_fixture()
         self.plugin._enabled = True

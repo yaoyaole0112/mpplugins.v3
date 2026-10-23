@@ -22,10 +22,15 @@ if (dialogFixture) {
   container.innerHTML = `<div class="v-overlay v-overlay--active v-dialog v-dialog--scrollable${mobile ? ' v-dialog--fullscreen' : ''}"><div class="v-overlay__scrim"></div><div class="v-overlay__content" style="max-width:78rem"><div class="v-card"><div class="v-card-text"></div></div></div></div>`
   container.querySelector('.v-card-text').appendChild(document.querySelector('#app'))
   document.body.appendChild(container)
+  const background = document.createElement('div')
+  background.className = 'ed2k-host-background'
+  background.style.height = '12000px'
+  background.textContent = '其他插件列表（不得在全屏插件底部出现）'
+  document.body.prepend(background)
 }
 
 const settings = { enabled: false, folder: '/media/test', recursive: true, monitor_enabled: true,
-  output_enabled: true, output: '', extensions: '', min_age: 60, delete_source: false,
+  output_enabled: true, output: '', extensions: '', min_age: 60, min_file_size: '', delete_source: false,
   scan_enabled: false, cron: '*/10 * * * *', telegram_enabled: false, telegram_mode: 'user',
   telegram_chat_id: '', telegram_thread_id: '', telegram_token: '' }
 Object.assign(settings, { cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
@@ -87,6 +92,7 @@ const api = { get: async path => {
   }
   if (!path.endsWith('/settings')) throw Error('Unexpected write request')
   if (typeof body.cloud_scan_enabled !== 'boolean') throw Error('Cloud schedule switch missing from save payload')
+  if (body.min_file_size !== '100M') throw Error('Minimum file size missing from save payload')
   return { ok: true, settings: body, message: '模拟保存成功' }
 } }
 
@@ -125,6 +131,7 @@ try {
         if (dialogFixture) {
           if (getComputedStyle(document.documentElement).position === 'fixed') throw Error(`${name}: document scrolling remains locked`)
           if (getComputedStyle(document.body).position === 'fixed') throw Error(`${name}: host body scrolling remains locked`)
+          if (getComputedStyle(document.querySelector('.ed2k-host-background')).display !== 'none') throw Error(`${name}: background plugin list still occupies document space`)
           for (const selector of ['.v-overlay', '.v-overlay__content', '.v-card', '.v-card-text']) {
             const element = document.querySelector(selector)
             if (element.scrollHeight > element.clientHeight + 1 && ['auto', 'scroll', 'hidden'].includes(getComputedStyle(element).overflowY)) throw Error(`${name}: host wrapper still clips: ${selector}`)
@@ -237,6 +244,11 @@ try {
     const cloudPanel = document.querySelector('#app [data-testid=cloud-source]')
     if (!cloudPanel || !cloudPanel.textContent.includes('不会删除云端文件') || cloudPanel.querySelector('input[type=checkbox]').checked) throw Error(`${name}: cloud defaults are unsafe or panel missing`)
     const commonPanel = document.querySelector('#app [data-testid=common-settings]')
+    const minimumInput = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.startsWith('生成链接最小文件大小'))?.querySelector('input')
+    if (!minimumInput || !minimumInput.placeholder.includes('100M')) throw Error(`${name}: minimum size input missing`)
+    minimumInput.value = '100M'
+    minimumInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await vue.nextTick()
     const localPanel = document.querySelector('#app [data-testid=local-source]')
     for (const heading of ['通用设置', '本地监控', '网盘监控', 'ED2K链接自动转发']) {
       if (![...document.querySelectorAll('#app h3')].some(element => element.textContent === heading)) throw Error(`${name}: missing heading ${heading}`)
@@ -310,6 +322,7 @@ try {
     if (intervals.size) throw Error(`${name}: polling not cleaned up`)
     if (mobile && dialogFixture && getComputedStyle(document.documentElement).position !== 'fixed') throw Error(`${name}: host scroll lock not restored after unmount`)
     if (mobile && dialogFixture && getComputedStyle(document.body).position !== 'fixed') throw Error(`${name}: host body lock not restored after unmount`)
+    if (mobile && dialogFixture && getComputedStyle(document.querySelector('.ed2k-host-background')).display === 'none') throw Error(`${name}: background plugin list not restored after closing`)
   }
   await Promise.all([...document.querySelectorAll('link[rel=stylesheet]')].map(async link => {
     const response = await fetch(link.href)
