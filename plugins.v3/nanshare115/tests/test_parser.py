@@ -76,9 +76,11 @@ class ParserTest(unittest.TestCase):
         plugin = self.module.NanShare115()
         plugin._target_cid = "12345"
         client = Mock()
-        client.clouddownload_task_add_urls.return_value = {"state": True, "data": {"result": [{}]}}
-        plugin._offline(client, ["ed2k://|file|demo|4|ABC|/"])
-        self.assertEqual(client.clouddownload_task_add_urls.call_args.args[0]["wp_path_id"], 12345)
+        client.clouddownload_task_add_url.return_value = {"state": True}
+        link = "ed2k://|file|demo|4|0123456789abcdef0123456789abcdef|/"
+        plugin._offline(client, [link])
+        client.clouddownload_task_add_url.assert_called_once_with({"url": link, "wp_path_id": 12345}, type="web")
+        client.clouddownload_task_add_urls.assert_not_called()
         plugin._target_cid = "0"
         self.assertEqual(plugin._path_id(client), 0)
         plugin._target_cid = "invalid"
@@ -190,6 +192,80 @@ class ParserTest(unittest.TestCase):
             plugin._poll_bot(stop)
         stop.wait.assert_not_called()
         self.assertIn("认证", plugin._bot_error)
+
+    def test_ed2k_spaces_encoded_forward_and_order(self):
+        from urllib.parse import quote
+
+        link = "ed2k://|file|test movie.mkv|123|0123456789abcdef0123456789abcdef|/"
+        links, _, _ = self.module.parse_input(quote(link, safe="") + "\nmagnet:?xt=urn:btih:ABC")
+        self.assertEqual(links, [link, "magnet:?xt=urn:btih:ABC"])
+        self.module.validate_offline_links(links)
+
+    def test_invalid_ed2k_does_not_submit(self):
+        plugin = self.module.NanShare115()
+        client = Mock()
+        with self.assertRaises(self.module.P115OperationError):
+            plugin._offline(client, ["ed2k://|file|test|1|INVALID|/"])
+        client.clouddownload_task_add_url.assert_not_called()
+        client.clouddownload_task_add_urls.assert_not_called()
+
+    def test_offline_api_error_is_safe_and_actionable(self):
+        plugin = self.module.NanShare115()
+        plugin._target_cid = "123"
+        client = Mock()
+        client.clouddownload_task_add_url.return_value = {
+            "state": False, "errcode": 10008,
+            "error_msg": "任务已存在 ed2k://secret UID=secret BOT_TOKEN=secret",
+        }
+        with self.assertRaises(self.module.P115OperationError) as error:
+            plugin._offline(client, ["magnet:?xt=urn:btih:ABC"])
+        self.assertIn("10008", str(error.exception))
+        self.assertIn("任务已存在", str(error.exception))
+        self.assertNotIn("secret", str(error.exception))
+        self.assertEqual(client.clouddownload_task_add_url.call_count, 1)
+
+    def test_offline_batch_partial_failure_count(self):
+        plugin = self.module.NanShare115()
+        plugin._target_cid = "456"
+        client = Mock()
+        client.clouddownload_task_add_urls.return_value = {"state": True, "data": {"result": [
+            {"state": True, "info_hash": "first"},
+            {"state": 0, "errcode": 0, "errno": 99, "msg": "链接格式错误"},
+        ]}}
+        result = plugin._offline(client, ["magnet:?xt=urn:btih:ABC", "magnet:?xt=urn:btih:DEF"])
+        self.assertIn("成功1条，失败1条", result)
+        self.assertIn("99", result)
+        self.assertEqual(client.clouddownload_task_add_urls.call_args.kwargs, {"type": "web"})
+
+    def test_offline_network_failure_does_not_replay(self):
+        plugin = self.module.NanShare115()
+        plugin._target_cid = "123"
+        client = Mock()
+        client.clouddownload_task_add_url.side_effect = TimeoutError("token must not leak")
+        with self.assertRaises(self.module.P115OperationError) as error:
+            plugin._offline(client, ["magnet:?xt=urn:btih:ABC"])
+        self.assertIn("结果可能不确定", str(error.exception))
+        self.assertNotIn("token must not leak", str(error.exception))
+        client.clouddownload_task_add_urls.assert_not_called()
+        self.assertEqual(client.clouddownload_task_add_url.call_count, 1)
+
+    def test_empty_results_are_not_reported_as_success(self):
+        plugin = self.module.NanShare115()
+        plugin._target_cid = "1"
+        client = Mock()
+        client.clouddownload_task_add_url.return_value = {"state": True, "data": {"result": []}}
+        with self.assertRaises(self.module.P115OperationError):
+            plugin._offline(client, ["magnet:?xt=urn:btih:ABC"])
+
+    def test_user_facing_strings_and_commands(self):
+        plugin = self.module.NanShare115()
+        form, _ = plugin.get_form()
+        import json
+
+        forbidden = "nan" + "share"
+        self.assertNotIn(forbidden, json.dumps(form, ensure_ascii=False).lower())
+        self.assertNotIn(forbidden, plugin._target_path.lower())
+        self.assertTrue(all(forbidden not in command for command in plugin._commands))
 
 
 if __name__ == "__main__":

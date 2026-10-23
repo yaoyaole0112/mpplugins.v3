@@ -1,10 +1,12 @@
-"""NanShare 风格的 Telegram 115 转存/离线下载插件。"""
+"""通过 Telegram 接收115分享及离线下载链接。"""
 
 from __future__ import annotations
 
 import re
+from html import unescape
 from threading import Event as StopEvent, Lock, Thread
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 from app.core.event import Event, eventmanager
 from app.log import logger
@@ -21,18 +23,20 @@ except ImportError:
 U115_RE = re.compile(r"https?://(?:115\.com|115cdn\.com|115share\.com)/s/(?P<code>[A-Za-z0-9]+)(?:\?[^\s]*)?", re.I)
 U115_PASSWORD_RE = re.compile(r"(?:password|提取码|访问码|密码)\s*[=:：]?\s*(?P<password>[A-Za-z0-9]{4})", re.I)
 MAGNET_RE = re.compile(r"magnet:\?[^\s<>]+", re.I)
-ED2K_RE = re.compile(r"ed2k://\|file\|[^\s<>]+?\|/", re.I)
+ED2K_RE = re.compile(r"ed2k://\|file\|[^\r\n<>]+?\|/", re.I)
 TORRENT_RE = re.compile(r"https?://[^\s<>]+?\.torrent(?:\?[^\s<>]*)?", re.I)
 
 
 def parse_input(text: str) -> Tuple[List[str], List[str], Optional[Tuple[str, str]]]:
     """提取离线链接和 115 分享码；结果保持输入顺序并去重。"""
-    value = text or ""
+    value = unescape(text or "")
+    value = re.sub(r"ed2k%3a%2f%2f[^\s<>]+", lambda match: unquote(match.group()), value, flags=re.I)
     offline: List[str] = []
-    for pattern in (MAGNET_RE, ED2K_RE, TORRENT_RE):
-        for match in pattern.findall(value):
-            if match not in offline:
-                offline.append(match)
+    matches = sorted((match for pattern in (MAGNET_RE, ED2K_RE, TORRENT_RE) for match in pattern.finditer(value)), key=lambda match: match.start())
+    for match in matches:
+        link = match.group()
+        if link not in offline:
+            offline.append(link)
     share = U115_RE.search(value)
     if not share:
         return offline, [], None
@@ -50,11 +54,48 @@ class BotConfigurationError(ValueError):
     pass
 
 
+class P115OperationError(RuntimeError):
+    pass
+
+
+def response_error(stage, response):
+    if not isinstance(response, dict):
+        return P115OperationError(f"{stage}：115返回格式异常，请核实网盘状态")
+    code = next((str(response[key]) for key in ("errcode", "errno", "errNo", "code")
+                 if key in response and str(response[key]) != "0" and re.fullmatch(r"-?\d{1,12}", str(response[key]))), "未知")
+    message = " ".join(str(response.get(key) or "") for key in ("error", "error_msg", "err_msg", "message", "msg"))
+    reason = "115拒绝请求，请在115客户端核实账户及任务状态"
+    for pattern, hint in (
+        (r"验证码|验证|captcha|verify", "115要求安全验证，请在115客户端完成验证后再操作"),
+        (r"登录|cookie|login|认证", "115登录状态异常，请在STRM助手中重新登录"),
+        (r"重复|已存在|已添加|exist|duplicate", "任务已存在，请勿重复提交"),
+        (r"配额|次数|quota|limit|上限", "离线次数或配额受限，请在115客户端核实"),
+        (r"空间|容量|space", "网盘空间不足，请在115客户端核实"),
+        (r"链接|格式|url|link", "115不接受此链接，请检查完整性并在115客户端核实"),
+        (r"目录|文件夹|directory|folder", "目标目录不可用，请核实目录路径或CID"),
+    ):
+        if re.search(pattern, message, re.I):
+            reason = hint
+            break
+    return P115OperationError(f"{stage}：{reason}（115错误码：{code}）")
+
+
+def validate_offline_links(links):
+    for index, link in enumerate(links, 1):
+        if not link.lower().startswith("ed2k:"):
+            continue
+        fields = link.split("|")
+        if (len(fields) < 6 or fields[1].lower() != "file" or not fields[2]
+                or not fields[3].isdecimal() or int(fields[3]) <= 0
+                or not re.fullmatch(r"[a-fA-F0-9]{32}", fields[4]) or fields[-1] != "/"):
+            raise P115OperationError(f"第{index}条ed2k链接格式错误：需包含文件名、正整数大小、32位哈希和结尾 |/；未提交任务")
+
+
 class NanShare115(_PluginBase):
     plugin_name = "115转存/离线"
     plugin_desc = "通过 MoviePilot Telegram Bot 接收 115分享、magnet、ed2k 或 torrent 链接并转存到指定115目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "nanshare115_"
@@ -63,8 +104,8 @@ class NanShare115(_PluginBase):
 
     _enabled = False
     _cookie = ""
-    _target_path = "/NanShare"
-    _commands = ("/nanshare", "/ns")
+    _target_path = "/115离线"
+    _commands = ("/p115", "/offline", "/ns")
     _client: Optional[P115Client] = None
     _client_lock = Lock()
 
@@ -90,7 +131,7 @@ class NanShare115(_PluginBase):
         self.stop_service()
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
-        self._target_path = str(config.get("target_path") or "/NanShare").strip() or "/NanShare"
+        self._target_path = str(config.get("target_path") or "/115离线").strip() or "/115离线"
         self._target_cid = str(config.get("target_cid") or "").strip()
         self._bot_token = str(config.get("bot_token") or "").strip()
         self._bot_proxy = str(config.get("bot_proxy") or "").strip()
@@ -100,10 +141,10 @@ class NanShare115(_PluginBase):
             try:
                 self._refresh_cookie()
             except Exception as exc:
-                sdk_logger.error(f"NanShare 115：初始化客户端失败：{type(exc).__name__}")
+                sdk_logger.error(f"115转存/离线：初始化客户端失败：{type(exc).__name__}")
         if self._enabled and self._bot_token and self._allowed_users:
             self._stop = StopEvent()
-            self._worker = Thread(target=self._poll_bot, args=(self._stop,), daemon=True, name="nanshare115-bot")
+            self._worker = Thread(target=self._poll_bot, args=(self._stop,), daemon=True, name="p115-transfer-bot")
             self._worker.start()
 
     def get_state(self) -> bool:
@@ -138,7 +179,7 @@ class NanShare115(_PluginBase):
             field("bot_token", "接收链接的 Bot", "填写你自己的 Bot Token，让该 Bot 独立接收链接；留空则继续使用 MoviePilot 已配置的 Bot。", "Bot Token（可选）", type="password"),
             field("allowed_users", "允许使用 Bot 的用户", "使用独立 Bot 时必填。只接受这些 Telegram 用户的私聊消息；填写数字用户ID，多个ID用逗号分隔，不是 @用户名。", "Telegram 用户ID", placeholder="123456789,987654321"),
             field("bot_proxy", "Bot 网络代理", "仅用于独立 Bot 访问 Telegram API。填写后优先使用此代理；留空自动使用 MoviePilot 的网络代理，MP未配置时使用运行环境网络。地址必须能从MP容器访问，127.0.0.1指容器自身。", "代理地址（可选）", placeholder="http://代理服务器地址:7890"),
-            field("target_path", "网盘保存目录", "115分享转存和离线任务都保存到此目录。填写从网盘根目录开始的路径，目录不存在时自动创建；填写下方CID后以CID为准。", "115目录路径", placeholder="/NanShare"),
+            field("target_path", "网盘保存目录", "115分享转存和离线任务都保存到此目录。填写从网盘根目录开始的路径，目录不存在时自动创建；填写下方CID后以CID为准。", "115目录路径", placeholder="/115离线"),
             field("target_cid", "精确指定保存目录", "可填写已有115文件夹的数字CID，填写后优先于上方目录路径；0表示网盘根目录。不清楚CID时留空，使用目录路径即可。", "目录CID（可选）", placeholder="例如：123456789"),
         ]}], {"enabled": self._enabled, "target_path": self._target_path, "target_cid": self._target_cid,
                "bot_token": self._bot_token, "allowed_users": ",".join(sorted(self._allowed_users)), "bot_proxy": self._bot_proxy}
@@ -158,7 +199,7 @@ class NanShare115(_PluginBase):
                 return
         except Exception:
             pass
-        logger.info("NanShare 115：回复渠道不可用，未广播消息")
+        logger.info("115转存/离线：回复渠道不可用，未广播消息")
 
     def _path_id(self, client: P115Client) -> int:
         if self._target_cid:
@@ -180,11 +221,11 @@ class NanShare115(_PluginBase):
                 continue
             response = client.fs_mkdir(name, pid=parent_id)
             if not response.get("state"):
-                raise RuntimeError(str(response.get("error") or response.get("message") or "创建115目录失败"))
+                raise response_error("创建目标目录", response)
             data = response.get("data") or {}
             parent_id = int(data.get("cid") or data.get("id") or response.get("cid") or 0)
             if not parent_id:
-                raise RuntimeError("创建115目录后未返回目录ID")
+                raise P115OperationError("创建目标目录：115未返回目录ID，已停止提交")
         return parent_id
 
     def _receive_share(self, client: P115Client, code: str, password: str) -> str:
@@ -195,17 +236,47 @@ class NanShare115(_PluginBase):
         payload = {"share_code": code, "receive_code": password, "file_id": ",".join(str(item["id"]) for item in share_files), "cid": self._path_id(client), "is_check": 0}
         response = client.share_receive(payload)
         if not response.get("state"):
-            raise RuntimeError(str(response.get("error") or "115 转存接口返回失败"))
+            raise response_error("分享转存", response)
         return f"115分享已转存到 {self._target_cid or self._target_path}"
 
     def _offline(self, client: P115Client, links: List[str]) -> str:
-        payload = {f"url[{index}]": link for index, link in enumerate(links)}
-        payload["wp_path_id"] = self._path_id(client)
-        response = client.clouddownload_task_add_urls(payload)
-        if not response.get("state"):
-            raise RuntimeError(str(response.get("error") or "115 离线接口返回失败"))
-        result = (response.get("data") or {}).get("result")
-        count = len(result) if isinstance(result, list) else len(links)
+        validate_offline_links(links)
+        try:
+            destination = self._path_id(client)
+        except P115OperationError:
+            raise
+        except Exception as exc:
+            raise P115OperationError(f"读取目标目录失败：{type(exc).__name__}；未提交离线任务") from None
+        payload = {"wp_path_id": destination}
+        try:
+            if len(links) == 1:
+                payload["url"] = links[0]
+                response = client.clouddownload_task_add_url(payload, type="web")
+            else:
+                payload.update({f"url[{index}]": link for index, link in enumerate(links)})
+                response = client.clouddownload_task_add_urls(payload, type="web")
+        except Exception as exc:
+            raise P115OperationError(f"提交离线任务异常：{type(exc).__name__}；结果可能不确定，请核实115任务列表，不自动重试") from None
+        if not isinstance(response, dict) or not response.get("state"):
+            raise response_error("提交离线任务", response)
+        data = response.get("data")
+        if isinstance(data, dict) and "state" in data and not data["state"]:
+            raise response_error("提交离线任务", data)
+        result = data.get("result") if isinstance(data, dict) else data if isinstance(data, list) else None
+        if result is None:
+            result = response.get("result")
+        if isinstance(result, list):
+            failures = [item for item in result if not isinstance(item, dict) or ("state" in item and not item["state"])
+                        or any(str(item.get(key, 0)) not in {"0", "", "None"} for key in ("errcode", "errno"))]
+            count = len(result) - len(failures)
+            if failures:
+                detail = str(response_error("失败项", failures[0]))
+                sdk_logger.warning("115转存/离线：离线提交成功%d条，失败%d条；%s", count, len(failures), detail)
+                return f"离线提交结果：成功{count}条，失败{len(failures)}条；{detail}。请核实115任务列表，不自动重试。"
+            if not result:
+                raise P115OperationError("提交离线任务：115返回空结果，未确认成功，请核实任务列表")
+        else:
+            count = len(links)
         return f"已提交 {count} 条离线任务，目标目录：{self._target_cid or self._target_path}（尚未确认下载完成）"
 
     def _handle(self, data: Dict[str, Any], text: str) -> None:
@@ -232,8 +303,9 @@ class NanShare115(_PluginBase):
                     results.append(self._offline(client, offline))
             self._reply(data, "\n".join(results))
         except Exception as exc:
-            sdk_logger.error(f"NanShare 115 处理失败：{type(exc).__name__}")
-            self._reply(data, f"处理失败：{type(exc).__name__}；请核实网盘状态后再试，插件不会自动重放提交。")
+            detail = str(exc) if isinstance(exc, P115OperationError) else f"{type(exc).__name__}；请核实目标目录及115任务状态"
+            sdk_logger.error("115转存/离线：%s", detail)
+            self._reply(data, f"处理失败：{detail}；插件不会自动重放提交。")
 
     @eventmanager.register(EventType.PluginAction)
     def handle_command(self, event: Event) -> None:
