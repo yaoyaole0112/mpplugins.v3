@@ -47,10 +47,10 @@ def _event_userid(data: Dict[str, Any]) -> Optional[str]:
 
 
 class NanShare115(_PluginBase):
-    plugin_name = "NanShare 115转存"
+    plugin_name = "115转存/离线"
     plugin_desc = "通过 MoviePilot Telegram Bot 接收 115分享、magnet、ed2k 或 torrent 链接并转存到指定115目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "nanshare115_"
@@ -104,24 +104,34 @@ class NanShare115(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        return [{"cmd": command, "event": EventType.PluginAction, "desc": "NanShare接收链接并转存到115", "category": "", "data": {"action": "nanshare115"}} for command in NanShare115._commands]
+        return [{"cmd": command, "event": EventType.PluginAction, "desc": "115转存/离线：接收分享及离线链接", "category": "", "data": {"action": "nanshare115"}} for command in NanShare115._commands]
 
     def get_api(self) -> List[Dict[str, Any]]:
-        return [{"path": "/status", "endpoint": self.status, "methods": ["GET"], "summary": "查看 NanShare 115 状态"}]
+        return [{"path": "/status", "endpoint": self.status, "methods": ["GET"], "summary": "查看115转存/离线状态"}]
 
     def status(self) -> Dict[str, Any]:
         return {"enabled": self._enabled, "configured": bool(self._cookie), "target_path": self._target_path,
                 "target_cid": self._target_cid, "bot_running": bool(self._worker and self._worker.is_alive())}
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        return [{"component": "VForm", "content": [
-            {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
-            {"component": "VAlert", "props": {"type": "info", "text": "自动读取115网盘STRM助手的Cookie，不再单独保存。独立Bot需填写Token和允许的Telegram用户ID；勿与其他程序共用接收Bot。"}},
-            {"component": "VTextField", "props": {"model": "bot_token", "label": "自定义 Bot Token（留空使用MP Bot）", "type": "password"}},
-            {"component": "VTextField", "props": {"model": "allowed_users", "label": "允许的Telegram用户ID（逗号分隔，独立Bot必填）"}},
-            {"component": "VTextField", "props": {"model": "bot_proxy", "label": "Bot HTTPS代理（可选）", "placeholder": "http://127.0.0.1:7890"}},
-            {"component": "VTextField", "props": {"model": "target_path", "label": "115目标目录", "placeholder": "/NanShare", "hint": "目录不存在时自动创建；TG 消息支持 /nanshare 链接"}},
-            {"component": "VTextField", "props": {"model": "target_cid", "label": "目标目录CID（可选，填写后优先于路径，0为根目录）"}},
+        def field(model, title, description, label, **props):
+            return {"component": "div", "props": {"class": "mb-6"}, "content": [
+                {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mb-2"}, "text": title},
+                {"component": "div", "props": {"class": "text-body-2 text-medium-emphasis mb-4", "style": "line-height: 1.7; overflow-wrap: anywhere;"}, "text": description},
+                {"component": "VTextField", "props": {
+                    "model": model, "label": label, "variant": "outlined",
+                    "density": "comfortable", "hide-details": "auto", **props,
+                }},
+            ]}
+
+        return [{"component": "VForm", "props": {"class": "pa-4"}, "content": [
+            {"component": "VSwitch", "props": {"model": "enabled", "label": "启用115转存/离线", "class": "mb-4"}},
+            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-6", "text": "自动读取115网盘STRM助手的Cookie，无需重复填写。独立Bot必须配置允许的用户ID，且不要与其他程序共用接收Bot。"}},
+            field("bot_token", "接收链接的 Bot", "填写你自己的 Bot Token，让该 Bot 独立接收链接；留空则继续使用 MoviePilot 已配置的 Bot。", "Bot Token（可选）", type="password"),
+            field("allowed_users", "允许使用 Bot 的用户", "使用独立 Bot 时必填。只接受这些 Telegram 用户的私聊消息；填写数字用户ID，多个ID用逗号分隔，不是 @用户名。", "Telegram 用户ID", placeholder="123456789,987654321"),
+            field("bot_proxy", "Bot 网络代理", "仅用于独立 Bot 访问 Telegram API。网络能够直连时留空；需要代理时填写完整的代理地址和端口。", "代理地址（可选）", placeholder="http://127.0.0.1:7890"),
+            field("target_path", "网盘保存目录", "115分享转存和离线任务都保存到此目录。填写从网盘根目录开始的路径，目录不存在时自动创建；填写下方CID后以CID为准。", "115目录路径", placeholder="/NanShare"),
+            field("target_cid", "精确指定保存目录", "可填写已有115文件夹的数字CID，填写后优先于上方目录路径；0表示网盘根目录。不清楚CID时留空，使用目录路径即可。", "目录CID（可选）", placeholder="例如：123456789"),
         ]}], {"enabled": self._enabled, "target_path": self._target_path, "target_cid": self._target_cid,
                "bot_token": self._bot_token, "allowed_users": ",".join(sorted(self._allowed_users)), "bot_proxy": self._bot_proxy}
 
@@ -136,7 +146,7 @@ class NanShare115(_PluginBase):
             channel = data.get("channel")
             source = data.get("source")
             if channel and source:
-                self.chain.post_message(Message(channel=channel, source=source, title="NanShare 115", text=text, userid=_event_userid(data)))
+                self.chain.post_message(Message(channel=channel, source=source, title=self.plugin_name, text=text, userid=_event_userid(data)))
                 return
         except Exception:
             pass

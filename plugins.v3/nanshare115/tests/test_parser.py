@@ -111,6 +111,28 @@ class ParserTest(unittest.TestCase):
         plugin.handle_message(types.SimpleNamespace(event_data={"text": "https://115.com/s/abc"}))
         plugin._handle.assert_not_called()
 
+    def test_settings_spacing_descriptions_and_stable_models(self):
+        plugin = self.module.NanShare115()
+        form, defaults = plugin.get_form()
+        self.assertEqual(plugin.plugin_name, "115转存/离线")
+        self.assertEqual(plugin.plugin_config_prefix, "nanshare115_")
+        self.assertEqual(form[0]["props"]["class"], "pa-4")
+        groups = form[0]["content"][2:]
+        self.assertEqual(len(groups), 5)
+        models = []
+        for group in groups:
+            self.assertEqual(group["props"]["class"], "mb-6")
+            title, description, control = group["content"]
+            self.assertTrue(title["text"])
+            self.assertTrue(description["text"])
+            self.assertEqual(description["props"]["class"], "text-body-2 text-medium-emphasis mb-4")
+            self.assertEqual(control["component"], "VTextField")
+            self.assertEqual(control["props"]["variant"], "outlined")
+            self.assertEqual(control["props"]["density"], "comfortable")
+            models.append(control["props"]["model"])
+        self.assertEqual(models, ["bot_token", "allowed_users", "bot_proxy", "target_path", "target_cid"])
+        self.assertNotIn("cookie", defaults)
+
 
 if __name__ == "__main__":
     unittest.main()
