@@ -31,6 +31,8 @@ from app.runtime.settings import get_runtime_setting
 from .tvmao_client import fetch_tvmao_cast
 from .baike_cast import fetch_baike_cast
 from .episode_plots import fetch_episode_plots, missing_episode_title, missing_episode_overview
+from .overview_quality import (overview_issues, overview_length, overview_signature,
+                               duplicate_overviews)
 from .emby_guard import EmbyClient, ReadRetryClient, ENRICHMENT_SLOT, RESOLVE_SLOTS
 
 
@@ -50,6 +52,8 @@ DEFAULT_ENRICH_CONFIG = {
     "role_prefix": True, "ai_title": True, "ai_credits": True,
     "ai_overview": False, "resolve_role": True,
     "max_actors": 30, "cast_lock_min": 10,
+    "overview_movie_min": 120, "overview_episode_min": 40,
+    "overview_english_fallback": True, "overview_lock": False,
 }
 
 
@@ -67,6 +71,9 @@ def validate_enrich_config(values):
         if key == "metadata_source":
             if value not in ("tmdb", "douban"):
                 raise ValueError("元数据来源仅支持 TMDB 或豆瓣")
+        elif key in ("overview_movie_min", "overview_episode_min"):
+            if type(value) is not int or not 0 <= value <= 2000:
+                raise ValueError("简介最低字数必须是 0–2000 的整数")
         elif key in ("max_actors", "cast_lock_min"):
             if type(value) is not int or not 1 <= value <= 200:
                 raise ValueError("演员人数和锁定阈值必须是 1–200 的整数")
@@ -243,6 +250,9 @@ class DataEnrichment:
         self._import_pending = {}
         self._closed = False
         self._resolve_recent = {}
+        records = owner.get_data("enrichment_records") if hasattr(owner, "get_data") else []
+        self._records = [entry for entry in records if isinstance(entry, dict)][-200:] if isinstance(records, list) else []
+        self.state.update(overview_preview=None, records=list(reversed(self._records)))
 
     def _ensure_active(self):
         if self._closed:
@@ -433,7 +443,8 @@ class DataEnrichment:
         with self.lock:
             return {**self.state, "log": list(self.state["log"]),
                     "preview": list(self.state["preview"]),
-                    "preview_repaired": list(self.state["preview_repaired"])}
+                    "preview_repaired": list(self.state["preview_repaired"]),
+                    "records": list(reversed(self._records))}
 
     def options(self):
         return validate_enrich_config(getattr(self.owner, "_enrichment_config", {}) or {})
@@ -1138,6 +1149,129 @@ class DataEnrichment:
             self.state["batch_result"] = {"ok": ok, "fail": failed}
         self.log(f"批量补全结束：成功 {ok} 部，失败 {failed} 部")
 
+    def start_overview_preview(self, series_id="", library_ids=None):
+        if series_id:
+            name, _ = self._split(series_id)
+            if name not in self._services():
+                raise ValueError("所选 Emby 服务器不可用")
+            libraries = None
+        else:
+            libraries = self._selected_tv_libraries(library_ids)
+        return self._begin("简介质量预检", self._overview_preview, series_id, libraries, self.options())
+
+    async def _overview_preview(self, series_id, libraries, options):
+        result = {"items": [], "checked": 0, "issues": 0, "errors": [], "truncated": False}
+        self.log("简介预检仅串行读取 Emby；大媒体库可能耗时较长，可停止任务，不会写库")
+        with self.lock:
+            self.state["overview_preview"] = None
+        identifiers = [series_id] if series_id else await self._library_series(libraries)
+        for key in identifiers:
+            self._ensure_active()
+            name, identifier = self._split(key)
+            try:
+                async with self._server(name) as emby:
+                    user = await self._user_id(name, emby)
+                    item = await self._item(emby, user, identifier)
+                    if item.get("Type") not in {"Movie", "Series"}:
+                        continue
+                    entries = [item]
+                    if item.get("Type") == "Series":
+                        offset = 0
+                        while True:
+                            self._ensure_active()
+                            page = await self._json(emby, f"Users/{user}/Items", {
+                                "ParentId": identifier, "Recursive": "true", "IncludeItemTypes": "Episode",
+                                "Fields": "Overview", "Limit": 300, "StartIndex": offset})
+                            episodes = page.get("Items") or []
+                            entries.extend(episodes)
+                            offset += len(episodes)
+                            if not episodes or offset >= int(page.get("TotalRecordCount", offset)):
+                                break
+                    duplicates = duplicate_overviews(entries[1:])
+                    for entry in entries:
+                        episode = entry is not item
+                        minimum = options["overview_episode_min" if episode else "overview_movie_min"]
+                        duplicated = episode and (entry.get("ParentIndexNumber"),
+                                                   overview_signature(entry.get("Overview"))) in duplicates
+                        reasons = overview_issues(entry.get("Overview"), minimum, duplicated)
+                        result["checked"] += 1
+                        result["issues"] += bool(reasons)
+                        if len(result["items"]) < 200:
+                            result["items"].append({"id": f"{name}::{entry.get('Id')}", "server": name,
+                                "title": str(item.get("Name") or "未命名媒体")[:100],
+                                "episode": f"S{entry.get('ParentIndexNumber')}E{entry.get('IndexNumber')}" if episode else "",
+                                "type": "分集" if episode else "电影" if item.get("Type") == "Movie" else "剧集",
+                                "length": overview_length(entry.get("Overview")), "reasons": reasons,
+                                "plan": "核对中文来源；不足时翻译英文原文，不生成剧情" if reasons else "简介质量正常"})
+                        else:
+                            result["truncated"] = True
+            except (ValueError, httpx.HTTPError) as error:
+                result["errors"].append(f"{_log_series(key)}：读取失败（{type(error).__name__}）")
+            with self.lock:
+                self.state["overview_preview"] = {**result, "items": list(result["items"]), "errors": list(result["errors"])}
+        with self.lock:
+            self.state["overview_preview"] = result
+        self.log(f"简介预检完成：检查 {result['checked']} 项，疑似问题 {result['issues']} 项；仅诊断，不写库、不请求 AI，来源可用性需补全时核实")
+
+    async def _resolve_overview(self, tmdb, path, api_key, current, primary, options, *, minimum,
+                                source, duplicated=False):
+        current_issues = overview_issues(current, minimum, duplicated)
+        primary_issues = overview_issues(primary, minimum)
+        text, used_source = str(primary or "").strip(), source
+        if (not text or "缺失" in primary_issues or "非中文" in primary_issues or
+                ("过短" in primary_issues and not current_issues)):
+            text, used_source = str(current or "").strip(), "Emby 原值"
+        if (options["ai_enabled"] and options["ai_overview"]
+                and overview_issues(text, minimum, duplicated and overview_signature(text) == overview_signature(current))):
+            english = primary if "非中文" in primary_issues else ""
+            if not english and options["overview_english_fallback"]:
+                try:
+                    english = (await self._tmdb_json(tmdb, path, {"api_key": api_key, "language": "en-US"})).get("overview") or ""
+                except (ValueError, httpx.HTTPError) as error:
+                    self.log(f"英文简介读取失败（{type(error).__name__}），保留可用原值")
+            if english and self._needs_translation(english):
+                translated = await self._optional_ai_map({"Overview": str(english)[:6000]},
+                    "仅将提供的简介原文忠实翻译为简体中文；不扩写、不生成剧情、不补充原文没有的事实")
+                proposal = str(translated.get("Overview") or "").strip()
+                if proposal and self._is_chinese_title(proposal) and (
+                        overview_length(proposal) >= overview_length(text) or "非中文" in overview_issues(text, minimum)
+                        or duplicated):
+                    text, used_source = proposal, "TMDB 英文原文翻译" if not primary or source.startswith("TMDB") else f"{source}原文翻译"
+        if not text and primary and "缺失" not in primary_issues:
+            text, used_source = str(primary).strip(), source
+        if "非中文" in overview_issues(text, 0) and used_source == "TMDB 中文":
+            used_source = "TMDB 原文（未汉化）"
+        return text, used_source
+
+    @staticmethod
+    def _lock_overview(original, update, options):
+        if not options["overview_lock"] or not update.get("Overview"):
+            return
+        if (update.get("Overview") == original.get("Overview") or
+                overview_issues(update["Overview"], 0)):
+            return
+        locked = list(update.get("LockedFields") or [])
+        if "Overview" not in locked:
+            locked.append("Overview")
+        update["LockedFields"] = locked
+
+    def _record_enrichment(self, identifier, status, update, fields, audit, message=""):
+        audit = audit or {}
+        entry = {"time": datetime.now().astimezone().isoformat(timespec="seconds"),
+                 "id": str(identifier)[:64], "server": str(audit.get("server") or "")[:80],
+                 "title": str(update.get("Name") or audit.get("title") or identifier)[:120],
+                 "type": str(update.get("Type") or ""), "status": status,
+                 "source": str(audit.get("source") or "元数据来源")[:80],
+                 "fields": list(fields), "message": message[:200]}
+        with self.lock:
+            self._records.append(entry)
+            self._records = self._records[-200:]
+            if hasattr(self.owner, "save_data"):
+                try:
+                    self.owner.save_data("enrichment_records", list(self._records))
+                except (OSError, RuntimeError, ValueError):
+                    logger.warning("媒体增强：补全结果记录持久化失败，当前进程内记录仍可查看")
+
     def _safe_strm(self, path):
         root = os.path.realpath(self.owner._strm_root)
         actual = os.path.realpath(str(path or ""))
@@ -1378,7 +1512,7 @@ class DataEnrichment:
             raise ValueError("所选 Emby 服务器不可用")
         return self._begin("媒体补全", self._enrich, name, identifier, mode, self.options())
 
-    async def _enrich_movie(self, emby, tmdb, identifier, item, mode, options, api_key, user=None):
+    async def _enrich_movie(self, emby, tmdb, identifier, item, mode, options, api_key, user=None, server=""):
         self.log(f"电影主数据源：{'TMDB' if options['metadata_source'] == 'tmdb' else '豆瓣优先'}；演职上限 {options['max_actors']} 人")
         provider = item.get("ProviderIds") or {}
         tmdb_id = provider.get("Tmdb") or provider.get("TMDB")
@@ -1398,14 +1532,16 @@ class DataEnrichment:
         douban = (await self._douban_data(item, include_cast=mode != "metadata")
                   if options["metadata_source"] == "douban" and mode in ("all", "metadata", "credits") else {})
         update = dict(item)
+        overview_source = "Emby 原值"
         if mode != "credits":
             update["Name"] = await self._series_title(
                 tmdb, tmdb_id, api_key, item.get("Name"), douban.get("name"), detail.get("title"),
                 media_type="movie")
-            overview = douban.get("overview") or detail.get("overview")
-            if overview and (not self._needs_translation(overview) or
-                             options["ai_enabled"] and options["ai_overview"] or
-                             self._needs_translation(item.get("Overview"))):
+            overview, overview_source = await self._resolve_overview(
+                tmdb, f"movie/{tmdb_id}", api_key, item.get("Overview"),
+                douban.get("overview") or detail.get("overview"), options,
+                minimum=options["overview_movie_min"], source="豆瓣" if douban.get("overview") else "TMDB 中文")
+            if overview:
                 update["Overview"] = overview
             if detail.get("vote_average"):
                 update["CommunityRating"] = detail["vote_average"]
@@ -1425,8 +1561,6 @@ class DataEnrichment:
                 translations = {}
                 if options["ai_title"] and update.get("Name") and not self._is_chinese_title(update["Name"]):
                     translations["Name"] = str(update.get("Name") or "")[:180]
-                if options["ai_overview"] and self._needs_translation(update.get("Overview")):
-                    translations["Overview"] = str(update["Overview"])[:900]
                 translated = await self._optional_ai_map(translations, "电影标题及剧情简介，译为简体中文，不编造事实")
                 update.update({key: value for key, value in translated.items()
                                if self._is_chinese_title(value) and not re.search(r"[A-Za-z]", value)})
@@ -1511,7 +1645,11 @@ class DataEnrichment:
                     else:
                         hint = "AI 智能补齐未开启，可靠中文资料不足时保留原文"
                     self.log(f"仍有 {len(unresolved)} 位演职的姓名或角色含外文；{hint}")
-        if not await self._save_item(emby, identifier, item, update, user=user):
+        if mode != "credits":
+            self._lock_overview(item, update, options)
+        issues = overview_issues(update.get("Overview"), options["overview_movie_min"]) if mode != "credits" else []
+        if not await self._save_item(emby, identifier, item, update, user=user,
+                                     audit={"server": server, "source": overview_source, "issues": issues}):
             self.log("电影资料未变化，跳过重复写入")
             return
         self.log("电影资料及演职人员已更新" if mode == "all" else "电影资料已更新" if mode == "metadata" else "电影演职人员已更新")
@@ -1547,42 +1685,76 @@ class DataEnrichment:
                     for person in value or []]
         return value
 
-    async def _save_item(self, emby, identifier, original, update, *, user=None):
+    async def _verify_saved_item(self, emby, identifier, original, payload, changed_fields, user):
+        expected = {field: payload[field] for field in changed_fields if field in payload}
+        for field in ("Name", "IndexNumber", "ParentIndexNumber", "ProviderIds"):
+            if field in original and field not in expected:
+                expected[field] = payload.get(field, original[field])
+        for attempt in range(2):
+            self._ensure_active()
+            current = (await self._item(emby, user, identifier) if user else
+                       await self._json(emby, f"Items/{identifier}"))
+            if isinstance(current, dict) and all(
+                    self._metadata_value(field, current.get(field)) == self._metadata_value(field, value)
+                    for field, value in expected.items()):
+                return True
+            if attempt == 0:
+                await asyncio.sleep(0.5)
+        return False
+
+    async def _save_item(self, emby, identifier, original, update, *, user=None, audit=None):
         self._ensure_active()
-        changed_fields = [field for field, value in update.items() if value is not None and
+        changed_fields = [field for field, value in update.items() if field != "UserData" and value is not None and
                           self._metadata_value(field, original.get(field)) != self._metadata_value(field, value)]
         if not changed_fields:
+            issues = (audit or {}).get("issues") or []
+            self._record_enrichment(identifier, "partial" if issues else "skipped", update, [], audit,
+                                    "字段未变化，未重复写入" + (f"；简介仍有：{'、'.join(issues)}" if issues else ""))
             return False
         payload = {key: value for key, value in update.items() if value is not None}
+        payload.pop("UserData", None)
+        interrupted = False
         try:
             response = await emby.post(f"Items/{identifier}", json=payload)
+            response.raise_for_status()
         except (httpx.RemoteProtocolError, httpx.NetworkError, httpx.TimeoutException):
+            interrupted = True
             self.log(f"Emby 条目 {identifier} 写入响应中断，正在只读核验是否已保存；不重放写入")
-            try:
-                if not user:
-                    raise ValueError("缺少用户上下文，无法核验写入结果")
-                current = await self._item(emby, user, identifier)
-                confirmed = isinstance(current, dict) and all(
-                    self._metadata_value(field, current.get(field)) == self._metadata_value(field, payload[field])
-                    for field in changed_fields)
-            except (httpx.HTTPError, ValueError):
-                confirmed = False
-            if confirmed:
-                self.log(f"Emby 条目 {identifier} 已核验保存成功，继续补全")
-                await asyncio.sleep(0.5)
-                return True
-            raise ValueError(f"Emby 条目 {identifier} 写入响应中断，未能确认保存结果；未重复提交，已完成的补全保留，请稍后重新补全") from None
-        response.raise_for_status()
+        except httpx.HTTPError as error:
+            self._record_enrichment(identifier, "failed", update, changed_fields, audit,
+                                    f"写入失败（{type(error).__name__}），未自动重试")
+            raise
+        try:
+            confirmed = await self._verify_saved_item(emby, identifier, original, payload, changed_fields, user)
+        except (httpx.HTTPError, ValueError):
+            confirmed = False
+        if not confirmed:
+            message = "写入后回读不一致或读取失败，未能确认保存结果；不重放写入，请稍后核对"
+            self._record_enrichment(identifier, "failed", update, changed_fields, audit, message)
+            raise ValueError(f"Emby 条目 {identifier} {message}")
+        if interrupted:
+            self.log(f"Emby 条目 {identifier} 已核验保存成功，继续补全")
+        issues = (audit or {}).get("issues") or []
+        self._record_enrichment(identifier, "partial" if issues else "updated", update, changed_fields, audit,
+                                "回读验证通过" + (f"；简介仍有：{'、'.join(issues)}" if issues else ""))
         await asyncio.sleep(0.5)
         return True
 
     async def _enrich(self, name, identifier, mode, options=None):
+        before = self._records[-1] if self._records else None
+        try:
+            return await self._enrich_impl(name, identifier, mode, options)
+        except (ValueError, httpx.HTTPError) as error:
+            latest = self._records[-1] if self._records else None
+            if latest is before or latest.get("status") != "failed":
+                self._record_enrichment(identifier, "failed", {}, [], {"server": name},
+                                        f"补全未完成（{type(error).__name__}），请查看运行进度")
+            raise
+
+    async def _enrich_impl(self, name, identifier, mode, options=None):
         options = validate_enrich_config(options or self.options())
         if mode == "all":
-            # The single "补全剧集数据" action always includes episode cast
-            # and, when an AI provider is enabled, every translation scope.
-            options.update(episode_cast=True, ai_title=True, ai_credits=True,
-                           ai_overview=True)
+            options.update(episode_cast=True, ai_title=True, ai_credits=True)
         api_key = str(getattr(settings, "TMDB_API_KEY", "") or "")
         if not api_key:
             raise ValueError("请先在 MoviePilot 配置 TMDB API Key")
@@ -1593,7 +1765,7 @@ class DataEnrichment:
             if item.get("Type") == "Movie":
                 if mode == "episodes":
                     raise ValueError("电影没有分集信息")
-                await self._enrich_movie(emby, tmdb, identifier, item, mode, options, api_key, user=user)
+                await self._enrich_movie(emby, tmdb, identifier, item, mode, options, api_key, user=user, server=name)
                 return
             if item.get("Type") != "Series":
                 raise ValueError("选中项目不是 Emby 电影或剧集")
@@ -1631,8 +1803,12 @@ class DataEnrichment:
                         tmdb, tmdb_id, api_key, item.get("Name"),
                         douban_detail.get("name"), detail.get("name"))
                     update["Name"] = enrichment_title if enrichment_title != original_title else matched_title
-                    if douban_detail.get("overview") or detail.get("overview"):
-                        update["Overview"] = douban_detail.get("overview") or detail["overview"]
+                    overview, overview_source = await self._resolve_overview(
+                        tmdb, f"tv/{tmdb_id}", api_key, item.get("Overview"),
+                        douban_detail.get("overview") or detail.get("overview"), options,
+                        minimum=options["overview_movie_min"], source="豆瓣" if douban_detail.get("overview") else "TMDB 中文")
+                    if overview:
+                        update["Overview"] = overview
                     if detail.get("vote_average"): update["CommunityRating"] = detail["vote_average"]
                     if detail.get("genres"): update["Genres"] = [g["name"] for g in detail["genres"]]
                     studios = [entry.get("name") for entry in
@@ -1652,8 +1828,6 @@ class DataEnrichment:
                         translations = {}
                         if options["ai_title"] and update.get("Name") and not self._is_chinese_title(update["Name"]):
                             translations["Name"] = update["Name"][:180]
-                        if options["ai_overview"] and re.search(r"[A-Za-z]", str(update.get("Overview") or "")):
-                            translations["Overview"] = update["Overview"][:900]
                         if translations:
                             translated = await self._optional_ai_map(translations, "剧集标题和剧情简介；将韩文、日文、泰文、英文等外文译为简体中文，保留原有事实，不编造剧名")
                             update.update({key: value for key, value in translated.items()
@@ -1707,7 +1881,11 @@ class DataEnrichment:
                                     person['Type'] != 'Actor' or person["Role"].startswith(("饰", "配")) for person in people))):
                             locked.append("Cast")
                         update["LockedFields"] = locked
-                saved = await self._save_item(emby, identifier, original_item, update, user=user)
+                if mode != "credits":
+                    self._lock_overview(original_item, update, options)
+                saved = await self._save_item(emby, identifier, original_item, update, user=user,
+                    audit={"server": name, "source": overview_source if mode != "credits" else "演职来源",
+                           "issues": overview_issues(update.get("Overview"), options["overview_movie_min"]) if mode != "credits" else []})
                 self.log({"all": "剧集元数据及演职人员已更新", "metadata": "剧集资料已更新",
                           "credits": "剧集演职人员已更新"}[mode] if saved else "剧集资料未变化，跳过重复写入")
                 if mode == "credits" and options["episode_cast"]:
@@ -1728,6 +1906,7 @@ class DataEnrichment:
                 translated_seasons = {}
                 web_seasons = {}
                 series_people = (update.get("People") if mode == "all" else item.get("People")) or []
+                duplicates = duplicate_overviews(episodes.get("Items", []))
                 changed = 0
                 missing_titles = missing_overviews = 0
                 for episode in episodes.get("Items", []):
@@ -1752,8 +1931,6 @@ class DataEnrichment:
                                     continue
                                 if options["ai_title"] and entry.get("name") and not self._is_chinese_title(entry["name"]):
                                     values[f"n{number_key}"] = str(entry["name"])[:160]
-                                if options["ai_overview"] and re.search(r"[A-Za-z]", str(entry.get("overview") or "")):
-                                    values[f"o{number_key}"] = str(entry["overview"])[:700]
                             translated_seasons[season] = {}
                             pairs = list(values.items())
                             for offset in range(0, len(pairs), 16):
@@ -1762,20 +1939,29 @@ class DataEnrichment:
                                 translated_seasons[season].update({key: value for key, value in proposals.items()
                                     if self._is_chinese_title(value) and not re.search(r"[A-Za-z]", value)})
                     tmdb_episode = seasons[season].get(number) or {}
+                    duplicated = (season, overview_signature(episode.get("Overview"))) in duplicates
                     if (missing_episode_title(tmdb_episode.get("name")) and missing_episode_overview(tmdb_episode.get("overview"))
                             and not (options["episode_cast"] and series_people)
+                            and not overview_issues(episode.get("Overview"), options["overview_episode_min"], duplicated)
                             and not missing_episode_title(episode.get("Name"))
                             and not missing_episode_overview(episode.get("Overview"))):
                         continue
                     full = await self._item(emby, user, episode["Id"])
                     original_episode = dict(full)
                     translated = translated_seasons.get(season, {})
+                    overview_source = "Emby 原值"
                     if not missing_episode_title(tmdb_episode.get("name")):
                         full["Name"] = self._select_chinese_title(
                             full.get("Name"), translated.get(f"n{number}"), tmdb_episode["name"])
                     if not missing_episode_overview(tmdb_episode.get("overview")):
-                        full["Overview"] = translated.get(f"o{number}", tmdb_episode["overview"])
-                    if missing_episode_title(full.get("Name")) or missing_episode_overview(full.get("Overview")):
+                        proposal = tmdb_episode["overview"]
+                        if (not self._needs_translation(proposal) or not full.get("Overview")) and (
+                                not overview_issues(proposal, options["overview_episode_min"])
+                                or overview_issues(full.get("Overview"), options["overview_episode_min"], duplicated)):
+                            full["Overview"] = proposal
+                            overview_source = "豆瓣/TMDB 分集" if options["metadata_source"] == "douban" else "TMDB 中文"
+                    remaining_duplicate = duplicated and overview_signature(full.get("Overview")) == overview_signature(episode.get("Overview"))
+                    if missing_episode_title(full.get("Name")) or overview_issues(full.get("Overview"), options["overview_episode_min"], remaining_duplicate):
                         if season not in web_seasons:
                             numbers = {number}
                             for entry in episodes.get("Items", []):
@@ -1787,9 +1973,10 @@ class DataEnrichment:
                                 if not missing_episode_title(primary.get("name")):
                                     resolved_title = self._select_chinese_title(resolved_title,
                                         translated.get(f"n{episode_number}"), primary["name"])
-                                if (missing_episode_title(resolved_title)
-                                        or (missing_episode_overview(entry.get("Overview"))
-                                            and missing_episode_overview(primary.get("overview")))):
+                                if (missing_episode_title(resolved_title) or (
+                                        overview_issues(entry.get("Overview"), options["overview_episode_min"],
+                                            (season, overview_signature(entry.get("Overview"))) in duplicates)
+                                        and overview_issues(primary.get("overview"), options["overview_episode_min"]))):
                                     numbers.add(episode_number)
                             plot_item = {**item, "Name": self._select_chinese_title(
                                 item.get("Name"), item.get("Name"), detail.get("name"))}
@@ -1799,16 +1986,37 @@ class DataEnrichment:
                         if missing_episode_title(full.get("Name")) and not missing_episode_title(plot.get("name")):
                             full["Name"] = plot["name"]
                             fields.append("标题")
-                        if missing_episode_overview(full.get("Overview")) and plot.get("overview"):
+                        if (plot.get("overview") and overview_issues(full.get("Overview"), options["overview_episode_min"], remaining_duplicate)
+                                and (overview_length(plot["overview"]) > overview_length(full.get("Overview"))
+                                     or missing_episode_overview(full.get("Overview")) or remaining_duplicate)):
                             full["Overview"] = plot["overview"]
+                            overview_source = plot.get("source") or "剧情网页"
                             fields.append("简介")
                         if fields:
                             self.log(f"S{season:02d}E{number:02d} 已从{plot.get('source') or '剧情网页'}补充{'、'.join(fields)}")
+                    remaining_duplicate = duplicated and overview_signature(full.get("Overview")) == overview_signature(episode.get("Overview"))
+                    web_overview = overview_source not in {"Emby 原值", "TMDB 中文", "豆瓣/TMDB 分集"}
+                    preferred_overview = full.get("Overview") if web_overview else tmdb_episode.get("overview")
+                    overview_options = ({**options, "overview_english_fallback": False}
+                                        if web_overview else options)
+                    resolved, resolved_source = await self._resolve_overview(
+                        tmdb, f"tv/{tmdb_id}/season/{season}/episode/{number}", api_key,
+                        full.get("Overview"), preferred_overview, overview_options,
+                        minimum=options["overview_episode_min"], source=overview_source,
+                        duplicated=remaining_duplicate)
+                    if resolved and ("原文翻译" in resolved_source or
+                                     missing_episode_overview(full.get("Overview"))):
+                        full["Overview"] = resolved
+                        overview_source = resolved_source
                     if options["episode_cast"] and series_people:
                         full["People"] = series_people
+                    self._lock_overview(original_episode, full, options)
                     missing_titles += int(missing_episode_title(full.get("Name")))
                     missing_overviews += int(missing_episode_overview(full.get("Overview")))
-                    saved = await self._save_item(emby, episode["Id"], original_episode, full, user=user)
+                    issues = overview_issues(full.get("Overview"), options["overview_episode_min"],
+                        duplicated and overview_signature(full.get("Overview")) == overview_signature(episode.get("Overview")))
+                    saved = await self._save_item(emby, episode["Id"], original_episode, full, user=user,
+                        audit={"server": name, "source": overview_source, "issues": issues})
                     changed += saved
                     if saved and changed % 20 == 0: self.log(f"已补全 {changed} 集")
                 self.log(f"分集信息补全完成：{changed} 集")

@@ -28,6 +28,9 @@ class EnrichmentTests(unittest.TestCase):
         owner = SimpleNamespace(_strm_root=str(root), get_data=lambda key: self.storage.get(key),
                                 save_data=lambda key, value: self.storage.__setitem__(key, value))
         self.enrichment = DataEnrichment(owner)
+        verify_patch = patch.object(self.enrichment, '_verify_saved_item', new_callable=AsyncMock, return_value=True)
+        verify_patch.start()
+        self.addCleanup(verify_patch.stop)
         web_patch = patch.object(self.enrichment, '_web_episode_plots', new_callable=AsyncMock, return_value={})
         self.web_plots = web_patch.start()
         self.addCleanup(web_patch.stop)
@@ -484,7 +487,7 @@ class EnrichmentTests(unittest.TestCase):
              patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock):
             asyncio.run(self.enrichment._enrich('Q4', 'series', 'episodes', DEFAULT_ENRICH_CONFIG))
         self.web_plots.assert_awaited_once()
-        self.assertEqual(self.web_plots.call_args.args[2], {23, 24, 25})
+        self.assertEqual(self.web_plots.call_args.args[2], {23, 24, 25, 26})
         self.assertEqual(set(written), {'23', '24', '25'})
         self.assertEqual(written['23']['Name'], '第23集：网页剧情标题')
         self.assertEqual(written['23']['Overview'], '网页首句。')

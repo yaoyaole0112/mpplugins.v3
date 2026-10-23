@@ -152,14 +152,26 @@ const enrich = reactive({ query: '', items: [], selected: null, searching: false
   libraries: [], catalogLoading: false, libraryIds: [], libraryPicker: false, libraryQuery: '',
   previewQuery: '', previewItems: [], previewSelected: null, previewEpisodes: [],
   previewChecked: [], force: false, forceLoaded: false, forceSaving: false,
-  status: { running: false, task: '', done: false, error: '', log: [], mediainfo: null, preview_result: null, batch_result: null, preview_repaired: [] } })
+  status: { running: false, task: '', done: false, error: '', log: [], mediainfo: null, preview_result: null, batch_result: null, preview_repaired: [], overview_preview: null, records: [] } })
 const enrichSettings = reactive({ open: false, ai_available: false, ai_model: '', draft: {
   metadata_source: 'tmdb',
   auto_on_import: true,
   ai_enabled: false, no_avatar: true, episode_cast: false, role_prefix: true,
   ai_title: true, ai_credits: true, ai_overview: false, resolve_role: true,
   max_actors: 30, cast_lock_min: 10,
+  overview_movie_min: 120, overview_episode_min: 40,
+  overview_english_fallback: true, overview_lock: false,
 } })
+const overviewPreviewPage = ref(1)
+const enrichmentRecordsPage = ref(1)
+const overviewPreviewPageCount = computed(() => Math.max(1, Math.ceil((enrich.status.overview_preview?.items?.length || 0) / 6)))
+const enrichmentRecordsPageCount = computed(() => Math.max(1, Math.ceil((enrich.status.records?.length || 0) / 6)))
+const overviewPreviewItems = computed(() => (enrich.status.overview_preview?.items || []).slice((overviewPreviewPage.value - 1) * 6, overviewPreviewPage.value * 6))
+const enrichmentRecordItems = computed(() => (enrich.status.records || []).slice((enrichmentRecordsPage.value - 1) * 6, enrichmentRecordsPage.value * 6))
+watch(overviewPreviewPageCount, count => { overviewPreviewPage.value = Math.min(overviewPreviewPage.value, count) })
+watch(enrichmentRecordsPageCount, count => { enrichmentRecordsPage.value = Math.min(enrichmentRecordsPage.value, count) })
+const enrichmentRecordLabels = { updated: '已验证更新', skipped: '未变化', partial: '仍有缺漏', failed: '失败／待核实' }
+const enrichmentFieldLabels = { Name: '标题', Overview: '简介', People: '演职人员', LockedFields: '字段锁定', ProviderIds: '外部编号', Genres: '类型', Studios: '制作方', CommunityRating: '评分' }
 const enrichLibraryMatches = computed(() => enrich.libraries.filter(item =>
   `${item.name} ${item.server}`.toLowerCase().includes(enrich.libraryQuery.toLowerCase())))
 function enrichLibraryLabel() {
@@ -195,9 +207,14 @@ async function saveEnrichSettings() {
   await work(async () => {
     const values = { ...enrichSettings.draft,
       max_actors: Number(enrichSettings.draft.max_actors),
-      cast_lock_min: Number(enrichSettings.draft.cast_lock_min) }
+      cast_lock_min: Number(enrichSettings.draft.cast_lock_min),
+      overview_movie_min: Number(enrichSettings.draft.overview_movie_min),
+      overview_episode_min: Number(enrichSettings.draft.overview_episode_min) }
     if (![values.max_actors, values.cast_lock_min].every(value => Number.isInteger(value) && value >= 1 && value <= 200)) {
       throw new Error('演员人数和锁定阈值必须是 1–200 的整数')
+    }
+    if (![values.overview_movie_min, values.overview_episode_min].every(value => Number.isInteger(value) && value >= 0 && value <= 2000)) {
+      throw new Error('简介最低字数必须是 0–2000 的整数')
     }
     const result = await post('enrichment/config', values)
     Object.assign(enrichSettings.draft, result.config)
@@ -280,6 +297,7 @@ async function enrichmentAction(operation, extra = {}) {
     if (operation === 'batch_enrich' && !window.confirm(`将补全选中 ${extra.library_ids?.length || 0} 个媒体库的电影或剧集资料，剧集包含分集；可能调用 MoviePilot AI，耗时较长。确定开始？`)) return
     if (operation === 'batch_preview' && !window.confirm('将扫描所有 Emby 电视剧媒体库中的剧集，并修复缺失、疑似偏色或尺寸比例异常的图片；包括旧版本已修复但比例异常的图片，正常图片不覆盖。任务可能耗时很长，确定开始？')) return
     const result = await post('enrichment/action', { operation, ...extra })
+    if (operation === 'overview_preview' && result.started) overviewPreviewPage.value = 1
     if (operation === 'preview_scan') {
       enrich.previewEpisodes = result.episodes || []
       enrich.previewChecked = enrich.previewEpisodes.filter(item => ['candidate', 'missing', 'size', 'pending'].includes(item.status)).map(item => item.id)
@@ -1213,11 +1231,26 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           <div class="eme-enrich-search"><input v-model.trim="enrich.query" placeholder="输入电影或剧集名称（至少两个字）" @keyup.enter="searchEnrichment('series')" /><button class="eme-button secondary" :disabled="enrich.searching" @click="searchEnrichment('series')">搜索媒体</button></div>
           <div v-if="enrich.items.length" class="eme-enrich-results"><button v-for="item in enrich.items" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.selected?.id === item.id }" @click="enrich.selected = item">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.type === 'Movie' ? '电影' : '剧集' }} · {{ item.server }}</button></div>
           <p v-if="enrich.selected" class="eme-hint">已选：{{ enrich.selected.name }} · {{ enrich.selected.server }}</p>
+          <div class="eme-inline eme-enrich-buttons"><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('overview_preview', { series_id: enrich.selected.id })">简介质量预检（不写入）</button></div>
           <div class="eme-inline eme-enrich-buttons"><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'all' })">补全{{ enrich.selected?.type === 'Movie' ? '电影' : '剧集' }}数据</button></div>
           <p class="eme-hint">使用 MoviePilot 的 TMDB API Key 与 Emby 连接。请核对媒体匹配后再补全。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>批量补全数据</h3><p>按电影或电视剧媒体库补全资料、演职人员及中文简介；电视剧还会补全分集信息；缺失标题、简介由电视猫优先、百度百科兜底，耗时可能较长。</p></div><button class="eme-button secondary" :disabled="busy || enrich.catalogLoading || enrich.status.running" @click="loadEnrichLibraries">{{ enrich.catalogLoading ? '读取中…' : '刷新媒体库' }}</button></div>
           <div class="eme-enrich-library-row"><label class="eme-enrich-library-field">媒体库（可多选）<div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" :aria-expanded="enrich.libraryPicker" @click="enrich.libraryPicker = !enrich.libraryPicker; enrich.libraryQuery = ''"><span>{{ enrichLibraryLabel() }}</span><i class="mdi" :class="enrich.libraryPicker ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="enrich.libraryPicker" class="eme-picker-menu"><input v-model="enrich.libraryQuery" class="eme-picker-search" placeholder="搜索服务器或媒体库" @click.stop /><button v-for="item in enrichLibraryMatches" :key="item.id" type="button" class="eme-picker-option" :class="{ selected: enrich.libraryIds.includes(item.id) }" @click="toggleEnrichLibrary(item.id)"><i class="mdi" :class="enrich.libraryIds.includes(item.id) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'" />{{ item.name }} · {{ item.type === 'Movie' ? '电影' : '剧集' }} · {{ item.server }}</button><p v-if="!enrichLibraryMatches.length" class="eme-picker-empty">没有可用的电影或电视剧媒体库</p></div></div></label><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.libraryIds.length" @click="enrichmentAction('batch_enrich', { library_ids: [...enrich.libraryIds] })">批量补全数据</button></div>
+        </section>
+        <section class="eme-card">
+          <div class="eme-card-heading"><div><h3>简介质量预检</h3><p>按上方选中的媒体库检查缺失、过短、非中文及同季重复简介。只读 Emby，不写库、不调用 AI；此处为质量诊断，来源是否可用需实际补全时核实。</p></div><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.libraryIds.length" @click="enrichmentAction('overview_preview', { library_ids: [...enrich.libraryIds] })">预检所选媒体库</button></div>
+          <template v-if="enrich.status.overview_preview">
+            <p class="eme-hint">已检查 {{ enrich.status.overview_preview.checked }} 项，疑似问题 {{ enrich.status.overview_preview.issues }} 项。{{ enrich.status.overview_preview.truncated ? '仅展示前 200 项，统计包含全部已检查项目。' : '' }}</p>
+            <p v-for="(message, index) in enrich.status.overview_preview.errors" :key="index" class="eme-message eme-warning">{{ message }}</p>
+            <article v-for="(item, index) in overviewPreviewItems" :key="`${item.id}:${index}`" class="eme-overview-entry"><strong>{{ item.title }} {{ item.episode }} · {{ item.type }}</strong><span>{{ item.server }} · 简介 {{ item.length }} 字 · {{ item.reasons.length ? item.reasons.join('、') : '正常' }}</span><small>{{ item.plan }}</small></article>
+            <nav v-if="overviewPreviewPageCount > 1" class="eme-pagination" aria-label="简介预检分页"><button class="eme-button secondary" :disabled="overviewPreviewPage <= 1" @click="overviewPreviewPage--">上一页</button><span>第 {{ overviewPreviewPage }} / {{ overviewPreviewPageCount }} 页</span><button class="eme-button secondary" :disabled="overviewPreviewPage >= overviewPreviewPageCount" @click="overviewPreviewPage++">下一页</button></nav>
+          </template>
+        </section>
+        <section v-if="enrich.status.records?.length" class="eme-card">
+          <div class="eme-card-heading"><div><h3>逐项补全记录</h3><p>持久保存最近 200 项写入、跳过及失败结果；“已验证更新”表示回读一致，不代表所有缺失资料均已补齐。</p></div></div>
+          <article v-for="(item, index) in enrichmentRecordItems" :key="`${item.time}:${item.id}:${index}`" class="eme-overview-entry"><strong>{{ item.title }} · {{ enrichmentRecordLabels[item.status] || item.status }}</strong><span>{{ item.server }} · {{ item.time }} · 简介来源：{{ item.source }}</span><small>变更字段：{{ item.fields.map(field => enrichmentFieldLabels[field] || field).join('、') || '无' }} · {{ item.message }}</small></article>
+          <nav v-if="enrichmentRecordsPageCount > 1" class="eme-pagination" aria-label="补全记录分页"><button class="eme-button secondary" :disabled="enrichmentRecordsPage <= 1" @click="enrichmentRecordsPage--">上一页</button><span>第 {{ enrichmentRecordsPage }} / {{ enrichmentRecordsPageCount }} 页</span><button class="eme-button secondary" :disabled="enrichmentRecordsPage >= enrichmentRecordsPageCount" @click="enrichmentRecordsPage++">下一页</button></nav>
         </section>
         <section class="eme-card">
           <div class="eme-card-heading"><div><h3>媒体信息补全</h3><p>扫描 Emby 电影与分集的文件大小和时长；探测缺失信息后，在 Emby 空闲时备份数据库、停机写入并重启。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || enrich.status.running" @click="enrichmentAction('mediainfo_check')">开始检查</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.status.mediainfo?.incomplete_count" @click="enrichmentAction('mediainfo_fill')">开始补全</button></div></div>
@@ -1352,6 +1385,9 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
             <p class="eme-enrich-model">当前 MoviePilot AI 模型：<strong>{{ enrichSettings.ai_model || '未配置' }}</strong><span v-if="!enrichSettings.ai_available">（LLM 服务尚未配置完整或接口不兼容）</span></p>
             <p v-if="!enrichSettings.ai_available" class="eme-hint">请先在 MoviePilot 中配置 LLM API Key、地址和模型，再启用 AI。</p>
             <div class="eme-enrich-settings-group"><strong>AI 翻译范围</strong><label v-for="option in [{ key: 'ai_title', label: '标题汉化' }, { key: 'ai_credits', label: '演职人员姓名和角色汉化' }, { key: 'ai_overview', label: '电影／剧集／分集简介汉化' }, { key: 'resolve_role', label: '补全占位角色名' }]" :key="option.key" class="eme-switch-label"><input v-model="enrichSettings.draft[option.key]" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.draft.ai_enabled" /><span class="eme-switch-track" aria-hidden="true" /><span>{{ option.label }}</span></label></div>
+            <div class="eme-enrich-settings-group"><strong>简介质量与保护（电影、剧集及分集）</strong><label class="eme-switch-label"><input v-model="enrichSettings.draft.overview_english_fallback" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>中文不足时获取 TMDB 英文原文翻译</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.overview_lock" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>锁定本次成功写入的中文简介</span></label></div>
+            <div class="eme-enrich-settings-numbers"><label>电影／整剧简介最低字数<input v-model.number="enrichSettings.draft.overview_movie_min" type="number" min="0" max="2000" /></label><label>分集简介最低字数<input v-model.number="enrichSettings.draft.overview_episode_min" type="number" min="0" max="2000" /></label></div>
+            <p class="eme-hint">字数按非空白字符计算，阈值仅用于质量诊断与真实来源补缺，不为凑字数生成剧情。英文兜底需同时开启 AI 和简介汉化；分集优先核对电视猫／百度百科。锁定默认关闭，关闭不会解除已有字段锁。写入后回读验证，不一致时标记待核实，不自动重放写入。</p>
             <div class="eme-enrich-settings-group"><strong>演职人员处理</strong><label class="eme-switch-label"><input v-model="enrichSettings.draft.no_avatar" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>过滤无头像演员（电影与剧集）</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.episode_cast" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>分集写入演职员（仅剧集，电影直接写入本片）</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.role_prefix" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>角色名前加“饰/配”</span></label></div>
             <div class="eme-enrich-settings-numbers"><label>每部作品写入演员数<input v-model.number="enrichSettings.draft.max_actors" type="number" min="1" max="200" /></label><label>锁定所需最低演员数<input v-model.number="enrichSettings.draft.cast_lock_min" type="number" min="1" max="200" /></label></div>
             <p class="eme-hint">仅当演员人数达到阈值且姓名已是中文时，才锁定 Emby 演职人员；AI 默认关闭，只有开启相应选项后才会产生 LLM 请求。</p>
@@ -1630,4 +1666,6 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
   .eme-shell .eme-pagination{flex-wrap:wrap;gap:8px}
   .eme-shell .eme-pagination>span{flex:1 1 100%;order:-1;text-align:center}
 }
+.eme-overview-entry{display:flex;flex-direction:column;gap:6px;min-width:0;padding:12px 0;border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity));overflow-wrap:anywhere}
+.eme-overview-entry small{color:rgba(var(--v-theme-on-surface),.65)}
 </style>

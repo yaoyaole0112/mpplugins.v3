@@ -25,10 +25,12 @@ class EmbyLoadTests(unittest.TestCase):
     def test_changed_item_writes_once_and_paces(self):
         response = Mock()
         client = SimpleNamespace(post=AsyncMock(return_value=response))
-        with patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock) as sleep:
+        with patch('emetools.data_enrichment.asyncio.sleep', new_callable=AsyncMock) as sleep, \
+                patch.object(self.enrichment, '_verify_saved_item', new_callable=AsyncMock, return_value=True) as verify:
             self.assertTrue(asyncio.run(self.enrichment._save_item(client, "1",
                              {"Name": "old"}, {"Name": "新标题"})))
         client.post.assert_awaited_once()
+        verify.assert_awaited_once()
         sleep.assert_awaited_once_with(0.5)
 
     def test_read_disconnect_recovers_and_releases_slots_between_attempts(self):
@@ -127,7 +129,7 @@ class EmbyLoadTests(unittest.TestCase):
         with patch('emetools.emby_guard.asyncio.sleep', new_callable=AsyncMock), \
                 patch('emetools.emby_guard.reserve_delay', return_value=0):
             asyncio.run(run())
-        self.assertEqual(methods, ['POST', 'GET'])
+        self.assertEqual(methods, ['POST', 'GET', 'GET'])
 
     def test_retry_stops_when_plugin_closes(self):
         def disconnect(request):
