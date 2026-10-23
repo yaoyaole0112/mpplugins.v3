@@ -1,4 +1,19 @@
 {
+  "NanShare115": {
+    "name": "NanShare 115转存",
+    "description": "通过 Telegram Bot 接收 115分享、magnet、ed2k 或 torrent 链接并转存到指定115目录。",
+    "labels": "115网盘,Telegram,离线下载",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
+    "author": "helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "history": {
+      "v1.0.0": "新增 Telegram 接收 115 分享及离线链接并转存到指定目录。"
+    }
+  },
   "BrushFlow": {
     "name": "站点刷流",
     "description": "自动托管多个站点刷流任务，并独立调度、统计与诊断。",
