@@ -32,13 +32,13 @@ def _load_module():
         "p115client": p115client,
     })
     path = Path(__file__).parents[1] / "__init__.py"
-    spec = importlib.util.spec_from_file_location("nanshare115_test_module", path)
+    spec = importlib.util.spec_from_file_location("p115transfer_test_module", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-class ParserTest(unittest.TestCase):
+class TransferPluginTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = _load_module()
@@ -58,7 +58,7 @@ class ParserTest(unittest.TestCase):
         self.assertIsNone(share)
 
     def test_cookie_from_helper_and_refresh(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         plugin.get_config = Mock(return_value={"cookies": "first-cookie"})
         with patch.object(self.module, "P115Client") as factory:
             plugin._refresh_cookie()
@@ -73,7 +73,7 @@ class ParserTest(unittest.TestCase):
             self.assertIsNone(plugin._client)
 
     def test_target_cid_and_offline_payload(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         plugin._target_cid = "12345"
         client = Mock()
         client.clouddownload_task_add_url.return_value = {"state": True}
@@ -88,7 +88,7 @@ class ParserTest(unittest.TestCase):
             plugin._path_id(client)
 
     def test_custom_bot_authorization(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         plugin._allowed_users = {"123"}
         plugin._handle = Mock()
         client = Mock()
@@ -104,7 +104,7 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(plugin._handle.call_count, 1)
 
     def test_no_duplicate_mp_command_or_custom_bot_consumption(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         plugin._enabled = True
         plugin._handle = Mock()
         plugin.handle_message(types.SimpleNamespace(event_data={"text": "/ns https://115.com/s/abc"}))
@@ -114,10 +114,10 @@ class ParserTest(unittest.TestCase):
         plugin._handle.assert_not_called()
 
     def test_settings_spacing_descriptions_and_stable_models(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         form, defaults = plugin.get_form()
         self.assertEqual(plugin.plugin_name, "115转存/离线")
-        self.assertEqual(plugin.plugin_config_prefix, "nanshare115_")
+        self.assertEqual(plugin.plugin_config_prefix, "p115transfer_")
         self.assertEqual(form[0]["props"]["class"], "pa-4")
         groups = form[0]["content"][2:]
         self.assertEqual(len(groups), 5)
@@ -136,7 +136,7 @@ class ParserTest(unittest.TestCase):
         self.assertNotIn("cookie", defaults)
 
     def test_bot_proxy_prefers_explicit_then_mp(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         runtime = types.ModuleType("app.runtime.settings")
         runtime.get_runtime_setting = Mock(return_value={"https": "http://mp-proxy:7890"})
         with patch.dict(sys.modules, {"app.runtime.settings": runtime}):
@@ -149,7 +149,7 @@ class ParserTest(unittest.TestCase):
             self.assertIsNone(plugin._resolve_bot_proxy())
 
     def test_startup_connect_error_retries_and_recovers(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         plugin.get_data = Mock(return_value=0)
         plugin._resolve_bot_proxy = Mock(return_value=None)
         httpx = types.ModuleType("httpx")
@@ -165,7 +165,7 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(plugin._bot_error, "")
 
     def test_startup_backoff_is_bounded_and_stoppable(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         plugin.get_data = Mock(return_value=0)
         plugin._resolve_bot_proxy = Mock(return_value=None)
         httpx = types.ModuleType("httpx")
@@ -180,7 +180,7 @@ class ParserTest(unittest.TestCase):
         self.assertNotIn("must-not-leak", plugin._bot_error)
 
     def test_bot_authentication_error_does_not_retry(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         plugin.get_data = Mock(return_value=0)
         plugin._resolve_bot_proxy = Mock(return_value=None)
         httpx = types.ModuleType("httpx")
@@ -202,7 +202,7 @@ class ParserTest(unittest.TestCase):
         self.module.validate_offline_links(links)
 
     def test_invalid_ed2k_does_not_submit(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         client = Mock()
         with self.assertRaises(self.module.P115OperationError):
             plugin._offline(client, ["ed2k://|file|test|1|INVALID|/"])
@@ -210,22 +210,22 @@ class ParserTest(unittest.TestCase):
         client.clouddownload_task_add_urls.assert_not_called()
 
     def test_offline_api_error_is_safe_and_actionable(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         plugin._target_cid = "123"
         client = Mock()
         client.clouddownload_task_add_url.return_value = {
-            "state": False, "errcode": 10008,
+            "state": False, "errcode": 10004,
             "error_msg": "任务已存在 ed2k://secret UID=secret BOT_TOKEN=secret",
         }
         with self.assertRaises(self.module.P115OperationError) as error:
             plugin._offline(client, ["magnet:?xt=urn:btih:ABC"])
-        self.assertIn("10008", str(error.exception))
+        self.assertIn("10004", str(error.exception))
         self.assertIn("任务已存在", str(error.exception))
         self.assertNotIn("secret", str(error.exception))
         self.assertEqual(client.clouddownload_task_add_url.call_count, 1)
 
     def test_offline_batch_partial_failure_count(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         plugin._target_cid = "456"
         client = Mock()
         client.clouddownload_task_add_urls.return_value = {"state": True, "data": {"result": [
@@ -233,12 +233,12 @@ class ParserTest(unittest.TestCase):
             {"state": 0, "errcode": 0, "errno": 99, "msg": "链接格式错误"},
         ]}}
         result = plugin._offline(client, ["magnet:?xt=urn:btih:ABC", "magnet:?xt=urn:btih:DEF"])
-        self.assertIn("成功1条，失败1条", result)
+        self.assertIn("新增1条，已存在0条，失败1条", result)
         self.assertIn("99", result)
         self.assertEqual(client.clouddownload_task_add_urls.call_args.kwargs, {"type": "web"})
 
     def test_offline_network_failure_does_not_replay(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         plugin._target_cid = "123"
         client = Mock()
         client.clouddownload_task_add_url.side_effect = TimeoutError("token must not leak")
@@ -250,7 +250,7 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(client.clouddownload_task_add_url.call_count, 1)
 
     def test_empty_results_are_not_reported_as_success(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         plugin._target_cid = "1"
         client = Mock()
         client.clouddownload_task_add_url.return_value = {"state": True, "data": {"result": []}}
@@ -258,7 +258,7 @@ class ParserTest(unittest.TestCase):
             plugin._offline(client, ["magnet:?xt=urn:btih:ABC"])
 
     def test_user_facing_strings_and_commands(self):
-        plugin = self.module.NanShare115()
+        plugin = self.module.P115Transfer()
         form, _ = plugin.get_form()
         import json
 
@@ -266,6 +266,31 @@ class ParserTest(unittest.TestCase):
         self.assertNotIn(forbidden, json.dumps(form, ensure_ascii=False).lower())
         self.assertNotIn(forbidden, plugin._target_path.lower())
         self.assertTrue(all(forbidden not in command for command in plugin._commands))
+
+    def test_existing_offline_task_is_not_an_error(self):
+        plugin = self.module.P115Transfer()
+        plugin._target_cid = "1"
+        client = Mock()
+        client.clouddownload_task_add_url.return_value = {"state": False, "errno": 10008}
+        self.assertIn("无需重复提交", plugin._offline(client, ["magnet:?xt=urn:btih:ABC"]))
+        self.assertEqual(client.clouddownload_task_add_url.call_count, 1)
+
+    def test_batch_separates_existing_tasks(self):
+        plugin = self.module.P115Transfer()
+        plugin._target_cid = "1"
+        client = Mock()
+        client.clouddownload_task_add_urls.return_value = {"state": True, "data": {"result": [
+            {"state": True}, {"state": False, "errcode": 10008},
+        ]}}
+        result = plugin._offline(client, ["magnet:?xt=urn:btih:ABC", "magnet:?xt=urn:btih:DEF"])
+        self.assertIn("新增1条，已存在1条", result)
+        self.assertNotIn("失败", result)
+
+    def test_reply_timeout_does_not_fail_or_replay_task(self):
+        plugin = self.module.P115Transfer()
+        plugin._bot_call = Mock(side_effect=TimeoutError("secret"))
+        plugin._reply({"bot_client": Mock(), "chat_id": 1}, "已提交")
+        self.assertEqual(plugin._bot_call.call_count, 1)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,12 @@ class P115OperationError(RuntimeError):
     pass
 
 
+def is_duplicate_task(response):
+    if not isinstance(response, dict):
+        return False
+    return any(str(response.get(key)) == "10008" for key in ("errcode", "errno", "errNo", "code"))
+
+
 def response_error(stage, response):
     if not isinstance(response, dict):
         return P115OperationError(f"{stage}：115返回格式异常，请核实网盘状态")
@@ -91,14 +97,14 @@ def validate_offline_links(links):
             raise P115OperationError(f"第{index}条ed2k链接格式错误：需包含文件名、正整数大小、32位哈希和结尾 |/；未提交任务")
 
 
-class NanShare115(_PluginBase):
+class P115Transfer(_PluginBase):
     plugin_name = "115转存/离线"
     plugin_desc = "通过 MoviePilot Telegram Bot 接收 115分享、magnet、ed2k 或 torrent 链接并转存到指定115目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.1.3"
+    plugin_version = "1.2.0"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
-    plugin_config_prefix = "nanshare115_"
+    plugin_config_prefix = "p115transfer_"
     plugin_order = 24
     auth_level = 1
 
@@ -152,7 +158,7 @@ class NanShare115(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        return [{"cmd": command, "event": EventType.PluginAction, "desc": "115转存/离线：接收分享及离线链接", "category": "", "data": {"action": "nanshare115"}} for command in NanShare115._commands]
+        return [{"cmd": command, "event": EventType.PluginAction, "desc": "115转存/离线：接收分享及离线链接", "category": "", "data": {"action": "p115transfer"}} for command in P115Transfer._commands]
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [{"path": "/status", "endpoint": self.status, "methods": ["GET"], "summary": "查看115转存/离线状态"}]
@@ -189,7 +195,10 @@ class NanShare115(_PluginBase):
 
     def _reply(self, data: Dict[str, Any], text: str) -> None:
         if data.get("bot_client"):
-            self._bot_call(data["bot_client"], "sendMessage", {"chat_id": data["chat_id"], "text": text})
+            try:
+                self._bot_call(data["bot_client"], "sendMessage", {"chat_id": data["chat_id"], "text": text})
+            except Exception as exc:
+                logger.warning("115转存/离线：任务处理后的Bot回复未送达（%s），不代表任务提交失败；请核实网盘状态，不自动重放", type(exc).__name__)
             return
         try:
             channel = data.get("channel")
@@ -258,21 +267,31 @@ class NanShare115(_PluginBase):
         except Exception as exc:
             raise P115OperationError(f"提交离线任务异常：{type(exc).__name__}；结果可能不确定，请核实115任务列表，不自动重试") from None
         if not isinstance(response, dict) or not response.get("state"):
+            if is_duplicate_task(response):
+                logger.info("115转存/离线：离线任务已存在，未重复添加；请在115任务列表查看，不自动移动已有任务")
+                return "该离线任务已在115中存在，无需重复提交。请查看115任务列表；已有任务的保存目录不会被本次设置改变。"
             raise response_error("提交离线任务", response)
         data = response.get("data")
         if isinstance(data, dict) and "state" in data and not data["state"]:
+            if is_duplicate_task(data):
+                logger.info("115转存/离线：离线任务已存在，未重复添加")
+                return "该离线任务已在115中存在，无需重复提交，请查看115任务列表。"
             raise response_error("提交离线任务", data)
         result = data.get("result") if isinstance(data, dict) else data if isinstance(data, list) else None
         if result is None:
             result = response.get("result")
         if isinstance(result, list):
-            failures = [item for item in result if not isinstance(item, dict) or ("state" in item and not item["state"])
-                        or any(str(item.get(key, 0)) not in {"0", "", "None"} for key in ("errcode", "errno"))]
-            count = len(result) - len(failures)
+            existing = [item for item in result if is_duplicate_task(item)]
+            failures = [item for item in result if not is_duplicate_task(item) and (not isinstance(item, dict) or ("state" in item and not item["state"])
+                        or any(str(item.get(key, 0)) not in {"0", "", "None"} for key in ("errcode", "errno")))]
+            count = len(result) - len(failures) - len(existing)
             if failures:
                 detail = str(response_error("失败项", failures[0]))
                 sdk_logger.warning("115转存/离线：离线提交成功%d条，失败%d条；%s", count, len(failures), detail)
-                return f"离线提交结果：成功{count}条，失败{len(failures)}条；{detail}。请核实115任务列表，不自动重试。"
+                return f"离线提交结果：新增{count}条，已存在{len(existing)}条，失败{len(failures)}条；{detail}。请核实115任务列表，不自动重试。"
+            if existing:
+                logger.info("115转存/离线：新增%d条离线任务，已存在%d条，未重放", count, len(existing))
+                return f"离线提交结果：新增{count}条，已存在{len(existing)}条，无需重复提交；请查看115任务列表。"
             if not result:
                 raise P115OperationError("提交离线任务：115返回空结果，未确认成功，请核实任务列表")
         else:
@@ -310,7 +329,7 @@ class NanShare115(_PluginBase):
     @eventmanager.register(EventType.PluginAction)
     def handle_command(self, event: Event) -> None:
         data = event.event_data or {}
-        if data.get("action") != "nanshare115" or not self._enabled or self._bot_token:
+        if data.get("action") != "p115transfer" or not self._enabled or self._bot_token:
             return
         self._handle(data, str(data.get("arg_str") or ""))
 
