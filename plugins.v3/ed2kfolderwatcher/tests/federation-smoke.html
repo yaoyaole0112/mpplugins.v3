@@ -30,7 +30,7 @@ if (dialogFixture) {
 }
 
 const settings = { enabled: false, folder: '/media/test', recursive: true, monitor_enabled: true,
-  output_enabled: true, output: '', extensions: '', min_age: 60, min_file_size: '', delete_source: false,
+  output_enabled: true, output: '', extensions: '', min_age: 60, min_file_size: '', delete_source: false, delete_small_files: false,
   scan_enabled: false, cron: '*/10 * * * *', telegram_enabled: false, telegram_mode: 'user',
   telegram_chat_id: '', telegram_thread_id: '', telegram_token: '' }
 Object.assign(settings, { cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
@@ -93,6 +93,7 @@ const api = { get: async path => {
   if (!path.endsWith('/settings')) throw Error('Unexpected write request')
   if (typeof body.cloud_scan_enabled !== 'boolean') throw Error('Cloud schedule switch missing from save payload')
   if (body.min_file_size !== '100M') throw Error('Minimum file size missing from save payload')
+  if (body.delete_small_files !== true) throw Error('Small file deletion switch missing from save payload')
   return { ok: true, settings: body, message: '模拟保存成功' }
 } }
 
@@ -250,6 +251,10 @@ try {
     minimumInput.dispatchEvent(new Event('input', { bubbles: true }))
     await vue.nextTick()
     const localPanel = document.querySelector('#app [data-testid=local-source]')
+    const smallDelete = [...localPanel.querySelectorAll('label')].find(label => label.textContent.trim() === '低于阈值文件自动删源')?.querySelector('input')
+    if (!smallDelete || smallDelete.checked) throw Error(`${name}: small file deletion must default to off`)
+    smallDelete.click()
+    await vue.nextTick()
     for (const heading of ['通用设置', '本地监控', '网盘监控', 'ED2K链接自动转发']) {
       if (![...document.querySelectorAll('#app h3')].some(element => element.textContent === heading)) throw Error(`${name}: missing heading ${heading}`)
     }
@@ -293,9 +298,17 @@ try {
     targets.dispatchEvent(new Event('input', { bubbles: true }))
     await vue.nextTick()
     if (!targets.value.includes('\n@channel\n')) throw Error(`${name}: multiline input lost`)
+    let deletionConfirmed = false
+    const requestsBeforeCancel = requests.length
+    window.confirm = message => { deletionConfirmed = message.includes('低于阈值文件自动删源'); return false }
+    buttons.find(button => button.textContent.trim() === '保存插件设置').click()
+    await vue.nextTick()
+    if (!deletionConfirmed || requests.length !== requestsBeforeCancel) throw Error(`${name}: destructive save confirmation missing`)
+    window.confirm = () => true
     buttons.find(button => button.textContent.trim() === '保存插件设置').click()
     await new Promise(resolve => setTimeout(resolve, 100))
     if (!document.querySelector('#app').innerText.includes('模拟保存成功')) throw Error(`${name}: settings save failed`)
+    window.confirm = () => confirmDelete
     if (buttons.filter(button => button.textContent.trim() === '保存插件设置').length !== 1) throw Error(`${name}: duplicate plugin save buttons`)
     if (buttons.filter(button => button.textContent.trim() === '保存账号设置').length !== 1) throw Error(`${name}: account save missing`)
     const headerButtons = [...document.querySelectorAll('#app .ed2k-header .header-actions button')]

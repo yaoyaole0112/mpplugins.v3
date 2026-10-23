@@ -14,10 +14,10 @@ from .file_size import minimum_file_bytes
 
 
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
-                 "min_age", "min_file_size", "delete_source", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
+                 "min_age", "min_file_size", "delete_source", "delete_small_files", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
                  "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
                  "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
-BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "scan_enabled", "telegram_enabled", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled"}
+BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "delete_small_files", "scan_enabled", "telegram_enabled", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled"}
 
 
 def settings_snapshot(plugin):

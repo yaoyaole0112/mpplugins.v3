@@ -160,7 +160,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.11.4"
+    plugin_version = "1.11.5"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -175,6 +175,7 @@ class Ed2kFolderWatcher(_PluginBase):
     _min_age = 60
     _min_file_size = ""
     _delete_source = False
+    _delete_small_files = False
     _telegram_enabled = False
     _telegram_mode = "user"
     _telegram_token = ""
@@ -238,6 +239,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._enabled = False
             logger.error(f"自动生成ED2K链接：{failure}，已停止插件，请修正配置")
         self._delete_source = bool(config.get("delete_source", False))
+        self._delete_small_files = bool(config.get("delete_small_files", False))
         self._telegram_enabled = bool(config.get("telegram_enabled", False))
         self._telegram_mode = "user"
         self._telegram_token = str(config.get("telegram_token") or "").strip()
@@ -918,6 +920,13 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._queue_event(path, delay=max(60, self._min_age))
                 return
             if stat.st_size < minimum_file_bytes(self._min_file_size):
+                if self._delete_small_files:
+                    if stat.st_mtime + self._min_age > time.time():
+                        self._queue_event(path)
+                        return
+                    if not self._stopping.is_set():
+                        self._unlink_source(path, stat)
+                        logger.info(f"自动生成ED2K链接：低于最小大小阈值，按独立开关删除本地源文件（未生成或发送链接）：{path}")
                 return
             if stat.st_mtime + self._min_age > time.time():
                 self._queue_event(path)
@@ -1136,7 +1145,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._web_login = None
 
     def _save_config(self) -> None:
-        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "telegram_enabled", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
+        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "delete_small_files", "telegram_enabled", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
         config = {name: getattr(self, f"_{name}") for name in fields}
         config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce)
         self.update_config(config)
@@ -1155,12 +1164,13 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextField", "output", "TXT 输出路径", placeholder="留空自动选择 ed2k.txt 路径"),
             field("VTextField", "extensions", "公共扩展名过滤", placeholder="留空处理全部文件，例如 mkv,mp4,flac"),
             field("VTextField", "min_age", "公共稳定等待秒数", type="number", hint="本地和网盘共用，请选择上传完成目录。", persistent_hint=True),
-            field("VTextField", "min_file_size", "生成链接最小文件大小", placeholder="例如100M、1.5G，留空或0不限制", hint="本地与网盘共用，小于此值不生成、不转发、不删源；单位B/K/M/G/T，按1024换算。", persistent_hint=True),
+            field("VTextField", "min_file_size", "生成链接最小文件大小", placeholder="例如100M、1.5G，留空或0不限制", hint="本地与网盘共用，小于此值不生成、不转发；默认保留源文件，本地可单独开启低于阈值自动删源。单位B/K/M/G/T，按1024换算。", persistent_hint=True),
             {"component": "VCardTitle", "text": "本地监控"},
             field("VTextField", "folder", "本地监控目录", placeholder="/downloads/complete", hint="MoviePilot 容器内可见的本地路径；留空可仅处理网盘。", persistent_hint=True),
             field("VSwitch", "recursive", "包含本地子目录"),
             field("VSwitch", "monitor_enabled", "本地实时监控文件"),
             field("VSwitch", "delete_source", "成功后删除本地源文件", hint="对网盘无效；两种输出都关闭时不删除。", persistent_hint=True),
+            field("VSwitch", "delete_small_files", "低于阈值文件自动删源", hint="默认关闭；仅删除通过扩展名过滤、稳定等待后的非空本地文件，不生成、不发送链接，删除不依赖TXT或TG成功。阈值留空或0不生效；网盘始终只读。请仅用于完成目录，删除不可恢复。", persistent_hint=True),
             field("VSwitch", "scan_enabled", "本地定时增量补扫"),
             field("VTextField", "cron", "本地补扫计划", hint="默认每 10 分钟：*/10 * * * *", persistent_hint=True),
             {"component": "VCardTitle", "text": "网盘监控"},
@@ -1181,4 +1191,4 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "delete_source": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "delete_source": False, "delete_small_files": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}

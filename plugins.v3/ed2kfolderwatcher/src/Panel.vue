@@ -17,10 +17,11 @@ const account = reactive({ api_id: '', api_hash: '', phone: '', code: '', passwo
 const auth = reactive({ logged_in: false, pending: false, password_required: false, api_hash_configured: false, expires_in: 0, retry_in: 0 })
 let timer
 let savedDelete = false
+let savedDeleteSmall = false
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || !loaded.value)
-const configFields = ['enabled', 'folder', 'recursive', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size', 'delete_source', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_recursive', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
-const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '本地与网盘共用；留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size', label: '生成链接最小文件大小', placeholder: '例如100M、1.5G（可为空）', hint: '本地与网盘共用；小于此值不生成、不转发TG、不删源。留空或0不限制；B/K/M/G/T按1024换算，等于阈值可生成。' }, { key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '本地与网盘共用；稳定等待不能保证上传已经完成，请选择完成目录' }]
+const configFields = ['enabled', 'folder', 'recursive', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size', 'delete_source', 'delete_small_files', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_recursive', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
+const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '本地与网盘共用；留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size', label: '生成链接最小文件大小', placeholder: '例如100M、1.5G（可为空）', hint: '本地与网盘共用；小于此值不生成、不转发TG；默认保留源文件，可在本地监控开启低于阈值自动删源。留空或0不限制；B/K/M/G/T按1024换算，等于阈值可生成。' }, { key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '本地与网盘共用；稳定等待不能保证上传已经完成，请选择完成目录' }]
 
 function unpack(response) {
   const result = response?.success === undefined && response?.data?.success !== undefined ? response.data : response
@@ -46,6 +47,7 @@ function applySettings(result) {
   Object.assign(settings, result.settings)
   settings.telegram_mode = 'user'
   savedDelete = !!settings.delete_source
+  savedDeleteSmall = !!settings.delete_small_files
 }
 async function refreshAuth() {
   const result = await request('telegram/status')
@@ -77,6 +79,7 @@ async function runCloud() {
 async function saveSettings() {
   if (auth.pending) { error.value = '请先完成或取消验证码登录，再保存其他设置'; return }
   if (settings.delete_source && !savedDelete && !window.confirm('确定启用生成成功后删除源文件？请先使用测试目录验证。')) return
+  if (settings.delete_small_files && !savedDeleteSmall && !window.confirm('确定启用低于阈值文件自动删源？稳定等待后的非空本地文件小于阈值时将直接删除，不生成链接、不等待Telegram或TXT成功，删除不可恢复。请仅使用下载完成目录，并先用测试文件验证。')) return
   await work(async () => {
     const result = await request('settings', Object.fromEntries(configFields.map(key => [key, settings[key] ?? ''])))
     applySettings(result)
@@ -161,6 +164,8 @@ onUnmounted(() => {
       <div class="switches"><label class="switch"><input v-model="settings.monitor_enabled" type="checkbox" :disabled="disabled">实时监控文件</label><label class="switch"><input v-model="settings.recursive" type="checkbox" :disabled="disabled">包含本地子目录</label><label class="switch"><input v-model="settings.delete_source" type="checkbox" :disabled="disabled">成功后删除本地源文件</label><label class="switch"><input v-model="settings.scan_enabled" type="checkbox" :disabled="disabled">本地定时增量补扫</label></div>
       <div class="fields"><label>本地监控目录<input v-model="settings.folder" :disabled="disabled" placeholder="/media/movies"><small>MoviePilot 容器内路径；留空可仅处理网盘来源。</small></label><label>本地补扫计划<input v-model="settings.cron" :disabled="disabled || !settings.scan_enabled" placeholder="*/10 * * * *"><small>默认关闭，网络挂载漏事件时可启用兜底。</small></label></div>
       <p v-if="settings.delete_source" class="warning">已开启本地删除源文件：仅在所选输出成功且文件未变化时删除；两种输出都关闭时不删除。此开关对网盘无效，网盘文件始终保留。</p>
+      <label class="switch"><input v-model="settings.delete_small_files" type="checkbox" :disabled="disabled">低于阈值文件自动删源</label>
+      <p class="warning" v-if="settings.delete_small_files">小于通用最小文件大小的非空本地文件，稳定等待后直接删除，不生成、不转发链接，不依赖TXT或TG成功，删除不可恢复。仅作用于符合扩展名过滤的文件；阈值留空或0不生效，空文件保留等待写入，网盘文件不删除。请仅监控下载完成目录，稳定等待不能保证下载已完成。</p>
     </article>
 
     <article class="card" data-testid="cloud-source">

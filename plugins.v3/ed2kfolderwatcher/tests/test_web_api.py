@@ -55,6 +55,15 @@ class WebApiTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, {"telegram_enabled": True, "telegram_chat_id": value})
 
+    def test_small_file_delete_boolean_validation_and_snapshot(self):
+        self.assertFalse(web_api.settings_snapshot(self.plugin)["delete_small_files"])
+        for value in (True, False):
+            result = web_api.validate_settings(self.plugin, {"delete_small_files": value})
+            self.assertIs(result["delete_small_files"], value)
+        for value in ("true", 1, None):
+            with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"delete_small_files": value})
+
     def test_minimum_file_size_validation_and_snapshot(self):
         for value in ("", "0", "100M", "1.5G", " 20 mb ", "1024"):
             result = web_api.validate_settings(self.plugin, {"min_file_size": value})

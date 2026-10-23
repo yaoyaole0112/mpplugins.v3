@@ -113,6 +113,68 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._process_file(path)
         self.assertEqual(self.records()[str(path.resolve())]["size"], 6)
 
+    def test_small_file_delete_without_hash_notification_or_output(self):
+        path = self.create("small.mkv", b"hello")
+        self.plugin._min_file_size = "6B"
+        self.plugin._delete_small_files = True
+        self.plugin._output_enabled = False
+        self.plugin._telegram_enabled = True
+        with patch.object(self.module, "ed2k_hash") as hashing, patch.object(self.plugin, "_notify_record") as notify:
+            self.plugin._process_file(path)
+        self.assertFalse(path.exists())
+        hashing.assert_not_called()
+        notify.assert_not_called()
+        self.assertFalse((self.root / "data" / "records.json").exists())
+
+    def test_small_file_delete_waits_for_stability_and_preserves_empty(self):
+        path = self.create("small.mkv", b"hello")
+        empty = self.create("empty.mkv", b"")
+        self.plugin._min_file_size = "6B"
+        self.plugin._delete_small_files = True
+        self.plugin._min_age = 60
+        with patch.object(self.plugin, "_queue_event") as queue:
+            self.plugin._process_file(path)
+            self.plugin._process_file(empty)
+        self.assertTrue(path.exists())
+        self.assertTrue(empty.exists())
+        self.assertEqual(queue.call_count, 2)
+        self.plugin._min_age = 0
+        self.plugin._process_file(path)
+        self.assertFalse(path.exists())
+
+    def test_small_file_delete_respects_boundary_and_disabled_threshold(self):
+        self.plugin._delete_small_files = True
+        for threshold in ("", "0", "5B"):
+            with self.subTest(threshold=threshold):
+                self.plugin._min_file_size = threshold
+                path = self.create("boundary.mkv", b"hello")
+                self.plugin._process_file(path)
+                self.assertTrue(path.exists())
+                self.assertEqual(self.records()[str(path.resolve())]["size"], 5)
+
+    def test_small_file_delete_rejects_changed_file_and_symlink(self):
+        path = self.create("small.mkv", b"hello")
+        expected = path.stat()
+        path.write_bytes(b"changed")
+        with self.assertRaises(ValueError):
+            self.plugin._unlink_source(path, expected)
+        self.plugin._min_file_size = "100B"
+        self.plugin._delete_small_files = True
+        outside = self.root / "outside.mkv"
+        outside.write_bytes(b"hello")
+        symlink = self.folder / "link.mkv"
+        symlink.symlink_to(outside)
+        self.plugin._process_file(symlink)
+        self.plugin._process_file(outside)
+        self.assertTrue(outside.exists())
+
+    def test_small_file_delete_configuration_round_trip(self):
+        self.assertFalse(self.plugin._delete_small_files)
+        self.plugin.init_plugin({"folder": str(self.folder), "delete_small_files": True, "min_file_size": "100M"})
+        self.plugin._save_config()
+        self.assertTrue(self.plugin.update_config.call_args.args[0]["delete_small_files"])
+        self.assertFalse(self.plugin.get_form()[1]["delete_small_files"])
+
     def test_minimum_size_configuration_round_trip(self):
         self.plugin.init_plugin({"folder": str(self.folder), "min_file_size": "100M"})
         self.plugin._save_config()
@@ -129,6 +191,7 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._min_file_size = "6B"
         self.plugin._telegram_enabled = True
         self.assertFalse(self.plugin._cloud_item_is_eligible(item))
+        self.plugin._delete_small_files = True
         with patch.object(self.cloud_module, "hash_remote") as hashing, patch.object(self.plugin, "_notify_record") as notify:
             self.plugin._process_cloud_file(item)
         storage.fresh.assert_not_called()
