@@ -46,11 +46,15 @@ def _event_userid(data: Dict[str, Any]) -> Optional[str]:
     return str(value) if value is not None else None
 
 
+class BotConfigurationError(ValueError):
+    pass
+
+
 class NanShare115(_PluginBase):
     plugin_name = "115转存/离线"
     plugin_desc = "通过 MoviePilot Telegram Bot 接收 115分享、magnet、ed2k 或 torrent 链接并转存到指定115目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "nanshare115_"
@@ -72,6 +76,8 @@ class NanShare115(_PluginBase):
         self._allowed_users = set()
         self._target_cid = ""
         self._bot_proxy = ""
+        self._bot_error = ""
+        self._bot_proxy_source = "未连接"
 
     def _refresh_cookie(self):
         config = self.get_config("P115StrmHelper") or {}
@@ -88,6 +94,7 @@ class NanShare115(_PluginBase):
         self._target_cid = str(config.get("target_cid") or "").strip()
         self._bot_token = str(config.get("bot_token") or "").strip()
         self._bot_proxy = str(config.get("bot_proxy") or "").strip()
+        self._bot_error = ""
         self._allowed_users = {item for item in re.split(r"[,，\s]+", str(config.get("allowed_users") or "")) if item.isdecimal()}
         if self._enabled:
             try:
@@ -111,7 +118,8 @@ class NanShare115(_PluginBase):
 
     def status(self) -> Dict[str, Any]:
         return {"enabled": self._enabled, "configured": bool(self._cookie), "target_path": self._target_path,
-                "target_cid": self._target_cid, "bot_running": bool(self._worker and self._worker.is_alive())}
+                "target_cid": self._target_cid, "bot_running": bool(self._worker and self._worker.is_alive()),
+                "bot_error": self._bot_error, "bot_proxy_source": self._bot_proxy_source}
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         def field(model, title, description, label, **props):
@@ -129,7 +137,7 @@ class NanShare115(_PluginBase):
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-6", "text": "自动读取115网盘STRM助手的Cookie，无需重复填写。独立Bot必须配置允许的用户ID，且不要与其他程序共用接收Bot。"}},
             field("bot_token", "接收链接的 Bot", "填写你自己的 Bot Token，让该 Bot 独立接收链接；留空则继续使用 MoviePilot 已配置的 Bot。", "Bot Token（可选）", type="password"),
             field("allowed_users", "允许使用 Bot 的用户", "使用独立 Bot 时必填。只接受这些 Telegram 用户的私聊消息；填写数字用户ID，多个ID用逗号分隔，不是 @用户名。", "Telegram 用户ID", placeholder="123456789,987654321"),
-            field("bot_proxy", "Bot 网络代理", "仅用于独立 Bot 访问 Telegram API。网络能够直连时留空；需要代理时填写完整的代理地址和端口。", "代理地址（可选）", placeholder="http://127.0.0.1:7890"),
+            field("bot_proxy", "Bot 网络代理", "仅用于独立 Bot 访问 Telegram API。填写后优先使用此代理；留空自动使用 MoviePilot 的网络代理，MP未配置时使用运行环境网络。地址必须能从MP容器访问，127.0.0.1指容器自身。", "代理地址（可选）", placeholder="http://代理服务器地址:7890"),
             field("target_path", "网盘保存目录", "115分享转存和离线任务都保存到此目录。填写从网盘根目录开始的路径，目录不存在时自动创建；填写下方CID后以CID为准。", "115目录路径", placeholder="/NanShare"),
             field("target_cid", "精确指定保存目录", "可填写已有115文件夹的数字CID，填写后优先于上方目录路径；0表示网盘根目录。不清楚CID时留空，使用目录路径即可。", "目录CID（可选）", placeholder="例如：123456789"),
         ]}], {"enabled": self._enabled, "target_path": self._target_path, "target_cid": self._target_cid,
@@ -258,12 +266,24 @@ class NanShare115(_PluginBase):
     def _bot_call(self, client, method, payload):
         response = client.post(f"https://api.telegram.org/bot{self._bot_token}/{method}", json=payload)
         if response.status_code in {401, 404, 409}:
-            raise ValueError("Bot认证失败或接收冲突")
+            raise BotConfigurationError("Bot认证失败或接收冲突")
         response.raise_for_status()
         result = response.json()
         if not result.get("ok"):
             raise RuntimeError("Telegram请求失败")
         return result.get("result")
+
+    def _resolve_bot_proxy(self):
+        if self._bot_proxy:
+            self._bot_proxy_source = "插件配置"
+            return self._bot_proxy
+        from app.runtime.settings import get_runtime_setting
+
+        proxy = get_runtime_setting("PROXY", None)
+        if isinstance(proxy, dict):
+            proxy = proxy.get("https") or proxy.get("https://") or proxy.get("all") or proxy.get("all://")
+        self._bot_proxy_source = "MoviePilot配置" if proxy else "运行环境网络"
+        return proxy or None
 
     def _bot_message(self, client, message):
         sender = str((message.get("from") or {}).get("id") or "")
@@ -290,25 +310,42 @@ class NanShare115(_PluginBase):
         offset_key = "bot_offset_" + hashlib.sha256(self._bot_token.encode()).hexdigest()[:16]
         offset = int(self.get_data(offset_key) or 0)
         try:
-            with httpx.Client(timeout=25, proxy=self._bot_proxy or None) as client:
-                info = self._bot_call(client, "getWebhookInfo", {})
-                if info.get("url"):
-                    logger.warning("NanShare 115：Bot已配置webhook，停止接收；不会自动删除webhook")
-                    return
+            proxy = self._resolve_bot_proxy()
+            logger.info("115转存/离线：Bot连接方式：%s", self._bot_proxy_source)
+            with httpx.Client(timeout=25, proxy=proxy) as client:
+                webhook_checked = False
+                failures = 0
                 while not stop.is_set():
                     try:
+                        if not webhook_checked:
+                            info = self._bot_call(client, "getWebhookInfo", {})
+                            if info.get("url"):
+                                self._bot_error = "Bot已配置webhook，请使用独立Bot；不会自动删除webhook"
+                                logger.warning("115转存/离线：%s", self._bot_error)
+                                return
+                            webhook_checked = True
                         updates = self._bot_call(client, "getUpdates", {"offset": offset, "timeout": 10, "allowed_updates": ["message"]})
+                        if failures:
+                            logger.info("115转存/离线：Bot连接已恢复，继续监听")
+                        failures = 0
+                        self._bot_error = ""
                         for update in updates:
                             if stop.is_set():
                                 return
                             offset = int(update["update_id"]) + 1
                             self.save_data(offset_key, offset)
                             self._bot_message(client, update.get("message") or {})
-                    except ValueError:
-                        logger.warning("NanShare 115：Bot认证或接收冲突，停止监听")
+                    except BotConfigurationError:
+                        self._bot_error = "Bot认证失败或接收冲突，请检查Token及其他接收程序"
+                        logger.warning("115转存/离线：%s", self._bot_error)
                         return
                     except Exception as exc:
-                        logger.warning("NanShare 115：Bot请求异常：%s，30秒后继续接收，不重放转存", type(exc).__name__)
-                        stop.wait(30)
+                        failures += 1
+                        delay = min(300, 30 * 2 ** min(failures - 1, 4))
+                        reason = "连接失败，请检查容器到Telegram的DNS、代理及网络连通性" if isinstance(exc, httpx.ConnectError) else "请求未完成，请检查网络或代理"
+                        self._bot_error = f"{type(exc).__name__}：{reason}；{delay}秒后重试"
+                        logger.warning("115转存/离线：%s（%s）；不重放转存", self._bot_error, self._bot_proxy_source)
+                        stop.wait(delay)
         except Exception as exc:
-            logger.warning("NanShare 115：Bot停止：%s", type(exc).__name__)
+            self._bot_error = f"{type(exc).__name__}：Bot初始化失败，请检查代理配置并重新保存"
+            logger.warning("115转存/离线：%s", self._bot_error)

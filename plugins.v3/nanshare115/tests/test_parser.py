@@ -2,7 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from pathlib import Path
 
 
@@ -11,7 +11,7 @@ def _load_module():
     app_event.Event = object
     app_event.eventmanager = types.SimpleNamespace(register=lambda *_a, **_k: (lambda fn: fn))
     app_log = types.ModuleType("app.log")
-    app_log.logger = types.SimpleNamespace(error=lambda *_a, **_k: None, info=lambda *_a, **_k: None)
+    app_log.logger = Mock()
     app_plugins = types.ModuleType("app.plugins")
     app_plugins._PluginBase = object
     app_message = types.ModuleType("app.schemas.message")
@@ -132,6 +132,64 @@ class ParserTest(unittest.TestCase):
             models.append(control["props"]["model"])
         self.assertEqual(models, ["bot_token", "allowed_users", "bot_proxy", "target_path", "target_cid"])
         self.assertNotIn("cookie", defaults)
+
+    def test_bot_proxy_prefers_explicit_then_mp(self):
+        plugin = self.module.NanShare115()
+        runtime = types.ModuleType("app.runtime.settings")
+        runtime.get_runtime_setting = Mock(return_value={"https": "http://mp-proxy:7890"})
+        with patch.dict(sys.modules, {"app.runtime.settings": runtime}):
+            self.assertEqual(plugin._resolve_bot_proxy(), "http://mp-proxy:7890")
+            self.assertEqual(plugin._bot_proxy_source, "MoviePilot配置")
+            plugin._bot_proxy = "http://explicit-proxy:7890"
+            self.assertEqual(plugin._resolve_bot_proxy(), plugin._bot_proxy)
+            plugin._bot_proxy = ""
+            runtime.get_runtime_setting.return_value = None
+            self.assertIsNone(plugin._resolve_bot_proxy())
+
+    def test_startup_connect_error_retries_and_recovers(self):
+        plugin = self.module.NanShare115()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxy = Mock(return_value=None)
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=[httpx.ConnectError("secret-token"), {}, []])
+        stop = Mock()
+        stop.is_set.side_effect = [False, False, True]
+        with patch.dict(sys.modules, {"httpx": httpx}):
+            plugin._poll_bot(stop)
+        stop.wait.assert_called_once_with(30)
+        self.assertEqual([call.args[1] for call in plugin._bot_call.call_args_list], ["getWebhookInfo", "getWebhookInfo", "getUpdates"])
+        self.assertEqual(plugin._bot_error, "")
+
+    def test_startup_backoff_is_bounded_and_stoppable(self):
+        plugin = self.module.NanShare115()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxy = Mock(return_value=None)
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=httpx.ConnectError("must-not-leak"))
+        stop = Mock()
+        stop.is_set.side_effect = [False] * 6 + [True]
+        with patch.dict(sys.modules, {"httpx": httpx}):
+            plugin._poll_bot(stop)
+        self.assertEqual([call.args[0] for call in stop.wait.call_args_list], [30, 60, 120, 240, 300, 300])
+        self.assertNotIn("must-not-leak", plugin._bot_error)
+
+    def test_bot_authentication_error_does_not_retry(self):
+        plugin = self.module.NanShare115()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxy = Mock(return_value=None)
+        httpx = types.ModuleType("httpx")
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=self.module.BotConfigurationError())
+        stop = Mock()
+        stop.is_set.return_value = False
+        with patch.dict(sys.modules, {"httpx": httpx}):
+            plugin._poll_bot(stop)
+        stop.wait.assert_not_called()
+        self.assertIn("认证", plugin._bot_error)
 
 
 if __name__ == "__main__":
