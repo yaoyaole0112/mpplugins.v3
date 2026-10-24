@@ -24,22 +24,22 @@ test('media precheck action is to the left of enrichment in the same row for bot
   assert.equal((row.match(/<button /g) || []).length, 2)
 })
 
-test('anomaly repair uses a fresh selected-media action and separate opt-in for database downtime', async () => {
+test('anomaly repair starts without confirmation and authorizes selected-media information repair', async () => {
   assert.ok(source.includes("enrichmentAction('repair_anomalies', { series_id: enrich.selected.id })"))
   assert.ok(backend.includes('start_repair_anomalies(action.series_id, action.allow_mediainfo)'))
   const calls = []
-  const confirmations = [true, false]
-  const context = vm.createContext({ work: callback => callback(), window: { confirm: () => confirmations.shift() },
+  const context = vm.createContext({ work: callback => callback(), window: { confirm: () => { throw new Error('unexpected confirmation') } },
     post: async (path, payload) => { calls.push({ path, payload }); return { started: true } },
     refreshEnrichment: async () => {}, scheduleEnrichmentPoll: () => {}, notice: { value: '' } })
   vm.runInContext(source.slice(source.indexOf('async function enrichmentAction('), source.indexOf('function togglePreviewEpisode(')), context)
   await context.enrichmentAction('repair_anomalies', { series_id: 'Q4::selected' })
   assert.equal(calls.length, 1)
   assert.equal(calls[0].payload.series_id, 'Q4::selected')
-  assert.equal(calls[0].payload.allow_mediainfo, false)
-  context.window.confirm = () => false
-  await context.enrichmentAction('repair_anomalies', { series_id: 'Q4::other' })
-  assert.equal(calls.length, 1)
+  assert.equal(calls[0].payload.allow_mediainfo, true)
+  await context.enrichmentAction('repair_anomalies', { series_id: 'Q4::other', allow_mediainfo: false })
+  assert.equal(calls.length, 2)
+  assert.equal(calls[1].payload.series_id, 'Q4::other')
+  assert.equal(calls[1].payload.allow_mediainfo, true)
 })
 
 test('precheck shows per-field results and distinguishes unknown from normal', () => {

@@ -294,8 +294,7 @@ function scheduleEnrichmentPoll() {
 async function enrichmentAction(operation, extra = {}) {
   await work(async () => {
     if (operation === 'repair_anomalies') {
-      if (!window.confirm('将重新预检当前所选电影/剧集，依次修复异常资料、分集信息与图片；正常字段不覆盖，待核实项目不盲目写入，无可靠来源时保留原值。可能调用已配置的 AI 或截帧。确认开始？')) return
-      extra = { ...extra, allow_mediainfo: window.confirm('若预检发现大小/时长缺失，是否允许仅对所选媒体探测，并在 Emby 空闲时备份数据库、短暂停止 Emby 写库后重启？取消则只修复资料与图片，不停机。') }
+      extra = { ...extra, allow_mediainfo: true }
     }
     if (operation === 'mediainfo_fill' && !window.confirm('即将探测文件信息，并在 Emby 空闲时备份数据库、短暂停止 Emby 写入后重启。播放或 Emby 任务进行中会拒绝执行。确认开始？')) return
     if (operation === 'batch_enrich' && !window.confirm(`将补全选中 ${extra.library_ids?.length || 0} 个媒体库的电影或剧集资料，剧集包含分集；可能调用 MoviePilot AI，耗时较长。确定开始？`)) return
@@ -1236,7 +1235,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           <div v-if="enrich.items.length" class="eme-enrich-results"><button v-for="item in enrich.items" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.selected?.id === item.id }" @click="enrich.selected = item">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.type === 'Movie' ? '电影' : '剧集' }} · {{ item.server }}</button></div>
           <p v-if="enrich.selected" class="eme-hint">已选：{{ enrich.selected.name }} · {{ enrich.selected.server }}</p>
           <div class="eme-inline eme-enrich-buttons"><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('overview_preview', { series_id: enrich.selected.id })">媒体信息预检</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('repair_anomalies', { series_id: enrich.selected.id })">补全异常信息</button></div>
-          <p class="eme-hint">补全异常信息会先重新预检当前所选媒体，再串行修复异常资料、分集及图片；不覆盖正常字段。大小/时长写库需另外确认；音视频流等未能可靠修复的项目保留在复查结果中。</p>
+          <p class="eme-hint">点击补全异常信息后直接开始：先重新预检所选媒体，再串行修复异常资料、分集及图片，不覆盖正常字段。默认允许补全缺失大小/时长；需要写库时仅在 Emby 空闲并备份数据库后短暂停止 Emby，写库后重启。音视频流等未能可靠修复的项目保留在复查结果中。</p>
           <p class="eme-hint">使用 MoviePilot 的 TMDB API Key 与 Emby 连接。请核对媒体匹配后再补全。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>批量补全数据</h3><p>按电影或电视剧媒体库补全资料、演职人员及中文简介；电视剧还会补全分集信息；缺失标题、简介由电视猫优先、百度百科兜底，耗时可能较长。</p></div><button class="eme-button secondary" :disabled="busy || enrich.catalogLoading || enrich.status.running" @click="loadEnrichLibraries">{{ enrich.catalogLoading ? '读取中…' : '刷新媒体库' }}</button></div>
