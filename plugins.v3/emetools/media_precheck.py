@@ -11,6 +11,12 @@ def positive_number(value):
         return False
 
 
+def foreign_text(value):
+    """Return true for labels that contain no Chinese text but do contain letters."""
+    text = str(value or "").strip()
+    return bool(text and re.search(r"[A-Za-z]", text) and not re.search(r"[\u3400-\u9fff]", text))
+
+
 def media_checks(item, options, *, episode=False, duplicated=False):
     checks = []
 
@@ -31,11 +37,18 @@ def media_checks(item, options, *, episode=False, duplicated=False):
         f"{overview_length(overview)} 字" + ("；" + "、".join(issues) if issues else ""))
     if not episode:
         genres = item.get("Genres") or []
-        add("类型", "正常" if genres else "缺失", "、".join(str(value) for value in genres) or "未填写媒体类型")
+        genre_values = [str(value).strip() for value in genres if str(value).strip()]
+        foreign_genres = sum(foreign_text(value) for value in genre_values)
+        add("类型", "缺失" if not genre_values else "疑似异常" if foreign_genres else "正常",
+            ("、".join(genre_values) or "未填写媒体类型") +
+            (f"；含外文 {foreign_genres} 项" if foreign_genres else ""))
         studios = [str(entry.get("Name") or "") if isinstance(entry, dict) else str(entry)
                    for entry in item.get("Studios") or []]
         studios = [name for name in studios if name.strip()]
-        add("工作室/播出平台", "正常" if studios else "缺失", "、".join(studios) or "未填写制作方或播出平台")
+        foreign_studios = sum(foreign_text(name) for name in studios)
+        add("工作室/播出平台", "缺失" if not studios else "疑似异常" if foreign_studios else "正常",
+            ("、".join(studios) or "未填写制作方或播出平台") +
+            (f"；含外文 {foreign_studios} 项" if foreign_studios else ""))
     people = [person for person in item.get("People") or [] if isinstance(person, dict) and person.get("Name")]
     field = "分集演职员" if episode else "演职员"
     if "People" not in item:

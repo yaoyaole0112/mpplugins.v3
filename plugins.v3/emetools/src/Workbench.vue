@@ -157,7 +157,7 @@ const enrichSettings = reactive({ open: false, ai_available: false, ai_model: ''
   metadata_source: 'tmdb',
   auto_on_import: true,
   ai_enabled: false, no_avatar: true, episode_cast: false, role_prefix: true,
-  ai_title: true, ai_credits: true, ai_overview: false, resolve_role: true,
+  ai_title: true, ai_credits: true, ai_overview: false, ai_metadata: true, resolve_role: true,
   max_actors: 30, cast_lock_min: 10,
   overview_movie_min: 120, overview_episode_min: 40,
   overview_english_fallback: true, overview_lock: false,
@@ -1390,7 +1390,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
             <label class="eme-switch-label"><input v-model="enrichSettings.draft.ai_enabled" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.ai_available" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 AI 智能补齐</span></label>
             <p class="eme-enrich-model">当前 MoviePilot AI 模型：<strong>{{ enrichSettings.ai_model || '未配置' }}</strong><span v-if="!enrichSettings.ai_available">（LLM 服务尚未配置完整或接口不兼容）</span></p>
             <p v-if="!enrichSettings.ai_available" class="eme-hint">请先在 MoviePilot 中配置 LLM API Key、地址和模型，再启用 AI。</p>
-            <div class="eme-enrich-settings-group"><strong>AI 翻译范围</strong><label v-for="option in [{ key: 'ai_title', label: '标题汉化' }, { key: 'ai_credits', label: '演职人员姓名和角色汉化' }, { key: 'ai_overview', label: '电影／剧集／分集简介汉化' }, { key: 'resolve_role', label: '补全占位角色名' }]" :key="option.key" class="eme-switch-label"><input v-model="enrichSettings.draft[option.key]" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.draft.ai_enabled" /><span class="eme-switch-track" aria-hidden="true" /><span>{{ option.label }}</span></label></div>
+            <div class="eme-enrich-settings-group"><strong>AI 翻译范围</strong><label v-for="option in [{ key: 'ai_title', label: '标题汉化' }, { key: 'ai_credits', label: '演职人员姓名和角色汉化' }, { key: 'ai_overview', label: '电影／剧集／分集简介汉化' }, { key: 'ai_metadata', label: '类型和工作室／播出平台汉化' }, { key: 'resolve_role', label: '补全占位角色名' }]" :key="option.key" class="eme-switch-label"><input v-model="enrichSettings.draft[option.key]" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.draft.ai_enabled" /><span class="eme-switch-track" aria-hidden="true" /><span>{{ option.label }}</span></label></div>
             <div class="eme-enrich-settings-group"><strong>简介质量与保护（电影、剧集及分集）</strong><label class="eme-switch-label"><input v-model="enrichSettings.draft.overview_english_fallback" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>中文不足时获取 TMDB 英文原文翻译</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.overview_lock" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>锁定本次成功写入的中文简介</span></label></div>
             <div class="eme-enrich-settings-numbers"><label>电影／整剧简介最低字数<input v-model.number="enrichSettings.draft.overview_movie_min" type="number" min="0" max="2000" /></label><label>分集简介最低字数<input v-model.number="enrichSettings.draft.overview_episode_min" type="number" min="0" max="2000" /></label></div>
             <p class="eme-hint">字数按非空白字符计算，阈值仅用于质量诊断与真实来源补缺，不为凑字数生成剧情。英文兜底需同时开启 AI 和简介汉化；分集优先核对电视猫／百度百科。锁定默认关闭，关闭不会解除已有字段锁。写入后回读验证，不一致时标记待核实，不自动重放写入。</p>

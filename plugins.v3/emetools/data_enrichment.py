@@ -50,7 +50,7 @@ DEFAULT_ENRICH_CONFIG = {
     "metadata_source": "tmdb",
     "auto_on_import": True,
     "ai_enabled": False, "no_avatar": True, "episode_cast": False,
-    "role_prefix": True, "ai_title": True, "ai_credits": True,
+    "role_prefix": True, "ai_title": True, "ai_credits": True, "ai_metadata": True,
     "ai_overview": False, "resolve_role": True,
     "max_actors": 30, "cast_lock_min": 10,
     "overview_movie_min": 120, "overview_episode_min": 40,
@@ -461,6 +461,48 @@ class DataEnrichment:
         value = str(text or "").strip()
         return bool(re.search(r"[\u3400-\u9fff]", value) and not re.search(
             r"[\u3040-\u30ff\u31f0-\u31ff\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff\u0e00-\u0e7f]", value))
+
+    @staticmethod
+    def _foreign_label(value):
+        text = str(value or "").strip()
+        return bool(text and re.search(r"[A-Za-z]", text) and not re.search(r"[\u3400-\u9fff]", text))
+
+    @staticmethod
+    def _known_label_translation(value):
+        key = re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+        translations = {
+            "action": "动作", "adventure": "冒险", "animation": "动画", "comedy": "喜剧",
+            "crime": "犯罪", "documentary": "纪录片", "drama": "剧情", "family": "家庭",
+            "fantasy": "奇幻", "history": "历史", "horror": "恐怖", "music": "音乐",
+            "mystery": "悬疑", "romance": "爱情", "science fiction": "科幻", "sci-fi": "科幻",
+            "thriller": "惊悚", "tv movie": "电视电影", "war": "战争", "western": "西部",
+            "mango tv": "芒果TV", "youku": "优酷", "iqiyi": "爱奇艺", "i\u200bqiyi": "爱奇艺",
+            "tencent video": "腾讯视频", "bilibili": "哔哩哔哩", "hbo": "HBO电视台",
+            "netflix": "奈飞", "disney+": "迪士尼+", "amazon studios": "亚马逊影业",
+        }
+        return translations.get(key, "")
+
+    async def _localize_labels(self, values, options, context):
+        """Localize abnormal genre/studio labels without inventing unknown companies."""
+        original = [str(value).strip() for value in values if str(value).strip()]
+        result = []
+        pending = {}
+        for index, value in enumerate(original):
+            known = self._known_label_translation(value) if self._foreign_label(value) else value
+            if known:
+                result.append(known)
+            elif self._foreign_label(value):
+                pending[str(index)] = value
+                result.append(value)
+            else:
+                result.append(value)
+        if pending and options.get("ai_enabled") and options.get("ai_metadata"):
+            translated = await self._optional_ai_map(
+                pending, f"{context}。仅翻译已有名称为简体中文，不直译或编造公司身份；不确定时返回原文。")
+            for key, value in translated.items():
+                if self._is_chinese_title(value) and not re.search(r"[A-Za-z]", value):
+                    result[int(key)] = value
+        return list(dict.fromkeys(result))
 
     @classmethod
     def _select_chinese_title(cls, current, *candidates):
@@ -1207,8 +1249,9 @@ class DataEnrichment:
                 repair_options = {**options, "episode_cast": options["episode_cast"] or any(
                     "People" in fields and key != series_id for key, fields in scope.items())}
                 active_fields = set().union(*scope.values())
-                for option, field in (("ai_title", "Name"), ("ai_overview", "Overview"), ("ai_credits", "People")):
-                    repair_options[option] = options[option] and field in active_fields
+                for option, fields in (("ai_title", {"Name"}), ("ai_overview", {"Overview"}),
+                                       ("ai_credits", {"People"}), ("ai_metadata", {"Genres", "Studios"})):
+                    repair_options[option] = options[option] and bool(fields & active_fields)
                 name, identifier = self._split(series_id)
                 parent_fields = scope.get(series_id, set())
                 episode_fields = [fields for key, fields in scope.items() if key != series_id]
@@ -1708,11 +1751,14 @@ class DataEnrichment:
             if detail.get("vote_average"):
                 update["CommunityRating"] = detail["vote_average"]
             if detail.get("genres"):
-                update["Genres"] = [genre["name"] for genre in detail["genres"] if genre.get("name")]
+                update["Genres"] = await self._localize_labels(
+                    [genre["name"] for genre in detail["genres"] if genre.get("name")], options,
+                    "电影类型汉化")
             studios = [company.get("name") for company in detail.get("production_companies") or []
                        if isinstance(company, dict) and company.get("name")]
             if studios:
-                update["Studios"] = [{"Name": name} for name in dict.fromkeys(studios)][:30]
+                studios = await self._localize_labels(studios, options, "电影工作室或播出平台汉化")
+                update["Studios"] = [{"Name": name} for name in studios][:30]
             providers = dict(provider)
             providers["Tmdb"] = str(tmdb_id)
             imdb_id = (detail.get("external_ids") or {}).get("imdb_id") or detail.get("imdb_id")
@@ -2043,12 +2089,15 @@ class DataEnrichment:
                     if overview:
                         update["Overview"] = overview
                     if detail.get("vote_average"): update["CommunityRating"] = detail["vote_average"]
-                    if detail.get("genres"): update["Genres"] = [g["name"] for g in detail["genres"]]
+                    if detail.get("genres"):
+                        update["Genres"] = await self._localize_labels(
+                            [g["name"] for g in detail["genres"] if g.get("name")], options, "剧集类型汉化")
                     studios = [entry.get("name") for entry in
                                (detail.get("networks") or []) + (detail.get("production_companies") or [])
                                if isinstance(entry, dict) and entry.get("name")]
                     if studios:
-                        update["Studios"] = [{"Name": name} for name in dict.fromkeys(studios)][:30]
+                        studios = await self._localize_labels(studios, options, "剧集工作室或播出平台汉化")
+                        update["Studios"] = [{"Name": name} for name in studios][:30]
                     providers = dict(item.get("ProviderIds") or {})
                     providers["Tmdb"] = str(tmdb_id)
                     external = detail.get("external_ids") or {}

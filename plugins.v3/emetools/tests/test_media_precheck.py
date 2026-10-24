@@ -21,11 +21,24 @@ class MediaPrecheckTests(unittest.TestCase):
 
     def test_series_checks_metadata_without_requiring_aggregate_file_information(self):
         checks = self.checks({'Type': 'Series', 'Name': '测试剧集', 'Overview': '中文剧情。' * 40,
-            'Genres': ['剧情'], 'Studios': [{'Name': 'Youku', 'Id': 123}],
+            'Genres': ['剧情'], 'Studios': [{'Name': '优酷', 'Id': 123}],
             'People': [{'Name': '演员', 'Type': 'Actor', 'Role': '饰 主角'}]})
         for field in ('标题', '简介/概要', '类型', '工作室/播出平台', '演职员'):
             self.assertEqual(checks[field]['status'], '正常')
         self.assertEqual(checks['媒体信息']['status'], '不适用')
+
+    def test_english_genres_and_studios_are_abnormal(self):
+        checks = self.checks({'Type': 'Series', 'Name': '中文剧', 'Overview': '中文剧情。' * 40,
+            'Genres': ['Drama'], 'Studios': [{'Name': 'Mango TV'}],
+            'People': [{'Name': '演员', 'Type': 'Actor', 'Role': '饰 主角'}]})
+        self.assertEqual(checks['类型']['status'], '疑似异常')
+        self.assertEqual(checks['工作室/播出平台']['status'], '疑似异常')
+        self.assertIn('含外文 1 项', checks['工作室/播出平台']['detail'])
+
+    def test_known_english_metadata_labels_have_safe_chinese_mappings(self):
+        async def run():
+            return (await self.engine._localize_labels(['Drama', 'Mango TV'], self.options, '测试'))
+        self.assertEqual(asyncio.run(run()), ['剧情', '芒果TV'])
 
     def test_movie_uses_source_size_runtime_and_stream_metadata(self):
         checks = self.checks({'Type': 'Movie', 'Name': '电影', 'Studios': ['电影公司'],
