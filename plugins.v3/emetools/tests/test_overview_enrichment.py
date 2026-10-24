@@ -105,19 +105,13 @@ class OverviewWorkflowTests(unittest.TestCase):
             self.assertEqual(self.resolve(current='保留中文。')[0], '保留中文。')
             translate.assert_not_awaited()
 
-    def test_overview_lock_is_independent_and_preserves_existing_locks(self):
+    def test_write_phase_does_not_lock_fields_before_recheck(self):
         original = {'Overview': '原简介。', 'LockedFields': ['Name', 'Cast']}
-        for enabled, text, expected in ((False, '新中文简介。', ['Name', 'Cast']),
-                                        (True, '新中文简介。', ['Name', 'Cast', 'Overview']),
-                                        (True, 'English only', ['Name', 'Cast']),
-                                        (True, '原简介。', ['Name', 'Cast'])):
+        for enabled, text in ((False, '新中文简介。'), (True, '新中文简介。'),
+                              (True, 'English only'), (True, '原简介。')):
             update = {**original, 'Overview': text}
             self.engine._lock_overview(original, update, {**self.options, 'overview_lock': enabled})
-            self.assertEqual(update['LockedFields'], expected)
-        original['LockedFields'].append('Overview')
-        update = {**original, 'Overview': '另一个中文简介。'}
-        self.engine._lock_overview(original, update, self.options)
-        self.assertIn('Overview', update['LockedFields'])
+            self.assertEqual(update['LockedFields'], ['Name', 'Cast'])
 
     def test_readonly_preview_paginates_and_detects_same_season_duplicates_without_ai(self):
         entries = [
@@ -410,7 +404,7 @@ class OverviewWorkflowTests(unittest.TestCase):
         self.assertEqual(reloaded.status()['records'][0]['id'], '204')
         self.assertEqual(reloaded.status()['records'][-1]['id'], '5')
 
-    def test_movie_fallback_translation_lock_and_readback_integration(self):
+    def test_movie_fallback_translation_defers_lock_until_recheck(self):
         stored = {'Id': 'movie', 'Type': 'Movie', 'Name': '测试电影', 'Overview': '',
                   'ProviderIds': {'Tmdb': '123'}, 'LockedFields': ['Name']}
         tmdb_requests = []
@@ -435,7 +429,7 @@ class OverviewWorkflowTests(unittest.TestCase):
                 patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'secret'):
             asyncio.run(self.engine._enrich('Q4', 'movie', 'metadata', {**self.options, 'overview_lock': True}))
         self.assertEqual(stored['Overview'], '忠于原文的电影简介。')
-        self.assertEqual(stored['LockedFields'], ['Name', 'Overview'])
+        self.assertEqual(stored['LockedFields'], ['Name'])
         self.assertEqual(methods, ['GET', 'POST', 'GET'])
         self.assertEqual(tmdb_requests, [('/3/movie/123', 'zh-CN'), ('/3/movie/123', 'en-US')])
         self.assertEqual(self.engine.status()['records'][0]['source'], 'TMDB 英文原文翻译')
@@ -474,7 +468,7 @@ class OverviewWorkflowTests(unittest.TestCase):
             asyncio.run(self.engine._enrich('Q4', 'series', 'episodes', {**self.options, 'overview_lock': True}))
         self.assertEqual(stored['Overview'], '第七集真实剧情的翻译。')
         self.assertEqual((stored['ParentIndexNumber'], stored['IndexNumber']), (2, 7))
-        self.assertIn('Overview', stored['LockedFields'])
+        self.assertNotIn('LockedFields', stored)
         self.assertEqual(tmdb_paths.count('/3/tv/123/season/2/episode/7'), 1)
 
     def test_real_web_episode_plot_precedes_english_translation_and_replaces_placeholder(self):

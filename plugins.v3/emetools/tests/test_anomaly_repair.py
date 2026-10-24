@@ -86,17 +86,49 @@ class AnomalyRepairTests(unittest.TestCase):
         self.assertIsNone(self.engine._repair_failures)
         self.assertEqual(self.engine.state['repair_result']['remaining'], 2)
 
-    def test_clean_repair_locks_the_emby_item_only_when_enabled(self):
+    def test_clean_repair_locks_normal_fields_and_complete_items_when_enabled(self):
         collected = {'Q4::series': (self.parent, [])}
         async def clean_preview(*args):
             self.engine.state['overview_preview'] = {'errors': [], 'issues': 0, 'unknown': 0}
             if len(args) > 3 and args[3] is not None:
                 args[3].update(collected)
         with patch.object(self.engine, '_overview_preview', side_effect=clean_preview), \
-                patch.object(self.engine, '_lock_completed_media', new_callable=AsyncMock) as lock:
+                patch.object(self.engine, '_lock_verified_media', new_callable=AsyncMock,
+                             return_value={'fields': 3, 'items': 1}) as lock:
             asyncio.run(self.engine._repair_anomalies('Q4::series', {**self.options, 'overview_lock': True}))
-        lock.assert_awaited_once_with('Q4::series')
-        self.assertTrue(self.engine.state['repair_result']['item_locked'])
+        lock.assert_awaited_once()
+        self.assertEqual(self.engine.state['repair_result']['locked_fields'], 3)
+        self.assertEqual(self.engine.state['repair_result']['locked_items'], 1)
+
+    def test_verified_media_locks_normal_fields_and_only_complete_episode_items(self):
+        verified = {
+            'Q4::series': ({'Id': 'series', 'Type': 'Series'}, [self.check('标题', '正常'), self.check('简介/概要', '正常'),
+                self.check('类型', '正常'), self.check('工作室/播出平台', '正常'), self.check('演职员', '正常'),
+                self.check('媒体信息', '不适用')]),
+            'Q4::ep1': ({'Id': 'ep1', 'Type': 'Episode'}, [self.check('分集标题', '正常'), self.check('分集简介', '正常'),
+                self.check('分集演职员', '正常'), self.check('媒体信息', '正常'), self.check('音视频流', '正常'),
+                self.check('分集图片', '正常')]),
+            'Q4::ep2': ({'Id': 'ep2', 'Type': 'Episode'}, [self.check('分集标题', '正常'), self.check('分集简介', '疑似异常')]),
+        }
+        stored = {identifier: {'Id': identifier, 'LockedFields': [], 'LockData': False}
+                  for identifier in ('series', 'ep1', 'ep2')}
+        async def item(client, user, identifier): return dict(stored[identifier])
+        async def post(path, json):
+            stored[path.rsplit('/', 1)[-1]] = dict(json)
+            return SimpleNamespace(raise_for_status=lambda: None)
+        @asynccontextmanager
+        async def client(*args): yield SimpleNamespace(post=post)
+        with patch.object(self.engine, '_server', side_effect=client), \
+                patch.object(self.engine, '_user_id', new_callable=AsyncMock, return_value='admin'), \
+                patch.object(self.engine, '_item', side_effect=item):
+            counts = asyncio.run(self.engine._lock_verified_media(verified))
+        self.assertEqual(set(stored['series']['LockedFields']), {'Name', 'Overview', 'Genres', 'Studios', 'Cast'})
+        self.assertFalse(stored['series']['LockData'])
+        self.assertEqual(set(stored['ep1']['LockedFields']), {'Name', 'Overview', 'Cast'})
+        self.assertTrue(stored['ep1']['LockData'])
+        self.assertEqual(set(stored['ep2']['LockedFields']), {'Name'})
+        self.assertFalse(stored['ep2']['LockData'])
+        self.assertEqual(counts, {'fields': 9, 'items': 1})
 
     def test_images_only_do_not_need_tmdb_and_failed_image_does_not_stop_next(self):
         collected = {'Q4::series': (self.parent, []), **{

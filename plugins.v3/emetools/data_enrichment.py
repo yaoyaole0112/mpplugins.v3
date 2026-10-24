@@ -1305,21 +1305,20 @@ class DataEnrichment:
             self._repair_scope = None
             self._repair_failures = None
         self.log("正在重新预检所选媒体，核实修复结果；无可靠来源的内容不编造")
-        await self._overview_preview(series_id, None, options)
+        verified = {}
+        await self._overview_preview(series_id, None, options, verified)
         result = self.state["overview_preview"]
-        item_locked = False
+        locks = {"fields": 0, "items": 0}
         if options["overview_lock"]:
-            if not result["issues"] and not result["unknown"] and not failures and not result["errors"]:
-                try:
-                    item_locked = await self._lock_completed_media(series_id)
-                except (ValueError, httpx.HTTPError) as error:
-                    failures.append(f"锁定项目：{type(error).__name__}")
-                    self.log(f"复查正常，但未能确认 Emby“锁定此项目”（{type(error).__name__}），不影响补全结果")
-            else:
-                self.log("复查仍有问题、待核实或失败步骤，暂不锁定 Emby 项目")
+            try:
+                locks = await self._lock_verified_media(verified)
+            except (ValueError, httpx.HTTPError) as error:
+                failures.append(f"锁定正常资料：{type(error).__name__}")
+                self.log(f"正常资料锁定未全部确认（{type(error).__name__}），不影响补全结果")
         with self.lock:
             self.state["repair_result"] = {"remaining": result["issues"], "unknown": result["unknown"],
-                "failures": failures, "errors": list(result["errors"]), "item_locked": item_locked,
+                "failures": failures, "errors": list(result["errors"]), "locked_fields": locks["fields"],
+                "locked_items": locks["items"],
                 "media_skipped": len(media) if not allow_mediainfo else 0}
         self.log(f"异常修复流程结束：仍有 {result['issues']} 项疑似问题、{result['unknown']} 项待核实；失败步骤 {len(failures)} 个、复查读取失败 {len(result['errors'])} 处。请查看最新预检结果，不代表全部补齐")
 
@@ -1461,33 +1460,53 @@ class DataEnrichment:
 
     @staticmethod
     def _lock_overview(original, update, options):
-        if not options["overview_lock"] or not update.get("Overview"):
-            return
-        if (update.get("Overview") == original.get("Overview") or
-                overview_issues(update["Overview"], 0)):
-            return
-        locked = list(update.get("LockedFields") or [])
-        if "Overview" not in locked:
-            locked.append("Overview")
-        update["LockedFields"] = locked
+        # Locks are applied after the read-only recheck so incomplete data is
+        # never locked merely because one source field was written successfully.
+        return
 
-    async def _lock_completed_media(self, series_id):
-        """Enable Emby's item lock only once every repair check is clean."""
-        name, identifier = self._split(series_id)
-        async with self._server(name) as emby:
-            user = await self._user_id(name, emby)
-            item = await self._item(emby, user, identifier)
-            if item.get("LockData"):
-                self.log("所选媒体已启用 Emby“锁定此项目”，无需重复写入")
-                return True
-            payload = {key: value for key, value in item.items() if key != "UserData"}
-            payload["LockData"] = True
-            response = await emby.post(f"Items/{identifier}", json=payload)
-            response.raise_for_status()
-            if not (await self._item(emby, user, identifier)).get("LockData"):
-                raise ValueError("Emby 未确认保存“锁定此项目”")
-        self.log("复查无异常，已启用 Emby“锁定此项目”以防止后续元数据改动")
-        return True
+    async def _lock_verified_media(self, verified):
+        """Lock normal Emby metadata fields and fully normal movie/episodes."""
+        field_map = {"标题": "Name", "分集标题": "Name", "简介/概要": "Overview",
+                     "分集简介": "Overview", "类型": "Genres", "工作室/播出平台": "Studios",
+                     "演职员": "Cast", "分集演职员": "Cast"}
+        grouped = {}
+        for key, (entry, checks) in verified.items():
+            identifier = str(entry.get("Id") or "")
+            if not identifier:
+                continue
+            normal = {field_map[check["field"]] for check in checks
+                      if check["status"] == "正常" and check["field"] in field_map}
+            all_normal = bool(checks) and all(check["status"] in {"正常", "不适用"} for check in checks)
+            grouped[key] = {"fields": normal, "lock_item": all_normal and entry.get("Type") != "Series"}
+        by_server = {}
+        for key, intent in grouped.items():
+            name, identifier = self._split(key)
+            by_server.setdefault(name, []).append((identifier, intent))
+        counts = {"fields": 0, "items": 0}
+        for name, entries in by_server.items():
+            async with self._server(name) as emby:
+                user = await self._user_id(name, emby)
+                for identifier, intent in entries:
+                    self._ensure_active()
+                    item = await self._item(emby, user, identifier)
+                    existing = set(item.get("LockedFields") or [])
+                    locks = existing | intent["fields"]
+                    lock_item = bool(item.get("LockData")) or intent["lock_item"]
+                    if locks == existing and lock_item == bool(item.get("LockData")):
+                        continue
+                    payload = {field: value for field, value in item.items() if field != "UserData"}
+                    payload["LockedFields"] = sorted(locks)
+                    payload["LockData"] = lock_item
+                    response = await emby.post(f"Items/{identifier}", json=payload)
+                    response.raise_for_status()
+                    saved = await self._item(emby, user, identifier)
+                    if not locks.issubset(set(saved.get("LockedFields") or [])) or (lock_item and not saved.get("LockData")):
+                        raise ValueError(f"Emby 未确认锁定条目 {identifier}")
+                    counts["fields"] += len(locks - existing)
+                    counts["items"] += int(not item.get("LockData") and lock_item)
+        if counts["fields"] or counts["items"]:
+            self.log(f"已锁定正常字段 {counts['fields']} 项，完整正常的电影/分集 {counts['items']} 项")
+        return counts
 
     def _record_enrichment(self, identifier, status, update, fields, audit, message=""):
         audit = audit or {}
