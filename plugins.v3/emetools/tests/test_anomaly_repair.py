@@ -86,6 +86,18 @@ class AnomalyRepairTests(unittest.TestCase):
         self.assertIsNone(self.engine._repair_failures)
         self.assertEqual(self.engine.state['repair_result']['remaining'], 2)
 
+    def test_clean_repair_locks_the_emby_item_only_when_enabled(self):
+        collected = {'Q4::series': (self.parent, [])}
+        async def clean_preview(*args):
+            self.engine.state['overview_preview'] = {'errors': [], 'issues': 0, 'unknown': 0}
+            if len(args) > 3 and args[3] is not None:
+                args[3].update(collected)
+        with patch.object(self.engine, '_overview_preview', side_effect=clean_preview), \
+                patch.object(self.engine, '_lock_completed_media', new_callable=AsyncMock) as lock:
+            asyncio.run(self.engine._repair_anomalies('Q4::series', {**self.options, 'overview_lock': True}))
+        lock.assert_awaited_once_with('Q4::series')
+        self.assertTrue(self.engine.state['repair_result']['item_locked'])
+
     def test_images_only_do_not_need_tmdb_and_failed_image_does_not_stop_next(self):
         collected = {'Q4::series': (self.parent, []), **{
             f'Q4::ep{number}': ({'Id': f'ep{number}', 'Path': f'/media/ep{number}.strm'}, [self.check('分集图片')])

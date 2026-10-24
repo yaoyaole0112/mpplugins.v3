@@ -59,7 +59,7 @@ test('overview settings use safe defaults and describe real-source-only enrichme
   for (const key of ['overview_lock', 'overview_english_fallback', 'overview_movie_min', 'overview_episode_min']) {
     assert.ok(source.includes(`v-model${key.endsWith('_min') ? '.number' : ''}="enrichSettings.draft.${key}"`))
   }
-  assert.ok(source.includes('关闭不会解除已有字段锁'))
+  assert.ok(source.includes('关闭开关不会解除已有锁定'))
   assert.ok(source.includes('不为凑字数生成剧情'))
 })
 

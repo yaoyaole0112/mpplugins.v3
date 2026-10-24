@@ -1307,9 +1307,20 @@ class DataEnrichment:
         self.log("正在重新预检所选媒体，核实修复结果；无可靠来源的内容不编造")
         await self._overview_preview(series_id, None, options)
         result = self.state["overview_preview"]
+        item_locked = False
+        if options["overview_lock"]:
+            if not result["issues"] and not result["unknown"] and not failures and not result["errors"]:
+                try:
+                    item_locked = await self._lock_completed_media(series_id)
+                except (ValueError, httpx.HTTPError) as error:
+                    failures.append(f"锁定项目：{type(error).__name__}")
+                    self.log(f"复查正常，但未能确认 Emby“锁定此项目”（{type(error).__name__}），不影响补全结果")
+            else:
+                self.log("复查仍有问题、待核实或失败步骤，暂不锁定 Emby 项目")
         with self.lock:
             self.state["repair_result"] = {"remaining": result["issues"], "unknown": result["unknown"],
-                "failures": failures, "errors": list(result["errors"]), "media_skipped": len(media) if not allow_mediainfo else 0}
+                "failures": failures, "errors": list(result["errors"]), "item_locked": item_locked,
+                "media_skipped": len(media) if not allow_mediainfo else 0}
         self.log(f"异常修复流程结束：仍有 {result['issues']} 项疑似问题、{result['unknown']} 项待核实；失败步骤 {len(failures)} 个、复查读取失败 {len(result['errors'])} 处。请查看最新预检结果，不代表全部补齐")
 
     async def _precheck_image(self, emby, entry):
@@ -1459,6 +1470,24 @@ class DataEnrichment:
         if "Overview" not in locked:
             locked.append("Overview")
         update["LockedFields"] = locked
+
+    async def _lock_completed_media(self, series_id):
+        """Enable Emby's item lock only once every repair check is clean."""
+        name, identifier = self._split(series_id)
+        async with self._server(name) as emby:
+            user = await self._user_id(name, emby)
+            item = await self._item(emby, user, identifier)
+            if item.get("LockData"):
+                self.log("所选媒体已启用 Emby“锁定此项目”，无需重复写入")
+                return True
+            payload = {key: value for key, value in item.items() if key != "UserData"}
+            payload["LockData"] = True
+            response = await emby.post(f"Items/{identifier}", json=payload)
+            response.raise_for_status()
+            if not (await self._item(emby, user, identifier)).get("LockData"):
+                raise ValueError("Emby 未确认保存“锁定此项目”")
+        self.log("复查无异常，已启用 Emby“锁定此项目”以防止后续元数据改动")
+        return True
 
     def _record_enrichment(self, identifier, status, update, fields, audit, message=""):
         audit = audit or {}
