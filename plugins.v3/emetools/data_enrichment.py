@@ -33,6 +33,7 @@ from .baike_cast import fetch_baike_cast
 from .episode_plots import fetch_episode_plots, missing_episode_title, missing_episode_overview
 from .overview_quality import (overview_issues, overview_length, overview_signature,
                                duplicate_overviews)
+from .media_precheck import media_checks
 from .emby_guard import EmbyClient, ReadRetryClient, ENRICHMENT_SLOT, RESOLVE_SLOTS
 
 
@@ -1159,11 +1160,41 @@ class DataEnrichment:
             libraries = None
         else:
             libraries = self._selected_tv_libraries(library_ids)
-        return self._begin("简介质量预检", self._overview_preview, series_id, libraries, self.options())
+        return self._begin("媒体信息预检", self._overview_preview, series_id, libraries, self.options())
+
+    async def _precheck_image(self, emby, entry):
+        if "ImageTags" not in entry:
+            return {"field": "分集图片", "status": "待核实", "detail": "接口未返回图片标记，无法判定缺图"}
+        if not (entry.get("ImageTags") or {}).get("Primary"):
+            return {"field": "分集图片", "status": "缺失", "detail": "Emby 未提供分集主图，可通过修复图片补全"}
+        identifier = str(entry.get("Id") or "")
+        if not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", identifier):
+            return {"field": "分集图片", "status": "待核实", "detail": "分集 ID 无效，未读取图片"}
+        self._ensure_active()
+        try:
+            response = await emby.get(f"Items/{identifier}/Images/Primary", params={
+                "maxWidth": 640, "maxHeight": 360, "quality": 85, "format": "jpg"})
+            if response.status_code == 404:
+                return {"field": "分集图片", "status": "缺失", "detail": "图片标记存在，但图片接口返回 404"}
+            response.raise_for_status()
+            content_type = str(response.headers.get("content-type") or "").lower()
+            if not content_type.startswith("image/") or len(response.content) > 8 * 1024 * 1024:
+                return {"field": "分集图片", "status": "待核实", "detail": "图片响应格式异常或超过大小限制"}
+            width, height, size_issue = self._preview_dimensions(response.content)
+            if not width or not height:
+                return {"field": "分集图片", "status": "疑似异常", "detail": "图片无法解码"}
+            dovi = bool(re.search(r"dovi|dolby[ -]?vision|\.dv[.\-_ ]", str(entry.get("Path") or ""), re.I))
+            cast = self._color_cast(response.content, dovi=dovi)
+            issues = (["尺寸比例异常"] if size_issue else []) + (["疑似偏色"] if cast else [])
+            return {"field": "分集图片", "status": "疑似异常" if issues else "正常",
+                    "detail": "、".join(issues) if issues else "已读取缩略图，未发现明显偏色或比例异常"}
+        except (httpx.HTTPError, OSError, ValueError, Image.DecompressionBombError) as error:
+            return {"field": "分集图片", "status": "待核实", "detail": f"图片读取失败（{type(error).__name__}），不判定为正常"}
 
     async def _overview_preview(self, series_id, libraries, options):
-        result = {"items": [], "checked": 0, "issues": 0, "errors": [], "truncated": False}
-        self.log("简介预检仅串行读取 Emby；大媒体库可能耗时较长，可停止任务，不会写库")
+        result = {"items": [], "checked": 0, "issues": 0, "unknown": 0, "errors": [], "truncated": False,
+                  "category_counts": {}}
+        self.log("媒体信息预检串行读取 Emby 资料与分集缩略图；不写库、不探测视频、不截帧、不调用 AI，大媒体库建议分批检查")
         with self.lock:
             self.state["overview_preview"] = None
         identifiers = [series_id] if series_id else await self._library_series(libraries)
@@ -1183,37 +1214,57 @@ class DataEnrichment:
                             self._ensure_active()
                             page = await self._json(emby, f"Users/{user}/Items", {
                                 "ParentId": identifier, "Recursive": "true", "IncludeItemTypes": "Episode",
-                                "Fields": "Overview", "Limit": 300, "StartIndex": offset})
+                                "Fields": "Overview,People,Path,MediaSources,MediaStreams,Size", "Limit": 100, "StartIndex": offset})
                             episodes = page.get("Items") or []
+                            if not episodes and offset < int(page.get("TotalRecordCount", offset)):
+                                raise ValueError("分集分页提前返回空列表，预检未完成")
                             entries.extend(episodes)
                             offset += len(episodes)
                             if not episodes or offset >= int(page.get("TotalRecordCount", offset)):
                                 break
                     duplicates = duplicate_overviews(entries[1:])
                     for entry in entries:
+                        self._ensure_active()
                         episode = entry is not item
                         minimum = options["overview_episode_min" if episode else "overview_movie_min"]
                         duplicated = episode and (entry.get("ParentIndexNumber"),
                                                    overview_signature(entry.get("Overview"))) in duplicates
                         reasons = overview_issues(entry.get("Overview"), minimum, duplicated)
+                        checks = media_checks(entry, options, episode=episode, duplicated=duplicated)
+                        if episode:
+                            checks.append(await self._precheck_image(emby, entry))
+                        problems = [check for check in checks if check["status"] in {"缺失", "疑似异常"}]
+                        uncertain = [check for check in checks if check["status"] == "待核实"]
+                        for check in problems:
+                            result["category_counts"][check["field"]] = result["category_counts"].get(check["field"], 0) + 1
+                        reasons += [f"{check['field']}：{check['status']}" for check in problems
+                                    if check["field"] not in {"简介/概要", "分集简介"}]
                         result["checked"] += 1
-                        result["issues"] += bool(reasons)
+                        result["issues"] += bool(problems)
+                        result["unknown"] += bool(uncertain)
                         if len(result["items"]) < 200:
                             result["items"].append({"id": f"{name}::{entry.get('Id')}", "server": name,
                                 "title": str(item.get("Name") or "未命名媒体")[:100],
                                 "episode": f"S{entry.get('ParentIndexNumber')}E{entry.get('IndexNumber')}" if episode else "",
                                 "type": "分集" if episode else "电影" if item.get("Type") == "Movie" else "剧集",
-                                "length": overview_length(entry.get("Overview")), "reasons": reasons,
-                                "plan": "核对中文来源；不足时翻译英文原文，不生成剧情" if reasons else "简介质量正常"})
+                                "length": overview_length(entry.get("Overview")), "reasons": reasons, "checks": checks,
+                                "uncertain": bool(uncertain),
+                                "plan": "资料问题使用数据补全；图片问题使用修复图片；大小/时长问题使用媒体信息补全。预检不执行修复。"
+                                    if problems else "部分项目尚待核实" if uncertain else "已检查项目正常"})
                         else:
                             result["truncated"] = True
+                        if result["checked"] % 20 == 0:
+                            with self.lock:
+                                self.state["overview_preview"] = {**result, "items": list(result["items"]),
+                                    "errors": list(result["errors"]), "category_counts": dict(result["category_counts"])}
             except (ValueError, httpx.HTTPError) as error:
                 result["errors"].append(f"{_log_series(key)}：读取失败（{type(error).__name__}）")
             with self.lock:
-                self.state["overview_preview"] = {**result, "items": list(result["items"]), "errors": list(result["errors"])}
+                self.state["overview_preview"] = {**result, "items": list(result["items"]), "errors": list(result["errors"]),
+                                                  "category_counts": dict(result["category_counts"])}
         with self.lock:
             self.state["overview_preview"] = result
-        self.log(f"简介预检完成：检查 {result['checked']} 项，疑似问题 {result['issues']} 项；仅诊断，不写库、不请求 AI，来源可用性需补全时核实")
+        self.log(f"媒体信息预检完成：检查 {result['checked']} 项，疑似问题 {result['issues']} 项，待核实 {result['unknown']} 项；仅诊断，不写库、不请求 AI")
 
     async def _resolve_overview(self, tmdb, path, api_key, current, primary, options, *, minimum,
                                 source, duplicated=False):

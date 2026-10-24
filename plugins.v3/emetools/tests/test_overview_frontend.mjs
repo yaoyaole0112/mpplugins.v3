@@ -11,8 +11,28 @@ test('read-only overview prechecks cover selected media and selected libraries i
   assert.ok(source.includes("enrichmentAction('overview_preview', { series_id: enrich.selected.id })"))
   assert.ok(source.includes("enrichmentAction('overview_preview', { library_ids: [...enrich.libraryIds] })"))
   assert.ok(source.includes('只读 Emby，不写库、不调用 AI'))
-  assert.ok(source.includes('来源是否可用需实际补全时核实'))
+  assert.ok(source.includes('预检不等于来源可补全性验证'))
   assert.ok(backend.includes('self._enrichment.start_overview_preview(action.series_id, action.library_ids)'))
+})
+
+test('media precheck action is to the left of enrichment in the same row for both shared entries', () => {
+  assert.ok(source.includes("detail: '完善媒体数据、信息与分集图片'"))
+  assert.ok(!source.includes('简介质量预检（不写入）'))
+  const row = source.match(/<div class="eme-inline eme-enrich-buttons">[^\n]+<\/div>/)?.[0]
+  assert.ok(row)
+  assert.ok(row.indexOf('>媒体信息预检</button>') < row.indexOf('>补全{{'))
+  assert.equal((row.match(/<button /g) || []).length, 2)
+})
+
+test('precheck shows per-field results and distinguishes unknown from normal', () => {
+  for (const label of ['简介/概要', '工作室/播出平台', '大小', '时长', '分集图片', '演职员']) {
+    assert.ok(source.includes(label))
+  }
+  assert.ok(source.includes('v-for="check in item.checks || []"'))
+  assert.ok(source.includes("item.uncertain ? '部分项目待核实'"))
+  assert.ok(source.includes('overview_preview.category_counts'))
+  assert.ok(source.includes('不探测视频、不截帧'))
+  assert.ok(source.includes('grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr))'))
 })
 
 test('overview settings use safe defaults and describe real-source-only enrichment', () => {
@@ -41,7 +61,7 @@ test('preview and persisted per-item records paginate instead of adding nested v
   enrich.status.overview_preview.items = []
   await nextTick()
   assert.equal(state.overviewPreviewPage.value, 1)
-  assert.ok(source.includes('aria-label="简介预检分页"'))
+  assert.ok(source.includes('aria-label="媒体预检分页"'))
   assert.ok(source.includes('aria-label="补全记录分页"'))
 })
 

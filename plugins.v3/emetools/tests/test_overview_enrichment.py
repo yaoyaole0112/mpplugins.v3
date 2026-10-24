@@ -179,7 +179,7 @@ class OverviewWorkflowTests(unittest.TestCase):
         with patch.object(self.engine, '_services', return_value={'Q4': object()}), \
                 patch.object(self.engine, '_begin') as begin:
             self.engine.start_overview_preview('Q4::movie')
-        self.assertEqual(begin.call_args.args[0], '简介质量预检')
+        self.assertEqual(begin.call_args.args[0], '媒体信息预检')
         with self.assertRaises(ValueError):
             self.engine.start_overview_preview('not-a-valid-key')
 
