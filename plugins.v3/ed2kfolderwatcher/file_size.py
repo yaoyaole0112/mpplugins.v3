@@ -2,6 +2,30 @@ import re
 from decimal import Decimal, ROUND_CEILING
 
 
+def minimum_gb_value(value):
+    from decimal import localcontext
+    with localcontext() as context:
+        context.prec = 64
+        return format(Decimal(minimum_file_bytes(value)) / Decimal(1024 ** 3), "f")
+
+
+def minimum_gb_setting(value):
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ValueError("最小文件大小请填写GB数值，例如0.5；留空或0不限制")
+    text = str(value).strip()
+    if not text:
+        return ""
+    if not re.fullmatch(r"\d{1,7}(?:\.\d{1,40})?", text):
+        raise ValueError("最小文件大小请填写GB数值，例如0.5；留空或0不限制")
+    from decimal import localcontext
+    with localcontext() as context:
+        context.prec = 64
+        size = Decimal(text) * 1024 ** 3
+        if size > 1024 ** 5:
+            raise ValueError("最小文件大小不能超过1048576GB")
+        return str(int(size.to_integral_value(rounding=ROUND_CEILING))) + "B"
+
+
 def minimum_file_bytes(value: str) -> int:
     if not isinstance(value, str) or len(value) > 64:
         raise ValueError("最小文件大小格式无效，请填写如100M、1.5G，留空或0不限制")

@@ -64,6 +64,16 @@ class WebApiTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, {"delete_small_files": value})
 
+    def test_gb_minimum_input_and_legacy_snapshot(self):
+        self.plugin._min_file_size = "500M"
+        self.assertEqual(web_api.settings_snapshot(self.plugin)["min_file_size_gb"], "0.48828125")
+        for value in ("0.5", 0.5, "", "0"):
+            result = web_api.validate_settings(self.plugin, {"min_file_size_gb": value})
+            self.assertEqual(web_api.minimum_file_bytes(result["min_file_size"]), 512 * 1024 ** 2 if str(value) == "0.5" else 0)
+        for values in ({"min_file_size_gb": "500M"}, {"min_file_size_gb": True}, {"min_file_size_gb": "0.5", "min_file_size": "100M"}):
+            with self.subTest(values=values), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, values)
+
     def test_minimum_file_size_validation_and_snapshot(self):
         for value in ("", "0", "100M", "1.5G", " 20 mb ", "1024"):
             result = web_api.validate_settings(self.plugin, {"min_file_size": value})

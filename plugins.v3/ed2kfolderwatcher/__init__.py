@@ -10,7 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, unquote
 
 from apscheduler.triggers.cron import CronTrigger
-from .file_size import minimum_file_bytes
+from .file_size import minimum_file_bytes, minimum_gb_setting, minimum_gb_value
+from .file_order import filename_order
 
 try:
     from Crypto.Hash import MD4 as _CryptoMD4
@@ -160,7 +161,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.11.5"
+    plugin_version = "1.11.6"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -234,6 +235,8 @@ class Ed2kFolderWatcher(_PluginBase):
         self._extensions = str(config.get("extensions") or DEFAULT_EXTENSIONS).strip()
         self._min_file_size = str(config.get("min_file_size") or "").strip()
         try:
+            if "min_file_size_gb" in config:
+                self._min_file_size = minimum_gb_setting(config["min_file_size_gb"])
             minimum_file_bytes(self._min_file_size)
         except ValueError as failure:
             self._enabled = False
@@ -415,13 +418,22 @@ class Ed2kFolderWatcher(_PluginBase):
         except OSError:
             return
 
+    def _next_pending_key(self):
+        now = time.monotonic()
+        ready = [key for key, (due, _) in self._pending.items() if due <= now]
+        def order(key):
+            item = self._pending[key][1]
+            path = item.get("path", key) if key.startswith("cloud:") else key
+            return key != "__cloud_scan__", filename_order(path)
+        return min(ready, key=order) if ready else min(self._pending, key=lambda key: self._pending[key][0])
+
     def _work(self) -> None:
         while not self._stopping.is_set():
             with self._condition:
                 if not self._pending:
                     self._condition.wait(timeout=1)
                     continue
-                key = min(self._pending, key=lambda item: self._pending[item][0])
+                key = self._next_pending_key()
                 due, signature = self._pending[key]
                 remaining = due - time.monotonic()
                 if remaining > 0:
@@ -448,7 +460,8 @@ class Ed2kFolderWatcher(_PluginBase):
                     from .cloud_storage import CloudError
                     detail = str(err) if isinstance(err, CloudError) else f"网盘任务失败（{type(err).__name__}）"
                     self._cloud_status.update(error=detail, file="")
-                    logger.warning(f"自动生成ED2K链接：{detail}")
+                    filename = signature.get("name", "未知文件") if isinstance(signature, dict) else "目录补扫"
+                    logger.warning(f"自动生成ED2K链接：{filename}：{detail}")
                     if key == "__cloud_scan__":
                         self._cloud_iterator = None
                         self._cloud_adapter = None
@@ -506,7 +519,7 @@ class Ed2kFolderWatcher(_PluginBase):
             for file_id, candidate in list(self._cloud_life_candidates.items()):
                 if candidate["expires"] <= now or candidate["attempts"] >= 10:
                     self._cloud_life_candidates.pop(file_id, None)
-                    logger.info(f"自动生成ED2K链接：生活事件文件复查到期，未加入计算队列：文件ID {file_id}；可手动补扫")
+                    logger.info(f"自动生成ED2K链接：生活事件文件复查到期，未加入计算队列：文件ID {file_id}；最后原因：{candidate.get('reason') or '文件详情尚未就绪'}；如确认符合条件可手动补扫")
             for _, event_type, _, event in sorted(new, key=lambda entry: entry[0]):
                 try:
                     file_id = str(int(event["file_id"]))
@@ -531,6 +544,7 @@ class Ed2kFolderWatcher(_PluginBase):
                         logger.warning("自动生成ED2K链接：生活事件待复查文件达到512项上限，请按需手动补扫")
             queued = 0
             checks = 0
+            ready_items = []
             for file_id, candidate in sorted(self._cloud_life_candidates.items(), key=lambda entry: entry[1]["due"]):
                 if checks >= 8 or stopping.is_set() or stopping is not self._stopping:
                     break
@@ -542,15 +556,22 @@ class Ed2kFolderWatcher(_PluginBase):
                 item = storage.item_from_life_event(candidate["event"])
                 if stopping.is_set() or stopping is not self._stopping:
                     return
-                if item and self._cloud_item_is_eligible(item):
-                    if self._queue_cloud_file(item):
-                        queued += 1
+                reason = self._cloud_item_skip_reason(item) if item else "文件路径或详情尚未就绪"
+                candidate["reason"] = reason
+                label = item.get("name") if item else None
+                label = label or f"文件ID {file_id}"
+                if item and not reason:
+                    ready_items.append(item)
                     self._cloud_life_candidates.pop(file_id, None)
                 elif candidate["attempts"] >= 10:
                     self._cloud_life_candidates.pop(file_id, None)
-                    logger.info(f"自动生成ED2K链接：生活事件文件复查10次仍未就绪或不在监控范围：文件ID {file_id}；可手动补扫")
+                    logger.info(f"自动生成ED2K链接：生活事件文件复查10次未加入队列：{label}（文件ID {file_id}）；原因：{reason}；如确认符合条件可手动补扫")
                 elif candidate["attempts"] == 1:
-                    logger.info(f"自动生成ED2K链接：新增事件文件尚未就绪或不在监控范围，保留限次复查：文件ID {file_id}")
+                    logger.info(f"自动生成ED2K链接：新增事件暂未加入队列，保留限次复查：{label}（文件ID {file_id}）；原因：{reason}")
+            with self._condition:
+                for item in sorted(ready_items, key=lambda item: filename_order(item["path"])):
+                    if self._queue_cloud_file(item):
+                        queued += 1
             self._cloud_status["life_events"] += queued
             self._cloud_life_failures = 0
             self._cloud_life_retry_after = 0
@@ -594,18 +615,29 @@ class Ed2kFolderWatcher(_PluginBase):
         return queued
 
     def _cloud_item_is_eligible(self, item: dict) -> bool:
+        return not self._cloud_item_skip_reason(item)
+
+    def _cloud_item_skip_reason(self, item: dict) -> str:
         from .cloud_storage import allowed_item, cloud_path
         if not allowed_item(item, self._cloud_storage, self._cloud_folder):
-            return False
+            return "不在所选网盘存储或监控目录"
         if not self._cloud_recursive and Path(cloud_path(item.get("path"))).parent.as_posix() != self._cloud_folder:
-            return False
+            return "子目录未开启监控"
         try:
             size = int(item.get("size") or 0)
         except (TypeError, ValueError):
-            return False
+            return "文件大小无效"
         suffix = Path(item.get("name") or item.get("path") or "").suffix.lower()
         extensions = self._extension_set()
-        return size > 0 and size >= minimum_file_bytes(self._min_file_size) and suffix not in {".part", ".tmp", ".!qb", ".crdownload"} and (not extensions or suffix.lstrip(".") in extensions)
+        if size <= 0:
+            return "文件大小尚为0，等待写入或元数据更新"
+        if size < minimum_file_bytes(self._min_file_size):
+            return "小于生成链接最小文件大小"
+        if suffix in {".part", ".tmp", ".!qb", ".crdownload"}:
+            return "临时下载文件，等待完成"
+        if extensions and suffix.lstrip(".") not in extensions:
+            return "扩展名不符合过滤设置"
+        return ""
 
     def _cloud_scan_step(self) -> None:
         from .cloud_storage import CloudStorage
@@ -633,7 +665,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._pending["__cloud_scan__"] = (time.monotonic() + 1, None)
 
     def _process_cloud_file(self, item: dict) -> None:
-        from .cloud_storage import CloudStorage, CloudError, fingerprint, fingerprint_matches, hash_remote, record_key, allowed_item
+        from .cloud_storage import CloudStorage, CloudError, fingerprint, fingerprint_matches, hash_remote, record_key, legacy_record_key, allowed_item
         if not self._cloud_enabled or self._stopping.is_set() or not self._cloud_item_is_eligible(item):
             return
         import datetime
@@ -675,8 +707,13 @@ class Ed2kFolderWatcher(_PluginBase):
             records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
             key = record_key(item)
             record = records.get(key)
+            old_key = legacy_record_key(item)
+            key_migrated = record is None and old_key in records
+            if key_migrated:
+                record = records.pop(old_key)
+                records[key] = record
             unchanged = record and not record_problem(record) and fingerprint_matches(record.get("cloud_fingerprint"), item) and record.get("hash_version") == 2
-            migrated = unchanged and record.get("cloud_fingerprint") != fingerprint(item)
+            migrated = unchanged and (key_migrated or record.get("cloud_fingerprint") != fingerprint(item))
             if migrated:
                 record["cloud_fingerprint"] = fingerprint(item)
             if unchanged and (not self._telegram_enabled or (record.get("telegram_sent") and record.get("telegram_target") == self._telegram_target_key())):
@@ -860,11 +897,12 @@ class Ed2kFolderWatcher(_PluginBase):
     def _iter_files(self, folder: Path):
         if self._recursive:
             iterator = os.walk(folder)
-            for root, _, filenames in iterator:
-                for filename in filenames:
+            for root, directories, filenames in iterator:
+                directories.sort(key=filename_order)
+                for filename in sorted(filenames, key=filename_order):
                     yield Path(root) / filename
         else:
-            for item in folder.iterdir():
+            for item in sorted(folder.iterdir(), key=lambda item: filename_order(item.name)):
                 if item.is_file():
                     yield item
 
@@ -1164,7 +1202,7 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextField", "output", "TXT 输出路径", placeholder="留空自动选择 ed2k.txt 路径"),
             field("VTextField", "extensions", "公共扩展名过滤", placeholder="留空处理全部文件，例如 mkv,mp4,flac"),
             field("VTextField", "min_age", "公共稳定等待秒数", type="number", hint="本地和网盘共用，请选择上传完成目录。", persistent_hint=True),
-            field("VTextField", "min_file_size", "生成链接最小文件大小", placeholder="例如100M、1.5G，留空或0不限制", hint="本地与网盘共用，小于此值不生成、不转发；默认保留源文件，本地可单独开启低于阈值自动删源。单位B/K/M/G/T，按1024换算。", persistent_hint=True),
+            field("VTextField", "min_file_size_gb", "生成链接最小文件大小（GB）", type="number", step="any", min=0, placeholder="例如0.5、1、1.5，仅填数值", hint="本地与网盘共用，小于此值不生成、不转发；默认保留源文件，本地可单独开启低于阈值自动删源。固定单位GB（1GB=1024³字节），留空或0不限制。", persistent_hint=True),
             {"component": "VCardTitle", "text": "本地监控"},
             field("VTextField", "folder", "本地监控目录", placeholder="/downloads/complete", hint="MoviePilot 容器内可见的本地路径；留空可仅处理网盘。", persistent_hint=True),
             field("VSwitch", "recursive", "包含本地子目录"),
@@ -1191,4 +1229,4 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "delete_source": False, "delete_small_files": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "delete_source": False, "delete_small_files": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}

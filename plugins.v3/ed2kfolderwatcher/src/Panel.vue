@@ -20,8 +20,8 @@ let savedDelete = false
 let savedDeleteSmall = false
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || !loaded.value)
-const configFields = ['enabled', 'folder', 'recursive', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size', 'delete_source', 'delete_small_files', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_recursive', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
-const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '本地与网盘共用；留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size', label: '生成链接最小文件大小', placeholder: '例如100M、1.5G（可为空）', hint: '本地与网盘共用；小于此值不生成、不转发TG；默认保留源文件，可在本地监控开启低于阈值自动删源。留空或0不限制；B/K/M/G/T按1024换算，等于阈值可生成。' }, { key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '本地与网盘共用；稳定等待不能保证上传已经完成，请选择完成目录' }]
+const configFields = ['enabled', 'folder', 'recursive', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'delete_source', 'delete_small_files', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_recursive', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
+const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '本地与网盘共用；留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size_gb', label: '生成链接最小文件大小（GB）', type: 'number', step: 'any', placeholder: '例如0.5、1、1.5（GB）', hint: '本地与网盘共用；小于此值不生成、不转发TG；默认保留源文件，可在本地监控开启低于阈值自动删源。留空或0不限制；固定单位GB（1GB=1024³字节），仅输入数值，支持小数；等于阈值可生成。' }, { key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '本地与网盘共用；稳定等待不能保证上传已经完成，请选择完成目录' }]
 
 function unpack(response) {
   const result = response?.success === undefined && response?.data?.success !== undefined ? response.data : response
@@ -154,7 +154,7 @@ onUnmounted(() => {
     <article class="card" data-testid="common-settings">
       <h3>通用设置</h3>
       <div class="switches"><label class="switch"><input v-model="settings.enabled" type="checkbox" :disabled="disabled">启用插件</label><label class="switch"><input v-model="settings.output_enabled" type="checkbox" :disabled="disabled">生成本地 TXT</label></div>
-      <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label></div>
+      <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :step="field.step" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label></div>
       <div class="fields"><label>TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；有本地目录时默认写入该目录，仅网盘时写入插件数据目录。关闭 TXT 不删除已有文件。</small></label></div>
       <p>Telegram 发送与个人账号授权也适用于两种来源，统一在下方配置；两种来源共用一个计算线程。</p>
     </article>

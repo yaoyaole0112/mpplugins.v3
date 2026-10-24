@@ -10,7 +10,7 @@ from app.api.dependencies.auth import get_current_active_superuser
 
 from .user_account import UserAccountError
 from .telegram_targets import telegram_targets
-from .file_size import minimum_file_bytes
+from .file_size import minimum_file_bytes, minimum_gb_value, minimum_gb_setting
 
 
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
@@ -23,10 +23,19 @@ BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "
 def settings_snapshot(plugin):
     result = {name: getattr(plugin, f"_{name}") for name in CONFIG_FIELDS}
     result["telegram_mode"] = "user"
+    result["min_file_size_gb"] = minimum_gb_value(plugin._min_file_size)
     return result
 
 
 def validate_settings(plugin, values):
+    values = dict(values)
+    if "min_file_size_gb" in values:
+        if "min_file_size" in values:
+            raise UserAccountError("大小阈值配置重复，请刷新页面重试")
+        try:
+            values["min_file_size"] = minimum_gb_setting(values.pop("min_file_size_gb"))
+        except ValueError as failure:
+            raise UserAccountError(str(failure)) from None
     if set(values) - set(CONFIG_FIELDS) - {"telegram_token"}:
         raise UserAccountError("包含未知配置项，请刷新页面后重新保存")
     result = {name: getattr(plugin, f"_{name}") for name in CONFIG_FIELDS}

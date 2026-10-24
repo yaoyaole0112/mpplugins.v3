@@ -30,7 +30,7 @@ if (dialogFixture) {
 }
 
 const settings = { enabled: false, folder: '/media/test', recursive: true, monitor_enabled: true,
-  output_enabled: true, output: '', extensions: '', min_age: 60, min_file_size: '', delete_source: false, delete_small_files: false,
+  output_enabled: true, output: '', extensions: '', min_age: 60, min_file_size: '500M', min_file_size_gb: '0.48828125', delete_source: false, delete_small_files: false,
   scan_enabled: false, cron: '*/10 * * * *', telegram_enabled: false, telegram_mode: 'user',
   telegram_chat_id: '', telegram_thread_id: '', telegram_token: '' }
 Object.assign(settings, { cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
@@ -92,7 +92,7 @@ const api = { get: async path => {
   }
   if (!path.endsWith('/settings')) throw Error('Unexpected write request')
   if (typeof body.cloud_scan_enabled !== 'boolean') throw Error('Cloud schedule switch missing from save payload')
-  if (body.min_file_size !== '100M') throw Error('Minimum file size missing from save payload')
+  if (String(body.min_file_size_gb) !== '0.5') throw Error('Minimum file size missing from save payload')
   if (body.delete_small_files !== true) throw Error('Small file deletion switch missing from save payload')
   return { ok: true, settings: body, message: '模拟保存成功' }
 } }
@@ -246,8 +246,9 @@ try {
     if (!cloudPanel || !cloudPanel.textContent.includes('不会删除云端文件') || cloudPanel.querySelector('input[type=checkbox]').checked) throw Error(`${name}: cloud defaults are unsafe or panel missing`)
     const commonPanel = document.querySelector('#app [data-testid=common-settings]')
     const minimumInput = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.startsWith('生成链接最小文件大小'))?.querySelector('input')
-    if (!minimumInput || !minimumInput.placeholder.includes('100M')) throw Error(`${name}: minimum size input missing`)
-    minimumInput.value = '100M'
+    if (!minimumInput || !minimumInput.placeholder.includes('GB')) throw Error(`${name}: minimum size input missing`)
+    if (minimumInput.value !== '0.48828125') throw Error(`${name}: legacy 500M conversion changed threshold`)
+    minimumInput.value = '0.5'
     minimumInput.dispatchEvent(new Event('input', { bubbles: true }))
     await vue.nextTick()
     const localPanel = document.querySelector('#app [data-testid=local-source]')

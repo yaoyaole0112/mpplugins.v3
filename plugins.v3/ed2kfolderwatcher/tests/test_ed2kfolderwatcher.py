@@ -113,6 +113,82 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._process_file(path)
         self.assertEqual(self.records()[str(path.resolve())]["size"], 6)
 
+    def test_natural_local_scan_and_ready_queue_order(self):
+        self.assertTrue(self.module.filename_order("①"))
+        for name in ("S01E10.mkv", "S01E2.mkv", "S01E1.mkv"):
+            self.create(name)
+        self.assertEqual([path.name for path in self.plugin._iter_files(self.folder)], ["S01E1.mkv", "S01E2.mkv", "S01E10.mkv"])
+        self.plugin._pending = {"/S01E10.mkv": (1, None), "/S01E2.mkv": (2, None), "/S01E1.mkv": (200, None)}
+        with patch.object(self.module.time, "monotonic", return_value=100):
+            self.assertEqual(self.plugin._next_pending_key(), "/S01E2.mkv")
+        with patch.object(self.module.time, "monotonic", return_value=0):
+            self.assertEqual(self.plugin._next_pending_key(), "/S01E10.mkv")
+        self.plugin._pending = {"cloud:10": (1, {"path": "/S01E10.mkv"}), "cloud:2": (2, {"path": "/S01E2.mkv"})}
+        with patch.object(self.module.time, "monotonic", return_value=100):
+            self.assertEqual(self.plugin._next_pending_key(), "cloud:2")
+        self.plugin._pending.clear()
+
+    def test_cloud_fresh_normalizes_id_type_but_rejects_moved_file(self):
+        item, storage = self.cloud_fixture()
+        adapter = object.__new__(self.cloud_module.CloudStorage)
+        adapter.list = Mock(return_value=[{**item, "fileid": 123}])
+        self.assertEqual(adapter.fresh(item)["fileid"], 123)
+        adapter.list.return_value = [{**item, "fileid": 123, "path": "/other/file.mkv"}]
+        with self.assertRaises(self.cloud_module.CloudError):
+            adapter.fresh(item)
+
+    def test_natural_cloud_walk_order(self):
+        item, storage = self.cloud_fixture()
+        adapter = object.__new__(self.cloud_module.CloudStorage)
+        adapter.storage = "115网盘Plus"
+        adapter.list = Mock(return_value=[{**item, "name": name, "path": "/cloud-test/" + name} for name in ("E10.mkv", "E2.mkv", "E1.mkv")])
+        self.assertEqual([entry["name"] for entry in adapter.walk("/cloud-test", False, self.plugin._stopping) if entry], ["E1.mkv", "E2.mkv", "E10.mkv"])
+
+    def test_legacy_integer_cloud_identity_migrates_without_hash_or_resend(self):
+        item, storage = self.cloud_fixture()
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32):
+            self.plugin._process_cloud_file(item)
+        records = self.records()
+        key = self.cloud_module.record_key(item)
+        old_key = self.cloud_module.legacy_record_key(item)
+        record = records.pop(key)
+        record["cloud_fingerprint"][1] = int(item["fileid"])
+        records[old_key] = record
+        cache = self.root / "data" / "records.json"
+        cache.write_text(json.dumps(records))
+        self.plugin._output_enabled = False
+        with patch.object(self.cloud_module, "hash_remote") as hashing, patch.object(self.plugin, "_notify_record") as notify:
+            self.plugin._process_cloud_file(item)
+        hashing.assert_not_called()
+        notify.assert_not_called()
+        self.assertIn(key, self.records())
+        self.assertNotIn(old_key, self.records())
+        self.assertEqual(self.cloud_module.record_key(item), self.cloud_module.record_key({**item, "fileid": 123}))
+
+    def test_life_batch_queued_in_natural_name_order(self):
+        item, storage, event = self.life_fixture()
+        names = ("E10.mkv", "E2.mkv", "E1.mkv")
+        storage.life_events.return_value = [{**event, "id": index, "file_id": str(index)} for index in range(1, 4)]
+        storage.item_from_life_event.side_effect = [{**item, "fileid": str(index), "name": name, "path": "/cloud-test/" + name} for index, name in enumerate(names, 1)]
+        self.plugin.poll_cloud_events()
+        self.assertEqual([value[1]["name"] for value in self.plugin._pending.values()], ["E1.mkv", "E2.mkv", "E10.mkv"])
+
+    def test_cloud_skip_reasons_distinguish_filters_from_not_ready(self):
+        item, storage = self.cloud_fixture()
+        self.assertEqual(self.plugin._cloud_item_skip_reason(item), "")
+        self.assertIn("监控目录", self.plugin._cloud_item_skip_reason({**item, "path": "/other/a.mkv"}))
+        self.assertIn("0", self.plugin._cloud_item_skip_reason({**item, "size": 0}))
+        self.plugin._min_file_size = "6B"
+        self.assertIn("最小文件大小", self.plugin._cloud_item_skip_reason(item))
+
+    def test_gb_threshold_initialization_and_canonical_save(self):
+        self.plugin.init_plugin({"folder": str(self.folder), "min_file_size_gb": "0.5"})
+        self.plugin._save_config()
+        saved = self.plugin.update_config.call_args.args[0]
+        self.assertEqual(self.module.minimum_file_bytes(saved["min_file_size"]), 512 * 1024 ** 2)
+        self.assertNotIn("min_file_size_gb", saved)
+        self.assertEqual(self.plugin.get_form()[1]["min_file_size_gb"], "0.5")
+
     def test_small_file_delete_without_hash_notification_or_output(self):
         path = self.create("small.mkv", b"hello")
         self.plugin._min_file_size = "6B"

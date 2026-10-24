@@ -29,16 +29,31 @@ def cloud_path(value):
 
 
 def fingerprint(item):
-    return [item.get(field) for field in ("storage", "fileid", "path", "name", "size", "modify_time")]
+    result = [item.get(field) for field in ("storage", "fileid", "path", "name", "size", "modify_time")]
+    if result[1] is not None:
+        result[1] = str(result[1])
+    return result
 
 
 def fingerprint_matches(saved, item):
-    return isinstance(saved, (list, tuple)) and len(saved) in {6, 7} and list(saved[:6]) == fingerprint(item)
+    if not isinstance(saved, (list, tuple)) or len(saved) not in {6, 7}:
+        return False
+    previous = list(saved[:6])
+    if previous[1] is not None:
+        previous[1] = str(previous[1])
+    return previous == fingerprint(item)
 
 
 def record_key(item):
-    identity = [item["storage"], item.get("fileid") or item["path"]]
+    identity = [item["storage"], str(item["fileid"]) if item.get("fileid") else item["path"]]
     return "cloud:" + hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
+
+
+def legacy_record_key(item):
+    identity = str(item.get("fileid") or "")
+    if not identity.isascii() or not identity.isdigit() or len(identity) > 64 or str(int(identity)) != identity:
+        return None
+    return "cloud:" + hashlib.sha256(repr([item["storage"], int(identity)]).encode("utf-8")).hexdigest()
 
 
 def allowed_item(item, storage, root):
@@ -82,12 +97,13 @@ class CloudStorage:
     def fresh(self, item):
         parent = PurePosixPath(item["path"]).parent.as_posix()
         matches = [entry for entry in self.list(parent)
-                   if entry.get("fileid") == item.get("fileid") and cloud_path(entry.get("path")) == cloud_path(item.get("path"))]
+                   if str(entry.get("fileid")) == str(item.get("fileid")) and item.get("fileid") not in (None, "") and cloud_path(entry.get("path")) == cloud_path(item.get("path"))]
         if len(matches) != 1:
             raise CloudError("网盘文件已移动、删除或查询结果不唯一，保留记录等待重试")
         return matches[0]
 
     def walk(self, root, recursive, stopping):
+        from .file_order import filename_order
         root = cloud_path(root)
         pending = [(root, 0)]
         visited = set()
@@ -100,15 +116,17 @@ class CloudStorage:
             visited.add(path)
             if depth > 64:
                 raise CloudError("网盘目录层级超过 64 层，请缩小扫描范围")
-            for item in self.list(path):
+            children = []
+            for item in sorted(self.list(path), key=lambda item: filename_order(item.get("name") or item["path"])):
                 if stopping.is_set():
                     raise InterruptedError("任务已停止")
                 if not allowed_item(item, self.storage, root):
                     continue
                 if item["type"] == "dir" and recursive:
-                    pending.append((cloud_path(item["path"]), depth + 1))
+                    children.append((cloud_path(item["path"]), depth + 1))
                 elif item["type"] == "file":
                     yield item
+            pending.extend(reversed(children))
             yield None
             if stopping.wait(.1):
                 raise InterruptedError("任务已停止")
