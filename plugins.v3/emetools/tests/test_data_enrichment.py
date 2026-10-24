@@ -1583,7 +1583,8 @@ class EnrichmentTests(unittest.TestCase):
             {'Path': str(self.strm), 'Size': 100, 'RunTimeTicks': 125000000}]}
         emby = httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(
             lambda request: httpx.Response(200, json=detail)))
-        with patch.object(self.enrichment, '_server', return_value=emby):
+        with patch.object(self.enrichment, '_server', return_value=emby), \
+             patch.object(self.enrichment, '_user_id', new_callable=AsyncMock, return_value='admin'):
             result = asyncio.run(self.enrichment._existing_mediainfo(item))
         self.assertEqual(result, {'Size': 100, 'RunTimeTicks': 125000000})
 

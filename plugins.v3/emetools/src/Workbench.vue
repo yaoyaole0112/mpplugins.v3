@@ -293,6 +293,10 @@ function scheduleEnrichmentPoll() {
 
 async function enrichmentAction(operation, extra = {}) {
   await work(async () => {
+    if (operation === 'repair_anomalies') {
+      if (!window.confirm('将重新预检当前所选电影/剧集，依次修复异常资料、分集信息与图片；正常字段不覆盖，待核实项目不盲目写入，无可靠来源时保留原值。可能调用已配置的 AI 或截帧。确认开始？')) return
+      extra = { ...extra, allow_mediainfo: window.confirm('若预检发现大小/时长缺失，是否允许仅对所选媒体探测，并在 Emby 空闲时备份数据库、短暂停止 Emby 写库后重启？取消则只修复资料与图片，不停机。') }
+    }
     if (operation === 'mediainfo_fill' && !window.confirm('即将探测文件信息，并在 Emby 空闲时备份数据库、短暂停止 Emby 写入后重启。播放或 Emby 任务进行中会拒绝执行。确认开始？')) return
     if (operation === 'batch_enrich' && !window.confirm(`将补全选中 ${extra.library_ids?.length || 0} 个媒体库的电影或剧集资料，剧集包含分集；可能调用 MoviePilot AI，耗时较长。确定开始？`)) return
     if (operation === 'batch_preview' && !window.confirm('将扫描所有 Emby 电视剧媒体库中的剧集，并修复缺失、疑似偏色或尺寸比例异常的图片；包括旧版本已修复但比例异常的图片，正常图片不覆盖。任务可能耗时很长，确定开始？')) return
@@ -1231,7 +1235,8 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           <div class="eme-enrich-search"><input v-model.trim="enrich.query" placeholder="输入电影或剧集名称（至少两个字）" @keyup.enter="searchEnrichment('series')" /><button class="eme-button secondary" :disabled="enrich.searching" @click="searchEnrichment('series')">搜索媒体</button></div>
           <div v-if="enrich.items.length" class="eme-enrich-results"><button v-for="item in enrich.items" :key="item.id" type="button" class="eme-enrich-result" :class="{ selected: enrich.selected?.id === item.id }" @click="enrich.selected = item">{{ item.name }} {{ item.year ? `(${item.year})` : '' }} · {{ item.type === 'Movie' ? '电影' : '剧集' }} · {{ item.server }}</button></div>
           <p v-if="enrich.selected" class="eme-hint">已选：{{ enrich.selected.name }} · {{ enrich.selected.server }}</p>
-          <div class="eme-inline eme-enrich-buttons"><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('overview_preview', { series_id: enrich.selected.id })">媒体信息预检</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('enrich', { series_id: enrich.selected.id, mode: 'all' })">补全{{ enrich.selected?.type === 'Movie' ? '电影' : '剧集' }}数据</button></div>
+          <div class="eme-inline eme-enrich-buttons"><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('overview_preview', { series_id: enrich.selected.id })">媒体信息预检</button><button class="eme-button primary" :disabled="busy || enrich.status.running || !enrich.selected" @click="enrichmentAction('repair_anomalies', { series_id: enrich.selected.id })">补全异常信息</button></div>
+          <p class="eme-hint">补全异常信息会先重新预检当前所选媒体，再串行修复异常资料、分集及图片；不覆盖正常字段。大小/时长写库需另外确认；音视频流等未能可靠修复的项目保留在复查结果中。</p>
           <p class="eme-hint">使用 MoviePilot 的 TMDB API Key 与 Emby 连接。请核对媒体匹配后再补全。</p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>批量补全数据</h3><p>按电影或电视剧媒体库补全资料、演职人员及中文简介；电视剧还会补全分集信息；缺失标题、简介由电视猫优先、百度百科兜底，耗时可能较长。</p></div><button class="eme-button secondary" :disabled="busy || enrich.catalogLoading || enrich.status.running" @click="loadEnrichLibraries">{{ enrich.catalogLoading ? '读取中…' : '刷新媒体库' }}</button></div>
@@ -1240,6 +1245,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
         <section class="eme-card">
           <div class="eme-card-heading"><div><h3>媒体信息预检</h3><p>检查电影/剧集简介/概要、类型、工作室/播出平台及演职员；逐分集检查标题、简介、演职员、图片缺失/疑似偏色/比例异常，以及电影和分集的大小、时长。只读 Emby，不写库、不调用 AI、不探测视频、不截帧；串行读取分集缩略图，大媒体库建议分批检查。预检不等于来源可补全性验证，未读取到的项目标记待核实，人物可能受服务器隐藏规则影响。</p></div><button class="eme-button secondary" :disabled="busy || enrich.status.running || !enrich.libraryIds.length" @click="enrichmentAction('overview_preview', { library_ids: [...enrich.libraryIds] })">预检所选媒体库</button></div>
           <template v-if="enrich.status.overview_preview">
+            <p v-if="enrich.status.repair_result" class="eme-message eme-warning">异常修复已结束：仍有 {{ enrich.status.repair_result.remaining }} 项疑似问题、{{ enrich.status.repair_result.unknown }} 项待核实，失败步骤 {{ enrich.status.repair_result.failures.length }} 个、复查读取失败 {{ enrich.status.repair_result.errors.length }} 处。{{ enrich.status.repair_result.media_skipped ? '大小/时长未授权停机写库，已跳过。' : '' }}请核对最新预检及运行日志，不代表全部补齐。</p>
             <p class="eme-hint">已检查 {{ enrich.status.overview_preview.checked }} 项媒体/分集，疑似问题 {{ enrich.status.overview_preview.issues }} 项，待核实 {{ enrich.status.overview_preview.unknown || 0 }} 项（可与问题项目重叠）。{{ enrich.status.overview_preview.truncated ? '仅展示前 200 项，统计包含全部已检查项目。' : '' }}</p>
             <p v-if="Object.keys(enrich.status.overview_preview.category_counts || {}).length" class="eme-hint">问题分类：{{ Object.entries(enrich.status.overview_preview.category_counts).map(([field, count]) => `${field} ${count} 项`).join(' · ') }}</p>
             <p v-for="(message, index) in enrich.status.overview_preview.errors" :key="index" class="eme-message eme-warning">{{ message }}</p>

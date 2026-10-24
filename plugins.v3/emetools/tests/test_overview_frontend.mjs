@@ -20,8 +20,26 @@ test('media precheck action is to the left of enrichment in the same row for bot
   assert.ok(!source.includes('简介质量预检（不写入）'))
   const row = source.match(/<div class="eme-inline eme-enrich-buttons">[^\n]+<\/div>/)?.[0]
   assert.ok(row)
-  assert.ok(row.indexOf('>媒体信息预检</button>') < row.indexOf('>补全{{'))
+  assert.ok(row.indexOf('>媒体信息预检</button>') < row.indexOf('>补全异常信息</button>'))
   assert.equal((row.match(/<button /g) || []).length, 2)
+})
+
+test('anomaly repair uses a fresh selected-media action and separate opt-in for database downtime', async () => {
+  assert.ok(source.includes("enrichmentAction('repair_anomalies', { series_id: enrich.selected.id })"))
+  assert.ok(backend.includes('start_repair_anomalies(action.series_id, action.allow_mediainfo)'))
+  const calls = []
+  const confirmations = [true, false]
+  const context = vm.createContext({ work: callback => callback(), window: { confirm: () => confirmations.shift() },
+    post: async (path, payload) => { calls.push({ path, payload }); return { started: true } },
+    refreshEnrichment: async () => {}, scheduleEnrichmentPoll: () => {}, notice: { value: '' } })
+  vm.runInContext(source.slice(source.indexOf('async function enrichmentAction('), source.indexOf('function togglePreviewEpisode(')), context)
+  await context.enrichmentAction('repair_anomalies', { series_id: 'Q4::selected' })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].payload.series_id, 'Q4::selected')
+  assert.equal(calls[0].payload.allow_mediainfo, false)
+  context.window.confirm = () => false
+  await context.enrichmentAction('repair_anomalies', { series_id: 'Q4::other' })
+  assert.equal(calls.length, 1)
 })
 
 test('precheck shows per-field results and distinguishes unknown from normal', () => {

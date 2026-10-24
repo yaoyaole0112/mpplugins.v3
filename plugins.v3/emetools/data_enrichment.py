@@ -1162,6 +1162,113 @@ class DataEnrichment:
             libraries = self._selected_tv_libraries(library_ids)
         return self._begin("媒体信息预检", self._overview_preview, series_id, libraries, self.options())
 
+    def start_repair_anomalies(self, series_id, allow_mediainfo=False):
+        name, _ = self._split(series_id)
+        if name not in self._services():
+            raise ValueError("所选 Emby 服务器不可用")
+        return self._begin("补全异常信息", self._repair_anomalies, series_id, self.options(), allow_mediainfo)
+
+    async def _repair_anomalies(self, series_id, options, allow_mediainfo=False):
+        collected = {}
+        with self.lock:
+            self.state["repair_result"] = None
+            self.state["preview_repaired"] = []
+        await self._overview_preview(series_id, None, options, collected)
+        if self.state["overview_preview"]["errors"]:
+            raise ValueError("所选媒体预检未完成，未执行修复，请检查预检读取错误后重试")
+        if series_id not in collected:
+            raise ValueError("所选媒体已失效或不再是电影/剧集，未执行修复，请重新搜索选择")
+        field_map = {"标题": "Name", "分集标题": "Name", "简介/概要": "Overview", "分集简介": "Overview",
+                     "类型": "Genres", "工作室/播出平台": "Studios", "演职员": "People", "分集演职员": "People"}
+        scope, images, media = {}, [], []
+        for key, (entry, checks) in collected.items():
+            problems = {check["field"]: check for check in checks if check["status"] in {"缺失", "疑似异常"}}
+            fields = {field_map[field] for field in problems if field in field_map}
+            if fields:
+                scope[key] = fields
+            if "分集图片" in problems:
+                detail = problems["分集图片"]
+                images.append((key, {"path": entry.get("Path"), "status": "missing" if detail["status"] == "缺失" else "candidate",
+                    "series": entry.get("SeriesName"), "name": entry.get("Name"),
+                    "season": entry.get("ParentIndexNumber"), "episode": entry.get("IndexNumber")}))
+            if "媒体信息" in problems:
+                sources = [source for source in entry.get("MediaSources") or [] if isinstance(source, dict)] or [{}]
+                source = next((value for value in sources if value.get("Type") in (None, "Default")), sources[0])
+                detail = problems["媒体信息"]["detail"]
+                media.append({"id": str(entry["Id"]), "server": key.split("::", 1)[0], "name": entry.get("Name"),
+                    "path": entry.get("Path") or source.get("Path"), "missing_size": "大小" in detail,
+                    "missing_runtime": "时长" in detail})
+        failures = []
+        try:
+            self._repair_scope = scope
+            self._repair_failures = failures
+            if scope:
+                self.log("[1/3] 修复异常资料与分集字段；正常字段不覆盖，遵循补全设置的 AI 范围")
+                repair_options = {**options, "episode_cast": options["episode_cast"] or any(
+                    "People" in fields and key != series_id for key, fields in scope.items())}
+                active_fields = set().union(*scope.values())
+                for option, field in (("ai_title", "Name"), ("ai_overview", "Overview"), ("ai_credits", "People")):
+                    repair_options[option] = options[option] and field in active_fields
+                name, identifier = self._split(series_id)
+                parent_fields = scope.get(series_id, set())
+                episode_fields = [fields for key, fields in scope.items() if key != series_id]
+                parent = collected.get(series_id, ({}, []))[0]
+                needs_cast = "People" in parent_fields or any("People" in fields for fields in episode_fields)
+                if episode_fields:
+                    mode = "episodes" if not parent_fields and (not needs_cast or parent.get("People")) else "all"
+                else:
+                    mode = "credits" if parent_fields == {"People"} else "all" if needs_cast else "metadata"
+                try:
+                    await self._enrich(name, identifier, mode, repair_options)
+                except Exception as error:
+                    failures.append(f"资料修复：{type(error).__name__}")
+                    self.log("资料修复未全部完成，继续检查其他类别；详情见逐项补全记录")
+            if images:
+                self.log(f"[2/3] 串行修复 {len(images)} 集异常图片，正常图片不覆盖")
+                image_result = {"ok": 0, "fail": 0}
+                for target in images:
+                    with self.lock:
+                        self.state["preview_result"] = None
+                    try:
+                        await self._repair_preview(series_id, [target], False, rescan=False)
+                    except Exception as error:
+                        failures.append(f"图片 {target[0]}：{type(error).__name__}")
+                        if not self.state.get("preview_result"):
+                            image_result["fail"] += 1
+                    current = self.state.get("preview_result") or {}
+                    for field in image_result:
+                        image_result[field] += current.get(field, 0)
+                with self.lock:
+                    self.state["preview_result"] = image_result
+            if media:
+                if allow_mediainfo:
+                    self.log(f"[3/3] 仅探测所选媒体的 {len(media)} 项大小/时长；不触发全库 Extract/Persist")
+                    safe_media = []
+                    for entry in media:
+                        try:
+                            entry["path"] = self._safe_strm(entry["path"])
+                            safe_media.append(entry)
+                        except (ValueError, TypeError):
+                            failures.append(f"大小/时长 {entry['id']}：非可安全读取的本地 STRM")
+                            self.log(f"条目 {entry['id']} 不满足本地 STRM 安全读取条件，保留原值，继续其余条目")
+                    try:
+                        if safe_media:
+                            await self._fill_mediainfo(selection=safe_media)
+                    except Exception as error:
+                        failures.append(f"大小/时长修复：{type(error).__name__}")
+                else:
+                    self.log("[3/3] 未授权短暂停止 Emby 写库，跳过大小/时长；其余修复继续")
+        finally:
+            self._repair_scope = None
+            self._repair_failures = None
+        self.log("正在重新预检所选媒体，核实修复结果；无可靠来源的内容不编造")
+        await self._overview_preview(series_id, None, options)
+        result = self.state["overview_preview"]
+        with self.lock:
+            self.state["repair_result"] = {"remaining": result["issues"], "unknown": result["unknown"],
+                "failures": failures, "errors": list(result["errors"]), "media_skipped": len(media) if not allow_mediainfo else 0}
+        self.log(f"异常修复流程结束：仍有 {result['issues']} 项疑似问题、{result['unknown']} 项待核实；失败步骤 {len(failures)} 个、复查读取失败 {len(result['errors'])} 处。请查看最新预检结果，不代表全部补齐")
+
     async def _precheck_image(self, emby, entry):
         if "ImageTags" not in entry:
             return {"field": "分集图片", "status": "待核实", "detail": "接口未返回图片标记，无法判定缺图"}
@@ -1191,7 +1298,7 @@ class DataEnrichment:
         except (httpx.HTTPError, OSError, ValueError, Image.DecompressionBombError) as error:
             return {"field": "分集图片", "status": "待核实", "detail": f"图片读取失败（{type(error).__name__}），不判定为正常"}
 
-    async def _overview_preview(self, series_id, libraries, options):
+    async def _overview_preview(self, series_id, libraries, options, collected=None):
         result = {"items": [], "checked": 0, "issues": 0, "unknown": 0, "errors": [], "truncated": False,
                   "category_counts": {}}
         self.log("媒体信息预检串行读取 Emby 资料与分集缩略图；不写库、不探测视频、不截帧、不调用 AI，大媒体库建议分批检查")
@@ -1233,6 +1340,8 @@ class DataEnrichment:
                         checks = media_checks(entry, options, episode=episode, duplicated=duplicated)
                         if episode:
                             checks.append(await self._precheck_image(emby, entry))
+                        if collected is not None:
+                            collected[f"{name}::{entry.get('Id')}"] = (entry, checks)
                         problems = [check for check in checks if check["status"] in {"缺失", "疑似异常"}]
                         uncertain = [check for check in checks if check["status"] == "待核实"]
                         for check in problems:
@@ -1527,7 +1636,7 @@ class DataEnrichment:
                 raise ValueError("插件已停止，请刷新页面")
             if self.state["running"] or not ENRICHMENT_SLOT.acquire(blocking=False):
                 raise ValueError("已有数据补全任务正在运行，请等待完成")
-            self.state.update(running=True, done=False, task=task, error="", log=[])
+            self.state.update(running=True, done=False, task=task, error="", log=[], repair_result=None)
             if task in ("分集图片修复", "批量扫描与修复分集图片"):
                 self.state["preview_repaired"] = []
 
@@ -1703,7 +1812,7 @@ class DataEnrichment:
         issues = overview_issues(update.get("Overview"), options["overview_movie_min"]) if mode != "credits" else []
         if not await self._save_item(emby, identifier, item, update, user=user,
                                      audit={"server": server, "source": overview_source, "issues": issues}):
-            self.log("电影资料未变化，跳过重复写入")
+            self.log("电影资料未确认修复，保留失败记录，继续其他类别" if self._verification_detail else "电影资料未变化，跳过重复写入")
             return
         if self._verification_incomplete:
             self.log("电影资料已提交；演职回读不完整，请查看逐项补全记录，未确认全部人员已保存")
@@ -1781,10 +1890,45 @@ class DataEnrichment:
         self.log(f"Emby 条目 {identifier} 回读核验未通过，{self._verification_detail}；不重放写入")
         return False
 
+    @staticmethod
+    def _scoped_update(original, update, fields):
+        scoped = dict(original)
+        for field in fields:
+            if update.get(field) is not None:
+                scoped[field] = update[field]
+        locks = set(original.get("LockedFields") or [])
+        proposed = set(update.get("LockedFields") or [])
+        for field, lock in (("Overview", "Overview"), ("People", "Cast")):
+            if field in fields:
+                locks.discard(lock)
+                if lock in proposed:
+                    locks.add(lock)
+        if locks != set(original.get("LockedFields") or []):
+            scoped["LockedFields"] = sorted(locks)
+        return scoped
+
     async def _save_item(self, emby, identifier, original, update, *, user=None, audit=None):
+        try:
+            return await self._save_item_impl(emby, identifier, original, update, user=user, audit=audit)
+        except (ValueError, httpx.HTTPError) as error:
+            failures = getattr(self, "_repair_failures", None)
+            if failures is None:
+                raise
+            failures.append(f"资料 {identifier}：{type(error).__name__}")
+            self._verification_detail = f"写入/核验失败：{type(error).__name__}"
+            self.log(f"条目 {identifier} 写入/核验失败，未重放写入，继续其余异常条目；详情见逐项记录")
+            return False
+
+    async def _save_item_impl(self, emby, identifier, original, update, *, user=None, audit=None):
         self._ensure_active()
         self._verification_detail = ""
         self._verification_incomplete = False
+        scope = getattr(self, "_repair_scope", None)
+        if scope is not None:
+            fields = scope.get(f"{(audit or {}).get('server')}::{identifier}", set())
+            if not fields:
+                return False
+            update = self._scoped_update(original, update, fields)
         changed_fields = [field for field, value in update.items() if field != "UserData" and value is not None and
                           self._metadata_value(field, original.get(field)) != self._metadata_value(field, value)]
         if not changed_fields:
@@ -1842,7 +1986,7 @@ class DataEnrichment:
 
     async def _enrich_impl(self, name, identifier, mode, options=None):
         options = validate_enrich_config(options or self.options())
-        if mode == "all":
+        if mode == "all" and getattr(self, "_repair_scope", None) is None:
             options.update(episode_cast=True, ai_title=True, ai_credits=True)
         api_key = str(getattr(settings, "TMDB_API_KEY", "") or "")
         if not api_key:
@@ -1979,8 +2123,10 @@ class DataEnrichment:
                     self.log("剧集资料已提交；演职回读不完整，请查看逐项补全记录，继续分集补全")
                 else:
                     self.log({"all": "剧集元数据及演职人员已更新", "metadata": "剧集资料已更新",
-                              "credits": "剧集演职人员已更新"}[mode] if saved else "剧集资料未变化，跳过重复写入")
-                if mode == "credits" and options["episode_cast"]:
+                              "credits": "剧集演职人员已更新"}[mode] if saved else
+                             "剧集资料未确认修复，保留失败记录，继续分集与其他类别" if self._verification_detail else
+                             "剧集资料未变化，跳过重复写入")
+                if mode == "credits" and options["episode_cast"] and getattr(self, "_repair_scope", None) is None:
                     await self._sync_episode_people(emby, user, identifier, people)
             if mode in ("all", "episodes"):
                 episodes = {"Items": []}
@@ -2002,8 +2148,20 @@ class DataEnrichment:
                 changed = 0
                 missing_titles = missing_overviews = 0
                 for episode in episodes.get("Items", []):
+                    scope = getattr(self, "_repair_scope", None)
+                    if scope is not None and f"{name}::{episode['Id']}" not in scope:
+                        continue
                     season, number = episode.get("ParentIndexNumber"), episode.get("IndexNumber")
                     if season is None or number is None: continue
+                    if scope is not None and scope.get(f"{name}::{episode['Id']}") == {"People"}:
+                        if series_people:
+                            full = await self._item(emby, user, episode["Id"])
+                            changed += await self._save_item(emby, episode["Id"], full,
+                                {**full, "People": series_people}, user=user,
+                                audit={"server": name, "source": "整剧演职资料"})
+                        else:
+                            self.log(f"S{season:02d}E{number:02d} 暂无可靠整剧演职资料，保留原值")
+                        continue
                     if season not in seasons:
                         data = await self._tmdb_json(tmdb, f"tv/{tmdb_id}/season/{season}",
                             {"api_key": api_key, "language": "zh-CN"})
@@ -2017,7 +2175,8 @@ class DataEnrichment:
                         if options["ai_enabled"] and (options["ai_title"] or options["ai_overview"]):
                             values = {}
                             emby_numbers = {entry.get("IndexNumber") for entry in episodes.get("Items", [])
-                                            if entry.get("ParentIndexNumber") == season}
+                                            if entry.get("ParentIndexNumber") == season and (scope is None or
+                                                "Name" in scope.get(f"{name}::{entry['Id']}", set()))}
                             for number_key, entry in seasons[season].items():
                                 if number_key not in emby_numbers or not isinstance(number_key, int):
                                     continue
@@ -2057,6 +2216,8 @@ class DataEnrichment:
                         if season not in web_seasons:
                             numbers = {number}
                             for entry in episodes.get("Items", []):
+                                if scope is not None and not ({"Name", "Overview"} & scope.get(f"{name}::{entry['Id']}", set())):
+                                    continue
                                 episode_number = entry.get("IndexNumber")
                                 if entry.get("ParentIndexNumber") != season or type(episode_number) is not int:
                                     continue
@@ -2322,7 +2483,8 @@ class DataEnrichment:
         fields = {}
         try:
             async with self._server(item["server"]) as emby:
-                detail = await self._json(emby, f"Items/{item['id']}", {"Fields": "Path,Size,MediaSources"})
+                user = await self._user_id(item["server"], emby)
+                detail = await self._item(emby, user, item["id"])
             sources = [source for source in detail.get("MediaSources") or []
                        if source.get("Path") == item["path"]]
             if detail.get("Path") == item["path"]:
@@ -2339,20 +2501,22 @@ class DataEnrichment:
             self.log(f"读取 Emby 已有媒体信息失败：{type(error).__name__}，继续视频探测")
         return fields
 
-    async def _fill_mediainfo(self):
+    async def _fill_mediainfo(self, selection=None):
         # Collect probe data before interrupting Emby. Never guess a database path.
         updates = {}
-        servers = {item["server"] for item in self._mi_selection}
+        scoped = selection is not None
+        selection = list(selection if scoped else self._mi_selection)
+        servers = {item["server"] for item in selection}
         if len(servers) != 1:
             raise ValueError("仅支持单台 Emby 服务器的安全写库，未修改数据库")
         name = next(iter(servers))
-        if any(item["missing_size"] and item["missing_runtime"] for item in self._mi_selection):
+        if not scoped and any(item["missing_size"] and item["missing_runtime"] for item in selection):
             async with self._server(name) as emby:
                 await self._scheduled_task(emby, SHENYI_EXTRACT, "Extract")
-        for index, item in enumerate(self._mi_selection, 1):
+        for index, item in enumerate(selection, 1):
             self._ensure_active()
             try:
-                self.log(f"[{index}/{len(self._mi_selection)}] 正在读取 {os.path.basename(item['path'])[:120]}；缺失：" +
+                self.log(f"[{index}/{len(selection)}] 正在读取 {os.path.basename(item['path'])[:120]}；缺失：" +
                          "、".join(label for key, label in (("missing_size", "大小"), ("missing_runtime", "时长"))
                                    if item[key]))
                 fields = await self._existing_mediainfo(item)
@@ -2360,6 +2524,9 @@ class DataEnrichment:
                            "missing_runtime": item["missing_runtime"] and not fields.get("RunTimeTicks")}
                 if pending["missing_size"] or pending["missing_runtime"]:
                     fields.update(await self._probe(pending))
+                if scoped:
+                    fields = {key: fields[key] for key, missing in (("Size", "missing_size"), ("RunTimeTicks", "missing_runtime"))
+                              if item[missing] and type(fields.get(key)) is int and fields[key] > 0}
                 if (item["missing_size"] and fields.get("Size") or
                         item["missing_runtime"] and fields.get("RunTimeTicks")):
                     updates.setdefault(item["server"], {})[item["id"]] = fields
@@ -2368,13 +2535,13 @@ class DataEnrichment:
                         remaining.append("大小")
                     if item["missing_runtime"] and not fields.get("RunTimeTicks"):
                         remaining.append("时长")
-                    self.log(f"[{index}/{len(self._mi_selection)}] 探测成功" +
+                    self.log(f"[{index}/{len(selection)}] 探测成功" +
                              (f"，仍缺{'、'.join(remaining)}" if remaining else ""))
                 else:
-                    self.log(f"[{index}/{len(self._mi_selection)}] 未获取到缺失的大小或时长，跳过写库")
+                    self.log(f"[{index}/{len(selection)}] 未获取到缺失的大小或时长，跳过写库")
             except (ValueError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
-                self.log(f"[{index}/{len(self._mi_selection)}] 探测失败：{type(error).__name__}")
-            if index % 20 == 0: self.log(f"已探测 {index}/{len(self._mi_selection)} 项")
+                self.log(f"[{index}/{len(selection)}] 探测失败：{type(error).__name__}")
+            if index % 20 == 0: self.log(f"已探测 {index}/{len(selection)} 项")
         if not updates:
             self.log("没有探测到可安全写入的文件大小或时长")
             return
@@ -2399,7 +2566,8 @@ class DataEnrichment:
                     await self._json(emby, "System/Info/Public")
                     await self._json(emby, "Items", {"IncludeItemTypes": "Movie,Episode",
                         "Recursive": "true", "Fields": "Path,Size,MediaSources", "Limit": 1})
-                    await self._scheduled_task(emby, SHENYI_PERSIST, "Persist")
+                    if not scoped:
+                        await self._scheduled_task(emby, SHENYI_PERSIST, "Persist")
                     ready = True
                     break
             except httpx.HTTPError:
@@ -2409,6 +2577,8 @@ class DataEnrichment:
             with self.lock:
                 self.state["mediainfo"] = {**(self.state.get("mediainfo") or {}),
                     "updated_count": changed, "recheck_pending": True}
+            return
+        if scoped:
             return
         try:
             await self._check_mediainfo()
@@ -2582,7 +2752,7 @@ class DataEnrichment:
             finally:
                 if os.path.exists(temporary): os.unlink(temporary)
 
-    async def _repair_preview(self, series_id, targets, force):
+    async def _repair_preview(self, series_id, targets, force, rescan=True):
         name, _ = self._split(series_id)
         completed, failed = 0, 0
         for position, (key, target) in enumerate(targets, 1):
@@ -2590,6 +2760,11 @@ class DataEnrichment:
             path = self._safe_strm(target["path"])
             thumb = path[:-5] + "-thumb.jpg"
             status = self._preview_status(key, thumb)
+            if not rescan:
+                if status in {"keep", "fixed"}:
+                    status = "pending"
+                elif target.get("status") == "missing" and status in {"candidate", "size"}:
+                    target = {**target, "status": status}
             if target.get("status") == "missing" and status not in {"missing", "pending"}:
                 self.log(f"[{position}/{len(targets)}] 缩略图已由其他任务生成，跳过覆盖")
                 continue
@@ -2641,9 +2816,10 @@ class DataEnrichment:
         with self.lock:
             self.state["preview_result"] = {"ok": completed, "fail": failed}
         self.log(f"预览图修复完成：成功 {completed} 集，失败 {failed} 集")
-        try:
-            await self.scan_preview(series_id)
-        except httpx.HTTPError:
-            self.log("刷新分集状态失败，请点击扫描分集重试")
+        if rescan:
+            try:
+                await self.scan_preview(series_id)
+            except httpx.HTTPError:
+                self.log("刷新分集状态失败，请点击扫描分集重试")
         if failed:
             raise ValueError(f"{failed} 集修复失败，请查看运行进度")
