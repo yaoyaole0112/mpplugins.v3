@@ -220,6 +220,49 @@ class TransferPluginTest(unittest.TestCase):
         self.assertEqual(httpx.Client.call_args.kwargs["proxy"], "http://proxy:7890")
         self.assertTrue(httpx.Client.return_value.close.called)
 
+    def test_read_timeout_warning_is_coalesced_and_recovery_clears_error(self):
+        plugin = self.module.P115Transfer()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxy = Mock(return_value=None)
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.ReadTimeout = type("ReadTimeout", (Exception,), {})
+        httpx.HTTPStatusError = type("HTTPStatusError", (Exception,), {})
+        httpx.Timeout = Mock(return_value=object())
+        httpx.Limits = Mock(return_value=object())
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=[{}, httpx.ReadTimeout(), httpx.ReadTimeout(), []])
+        stop = Mock()
+        stop.is_set.side_effect = [False, False, False, True]
+        with patch.dict(sys.modules, {"httpx": httpx}), patch.object(self.module, "logger") as log:
+            plugin._poll_bot(stop)
+        self.assertEqual(log.warning.call_count, 1)
+        self.assertEqual([call.args[0] for call in stop.wait.call_args_list], [30, 60])
+        self.assertEqual(httpx.Client.call_count, 3)
+        self.assertEqual(plugin._bot_error, "")
+        httpx.Timeout.assert_called_once_with(connect=15, read=45, write=15, pool=15)
+
+    def test_http_status_error_records_status_without_secret_url(self):
+        plugin = self.module.P115Transfer()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxy = Mock(return_value=None)
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.ReadTimeout = type("ReadTimeout", (Exception,), {})
+        httpx.HTTPStatusError = type("HTTPStatusError", (Exception,), {})
+        httpx.Timeout = Mock(return_value=object())
+        httpx.Limits = Mock(return_value=object())
+        httpx.Client = MagicMock()
+        error = httpx.HTTPStatusError("secret-token-in-url")
+        error.response = types.SimpleNamespace(status_code=502)
+        plugin._bot_call = Mock(side_effect=error)
+        stop = Mock()
+        stop.is_set.side_effect = [False, True]
+        with patch.dict(sys.modules, {"httpx": httpx}):
+            plugin._poll_bot(stop)
+        self.assertIn("HTTP 502", plugin._bot_error)
+        self.assertNotIn("secret-token", plugin._bot_error)
+
     def test_ed2k_spaces_encoded_forward_and_order(self):
         from urllib.parse import quote
 

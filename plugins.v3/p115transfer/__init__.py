@@ -101,7 +101,7 @@ class P115Transfer(_PluginBase):
     plugin_name = "115转存/离线"
     plugin_desc = "通过 MoviePilot Telegram Bot 接收 115分享、magnet、ed2k 或 torrent 链接并转存到指定115目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.2.1"
+    plugin_version = "1.2.2"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "p115transfer_"
@@ -348,7 +348,7 @@ class P115Transfer(_PluginBase):
         if hasattr(self, "_stop"):
             self._stop.set()
         if getattr(self, "_worker", None) and self._worker.is_alive():
-            self._worker.join(timeout=35)
+            self._worker.join(timeout=55)
             if self._worker.is_alive():
                 raise RuntimeError("旧Bot任务尚未停止，请稍后重试")
         self._worker = None
