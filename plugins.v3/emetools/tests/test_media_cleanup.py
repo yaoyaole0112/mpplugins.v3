@@ -258,6 +258,56 @@ class MediaCleanupTests(unittest.TestCase):
             self.engine.delete([str(self.bad)])
         self.assertTrue(self.bad.exists())
 
+    def test_ungrouped_season_strm_does_not_invalidate_unchanged_inventory(self):
+        season = self.folder / 'Season 2'
+        season.mkdir()
+        good = season / 'Show.S02E01.2160p.strm'
+        bad = season / 'Show.S02E01.720p.strm'
+        ignored = season / '.mkv(1).strm'
+        good.write_text('https://example.com/redirect115/111', encoding='utf-8')
+        bad.write_text('https://example.com/redirect115/222', encoding='utf-8')
+        ignored.write_text('unrecognized', encoding='utf-8')
+        self.engine.scan()
+        self.assertIn(ignored.name, self.engine._scan_inventory[str(season)])
+        self.assertNotIn(str(ignored), self.engine._snapshot)
+        with patch('emetools.media_cleanup.P115Client') as client:
+            client.return_value.__enter__.return_value.delete_files.return_value = {'state': True}
+            result = self.engine.delete([str(bad)])
+        self.assertEqual(len(result['deleted']), 1)
+        self.assertFalse(result['failures'])
+        self.assertTrue(ignored.exists())
+        self.assertTrue(good.exists())
+
+    def test_unchanged_excluded_symlink_is_not_a_directory_change(self):
+        link = self.folder / 'link.strm'
+        link.symlink_to(self.good)
+        self.engine.scan()
+        self.assertNotIn(str(link), self.engine._snapshot)
+        with patch('emetools.media_cleanup.P115Client') as client:
+            client.return_value.__enter__.return_value.delete_files.return_value = {'state': True}
+            result = self.engine.delete([str(self.bad)])
+        self.assertEqual(len(result['deleted']), 1)
+        self.assertTrue(link.is_symlink())
+
+    def test_replacing_candidate_with_symlink_still_prevents_cloud_deletion(self):
+        self.engine.scan()
+        self.bad.unlink()
+        self.bad.symlink_to(self.good)
+        with patch('emetools.media_cleanup.P115Client') as client:
+            with self.assertRaises(ValueError):
+                self.engine.delete([str(self.bad)])
+        client.assert_not_called()
+
+    def test_removing_strm_after_scan_still_prevents_cloud_deletion(self):
+        other = self.folder / 'Movie.480p.strm'
+        other.write_text('other', encoding='utf-8')
+        self.engine.scan()
+        other.unlink()
+        with patch('emetools.media_cleanup.P115Client') as client:
+            with self.assertRaisesRegex(ValueError, '版本已变化'):
+                self.engine.delete([str(self.bad)])
+        client.assert_not_called()
+
     def test_cloud_failure_keeps_local(self):
         self.engine.scan()
         with patch("emetools.media_cleanup.P115Client") as client:

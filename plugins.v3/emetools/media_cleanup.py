@@ -362,6 +362,7 @@ class MediaCleanup:
                 raise ValueError("STRM 根目录不存在")
             paths = self._scope_paths(root, library_ids)
             grouped = {}
+            inventory = {}
             seen_folders = set()
             for scope in paths:
                 for folder, dirs, files in os.walk(scope, followlinks=False):
@@ -373,6 +374,9 @@ class MediaCleanup:
                         if not name.lower().endswith(".strm"):
                             continue
                         path = os.path.join(folder, name)
+                        stat = os.stat(path, follow_symlinks=False)
+                        signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                        inventory.setdefault(folder, {})[name] = signature
                         if os.path.islink(path):
                             continue
                         # A library root may contain unrelated loose films: do not
@@ -387,10 +391,9 @@ class MediaCleanup:
                         if info["effect"] == "dovi" and extra.get("effect") != "dovi":
                             extra.pop("effect", None)
                         info.update(extra)
-                        stat = os.stat(path, follow_symlinks=False)
                         grouped.setdefault((folder, key), []).append({"file_path": path, "file_name": name,
                             "size": 0, "bitrate": 0, "item_id": "", **info,
-                            "signature": (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)})
+                            "signature": signature})
             results, snapshot = [], {}
             rules = validate_rules(self.config["rules"])
             for (_, name), versions in grouped.items():
@@ -411,9 +414,7 @@ class MediaCleanup:
                                 "total_space_savings": sum(version["size"] for version in inferior)})
             results.sort(key=_result_sort_key)
             self._snapshot = snapshot
-            self._scan_inventory = {folder: {item["file_name"]: item["signature"] for versions in grouped.values()
-                                             for item in versions if os.path.dirname(item["file_path"]) == folder}
-                                    for folder, _ in grouped}
+            self._scan_inventory = inventory
             self._scan_rules = copy.deepcopy(rules)
             self._scan_root = root
             self.result = {"total_scanned": sum(map(len, grouped.values())), "duplicate_groups": len(results),
@@ -464,11 +465,13 @@ class MediaCleanup:
                 inventory = self._scan_inventory.get(folder, {})
                 current = {name for name in os.listdir(folder) if name.lower().endswith(".strm")}
                 if current != set(inventory):
+                    logger.warning("媒体增强 媒体清理：目录快照不一致，新增STRM=%d，移除STRM=%d；未执行本批删除",
+                                   len(current - set(inventory)), len(set(inventory) - current))
                     raise ValueError("媒体目录中的版本已变化，请重新扫描")
                 for name, signature in inventory.items():
                     member = os.path.join(folder, name)
                     st = os.stat(member, follow_symlinks=False)
-                    if os.path.islink(member) or (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != signature:
+                    if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != signature:
                         raise ValueError("媒体版本已变化，请重新扫描")
                 best = self._snapshot.get(item["best_path"])
                 if not best or os.path.islink(best["file_path"]) or os.path.commonpath(
