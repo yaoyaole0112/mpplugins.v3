@@ -154,6 +154,10 @@ class TransferPluginTest(unittest.TestCase):
         plugin._resolve_bot_proxy = Mock(return_value=None)
         httpx = types.ModuleType("httpx")
         httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.ReadTimeout = type("ReadTimeout", (Exception,), {})
+        httpx.HTTPStatusError = type("HTTPStatusError", (Exception,), {})
+        httpx.Timeout = Mock(return_value=object())
+        httpx.Limits = Mock(return_value=object())
         httpx.Client = MagicMock()
         plugin._bot_call = Mock(side_effect=[httpx.ConnectError("secret-token"), {}, []])
         stop = Mock()
@@ -170,6 +174,8 @@ class TransferPluginTest(unittest.TestCase):
         plugin._resolve_bot_proxy = Mock(return_value=None)
         httpx = types.ModuleType("httpx")
         httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Timeout = Mock(return_value=object())
+        httpx.Limits = Mock(return_value=object())
         httpx.Client = MagicMock()
         plugin._bot_call = Mock(side_effect=httpx.ConnectError("must-not-leak"))
         stop = Mock()
@@ -184,6 +190,8 @@ class TransferPluginTest(unittest.TestCase):
         plugin.get_data = Mock(return_value=0)
         plugin._resolve_bot_proxy = Mock(return_value=None)
         httpx = types.ModuleType("httpx")
+        httpx.Timeout = Mock(return_value=object())
+        httpx.Limits = Mock(return_value=object())
         httpx.Client = MagicMock()
         plugin._bot_call = Mock(side_effect=self.module.BotConfigurationError())
         stop = Mock()
@@ -192,6 +200,25 @@ class TransferPluginTest(unittest.TestCase):
             plugin._poll_bot(stop)
         stop.wait.assert_not_called()
         self.assertIn("认证", plugin._bot_error)
+
+    def test_reconnect_reuses_no_stale_http_connection(self):
+        plugin = self.module.P115Transfer()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxy = Mock(return_value="http://proxy:7890")
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Timeout = Mock(return_value=object())
+        httpx.Limits = Mock(return_value=object())
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=[httpx.ConnectError(), {}, []])
+        stop = Mock()
+        stop.is_set.side_effect = [False, False, True]
+        with patch.dict(sys.modules, {"httpx": httpx}):
+            plugin._poll_bot(stop)
+        self.assertEqual(httpx.Client.call_count, 2)
+        self.assertEqual(httpx.Client.call_args.kwargs["timeout"], httpx.Timeout.return_value)
+        self.assertEqual(httpx.Client.call_args.kwargs["proxy"], "http://proxy:7890")
+        self.assertTrue(httpx.Client.return_value.close.called)
 
     def test_ed2k_spaces_encoded_forward_and_order(self):
         from urllib.parse import quote

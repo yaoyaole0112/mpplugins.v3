@@ -101,7 +101,7 @@ class P115Transfer(_PluginBase):
     plugin_name = "115转存/离线"
     plugin_desc = "通过 MoviePilot Telegram Bot 接收 115分享、magnet、ed2k 或 torrent 链接并转存到指定115目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "p115transfer_"
@@ -400,43 +400,76 @@ class P115Transfer(_PluginBase):
 
         offset_key = "bot_offset_" + hashlib.sha256(self._bot_token.encode()).hexdigest()[:16]
         offset = int(self.get_data(offset_key) or 0)
+        client = None
         try:
             proxy = self._resolve_bot_proxy()
             logger.info("115转存/离线：Bot连接方式：%s", self._bot_proxy_source)
-            with httpx.Client(timeout=25, proxy=proxy) as client:
-                webhook_checked = False
-                failures = 0
-                while not stop.is_set():
-                    try:
-                        if not webhook_checked:
-                            info = self._bot_call(client, "getWebhookInfo", {})
-                            if info.get("url"):
-                                self._bot_error = "Bot已配置webhook，请使用独立Bot；不会自动删除webhook"
-                                logger.warning("115转存/离线：%s", self._bot_error)
-                                return
-                            webhook_checked = True
-                        updates = self._bot_call(client, "getUpdates", {"offset": offset, "timeout": 10, "allowed_updates": ["message"]})
-                        if failures:
-                            logger.info("115转存/离线：Bot连接已恢复，继续监听")
-                        failures = 0
-                        self._bot_error = ""
-                        for update in updates:
-                            if stop.is_set():
-                                return
-                            offset = int(update["update_id"]) + 1
-                            self.save_data(offset_key, offset)
-                            self._bot_message(client, update.get("message") or {})
-                    except BotConfigurationError:
-                        self._bot_error = "Bot认证失败或接收冲突，请检查Token及其他接收程序"
-                        logger.warning("115转存/离线：%s", self._bot_error)
-                        return
-                    except Exception as exc:
-                        failures += 1
-                        delay = min(300, 30 * 2 ** min(failures - 1, 4))
-                        reason = "连接失败，请检查容器到Telegram的DNS、代理及网络连通性" if isinstance(exc, httpx.ConnectError) else "请求未完成，请检查网络或代理"
-                        self._bot_error = f"{type(exc).__name__}：{reason}；{delay}秒后重试"
+            timeout = httpx.Timeout(connect=15, read=45, write=15, pool=15)
+            limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+            webhook_checked = False
+            failures = 0
+            outage_reported = False
+            while not stop.is_set():
+                if client is None:
+                    client = httpx.Client(
+                        timeout=timeout,
+                        limits=limits,
+                        proxy=proxy,
+                        trust_env=False,
+                    )
+                try:
+                    if not webhook_checked:
+                        info = self._bot_call(client, "getWebhookInfo", {})
+                        if info.get("url"):
+                            self._bot_error = "Bot已配置webhook，请使用独立Bot；不会自动删除webhook"
+                            logger.warning("115转存/离线：%s", self._bot_error)
+                            return
+                        webhook_checked = True
+                    updates = self._bot_call(
+                        client,
+                        "getUpdates",
+                        {"offset": offset, "timeout": 25, "allowed_updates": ["message"]},
+                    )
+                    if failures:
+                        logger.info("115转存/离线：Bot连接已恢复，继续监听")
+                    failures = 0
+                    outage_reported = False
+                    self._bot_error = ""
+                    for update in updates:
+                        if stop.is_set():
+                            return
+                        offset = int(update["update_id"]) + 1
+                        self.save_data(offset_key, offset)
+                        self._bot_message(client, update.get("message") or {})
+                except BotConfigurationError:
+                    self._bot_error = "Bot认证失败或接收冲突，请检查Token及其他接收程序"
+                    logger.warning("115转存/离线：%s", self._bot_error)
+                    return
+                except Exception as exc:
+                    failures += 1
+                    delay = min(300, 30 * 2 ** min(failures - 1, 4))
+                    if isinstance(exc, httpx.ConnectError):
+                        reason = "连接失败，请检查容器到Telegram的DNS、代理及网络连通性"
+                    elif isinstance(exc, httpx.ReadTimeout):
+                        reason = "Telegram长轮询超时，已重建连接；请检查代理空闲连接超时"
+                    elif isinstance(exc, httpx.HTTPStatusError):
+                        status_code = getattr(getattr(exc, "response", None), "status_code", "未知")
+                        reason = f"Telegram返回HTTP {status_code}，已重建连接；请检查代理及Telegram连通性"
+                    else:
+                        reason = "请求未完成，请检查网络或代理"
+                    self._bot_error = f"{type(exc).__name__}：{reason}；{delay}秒后重试"
+                    if not outage_reported:
                         logger.warning("115转存/离线：%s（%s）；不重放转存", self._bot_error, self._bot_proxy_source)
-                        stop.wait(delay)
+                        outage_reported = True
+                    else:
+                        logger.info("115转存/离线：Bot仍在重连（第%d次，%d秒后重试）", failures, delay)
+                    if client is not None:
+                        client.close()
+                        client = None
+                    stop.wait(delay)
         except Exception as exc:
             self._bot_error = f"{type(exc).__name__}：Bot初始化失败，请检查代理配置并重新保存"
             logger.warning("115转存/离线：%s", self._bot_error)
+        finally:
+            if client is not None:
+                client.close()
