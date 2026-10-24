@@ -108,6 +108,7 @@ class P115TaskTests(unittest.TestCase):
         self.hold()
         plugin = object.__new__(EmeTools)
         plugin._p115_tasks = self.queue
+        plugin._set_cleanup_status = lambda *args, **kwargs: True
         async def action_serial(action):
             return {"ok": True}
         plugin._action_serial = action_serial
@@ -119,6 +120,7 @@ class P115TaskTests(unittest.TestCase):
         self.hold()
         plugin = object.__new__(EmeTools)
         plugin._p115_tasks = self.queue
+        plugin._set_cleanup_status = lambda *args, **kwargs: True
         plugin._pending_lock = threading.Lock()
         plugin._pending = {"confirmation": (time.monotonic(), "cleanup", {})}
         async def action_serial(action):

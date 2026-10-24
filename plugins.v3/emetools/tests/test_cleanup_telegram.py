@@ -1,9 +1,11 @@
 import asyncio
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from fastapi import HTTPException
 from emetools import EmeTools, ToolAction
 from app.schemas.system import NotificationConf
 from app.schemas.types import MessageType, NotificationChannel
@@ -21,6 +23,10 @@ class FileCleanupTelegramTests(unittest.TestCase):
                 patch('emetools.missing_episodes.MediaServerHelper', return_value=MagicMock()):
             self.plugin.init_plugin({'strm_root': directory.name})
         self.plugin.chain = MagicMock()
+        notification_helper = patch('emetools.NotificationHelper')
+        self.notification_helper = notification_helper.start()
+        self.notification_helper.return_value.get_service.return_value = None
+        self.addCleanup(notification_helper.stop)
         self.plugin._schedule['p115_cleanup']['dir_ids'] = ['111']
         self.client = MagicMock()
         self.client.__enter__.return_value = self.client
@@ -61,6 +67,11 @@ class FileCleanupTelegramTests(unittest.TestCase):
         self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'completed')
         self.client.delete_files.assert_called_once_with(['222'])
         self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
+        self.client.delete_files.assert_called_once()
+        with self.assertRaises(HTTPException) as repeated:
+            asyncio.run(self.plugin._action_serial(ToolAction(operation='cleanup_confirm', token=token)))
+        self.assertEqual(repeated.exception.status_code, 400)
+        self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'completed')
         self.client.delete_files.assert_called_once()
 
     def test_command_works_when_routine_plugin_notifications_are_disabled(self):
@@ -142,6 +153,131 @@ class FileCleanupTelegramTests(unittest.TestCase):
         response = self.plugin._cleanup_request()
         self.assertTrue(response['pending'])
         return response['token']
+
+    def test_web_confirmation_updates_original_telegram_message_processing_and_completed(self):
+        sender = MagicMock()
+        sender.send_msg.return_value = {'success': True, 'message_id': 789, 'chat_id': 123}
+        self.notification_helper.return_value.get_service.return_value = SimpleNamespace(instance=sender)
+        token = self.request()
+        sender.send_msg.assert_called_once()
+        self.plugin.chain.post_message.assert_not_called()
+        result = asyncio.run(self.plugin._action_serial(ToolAction(operation='cleanup_confirm', token=token)))
+        self.assertTrue(result['ok'])
+        edits = [call.args[0] for call in self.plugin.chain.post_message.call_args_list
+                 if call.args[0].original_message_id == 789]
+        self.assertEqual([message.buttons[0][0]['text'] for message in edits], ['⌛️清理中', '🗑️清理完成'])
+        self.assertTrue(all(message.source == '管理员Bot' and str(message.original_chat_id) == '123' for message in edits))
+        self.client.delete_files.assert_called_once_with(['222'])
+        self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
+        self.client.delete_files.assert_called_once()
+
+    def test_web_failure_updates_original_notification_without_completed_state(self):
+        sender = MagicMock()
+        sender.send_msg.return_value = {'success': True, 'message_id': 790, 'chat_id': 123}
+        self.notification_helper.return_value.get_service.return_value = SimpleNamespace(instance=sender)
+        token = self.request()
+        self.client.list_files_in_dir.return_value = [{'fid': '333', 'size': 1}]
+        result = asyncio.run(self.plugin._action_serial(ToolAction(operation='cleanup_confirm', token=token)))
+        self.assertFalse(result['ok'])
+        edits = [call.args[0] for call in self.plugin.chain.post_message.call_args_list
+                 if call.args[0].original_message_id == 790]
+        self.assertEqual([message.buttons[0][0]['text'] for message in edits], ['⌛️清理中', '清理已结束'])
+        self.client.delete_files.assert_not_called()
+
+    def test_web_queue_updates_original_notification_before_cleanup_starts(self):
+        sender = MagicMock()
+        sender.send_msg.return_value = {'success': True, 'message_id': 793, 'chat_id': 123}
+        self.notification_helper.return_value.get_service.return_value = SimpleNamespace(instance=sender)
+        token = self.request()
+        release = threading.Event()
+        started = threading.Event()
+        self.addCleanup(release.set)
+        def hold():
+            started.set()
+            release.wait(5)
+        self.plugin._p115_tasks.submit('hold', 'hold', hold)
+        self.assertTrue(started.wait(2))
+        response = asyncio.run(self.plugin.action(ToolAction(operation='cleanup_confirm', token=token)))
+        self.assertTrue(response['queued'])
+        self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'processing')
+        self.client.delete_files.assert_not_called()
+        message = self.plugin.chain.post_message.call_args.args[0]
+        self.assertEqual(message.original_message_id, 793)
+        self.assertEqual(message.buttons[0][0]['text'], '⌛️清理中')
+        self.plugin._handle_file_cleanup_confirmation(token, True, {**self.data, 'original_message_id': 793})
+        job = self.plugin._p115_tasks._jobs[response['job_id']]
+        release.set()
+        self.assertTrue(job['done'].wait(3))
+        self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'completed')
+        self.client.delete_files.assert_called_once_with(['222'])
+        edits = [call.args[0] for call in self.plugin.chain.post_message.call_args_list
+                 if call.args[0].original_message_id == 793]
+        self.assertEqual([message.buttons[0][0]['text'] for message in edits], ['⌛️清理中', '🗑️清理完成'])
+
+    def test_late_queue_update_cannot_overwrite_completed_status(self):
+        token = self.request()
+        self.plugin._set_cleanup_status(token, 'completed')
+        self.assertFalse(self.plugin._set_cleanup_status(token, 'processing', expected_state='pending'))
+        self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'completed')
+
+    def test_command_confirmation_can_be_completed_from_web(self):
+        sender = MagicMock()
+        sender.send_msg.return_value = {'success': True, 'message_id': 795, 'chat_id': 123}
+        self.notification_helper.return_value.get_service.return_value = SimpleNamespace(instance=sender)
+        self.command()
+        self.assertTrue(sender.send_msg.call_args.kwargs['private_delivery'])
+        token = next(iter(self.plugin._pending))
+        result = asyncio.run(self.plugin._action_serial(ToolAction(operation='cleanup_confirm', token=token)))
+        self.assertTrue(result['ok'])
+        edits = [call.args[0] for call in self.plugin.chain.post_message.call_args_list
+                 if call.args[0].original_message_id == 795]
+        self.assertEqual([message.buttons[0][0]['text'] for message in edits], ['⌛️清理中', '🗑️清理完成'])
+
+    def test_new_preview_keeps_consumed_task_message_for_completion(self):
+        sender = MagicMock()
+        sender.send_msg.return_value = {'success': True, 'message_id': 796, 'chat_id': 123}
+        self.notification_helper.return_value.get_service.return_value = SimpleNamespace(instance=sender)
+        token = self.request()
+        self.plugin._consume(token, 'cleanup')
+        self.plugin._set_cleanup_status(token, 'processing')
+        self.request()
+        self.plugin.chain.post_message.reset_mock()
+        self.plugin._set_cleanup_status(token, 'completed')
+        message = self.plugin.chain.post_message.call_args.args[0]
+        self.assertEqual(message.original_message_id, 796)
+        self.assertEqual(message.buttons[0][0]['text'], '🗑️清理完成')
+
+    def test_telegram_confirmation_updates_other_original_messages_once(self):
+        sender = MagicMock()
+        sender.send_msg.return_value = {'success': True, 'message_id': 101, 'chat_id': 123}
+        self.notification_helper.return_value.get_service.return_value = SimpleNamespace(instance=sender)
+        token = self.request()
+        self.plugin._cleanup_message_refs[token].append({**self.data, 'original_message_id': 794})
+        self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
+        for message_id in (101, 794):
+            edits = [call.args[0] for call in self.plugin.chain.post_message.call_args_list
+                     if call.args[0].original_message_id == message_id]
+            self.assertEqual([message.buttons[0][0]['text'] for message in edits], ['⌛️清理中', '🗑️清理完成'])
+        self.client.delete_files.assert_called_once_with(['222'])
+
+    def test_edit_failure_does_not_repeat_or_prevent_cleanup(self):
+        sender = MagicMock()
+        sender.send_msg.return_value = {'success': True, 'message_id': 791, 'chat_id': 123}
+        self.notification_helper.return_value.get_service.return_value = SimpleNamespace(instance=sender)
+        token = self.request()
+        self.plugin.chain.post_message.side_effect = RuntimeError('edit failed')
+        self.assertTrue(self.plugin._cleanup_confirm(token)['ok'])
+        self.client.delete_files.assert_called_once_with(['222'])
+        self.assertEqual(self.plugin._get_cleanup_status(token)['state'], 'completed')
+
+    def test_repeated_processing_status_does_not_repeat_edits(self):
+        sender = MagicMock()
+        sender.send_msg.return_value = {'success': True, 'message_id': 792, 'chat_id': 123}
+        self.notification_helper.return_value.get_service.return_value = SimpleNamespace(instance=sender)
+        token = self.request()
+        self.plugin._set_cleanup_status(token, 'processing')
+        self.plugin._set_cleanup_status(token, 'processing')
+        self.plugin.chain.post_message.assert_called_once()
 
     def test_notification_has_buttons_and_shared_web_token(self):
         token = self.request()
