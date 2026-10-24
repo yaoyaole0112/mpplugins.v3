@@ -854,7 +854,7 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(series['Overview'], '整剧简介')
         self.assertEqual(series['CommunityRating'], 8.2)
         self.assertEqual(series['Genres'], ['剧情'])
-        self.assertEqual(series['Studios'], ['电视台', '制作公司'])
+        self.assertEqual(series['Studios'], [{'Name': '电视台'}, {'Name': '制作公司'}])
         self.assertEqual(series['ProviderIds'], {
             'Tmdb': '12345', 'Douban': '88', 'Imdb': 'tt12345', 'Tvdb': '987'})
         self.assertEqual(episode['People'], series['People'])

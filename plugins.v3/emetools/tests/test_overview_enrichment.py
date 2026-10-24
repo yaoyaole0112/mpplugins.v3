@@ -238,6 +238,146 @@ class OverviewWorkflowTests(unittest.TestCase):
         self.assertTrue(asyncio.run(run()))
         self.assertEqual(methods, ['POST', 'GET', 'GET'])
 
+    def test_emby_studio_ids_order_and_rating_precision_do_not_cause_false_failures(self):
+        methods = []
+        update = {'Name': '剧集', 'Studios': [{'Name': '制作方'}, {'Name': '电视台'}],
+                  'CommunityRating': 8.367, 'LockedFields': ['Cast', 'Overview'], 'Genres': ['剧情', '喜剧']}
+        def handler(request):
+            methods.append(request.method)
+            if request.method == 'POST':
+                self.assertEqual(json.loads(request.content)['Studios'], update['Studios'])
+                return httpx.Response(204)
+            return httpx.Response(200, json={**update, 'Studios': [
+                {'Name': '电视台', 'Id': 101}, {'Name': '制作方', 'Id': 102}], 'CommunityRating': 8.4,
+                'Genres': ['喜剧', '剧情'], 'LockedFields': ['Overview', 'Cast']})
+        async def run():
+            async with httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(handler)) as client:
+                return await self.engine._save_item(client, '1', {'Name': '剧集'}, update, user='admin')
+        self.assertTrue(asyncio.run(run()))
+        self.assertEqual(methods, ['POST', 'GET'])
+        self.assertEqual(self.engine.status()['records'][0]['status'], 'updated')
+
+    def test_equivalent_studio_objects_and_precision_skip_repeated_write(self):
+        original = {'Studios': [{'Name': 'Youku', 'Id': 44500}], 'CommunityRating': 8.4}
+        update = {'Studios': [{'Name': 'Youku'}], 'CommunityRating': 8.367}
+        client = SimpleNamespace(post=AsyncMock())
+        self.assertFalse(asyncio.run(self.engine._save_item(client, '1', original, update)))
+        client.post.assert_not_awaited()
+
+    def test_visible_cast_subset_is_recorded_as_unverified_partial_without_aborting_or_replay(self):
+        people = [{'Name': name, 'Type': 'Actor', 'Role': '饰 主角'} for name in ('甲', '乙', '丙')]
+        methods = []
+        def handler(request):
+            methods.append(request.method)
+            if request.method == 'POST':
+                return httpx.Response(204)
+            return httpx.Response(200, json={'Name': '剧集', 'People': [people[0], people[2]]})
+        async def run():
+            async with httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(handler)) as client:
+                return await self.engine._save_item(client, '1', {'Name': '剧集'},
+                    {'Name': '剧集', 'People': people}, user='admin')
+        self.assertTrue(asyncio.run(run()))
+        self.assertEqual(methods, ['POST', 'GET', 'GET'])
+        record = self.engine.status()['records'][0]
+        self.assertEqual(record['status'], 'partial')
+        self.assertIn('尚未核实', record['message'])
+        self.assertNotIn('回读验证通过', record['message'])
+
+    def test_real_field_loss_or_cast_corruption_still_fails_without_replaying_write(self):
+        people = [{'Name': name, 'Type': 'Actor', 'Role': '饰 主角'} for name in ('甲', '乙')]
+        for wrong in ({'People': []}, {'People': [{**people[0], 'Role': '错误角色'}]},
+                      {'People': list(reversed(people))}, {'Studios': [{'Name': '错误制作方'}]},
+                      {'CommunityRating': 7.2}, {'LockedFields': []},
+                      {'People': people[:1], 'Overview': '旧简介'}):
+            with self.subTest(wrong=wrong):
+                update = {'Name': '剧集', 'People': people, 'Studios': [{'Name': '制作方'}],
+                          'CommunityRating': 8.367, 'LockedFields': ['Overview'], 'Overview': '新简介'}
+                methods = []
+                def handler(request):
+                    methods.append(request.method)
+                    return (httpx.Response(204) if request.method == 'POST' else
+                            httpx.Response(200, json={**update, **wrong}))
+                async def run():
+                    async with httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(handler)) as client:
+                        await self.engine._save_item(client, '1', {'Name': '剧集'}, update, user='admin')
+                with self.assertRaisesRegex(ValueError, '不一致字段'):
+                    asyncio.run(run())
+                self.assertEqual(methods, ['POST', 'GET', 'GET'])
+                self.assertEqual(self.engine.status()['records'][0]['status'], 'failed')
+
+    def test_read_failure_reports_safe_reason_not_credentials_or_response_body(self):
+        def handler(request):
+            if request.method == 'POST':
+                return httpx.Response(204)
+            raise httpx.ReadTimeout('secret-token signed-url', request=request)
+        async def run():
+            async with httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(handler)) as client:
+                await self.engine._save_item(client, '1', {'Name': '旧'}, {'Name': '新'}, user='admin')
+        with self.assertRaisesRegex(ValueError, '回读异常：ReadTimeout'):
+            asyncio.run(run())
+        self.assertNotIn('secret-token', self.engine.status()['records'][0]['message'])
+
+    def test_interrupted_write_with_only_partial_cast_readback_is_not_confirmed(self):
+        people = [{'Name': name, 'Type': 'Actor', 'Role': '饰 主角'} for name in ('甲', '乙')]
+        methods = []
+        def handler(request):
+            methods.append(request.method)
+            if request.method == 'POST':
+                raise httpx.ReadTimeout('secret-token', request=request)
+            return httpx.Response(200, json={'Name': '剧集', 'People': people[:1]})
+        async def run():
+            async with httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(handler)) as client:
+                await self.engine._save_item(client, '1', {'Name': '剧集'},
+                    {'Name': '剧集', 'People': people}, user='admin')
+        with self.assertRaisesRegex(ValueError, '写入响应中断'):
+            asyncio.run(run())
+        self.assertEqual(methods, ['POST', 'GET', 'GET'])
+        self.assertEqual(self.engine.status()['records'][0]['status'], 'failed')
+
+    def test_filtered_cast_does_not_abort_series_episode_enrichment(self):
+        series = {'Id': 'series', 'Type': 'Series', 'Name': '测试剧', 'ProviderIds': {'Tmdb': '123'}}
+        episode = {'Id': 'ep1', 'Type': 'Episode', 'Name': '第1集', 'Overview': '',
+                   'ParentIndexNumber': 1, 'IndexNumber': 1}
+        writes = []
+        def emby_handler(request):
+            if request.method == 'POST':
+                payload = json.loads(request.content)
+                writes.append(payload)
+                if payload['Id'] == 'series':
+                    series.update(payload)
+                    series['People'] = series['People'][:1]
+                else:
+                    episode.update(payload)
+                return httpx.Response(204)
+            if request.url.path.endswith('/Items/series'):
+                return httpx.Response(200, json=series)
+            if request.url.path.endswith('/Items/ep1'):
+                return httpx.Response(200, json=episode)
+            return httpx.Response(200, json={'Items': [episode], 'TotalRecordCount': 1})
+        def tmdb_handler(request):
+            if '/season/' in request.url.path:
+                return httpx.Response(200, json={'episodes': [
+                    {'episode_number': 1, 'name': '第一集剧情标题', 'overview': '真实分集剧情。' * 10}]})
+            return httpx.Response(200, json={'name': '测试剧', 'overview': '真实整剧剧情。' * 30,
+                'production_companies': [{'name': '制作方'}], 'aggregate_credits': {'cast': [
+                    {'name': name, 'profile_path': '/avatar.jpg', 'order': index, 'roles': [{'character': '主角'}]}
+                    for index, name in enumerate(('演员甲', '演员乙'))]}})
+        emby = httpx.AsyncClient(base_url='http://emby/', transport=httpx.MockTransport(emby_handler))
+        tmdb = httpx.AsyncClient(base_url='https://tmdb/3/', transport=httpx.MockTransport(tmdb_handler))
+        with patch.object(self.engine, '_server', return_value=emby), \
+                patch.object(self.engine, '_tmdb_client', return_value=tmdb), \
+                patch.object(self.engine, '_user_id', new_callable=AsyncMock, return_value='admin'), \
+                patch.object(self.engine, '_supplement_baike_cast', new_callable=AsyncMock,
+                             side_effect=lambda cast, *args: (cast, [])), \
+                patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'secret'):
+            asyncio.run(self.engine._enrich('Q4', 'series', 'all', DEFAULT_ENRICH_CONFIG))
+        self.assertEqual([entry['Id'] for entry in writes], ['series', 'ep1'])
+        self.assertEqual(writes[0]['Studios'], [{'Name': '制作方'}])
+        self.assertEqual(episode['Name'], '第一集剧情标题')
+        records = self.engine.status()['records']
+        self.assertEqual(records[0]['status'], 'updated')
+        self.assertEqual(records[1]['status'], 'partial')
+
     def test_write_http_error_is_recorded_once_without_sensitive_url(self):
         methods = []
         def handler(request):

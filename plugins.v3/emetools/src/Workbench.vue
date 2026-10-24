@@ -170,7 +170,7 @@ const overviewPreviewItems = computed(() => (enrich.status.overview_preview?.ite
 const enrichmentRecordItems = computed(() => (enrich.status.records || []).slice((enrichmentRecordsPage.value - 1) * 6, enrichmentRecordsPage.value * 6))
 watch(overviewPreviewPageCount, count => { overviewPreviewPage.value = Math.min(overviewPreviewPage.value, count) })
 watch(enrichmentRecordsPageCount, count => { enrichmentRecordsPage.value = Math.min(enrichmentRecordsPage.value, count) })
-const enrichmentRecordLabels = { updated: '已验证更新', skipped: '未变化', partial: '仍有缺漏', failed: '失败／待核实' }
+const enrichmentRecordLabels = { updated: '已验证更新', skipped: '未变化', partial: '部分完成／待核实', failed: '失败／待核实' }
 const enrichmentFieldLabels = { Name: '标题', Overview: '简介', People: '演职人员', LockedFields: '字段锁定', ProviderIds: '外部编号', Genres: '类型', Studios: '制作方', CommunityRating: '评分' }
 const enrichLibraryMatches = computed(() => enrich.libraries.filter(item =>
   `${item.name} ${item.server}`.toLowerCase().includes(enrich.libraryQuery.toLowerCase())))

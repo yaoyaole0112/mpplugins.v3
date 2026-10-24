@@ -249,6 +249,8 @@ class DataEnrichment:
         self._import_timers = {}
         self._import_pending = {}
         self._closed = False
+        self._verification_incomplete = False
+        self._verification_detail = ""
         self._resolve_recent = {}
         records = owner.get_data("enrichment_records") if hasattr(owner, "get_data") else []
         self._records = [entry for entry in records if isinstance(entry, dict)][-200:] if isinstance(records, list) else []
@@ -1550,7 +1552,7 @@ class DataEnrichment:
             studios = [company.get("name") for company in detail.get("production_companies") or []
                        if isinstance(company, dict) and company.get("name")]
             if studios:
-                update["Studios"] = list(dict.fromkeys(studios))[:30]
+                update["Studios"] = [{"Name": name} for name in dict.fromkeys(studios)][:30]
             providers = dict(provider)
             providers["Tmdb"] = str(tmdb_id)
             imdb_id = (detail.get("external_ids") or {}).get("imdb_id") or detail.get("imdb_id")
@@ -1652,7 +1654,10 @@ class DataEnrichment:
                                      audit={"server": server, "source": overview_source, "issues": issues}):
             self.log("电影资料未变化，跳过重复写入")
             return
-        self.log("电影资料及演职人员已更新" if mode == "all" else "电影资料已更新" if mode == "metadata" else "电影演职人员已更新")
+        if self._verification_incomplete:
+            self.log("电影资料已提交；演职回读不完整，请查看逐项补全记录，未确认全部人员已保存")
+        else:
+            self.log("电影资料及演职人员已更新" if mode == "all" else "电影资料已更新" if mode == "metadata" else "电影演职人员已更新")
 
     async def _sync_episode_people(self, emby, user, series_id, people):
         """Propagate the freshly saved series cast without changing episode metadata."""
@@ -1683,9 +1688,18 @@ class DataEnrichment:
         if field == "People":
             return [{key: person.get(key) or "" for key in ("Name", "Type", "Role")}
                     for person in value or []]
+        if field == "Studios":
+            return sorted({entry.get("Name", "") if isinstance(entry, dict) else str(entry)
+                           for entry in value or []})
+        if field in {"LockedFields", "Genres"}:
+            return sorted(set(value or []))
+        if field == "CommunityRating" and isinstance(value, (int, float)):
+            return round(value, 1)
         return value
 
     async def _verify_saved_item(self, emby, identifier, original, payload, changed_fields, user):
+        self._verification_detail = ""
+        self._verification_incomplete = False
         expected = {field: payload[field] for field in changed_fields if field in payload}
         for field in ("Name", "IndexNumber", "ParentIndexNumber", "ProviderIds"):
             if field in original and field not in expected:
@@ -1694,16 +1708,32 @@ class DataEnrichment:
             self._ensure_active()
             current = (await self._item(emby, user, identifier) if user else
                        await self._json(emby, f"Items/{identifier}"))
-            if isinstance(current, dict) and all(
-                    self._metadata_value(field, current.get(field)) == self._metadata_value(field, value)
-                    for field, value in expected.items()):
+            mismatches = [field for field, value in expected.items()
+                          if not isinstance(current, dict) or
+                          self._metadata_value(field, current.get(field)) != self._metadata_value(field, value)]
+            if not mismatches:
                 return True
             if attempt == 0:
                 await asyncio.sleep(0.5)
+        if mismatches == ["People"] and isinstance(current, dict):
+            visible = self._metadata_value("People", current.get("People"))
+            submitted = self._metadata_value("People", payload.get("People"))
+            remaining = iter(submitted)
+            if visible and len(visible) < len(submitted) and all(
+                    any(person == candidate for candidate in remaining) for person in visible):
+                self._verification_incomplete = True
+                self._verification_detail = (f"演职回读 {len(visible)}/{len(submitted)} 人，"
+                    "可能受服务器隐藏人物等规则影响；完整演员表尚未核实，不代表全部已补齐")
+                self.log(f"Emby 条目 {identifier} {self._verification_detail}；不重放写入，继续后续补全")
+                return True
+        self._verification_detail = "不一致字段：" + "、".join(mismatches)
+        self.log(f"Emby 条目 {identifier} 回读核验未通过，{self._verification_detail}；不重放写入")
         return False
 
     async def _save_item(self, emby, identifier, original, update, *, user=None, audit=None):
         self._ensure_active()
+        self._verification_detail = ""
+        self._verification_incomplete = False
         changed_fields = [field for field, value in update.items() if field != "UserData" and value is not None and
                           self._metadata_value(field, original.get(field)) != self._metadata_value(field, value)]
         if not changed_fields:
@@ -1726,17 +1756,25 @@ class DataEnrichment:
             raise
         try:
             confirmed = await self._verify_saved_item(emby, identifier, original, payload, changed_fields, user)
-        except (httpx.HTTPError, ValueError):
+            if interrupted and self._verification_incomplete:
+                confirmed = False
+                self._verification_detail = "写入响应中断；" + self._verification_detail
+        except (httpx.HTTPError, ValueError) as error:
             confirmed = False
+            self._verification_detail = f"回读异常：{type(error).__name__}"
         if not confirmed:
             message = "写入后回读不一致或读取失败，未能确认保存结果；不重放写入，请稍后核对"
+            if self._verification_detail:
+                message += f"（{self._verification_detail}）"
             self._record_enrichment(identifier, "failed", update, changed_fields, audit, message)
             raise ValueError(f"Emby 条目 {identifier} {message}")
-        if interrupted:
+        if interrupted and not self._verification_incomplete:
             self.log(f"Emby 条目 {identifier} 已核验保存成功，继续补全")
         issues = (audit or {}).get("issues") or []
-        self._record_enrichment(identifier, "partial" if issues else "updated", update, changed_fields, audit,
-                                "回读验证通过" + (f"；简介仍有：{'、'.join(issues)}" if issues else ""))
+        message = (self._verification_detail if self._verification_incomplete else "回读验证通过")
+        self._record_enrichment(identifier, "partial" if issues or self._verification_incomplete else "updated",
+                                update, changed_fields, audit,
+                                message + (f"；简介仍有：{'、'.join(issues)}" if issues else ""))
         await asyncio.sleep(0.5)
         return True
 
@@ -1815,7 +1853,7 @@ class DataEnrichment:
                                (detail.get("networks") or []) + (detail.get("production_companies") or [])
                                if isinstance(entry, dict) and entry.get("name")]
                     if studios:
-                        update["Studios"] = list(dict.fromkeys(studios))[:30]
+                        update["Studios"] = [{"Name": name} for name in dict.fromkeys(studios)][:30]
                     providers = dict(item.get("ProviderIds") or {})
                     providers["Tmdb"] = str(tmdb_id)
                     external = detail.get("external_ids") or {}
@@ -1886,8 +1924,11 @@ class DataEnrichment:
                 saved = await self._save_item(emby, identifier, original_item, update, user=user,
                     audit={"server": name, "source": overview_source if mode != "credits" else "演职来源",
                            "issues": overview_issues(update.get("Overview"), options["overview_movie_min"]) if mode != "credits" else []})
-                self.log({"all": "剧集元数据及演职人员已更新", "metadata": "剧集资料已更新",
-                          "credits": "剧集演职人员已更新"}[mode] if saved else "剧集资料未变化，跳过重复写入")
+                if saved and self._verification_incomplete:
+                    self.log("剧集资料已提交；演职回读不完整，请查看逐项补全记录，继续分集补全")
+                else:
+                    self.log({"all": "剧集元数据及演职人员已更新", "metadata": "剧集资料已更新",
+                              "credits": "剧集演职人员已更新"}[mode] if saved else "剧集资料未变化，跳过重复写入")
                 if mode == "credits" and options["episode_cast"]:
                     await self._sync_episode_people(emby, user, identifier, people)
             if mode in ("all", "episodes"):
