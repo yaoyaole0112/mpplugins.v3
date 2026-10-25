@@ -31,7 +31,7 @@ if (dialogFixture) {
 }
 
 const settings = { enabled: false, folder: '/media/test', recursive: true, include_subdirectories: true, monitor_enabled: true,
-  output_enabled: true, output: '', extensions: '', min_age: 60, min_file_size: '500M', min_file_size_gb: '0.48828125', delete_source: false, delete_small_files: false,
+  output_enabled: true, output: '', extensions: '', min_age: 60, min_file_size: '500M', min_file_size_gb: '0.48828125', delete_source: false, delete_small_files: false, cloud_delete_enabled: false,
   scan_enabled: false, cron: '*/10 * * * *', telegram_enabled: false, telegram_mode: 'user',
   telegram_chat_id: '', telegram_thread_id: '', telegram_token: '' }
 Object.assign(settings, { cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
@@ -96,6 +96,7 @@ const api = { get: async path => {
   if (typeof body.cloud_scan_enabled !== 'boolean') throw Error('Cloud schedule switch missing from save payload')
   if (String(body.min_file_size_gb) !== '0.5') throw Error('Minimum file size missing from save payload')
   if (body.delete_small_files !== true) throw Error('Small file deletion switch missing from save payload')
+  if (body.cloud_delete_enabled !== false || body.confirm_cloud_delete !== false) throw Error('Cloud deletion must remain opt-in and disabled by default')
   if (body.include_subdirectories !== false || 'recursive' in body || 'cloud_recursive' in body) throw Error('Shared recursive switch missing or legacy fields leaked into save payload')
   return { ok: true, settings: body, message: '模拟保存成功' }
 } }
@@ -246,7 +247,7 @@ try {
     }
     if (!document.querySelector('#app').innerText.includes('Telegram 账号')) throw Error(`${name}: account panel missing`)
     const cloudPanel = document.querySelector('#app [data-testid=cloud-source]')
-    if (!cloudPanel || !cloudPanel.textContent.includes('不会删除云端文件') || cloudPanel.querySelector('input[type=checkbox]').checked) throw Error(`${name}: cloud defaults are unsafe or panel missing`)
+    if (!cloudPanel || !cloudPanel.textContent.includes('默认保留云端文件') || cloudPanel.querySelector('input[type=checkbox]').checked) throw Error(`${name}: cloud defaults are unsafe or panel missing`)
     const commonPanel = document.querySelector('#app [data-testid=common-settings]')
     const recursiveSwitch = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.trim() === '包含子目录')?.querySelector('input')
     if (!recursiveSwitch) throw Error(`${name}: shared recursive switch missing`)
@@ -290,7 +291,7 @@ try {
     await vue.nextTick()
     if (!scheduleInput.disabled) throw Error(`${name}: cloud schedule input did not disable`)
     if (![...cloudPanel.querySelectorAll('label')].some(label => label.textContent.startsWith('网盘监控目录'))) throw Error(`${name}: cloud folder label not renamed`)
-    if (!commonPanel || !localPanel || !commonPanel.textContent.includes('扩展名过滤') || !commonPanel.textContent.includes('TXT 输出路径') || commonPanel.textContent.includes('删除本地源文件') || !localPanel.textContent.includes('删除本地源文件') || localPanel.textContent.includes('TXT 输出路径')) throw Error(`${name}: common and local settings are mixed`)
+    if (!commonPanel || !localPanel || !commonPanel.textContent.includes('扩展名过滤') || !commonPanel.textContent.includes('TXT 输出路径') || !commonPanel.textContent.includes('完成后删除源文件') || localPanel.textContent.includes('成功后删除本地源文件') || localPanel.textContent.includes('TXT 输出路径')) throw Error(`${name}: common and local settings are mixed`)
     const lifeSwitch = [...cloudPanel.querySelectorAll('label')].find(label => label.textContent.includes('115生活事件监控')).querySelector('input')
     if (lifeSwitch.checked || cloudPanel.querySelector('input[max="1800"]').value !== '300') throw Error(`${name}: unsafe life or timeout defaults`)
     lifeSwitch.click()
@@ -321,6 +322,23 @@ try {
     await vue.nextTick()
     if (!targets.value.includes('\n@channel\n')) throw Error(`${name}: multiline input lost`)
     let deletionConfirmed = false
+    const masterDelete = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.trim() === '完成后删除源文件').querySelector('input')
+    const cloudDelete = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.startsWith('单独授权115网盘删源')).querySelector('input')
+    if (masterDelete.checked || cloudDelete.checked) throw Error(`${name}: upgrade enabled cloud deletion`)
+    masterDelete.click()
+    cloudDelete.click()
+    cloudPanel.querySelector('input[type=checkbox]').click()
+    await vue.nextTick()
+    let cloudConfirmation = false
+    const beforeCloudConfirmation = requests.length
+    window.confirm = message => { if (message.includes('确认授权当前115账号')) { cloudConfirmation = true; return false } return true }
+    buttons.find(button => button.textContent.trim() === '保存插件设置').click()
+    await vue.nextTick()
+    if (!cloudConfirmation || requests.length !== beforeCloudConfirmation) throw Error(`${name}: cloud deletion confirmation missing or cancellation saved settings`)
+    masterDelete.click()
+    cloudPanel.querySelector('input[type=checkbox]').click()
+    await vue.nextTick()
+    if (cloudDelete.checked) throw Error(`${name}: disabling master switch did not revoke cloud deletion`)
     const requestsBeforeCancel = requests.length
     window.confirm = message => { deletionConfirmed = message.includes('低于阈值文件自动删源'); return false }
     buttons.find(button => button.textContent.trim() === '保存插件设置').click()

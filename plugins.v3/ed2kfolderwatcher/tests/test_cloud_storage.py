@@ -20,6 +20,93 @@ def md4(data):
 
 
 class CloudStorageTests(unittest.TestCase):
+    def deletion_fixture(self):
+        storage = object.__new__(cloud.CloudStorage)
+        storage.storage = "115网盘Plus"
+        storage.oper = Mock()
+        storage.oper.client.user_id = 321
+        item = {"storage": "115网盘Plus", "fileid": "123", "type": "file", "name": "a.mkv", "path": "/test/a.mkv", "size": 5, "modify_time": 1}
+        storage.list = Mock(return_value=[item])
+        storage.delete_path = Mock(return_value=item["path"])
+        storage.oper.client.fs_file_skim.return_value = {"state": True, "data": [{"file_id": "123", "sha1": "A" * 40}]}
+        tools = types.ModuleType("app.plugins.p115disk.tools")
+        tools.get_ios_ua_app = lambda **kwargs: {}
+        module_patch = patch.dict(sys.modules, {tools.__name__: tools})
+        module_patch.start()
+        self.addCleanup(module_patch.stop)
+        return storage, item, storage.delete_scope("/test", True)
+
+    def test_delete_scope_binds_account_directory_and_recursion(self):
+        storage, item, scope = self.deletion_fixture()
+        self.assertNotEqual(scope, storage.delete_scope("/test", False))
+        self.assertNotEqual(scope, storage.delete_scope("/other", True))
+        storage.oper.client.user_id = 654
+        self.assertNotEqual(scope, storage.delete_scope("/test", True))
+        for root in ("/", "relative", "/test/../other"):
+            with self.subTest(root=root), self.assertRaises(cloud.CloudError):
+                storage.delete_scope(root, True)
+        storage.storage = "CloudDrive储存"
+        with self.assertRaises(cloud.CloudError):
+            storage.delete_scope("/test", True)
+
+    def test_prepare_delete_requires_identity_and_verified_sha1(self):
+        storage, item, scope = self.deletion_fixture()
+        self.assertEqual(storage.prepare_delete(item, "a" * 40, "/test", True, scope), item)
+        for changed in ({"size": 6}, {"type": "dir"}, {"path": "/other/a.mkv"}, {"fileid": "456"}):
+            storage.list.return_value = [{**item, **changed}]
+            with self.subTest(changed=changed), self.assertRaises(cloud.CloudError):
+                storage.prepare_delete(item, "a" * 40, "/test", True, scope)
+        storage.list.return_value = [item]
+        for sha1 in (None, "wrong", "b" * 40):
+            with self.subTest(sha1=sha1), self.assertRaises(cloud.CloudError):
+                storage.prepare_delete(item, sha1, "/test", True, scope)
+        storage.oper.client.fs_delete.assert_not_called()
+
+    def test_delete_uses_refreshed_path_and_cancels_if_file_moved(self):
+        storage, item, scope = self.deletion_fixture()
+        storage.delete_path.return_value = "/outside/a.mkv"
+        with self.assertRaises(cloud.CloudError):
+            storage.prepare_delete(item, "a" * 40, "/test", True, scope)
+        with self.assertRaises(cloud.CloudError):
+            storage.delete_prepared(item, "/test", True, scope, threading.Event())
+        storage.oper.client.fs_delete.assert_not_called()
+
+    def test_delete_by_id_is_limited_strict_and_never_falls_back(self):
+        storage, item, scope = self.deletion_fixture()
+        storage.oper.client.fs_delete.return_value = {"state": True}
+        self.assertTrue(storage.delete_prepared(item, "/test", True, scope, threading.Event()))
+        storage.oper.client.fs_delete.assert_called_once_with("123", timeout=30)
+        storage.oper._delete_rate_limiter.acquire.assert_called_once()
+        storage.oper._id_cache.remove.assert_called_once_with(123)
+        storage.oper.delete.assert_not_called()
+        storage.oper.client.fs_delete.return_value = {"state": False}
+        self.assertFalse(storage.delete_prepared(item, "/test", True, scope, threading.Event()))
+        for result in (None, {}, {"state": 1}, {"state": "true"}):
+            storage.oper.client.fs_delete.return_value = result
+            with self.subTest(result=result), self.assertRaises(cloud.CloudError):
+                storage.delete_prepared(item, "/test", True, scope, threading.Event())
+
+    def test_delete_cancels_on_stop_account_change_and_outside_scope(self):
+        storage, item, scope = self.deletion_fixture()
+        stopping = threading.Event()
+        stopping.set()
+        with self.assertRaises(cloud.CloudError):
+            storage.delete_prepared(item, "/test", True, scope, stopping)
+        for changed in ({"path": "/other/a.mkv"}, {"type": "dir"}, {"fileid": "0"}):
+            with self.subTest(changed=changed), self.assertRaises(cloud.CloudError):
+                storage.delete_prepared({**item, **changed}, "/test", True, scope, threading.Event())
+        storage.oper.client.user_id = 654
+        with self.assertRaises(cloud.CloudError):
+            storage.delete_prepared(item, "/test", True, scope, threading.Event())
+        storage.oper.client.fs_delete.assert_not_called()
+
+    def test_sha1_query_rejects_ambiguous_or_invalid_metadata(self):
+        storage, item, scope = self.deletion_fixture()
+        for result in ({"state": False}, {"state": True, "data": []}, {"state": True, "data": [{"file_id": "456", "sha1": "a" * 40}]}, {"state": True, "data": [{"file_id": "123", "sha1": "bad"}]}):
+            storage.oper.client.fs_file_skim.return_value = result
+            with self.subTest(result=result), self.assertRaises(cloud.CloudError):
+                storage.file_sha1(item)
+
     @staticmethod
     def life_event(**values):
         event = {field: None for field in cloud.LIFE_EVENT_FIELDS}

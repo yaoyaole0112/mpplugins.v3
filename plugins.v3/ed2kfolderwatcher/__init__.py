@@ -161,7 +161,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.11.7"
+    plugin_version = "1.12.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -176,6 +176,8 @@ class Ed2kFolderWatcher(_PluginBase):
     _min_age = 60
     _min_file_size = ""
     _delete_source = False
+    _cloud_delete_enabled = False
+    _cloud_delete_scope = ""
     _delete_small_files = False
     _telegram_enabled = False
     _telegram_mode = "user"
@@ -246,6 +248,8 @@ class Ed2kFolderWatcher(_PluginBase):
             self._enabled = False
             logger.error(f"自动生成ED2K链接：{failure}，已停止插件，请修正配置")
         self._delete_source = bool(config.get("delete_source", False))
+        self._cloud_delete_enabled = config.get("cloud_delete_enabled") is True
+        self._cloud_delete_scope = str(config.get("cloud_delete_scope") or "")
         self._delete_small_files = bool(config.get("delete_small_files", False))
         self._telegram_enabled = bool(config.get("telegram_enabled", False))
         self._telegram_mode = "user"
@@ -672,7 +676,9 @@ class Ed2kFolderWatcher(_PluginBase):
         from .cloud_storage import CloudStorage, CloudError, fingerprint, fingerprint_matches, hash_remote, record_key, legacy_record_key, allowed_item
         if not self._cloud_enabled or self._stopping.is_set() or not self._cloud_item_is_eligible(item):
             return
+        stopping = self._stopping
         import datetime
+        delete_scope_at_start = self._cloud_delete_scope if self._delete_source and self._cloud_delete_enabled else ""
         modified = item.get("modify_time")
         if isinstance(modified, (int, float)):
             modified_at = modified / 1000 if modified > 10_000_000_000 else modified
@@ -716,6 +722,8 @@ class Ed2kFolderWatcher(_PluginBase):
             if key_migrated:
                 record = records.pop(old_key)
                 records[key] = record
+            if record and (record.get("source_deleted") or record.get("cloud_delete_state") in {"inflight", "uncertain"}):
+                return
             unchanged = record and not record_problem(record) and fingerprint_matches(record.get("cloud_fingerprint"), item) and record.get("hash_version") == 2
             migrated = unchanged and (key_migrated or record.get("cloud_fingerprint") != fingerprint(item))
             if migrated:
@@ -724,6 +732,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 if output is not None or migrated:
                     self._write_results(output, cache_path, records)
                 self._cloud_succeeded(key)
+                self._maybe_delete_cloud_source(storage, item, record, output, cache_path, records, stopping)
                 return
             fresh = storage.fresh(item)
             if fingerprint(fresh) != fingerprint(item):
@@ -731,23 +740,41 @@ class Ed2kFolderWatcher(_PluginBase):
                 return
             item = fresh
             self._cloud_status.update(file=item["name"], bytes_read=0, size=item["size"], error="", reconnecting=False, stream_retries=0)
+            delete_evidence_scope = ""
             if not unchanged:
+                if delete_scope_at_start and delete_scope_at_start == self._cloud_delete_scope and item["storage"] == "115网盘Plus":
+                    try:
+                        if storage.delete_scope(self._cloud_folder, self._cloud_recursive) == delete_scope_at_start:
+                            item = {**item, "sha1": storage.file_sha1(item)}
+                            delete_evidence_scope = delete_scope_at_start
+                    except Exception as failure:
+                        logger.warning(f"自动生成ED2K链接：未获得删源所需SHA1或账号证据，仅生成链接并保留网盘源文件：{item['name']}（{type(failure).__name__}）")
                 digest = lambda data: _CryptoMD4.new(data).digest() if _CryptoMD4 else _md4(data)
                 def progress(done, size):
                     self._cloud_status.update(bytes_read=done, size=size, reconnecting=False)
                 def on_retry(attempt):
                     self._cloud_status.update(reconnecting=True, stream_retries=attempt)
-                file_hash = hash_remote(storage, item, self._stopping, digest, ED2K_PART_SIZE, progress,
+                file_hash = hash_remote(storage, item, stopping, digest, ED2K_PART_SIZE, progress,
                                         read_timeout=self._cloud_read_timeout, on_retry=on_retry)
+                if stopping is not self._stopping or stopping.is_set():
+                    return
                 record = {"name": item["name"], "size": item["size"], "link": ed2k_link(Path(item["name"]), file_hash, item["size"]),
                           "source_type": "cloud", "storage": item["storage"], "source_path": item["path"],
                           "cloud_fingerprint": fingerprint(item), "generated_at": time.time(), "source_deleted": False,
                           "hash_version": 2, "telegram_sent": False, "telegram_target": ""}
                 if record_problem(record):
                     raise CloudError("网盘链接校验失败，不保存或发送")
+                if delete_evidence_scope and delete_evidence_scope == self._cloud_delete_scope and stopping is self._stopping and not stopping.is_set():
+                    try:
+                        scope = storage.delete_scope(self._cloud_folder, self._cloud_recursive)
+                        sha1 = item.get("sha1")
+                        if scope == self._cloud_delete_scope and isinstance(sha1, str) and re.fullmatch(r"[0-9a-fA-F]{40}", sha1):
+                            record.update(cloud_delete_scope=scope, cloud_sha1=sha1.lower(), cloud_delete_note="等待所选输出完成后校验删源")
+                    except CloudError:
+                        pass
                 records[key] = record
                 self._cloud_status["completed"] += 1
-                logger.info(f"自动生成ED2K链接：网盘文件生成完成（不删源）：{item['storage']}：{item['name']}")
+                logger.info(f"自动生成ED2K链接：网盘文件生成完成：{item['storage']}：{item['name']}")
             self._write_results(output, cache_path, records)
             self._notify_record(Path(item["name"]), record, checkpoint=lambda: self._write_results(output, cache_path, records))
             self._write_results(output, cache_path, records)
@@ -757,6 +784,53 @@ class Ed2kFolderWatcher(_PluginBase):
             self._cloud_status["file"] = ""
             if self._telegram_enabled and not record.get("telegram_sent"):
                 self._queue_cloud_file(item, delay=300)
+            else:
+                self._maybe_delete_cloud_source(storage, item, record, output, cache_path, records, stopping)
+
+    def _maybe_delete_cloud_source(self, storage, item, record, output, cache_path, records, stopping):
+        if stopping is not self._stopping or stopping.is_set() or not self._delete_source or not self._cloud_delete_enabled:
+            return
+        if item.get("storage") != "115网盘Plus" or not self._cloud_delete_scope or record.get("cloud_delete_scope") != self._cloud_delete_scope:
+            return
+        if record_problem(record) or record.get("source_deleted") or record.get("cloud_delete_state") in {"inflight", "uncertain", "blocked"}:
+            return
+        if output is None and not self._telegram_enabled:
+            return
+        if self._telegram_enabled and (not record.get("telegram_sent") or record.get("telegram_target") != self._telegram_target_key()):
+            return
+        if record.get("cloud_delete_attempts", 0) >= 3:
+            return
+        if record.get("cloud_delete_retry_at", 0) > time.time():
+            self._queue_cloud_file(item, delay=max(1, record["cloud_delete_retry_at"] - time.time()))
+            return
+        try:
+            current = storage.prepare_delete(item, record.get("cloud_sha1"), self._cloud_folder, self._cloud_recursive, self._cloud_delete_scope)
+        except Exception as failure:
+            record.update(cloud_delete_state="blocked", cloud_delete_note="文件身份或授权校验未通过，保留源文件", delete_failed=True)
+            self._write_results(output, cache_path, records)
+            logger.warning(f"自动生成ED2K链接：网盘删源校验未通过，保留文件：{item['name']}（{type(failure).__name__}）")
+            return
+        if stopping is not self._stopping or stopping.is_set():
+            return
+        record.update(cloud_delete_state="inflight", cloud_delete_note="删除请求处理中，异常中断后不自动重删", cloud_delete_requested_at=time.time(), cloud_delete_attempts=record.get("cloud_delete_attempts", 0) + 1)
+        self._write_results(output, cache_path, records)
+        try:
+            deleted = storage.delete_prepared(current, self._cloud_folder, self._cloud_recursive, self._cloud_delete_scope, stopping)
+        except Exception as failure:
+            record.update(cloud_delete_state="uncertain", cloud_delete_note="删除结果未确认，请到115核实；不会自动重删", delete_failed=True)
+            logger.warning(f"自动生成ED2K链接：网盘删除结果未确认，暂停重试：{item['name']}（{type(failure).__name__}）")
+        else:
+            if deleted is True:
+                record.update(source_deleted=True, deleted_at=time.time(), delete_method="cloud_auto", cloud_delete_state="deleted", cloud_delete_note="115接口确认删除成功")
+                record.pop("delete_failed", None)
+                record.pop("cloud_delete_retry_at", None)
+                logger.info(f"自动生成ED2K链接：115源文件删除成功，链接及记录已保留：{item['name']}")
+            else:
+                record.update(cloud_delete_state="failed", cloud_delete_note="115接口未确认成功，最多尝试3次", delete_failed=True, cloud_delete_retry_at=time.time() + 300)
+                logger.warning(f"自动生成ED2K链接：115明确返回删除失败，保留链接记录：{item['name']}；尝试{record['cloud_delete_attempts']}/3，重试前再次核验文件身份")
+                if record["cloud_delete_attempts"] < 3:
+                    self._queue_cloud_file(item, delay=300)
+        self._write_results(output, cache_path, records)
 
     def _extension_set(self) -> set[str]:
         return {item.strip().lower().lstrip(".") for item in self._extensions.split(",") if item.strip()}
@@ -1146,6 +1220,8 @@ class Ed2kFolderWatcher(_PluginBase):
             for index, (path, record) in ordered[:100]:
                 if record.get("source_deleted") is True:
                     source_status = "deleted"
+                elif record.get("cloud_delete_state") in {"inflight", "uncertain"}:
+                    source_status = "delete_uncertain"
                 elif record.get("delete_failed"):
                     source_status = "delete_failed"
                 elif record.get("source_deleted") is False:
@@ -1163,9 +1239,9 @@ class Ed2kFolderWatcher(_PluginBase):
                               "generated_at": record.get("generated_at"), "source_status": source_status,
                               "source_type": record.get("source_type", "local"), "storage": record.get("storage", "local"),
                               "source_path": record.get("source_path", path),
-                              "deleted_at": record.get("deleted_at")})
+                              "deleted_at": record.get("deleted_at"), "cloud_delete_state": record.get("cloud_delete_state", ""), "cloud_delete_note": record.get("cloud_delete_note", "")})
             return {"ok": True, "items": items, "total": len(records), "limit": 100,
-                    "delete_source_enabled": self._delete_source}
+                    "delete_source_enabled": self._delete_source, "cloud_delete_enabled": self._cloud_delete_enabled}
         except (OSError, ValueError, TypeError):
             return {"ok": False, "message": "读取生成记录失败，原记录已保留，请检查日志或文件权限"}
 
@@ -1187,9 +1263,9 @@ class Ed2kFolderWatcher(_PluginBase):
             self._web_login = None
 
     def _save_config(self) -> None:
-        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "delete_small_files", "telegram_enabled", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
+        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
         config = {name: getattr(self, f"_{name}") for name in fields}
-        config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce)
+        config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce, cloud_delete_scope=self._cloud_delete_scope)
         self.update_config(config)
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -1202,6 +1278,7 @@ class Ed2kFolderWatcher(_PluginBase):
         return [{"component": "VForm", "content": [
             {"component": "VCardTitle", "text": "通用设置"},
             field("VSwitch", "enabled", "启用插件"),
+            field("VSwitch", "delete_source", "完成后删除源文件", hint="本地沿用原设置；115另需在新版设置页面单独授权，CloudDrive仍只读。全部输出成功后才删除，TG已发送不代表接收机器人已转存。", persistent_hint=True),
             field("VSwitch", "include_subdirectories", "包含子目录", hint="本地与网盘共用；旧配置两者不一致时，请先明确选择再保存，升级不会自动改变监控范围。", persistent_hint=True),
             field("VSwitch", "output_enabled", "生成本地 TXT 文件", hint="本地与网盘链接合并输出；关闭仍保留内部记录。", persistent_hint=True),
             field("VTextField", "output", "TXT 输出路径", placeholder="留空自动选择 ed2k.txt 路径"),
@@ -1211,12 +1288,11 @@ class Ed2kFolderWatcher(_PluginBase):
             {"component": "VCardTitle", "text": "本地监控"},
             field("VTextField", "folder", "本地监控目录", placeholder="/downloads/complete", hint="MoviePilot 容器内可见的本地路径；留空可仅处理网盘。", persistent_hint=True),
             field("VSwitch", "monitor_enabled", "本地实时监控文件"),
-            field("VSwitch", "delete_source", "成功后删除本地源文件", hint="对网盘无效；两种输出都关闭时不删除。", persistent_hint=True),
-            field("VSwitch", "delete_small_files", "低于阈值文件自动删源", hint="默认关闭；仅删除通过扩展名过滤、稳定等待后的非空本地文件，不生成、不发送链接，删除不依赖TXT或TG成功。阈值留空或0不生效；网盘始终只读。请仅用于完成目录，删除不可恢复。", persistent_hint=True),
+            field("VSwitch", "delete_small_files", "低于阈值文件自动删源", hint="默认关闭；仅删除通过扩展名过滤、稳定等待后的非空本地文件，不生成、不发送链接，删除不依赖TXT或TG成功。阈值留空或0不生效；本开关不处理网盘文件。请仅用于完成目录，删除不可恢复。", persistent_hint=True),
             field("VSwitch", "scan_enabled", "本地定时增量补扫"),
             field("VTextField", "cron", "本地补扫计划", hint="默认每 10 分钟：*/10 * * * *", persistent_hint=True),
             {"component": "VCardTitle", "text": "网盘监控"},
-            field("VSwitch", "cloud_enabled", "启用网盘增量生成（只读，不删源）"),
+            field("VSwitch", "cloud_enabled", "启用网盘增量生成"),
             field("VSelect", "cloud_storage", "网盘存储", items=[{"title": "115网盘Plus", "value": "115网盘Plus"}, {"title": "CloudDrive储存", "value": "CloudDrive储存"}]),
             field("VTextField", "cloud_folder", "网盘监控目录", hint="网盘内绝对路径，不能使用根目录；可在新版插件设置页面浏览选择。", persistent_hint=True),
             field("VSwitch", "cloud_monitor_enabled", "115生活事件监控（近实时）", hint="仅处理开启后新增事件对应的单个文件，不扫描已有文件；每分钟检查一次。", persistent_hint=True),
@@ -1232,4 +1308,4 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "delete_source": False, "delete_small_files": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}

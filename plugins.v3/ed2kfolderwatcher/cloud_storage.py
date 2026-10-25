@@ -1,4 +1,5 @@
 import hashlib
+import json
 import posixpath
 import re
 import sys
@@ -84,6 +85,85 @@ class CloudStorage:
                           if getattr(plugin, "_disk_name", None) == storage and getattr(plugin, attribute, None) is not None), None)
         if self.oper is None:
             raise CloudError("对应存储插件未就绪，请先启用并登录存储插件")
+
+    def delete_scope(self, root, recursive):
+        root = cloud_path(root)
+        if self.storage != "115网盘Plus" or root == "/":
+            raise CloudError("自动删源仅支持115网盘Plus的指定子目录，CloudDrive仍只读")
+        account = getattr(self.oper.client, "user_id", None)
+        if not isinstance(account, (str, int)) or isinstance(account, bool) or not re.fullmatch(r"[1-9][0-9]*", str(account)):
+            raise CloudError("无法确认115存储账号，拒绝授权或删除")
+        payload = [self.storage, str(account), root, bool(recursive)]
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
+
+    def prepare_delete(self, item, sha1, root, recursive, scope):
+        if not scope or self.delete_scope(root, recursive) != scope:
+            raise CloudError("网盘删源授权与当前账号或目录不一致，请重新授权")
+        if not re.fullmatch(r"[1-9][0-9]{0,63}", str(item.get("fileid") or "")) or item.get("type") != "file":
+            raise CloudError("仅允许按有效文件ID删除单个115文件")
+        if not isinstance(sha1, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha1):
+            raise CloudError("缺少已验证SHA1，保留网盘源文件")
+        current = self.fresh(item)
+        if not allowed_item(current, self.storage, root) or current.get("type") != "file" or not fingerprint_matches(fingerprint(item), current):
+            raise CloudError("网盘文件身份、大小或路径变化，拒绝删除")
+        if not recursive and PurePosixPath(cloud_path(current["path"])).parent.as_posix() != cloud_path(root):
+            raise CloudError("网盘文件位于未授权的子目录，拒绝删除")
+        if self.file_sha1(current) != sha1.lower():
+            raise CloudError("网盘文件SHA1变化或缺失，拒绝删除")
+        if self.delete_path(current) != cloud_path(item["path"]):
+            raise CloudError("115文件当前路径已变化，拒绝删除")
+        return current
+
+    def delete_path(self, item):
+        from p115client.tool.attr import get_path
+        return cloud_path(get_path(client=self.oper.client, attr=str(item["fileid"]), root_id=None, ensure_file=True, refresh=True, app="android", timeout=30))
+
+    def file_sha1(self, item):
+        if self.storage != "115网盘Plus" or item.get("type") != "file" or not re.fullmatch(r"[1-9][0-9]{0,63}", str(item.get("fileid") or "")):
+            raise CloudError("只能校验有效115文件的SHA1")
+        from app.plugins.p115disk.tools import get_ios_ua_app
+        response = self.oper.client.fs_file_skim(str(item["fileid"]), **{**get_ios_ua_app(app=False), "timeout": 30})
+        if not isinstance(response, dict) or response.get("state") is not True:
+            raise CloudError("115文件SHA1查询未确认成功")
+        rows = response.get("data")
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict) or str(rows[0].get("file_id")) != str(item["fileid"]):
+            raise CloudError("115文件SHA1查询身份不一致")
+        digest = rows[0].get("sha1")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", digest):
+            raise CloudError("115文件缺少有效SHA1")
+        return digest.lower()
+
+    def delete_prepared(self, item, root, recursive, scope, stopping):
+        if stopping.is_set() or self.delete_scope(root, recursive) != scope:
+            raise CloudError("插件停止或授权变化，取消网盘删除")
+        if item.get("type") != "file" or not allowed_item(item, self.storage, root) or not re.fullmatch(r"[1-9][0-9]{0,63}", str(item.get("fileid") or "")):
+            raise CloudError("删除对象不是已授权的单个文件")
+        if not recursive and PurePosixPath(cloud_path(item["path"])).parent.as_posix() != cloud_path(root):
+            raise CloudError("删除对象位于未授权的子目录")
+        from app.plugins.p115disk.tools import get_ios_ua_app
+        limiter = getattr(self.oper, "_delete_rate_limiter", None)
+        if limiter is None:
+            raise CloudError("115存储缺少删除限速器，拒绝发送删除请求")
+        limiter.acquire()
+        if stopping.is_set() or self.delete_scope(root, recursive) != scope:
+            raise CloudError("等待限速期间停止或授权变化，取消删除")
+        if self.delete_path(item) != cloud_path(item["path"]):
+            raise CloudError("限速等待后文件已移动，取消删除")
+        if stopping.is_set():
+            raise CloudError("插件停止，取消删除")
+        result = self.oper.client.fs_delete(str(item["fileid"]), **{**get_ios_ua_app(app=False), "timeout": 30})
+        if not isinstance(result, dict) or not isinstance(result.get("state"), bool):
+            raise CloudError("115删除响应状态未知，不自动重试")
+        if result["state"] is False:
+            return False
+        for name in ("_id_cache", "_id_item_cache"):
+            cache = getattr(self.oper, name, None)
+            if cache is not None:
+                try:
+                    cache.remove(int(item["fileid"]))
+                except Exception:
+                    pass
+        return True
 
     def list(self, path):
         from app.schemas import FileItem

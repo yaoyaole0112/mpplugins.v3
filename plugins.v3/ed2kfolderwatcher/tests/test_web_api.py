@@ -205,6 +205,27 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(self.client.post("/run").json()["ok"])
         self.plugin.scan.assert_not_called()
 
+    def test_cloud_delete_requires_confirmation_and_binds_scope_without_deleting(self):
+        from ed2k_api_test_package import cloud_storage
+        values = {"cloud_enabled": True, "cloud_storage": "115网盘Plus", "cloud_folder": "/test", "cloud_cron": "*/10 * * * *", "cloud_delete_enabled": True, "delete_source": True, "output_enabled": True}
+        with patch.object(cloud_storage, "available_storages", return_value=[{"type": "115网盘Plus"}]), patch.object(cloud_storage, "CloudStorage") as adapter:
+            adapter.return_value.delete_scope.return_value = "bound-scope"
+            with self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, values)
+            result = web_api.validate_settings(self.plugin, {**values, "confirm_cloud_delete": True})
+            self.assertEqual(result["cloud_delete_scope"], "bound-scope")
+            self.assertNotIn("confirm_cloud_delete", result)
+            adapter.return_value.delete_prepared.assert_not_called()
+            for changed in ({"delete_source": False}, {"output_enabled": False}, {"cloud_enabled": False}, {"confirm_cloud_delete": "true"}, {"cloud_delete_scope": "forged"}):
+                with self.subTest(changed=changed), self.assertRaises(web_api.UserAccountError):
+                    web_api.validate_settings(self.plugin, {**values, "confirm_cloud_delete": True, **changed})
+            adapter.return_value.delete_scope.side_effect = cloud_storage.CloudError("Account not available")
+            with self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {**values, "confirm_cloud_delete": True})
+        result = web_api.validate_settings(self.plugin, {"cloud_delete_enabled": False})
+        self.assertEqual(result["cloud_delete_scope"], "")
+        self.assertFalse(result["cloud_delete_enabled"])
+
     def test_cloud_validation_rejects_root_traversal_and_unknown_storage(self):
         from ed2k_api_test_package import cloud_storage
         values = {"cloud_enabled": True, "cloud_storage": "115网盘Plus", "cloud_folder": "/test", "cloud_cron": "*/10 * * * *"}

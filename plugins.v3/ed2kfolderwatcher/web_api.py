@@ -14,10 +14,10 @@ from .file_size import minimum_file_bytes, minimum_gb_value, minimum_gb_setting
 
 
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
-                 "min_age", "min_file_size", "delete_source", "delete_small_files", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
+                 "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
                  "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
                  "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
-BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "delete_small_files", "scan_enabled", "telegram_enabled", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled"}
+BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled"}
 
 
 def settings_snapshot(plugin):
@@ -30,6 +30,9 @@ def settings_snapshot(plugin):
 
 def validate_settings(plugin, values):
     values = dict(values)
+    confirm_cloud_delete = values.pop("confirm_cloud_delete", False)
+    if not isinstance(confirm_cloud_delete, bool):
+        raise UserAccountError("网盘删源确认格式不正确")
     if "include_subdirectories" in values:
         shared_recursive = values.pop("include_subdirectories")
         if not isinstance(shared_recursive, bool):
@@ -96,6 +99,21 @@ def validate_settings(plugin, values):
         except ValueError as error:
             raise UserAccountError(str(error)) from None
     result["onlyonce"] = False
+    result["cloud_delete_scope"] = ""
+    if result["cloud_delete_enabled"]:
+        if confirm_cloud_delete is not True:
+            raise UserAccountError("请单独确认115网盘删源风险，旧本地删源设置不代表云端授权")
+        from .cloud_storage import CloudStorage, CloudError
+        try:
+            if not result["delete_source"] or not result["cloud_enabled"]:
+                raise CloudError("请先开启完成后删除源文件与网盘增量生成")
+            if not result["output_enabled"] and not result["telegram_enabled"]:
+                raise CloudError("请至少开启TXT或Telegram一种输出后再授权网盘删源")
+            result["cloud_delete_scope"] = CloudStorage(result["cloud_storage"]).delete_scope(result["cloud_folder"], result["cloud_recursive"])
+        except CloudError as failure:
+            raise UserAccountError(str(failure)) from None
+        except Exception as failure:
+            raise UserAccountError(f"115网盘删源授权校验失败（{type(failure).__name__}），未启用删除") from None
     return result
 
 
@@ -198,7 +216,7 @@ def build_routes(plugin):
             for path, endpoint, method, summary in (
                 ("/records", recent, "GET", "最近生成链接与删源状态"),
                 ("/records/delete-source", delete_source, "POST", "确认后手动删除记录对应的源文件"),
-                ("/cloud/status", cloud_status, "GET", "只读网盘来源及生成进度"),
+                ("/cloud/status", cloud_status, "GET", "网盘来源及生成进度"),
                 ("/cloud/run", cloud_run, "POST", "网盘增量扫描与补发"),
                 ("/cloud/browse", cloud_browse, "POST", "浏览网盘子目录"),
                 ("/settings", status, "GET", "读取安全配置"), ("/settings", save, "POST", "保存插件配置"),

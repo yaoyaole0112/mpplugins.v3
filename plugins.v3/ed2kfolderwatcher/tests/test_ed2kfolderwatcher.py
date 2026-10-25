@@ -113,6 +113,139 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._process_file(path)
         self.assertEqual(self.records()[str(path.resolve())]["size"], 6)
 
+    def cloud_delete_fixture(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._output_enabled = True
+        self.plugin._delete_source = True
+        self.plugin._cloud_delete_enabled = True
+        self.plugin._cloud_delete_scope = "authorized-scope"
+        storage.delete_scope.return_value = "authorized-scope"
+        storage.file_sha1.return_value = "a" * 40
+        storage.prepare_delete.return_value = item
+        storage.delete_prepared.return_value = True
+        return item, storage
+
+    def test_cloud_delete_success_keeps_link_and_does_not_repeat(self):
+        item, storage = self.cloud_delete_fixture()
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32) as hashing:
+            self.plugin._process_cloud_file(item)
+            self.plugin._process_cloud_file(item)
+        self.assertEqual(hashing.call_count, 1)
+        storage.delete_prepared.assert_called_once()
+        record = self.records()[self.cloud_module.record_key(item)]
+        self.assertTrue(record["source_deleted"])
+        self.assertEqual(record["cloud_delete_state"], "deleted")
+        self.assertIn(record["link"], (self.folder / "ed2k.txt").read_text())
+        self.assertFalse(self.plugin.recent_records()["items"][0]["can_delete"])
+
+    def test_cloud_delete_needs_outputs_and_dedicated_opt_in(self):
+        for flag in ("_cloud_delete_enabled", "_delete_source", "_output_enabled"):
+            with self.subTest(flag=flag):
+                item, storage = self.cloud_delete_fixture()
+                self.plugin._min_age = 0
+                setattr(self.plugin, flag, False)
+                item = {**item, "fileid": flag, "name": flag + ".mkv", "path": "/cloud-test/" + flag + ".mkv"}
+                storage.fresh.return_value = item
+                with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32):
+                    self.plugin._process_cloud_file(item)
+                storage.delete_prepared.assert_not_called()
+
+    def test_cloud_delete_does_not_retroactively_delete_old_links(self):
+        item, storage = self.cloud_fixture()
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32):
+            self.plugin._process_cloud_file(item)
+        self.plugin._delete_source = True
+        self.plugin._cloud_delete_enabled = True
+        self.plugin._cloud_delete_scope = "authorized-scope"
+        self.plugin._output_enabled = True
+        with patch.object(self.cloud_module, "hash_remote") as hashing:
+            self.plugin._process_cloud_file(item)
+        hashing.assert_not_called()
+        storage.delete_prepared.assert_not_called()
+
+    def test_cloud_delete_waits_for_all_telegram_outputs(self):
+        item, storage = self.cloud_delete_fixture()
+        self.plugin._telegram_enabled = True
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32), patch.object(self.plugin, "_notify_record"), patch.object(self.plugin, "_telegram_target_key", return_value="targets"):
+            self.plugin._process_cloud_file(item)
+        storage.delete_prepared.assert_not_called()
+        def complete(path, record, **kwargs):
+            record.update(telegram_sent=True, telegram_target="targets")
+        with patch.object(self.cloud_module, "hash_remote") as hashing, patch.object(self.plugin, "_notify_record", side_effect=complete), patch.object(self.plugin, "_telegram_target_key", return_value="targets"):
+            self.plugin._process_cloud_file(item)
+        hashing.assert_not_called()
+        storage.delete_prepared.assert_called_once()
+
+    def test_cloud_delete_timeout_is_uncertain_and_never_blindly_retried(self):
+        item, storage = self.cloud_delete_fixture()
+        storage.delete_prepared.side_effect = TimeoutError("private URL")
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32) as hashing:
+            self.plugin._process_cloud_file(item)
+            self.plugin._process_cloud_file(item)
+        self.assertEqual(hashing.call_count, 1)
+        storage.delete_prepared.assert_called_once()
+        self.assertEqual(self.plugin.recent_records()["items"][0]["source_status"], "delete_uncertain")
+
+    def test_cloud_delete_explicit_failure_retries_only_delete_at_most_three_times(self):
+        item, storage = self.cloud_delete_fixture()
+        storage.delete_prepared.return_value = False
+        key = self.cloud_module.record_key(item)
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32) as hashing, patch.object(self.plugin, "_notify_record") as notify:
+            for attempt in range(5):
+                if attempt:
+                    records = self.records()
+                    records[key]["cloud_delete_retry_at"] = 0
+                    (self.root / "data" / "records.json").write_text(json.dumps(records))
+                self.plugin._process_cloud_file(item)
+        self.assertEqual(hashing.call_count, 1)
+        self.assertEqual(notify.call_count, 1)
+        self.assertEqual(storage.delete_prepared.call_count, 3)
+        self.assertFalse(self.records()[key]["source_deleted"])
+
+    def test_cloud_delete_prepare_failure_preserves_source(self):
+        item, storage = self.cloud_delete_fixture()
+        storage.prepare_delete.side_effect = self.cloud_module.CloudError("changed")
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32):
+            self.plugin._process_cloud_file(item)
+        storage.delete_prepared.assert_not_called()
+        self.assertEqual(self.records()[self.cloud_module.record_key(item)]["cloud_delete_state"], "blocked")
+
+    def test_cloud_delete_checkpoint_failure_never_sends_request(self):
+        item, storage = self.cloud_delete_fixture()
+        original = self.plugin._write_results
+        def checkpoint(output, cache, records):
+            if any(record.get("cloud_delete_state") == "inflight" for record in records.values()):
+                raise OSError("disk full")
+            original(output, cache, records)
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32), patch.object(self.plugin, "_write_results", side_effect=checkpoint), self.assertRaises(OSError):
+            self.plugin._process_cloud_file(item)
+        storage.delete_prepared.assert_not_called()
+
+    def test_cloud_delete_post_request_checkpoint_failure_stays_inflight_on_disk(self):
+        item, storage = self.cloud_delete_fixture()
+        original = self.plugin._write_results
+        def checkpoint(output, cache, records):
+            if any(record.get("cloud_delete_state") == "deleted" for record in records.values()):
+                raise OSError("disk full after request")
+            original(output, cache, records)
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32), patch.object(self.plugin, "_write_results", side_effect=checkpoint), self.assertRaises(OSError):
+            self.plugin._process_cloud_file(item)
+        self.assertEqual(self.records()[self.cloud_module.record_key(item)]["cloud_delete_state"], "inflight")
+        with patch.object(self.cloud_module, "hash_remote") as hashing:
+            self.plugin._process_cloud_file(item)
+        hashing.assert_not_called()
+        storage.delete_prepared.assert_called_once()
+
+    def test_cloud_delete_scope_and_sha1_evidence_are_required(self):
+        for failed in ("delete_scope", "file_sha1"):
+            item, storage = self.cloud_delete_fixture()
+            getattr(storage, failed).side_effect = self.cloud_module.CloudError("no evidence")
+            item = {**item, "fileid": failed, "name": failed + ".mkv", "path": "/cloud-test/" + failed + ".mkv"}
+            storage.fresh.return_value = item
+            with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32):
+                self.plugin._process_cloud_file(item)
+            storage.delete_prepared.assert_not_called()
+
     def test_shared_recursive_controls_local_and_cloud_ranges(self):
         child = self.folder / "child"
         child.mkdir()
