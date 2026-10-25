@@ -24,11 +24,19 @@ def settings_snapshot(plugin):
     result = {name: getattr(plugin, f"_{name}") for name in CONFIG_FIELDS}
     result["telegram_mode"] = "user"
     result["min_file_size_gb"] = minimum_gb_value(plugin._min_file_size)
+    result["include_subdirectories"] = plugin._recursive if plugin._recursive == plugin._cloud_recursive else None
     return result
 
 
 def validate_settings(plugin, values):
     values = dict(values)
+    if "include_subdirectories" in values:
+        shared_recursive = values.pop("include_subdirectories")
+        if not isinstance(shared_recursive, bool):
+            raise UserAccountError("请明确选择是否包含子目录")
+        if {"recursive", "cloud_recursive"} & set(values):
+            raise UserAccountError("子目录配置重复，请刷新页面后重新保存")
+        values.update(recursive=shared_recursive, cloud_recursive=shared_recursive)
     if "min_file_size_gb" in values:
         if "min_file_size" in values:
             raise UserAccountError("大小阈值配置重复，请刷新页面重试")

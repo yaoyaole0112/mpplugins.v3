@@ -20,7 +20,7 @@ let savedDelete = false
 let savedDeleteSmall = false
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || !loaded.value)
-const configFields = ['enabled', 'folder', 'recursive', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'delete_source', 'delete_small_files', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_recursive', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
+const configFields = ['enabled', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'delete_source', 'delete_small_files', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
 const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '本地与网盘共用；留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size_gb', label: '生成链接最小文件大小（GB）', type: 'number', step: 'any', placeholder: '例如0.5、1、1.5（GB）', hint: '本地与网盘共用；小于此值不生成、不转发TG；默认保留源文件，可在本地监控开启低于阈值自动删源。留空或0不限制；固定单位GB（1GB=1024³字节），仅输入数值，支持小数；等于阈值可生成。' }, { key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '本地与网盘共用；稳定等待不能保证上传已经完成，请选择完成目录' }]
 
 function unpack(response) {
@@ -78,6 +78,7 @@ async function runCloud() {
 }
 async function saveSettings() {
   if (auth.pending) { error.value = '请先完成或取消验证码登录，再保存其他设置'; return }
+  if (typeof settings.include_subdirectories !== 'boolean') { error.value = '原本地与网盘子目录设置不一致，请先明确选择是否包含子目录，再保存'; return }
   if (settings.delete_source && !savedDelete && !window.confirm('确定启用生成成功后删除源文件？请先使用测试目录验证。')) return
   if (settings.delete_small_files && !savedDeleteSmall && !window.confirm('确定启用低于阈值文件自动删源？稳定等待后的非空本地文件小于阈值时将直接删除，不生成链接、不等待Telegram或TXT成功，删除不可恢复。请仅使用下载完成目录，并先用测试文件验证。')) return
   await work(async () => {
@@ -153,7 +154,8 @@ onUnmounted(() => {
 
     <article class="card" data-testid="common-settings">
       <h3>通用设置</h3>
-      <div class="switches"><label class="switch"><input v-model="settings.enabled" type="checkbox" :disabled="disabled">启用插件</label><label class="switch"><input v-model="settings.output_enabled" type="checkbox" :disabled="disabled">生成本地 TXT</label></div>
+      <div class="switches"><label class="switch"><input v-model="settings.enabled" type="checkbox" :disabled="disabled">启用插件</label><label class="switch"><input v-model="settings.output_enabled" type="checkbox" :disabled="disabled">生成本地 TXT</label><label class="switch"><input v-model="settings.include_subdirectories" :indeterminate="settings.include_subdirectories === null" type="checkbox" :disabled="disabled">包含子目录</label></div>
+      <p v-if="settings.include_subdirectories === null" class="warning">原本地与网盘子目录设置不一致，目前仍分别按原配置运行。请明确选择“包含子目录”后保存，两种来源将统一使用此设置。</p>
       <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :step="field.step" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label></div>
       <div class="fields"><label>TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；有本地目录时默认写入该目录，仅网盘时写入插件数据目录。关闭 TXT 不删除已有文件。</small></label></div>
       <p>Telegram 发送与个人账号授权也适用于两种来源，统一在下方配置；两种来源共用一个计算线程。</p>
@@ -161,7 +163,7 @@ onUnmounted(() => {
 
     <article class="card" data-testid="local-source">
       <h3>本地监控</h3>
-      <div class="switches"><label class="switch"><input v-model="settings.monitor_enabled" type="checkbox" :disabled="disabled">实时监控文件</label><label class="switch"><input v-model="settings.recursive" type="checkbox" :disabled="disabled">包含本地子目录</label><label class="switch"><input v-model="settings.delete_source" type="checkbox" :disabled="disabled">成功后删除本地源文件</label><label class="switch"><input v-model="settings.scan_enabled" type="checkbox" :disabled="disabled">本地定时增量补扫</label></div>
+      <div class="switches"><label class="switch"><input v-model="settings.monitor_enabled" type="checkbox" :disabled="disabled">实时监控文件</label><label class="switch"><input v-model="settings.delete_source" type="checkbox" :disabled="disabled">成功后删除本地源文件</label><label class="switch"><input v-model="settings.scan_enabled" type="checkbox" :disabled="disabled">本地定时增量补扫</label></div>
       <div class="fields"><label>本地监控目录<input v-model="settings.folder" :disabled="disabled" placeholder="/media/movies"><small>MoviePilot 容器内路径；留空可仅处理网盘来源。</small></label><label>本地补扫计划<input v-model="settings.cron" :disabled="disabled || !settings.scan_enabled" placeholder="*/10 * * * *"><small>默认关闭，网络挂载漏事件时可启用兜底。</small></label></div>
       <p v-if="settings.delete_source" class="warning">已开启本地删除源文件：仅在所选输出成功且文件未变化时删除；两种输出都关闭时不删除。此开关对网盘无效，网盘文件始终保留。</p>
       <label class="switch"><input v-model="settings.delete_small_files" type="checkbox" :disabled="disabled">低于阈值文件自动删源</label>
@@ -171,7 +173,7 @@ onUnmounted(() => {
     <article class="card" data-testid="cloud-source">
       <h3>网盘监控</h3>
       <p>无需将网盘挂载为本地目录；复用已登录的存储插件，完整数据经网络分块读取计算，不保存完整临时文件。本地和网盘共用一个工作线程；不会并发计算多个文件，也不会删除云端文件。</p>
-      <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_recursive" type="checkbox" :disabled="disabled">包含网盘子目录</label><label class="switch"><input v-model="settings.cloud_scan_enabled" type="checkbox" :disabled="disabled">网盘定时增量补扫</label><label class="switch"><input v-model="settings.cloud_monitor_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">115生活事件监控（近实时）</label></div>
+      <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_monitor_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">115生活事件监控（近实时）</label><label class="switch"><input v-model="settings.cloud_scan_enabled" type="checkbox" :disabled="disabled">网盘定时增量补扫</label></div>
       <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''; if (settings.cloud_storage !== '115网盘Plus') settings.cloud_monitor_enabled = false"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>当前已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储，请先启用并登录对应插件' }}</small></label><label>网盘监控目录<input v-model.trim="settings.cloud_folder" :disabled="disabled" placeholder="/待生成链接"><small>网盘内的绝对路径，不是容器本地路径。首次扫描处理目录内现有文件，建议先选小目录测试。</small></label><label>网盘补扫计划<input v-model.trim="settings.cloud_cron" :disabled="disabled || !settings.cloud_scan_enabled" placeholder="*/10 * * * *"><small>仅开启“网盘定时增量补扫”后生效；关闭不影响手动补扫和生活事件触发。默认计划每 10 分钟。</small></label><label>网盘读取超时（秒）<input v-model="settings.cloud_read_timeout" type="number" min="30" max="1800" :disabled="disabled"><small>单次网络读取等待上限，默认 300 秒，不是整个文件计算时限。临时断线最多重连两次；服务提供强校验标识或SHA1时尝试安全续读。</small></label><label v-if="settings.cloud_monitor_enabled">115生活事件来源<select v-model="settings.cloud_life_source" :disabled="disabled"><option value="shared">复用115插件监听（不额外请求生活接口）</option><option value="direct">独立轮询（每分钟一次生活接口）</option></select><small>复用模式要求115插件生活事件监听正在运行，且与当前存储登录同一账号；不会擅自切换为独立请求。</small></label></div>
       <p v-if="settings.cloud_monitor_enabled">每分钟检查一次开启后产生的新生活事件，只将事件对应且位于监控目录内的单个文件加入队列，不扫描或补算目录中的已有文件。新增事件文件尚未整理到监控目录时，按文件ID保留最多15分钟、最多10次复查；后续改名事件仅唤醒已有候选，不处理单独改名的历史文件。每轮最多检查8个文件；保存配置或重启清空候选，漏报文件可手动或定时补扫。</p>
       <div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud()">浏览网盘目录</button><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.cloud_enabled" @click="runCloud">立即网盘增量扫描／补发</button><button type="button" class="secondary" :disabled="disabled" @click="work(refreshCloud)">刷新网盘进度</button></div>

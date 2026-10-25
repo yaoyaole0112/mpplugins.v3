@@ -48,6 +48,27 @@ class WebApiTests(unittest.TestCase):
     def authorize(self):
         self.app.dependency_overrides[web_api.get_current_active_superuser] = lambda: types.SimpleNamespace(is_superuser=True)
 
+    def test_shared_recursive_validation_and_legacy_snapshot(self):
+        for value in (True, False):
+            result = web_api.validate_settings(self.plugin, {"include_subdirectories": value})
+            self.assertIs(result["recursive"], value)
+            self.assertIs(result["cloud_recursive"], value)
+            self.assertNotIn("include_subdirectories", result)
+        for value in (None, "true", 1):
+            with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"include_subdirectories": value})
+        for legacy in ("recursive", "cloud_recursive"):
+            with self.subTest(legacy=legacy), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"include_subdirectories": True, legacy: False})
+        self.plugin._recursive = True
+        self.plugin._cloud_recursive = False
+        self.assertIsNone(web_api.settings_snapshot(self.plugin)["include_subdirectories"])
+        result = web_api.validate_settings(self.plugin, {"min_age": 90})
+        self.assertTrue(result["recursive"])
+        self.assertFalse(result["cloud_recursive"])
+        self.plugin._cloud_recursive = True
+        self.assertTrue(web_api.settings_snapshot(self.plugin)["include_subdirectories"])
+
     def test_multi_target_settings_validation(self):
         result = web_api.validate_settings(self.plugin, {"telegram_enabled": True, "telegram_chat_id": "@first\n@second|123"})
         self.assertEqual(result["telegram_chat_id"], "@first\n@second|123")

@@ -9,6 +9,7 @@ const mobile = matchMedia('(max-width: 959px)').matches
 const dialogFixture = new URLSearchParams(location.search).has('dialog')
 const manual = new URLSearchParams(location.search).has('manual')
 const requestedComponent = new URLSearchParams(location.search).get('component')
+const mixedRecursive = new URLSearchParams(location.search).has('mixed-recursive')
 if (dialogFixture) {
   const stylesheet = document.createElement('link')
   stylesheet.rel = 'stylesheet'
@@ -29,11 +30,12 @@ if (dialogFixture) {
   document.body.prepend(background)
 }
 
-const settings = { enabled: false, folder: '/media/test', recursive: true, monitor_enabled: true,
+const settings = { enabled: false, folder: '/media/test', recursive: true, include_subdirectories: true, monitor_enabled: true,
   output_enabled: true, output: '', extensions: '', min_age: 60, min_file_size: '500M', min_file_size_gb: '0.48828125', delete_source: false, delete_small_files: false,
   scan_enabled: false, cron: '*/10 * * * *', telegram_enabled: false, telegram_mode: 'user',
   telegram_chat_id: '', telegram_thread_id: '', telegram_token: '' }
 Object.assign(settings, { cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
+if (mixedRecursive) Object.assign(settings, { include_subdirectories: null, cloud_recursive: false })
 let requests = []
 let mode = 'normal'
 let closes = 0
@@ -94,6 +96,7 @@ const api = { get: async path => {
   if (typeof body.cloud_scan_enabled !== 'boolean') throw Error('Cloud schedule switch missing from save payload')
   if (String(body.min_file_size_gb) !== '0.5') throw Error('Minimum file size missing from save payload')
   if (body.delete_small_files !== true) throw Error('Small file deletion switch missing from save payload')
+  if (body.include_subdirectories !== false || 'recursive' in body || 'cloud_recursive' in body) throw Error('Shared recursive switch missing or legacy fields leaked into save payload')
   return { ok: true, settings: body, message: '模拟保存成功' }
 } }
 
@@ -245,6 +248,24 @@ try {
     const cloudPanel = document.querySelector('#app [data-testid=cloud-source]')
     if (!cloudPanel || !cloudPanel.textContent.includes('不会删除云端文件') || cloudPanel.querySelector('input[type=checkbox]').checked) throw Error(`${name}: cloud defaults are unsafe or panel missing`)
     const commonPanel = document.querySelector('#app [data-testid=common-settings]')
+    const recursiveSwitch = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.trim() === '包含子目录')?.querySelector('input')
+    if (!recursiveSwitch) throw Error(`${name}: shared recursive switch missing`)
+    if (mixedRecursive) {
+      if (!recursiveSwitch.indeterminate) throw Error(`${name}: mixed legacy values not shown as pending choice`)
+      const beforeSave = requests.length
+      buttons.find(button => button.textContent.trim() === '保存插件设置').click()
+      await vue.nextTick()
+      if (requests.length !== beforeSave || !document.querySelector('#app [role=alert]')?.textContent.includes('请先明确选择')) throw Error(`${name}: mixed recursive values saved without explicit choice`)
+      recursiveSwitch.click()
+      await vue.nextTick()
+    }
+    if (!recursiveSwitch.checked) throw Error(`${name}: recursive true value lost`)
+    if (document.querySelector('#app').textContent.includes('包含本地子目录') || document.querySelector('#app').textContent.includes('包含网盘子目录')) throw Error(`${name}: duplicate recursive switches still visible`)
+    recursiveSwitch.click()
+    await vue.nextTick()
+    if (recursiveSwitch.checked) throw Error(`${name}: shared recursive switch cannot be disabled`)
+    const cloudSwitchLabels = [...cloudPanel.querySelectorAll('.switches label')].map(label => label.textContent.trim())
+    if (cloudSwitchLabels.join('|') !== '启用网盘增量生成|115生活事件监控（近实时）|网盘定时增量补扫') throw Error(`${name}: cloud switch order incorrect`)
     const minimumInput = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.startsWith('生成链接最小文件大小'))?.querySelector('input')
     if (!minimumInput || !minimumInput.placeholder.includes('GB')) throw Error(`${name}: minimum size input missing`)
     if (minimumInput.value !== '0.48828125') throw Error(`${name}: legacy 500M conversion changed threshold`)

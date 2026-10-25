@@ -113,6 +113,36 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._process_file(path)
         self.assertEqual(self.records()[str(path.resolve())]["size"], 6)
 
+    def test_shared_recursive_controls_local_and_cloud_ranges(self):
+        child = self.folder / "child"
+        child.mkdir()
+        path = child / "nested.mkv"
+        path.write_bytes(b"hello")
+        for value in (False, True):
+            self.plugin.init_plugin({"folder": str(self.folder), "include_subdirectories": value})
+            item, storage = self.cloud_fixture()
+            self.assertIs(self.plugin._eligible(path), value)
+            self.assertIs(self.plugin._cloud_item_is_eligible({**item, "path": "/cloud-test/child/nested.mkv"}), value)
+            self.plugin._save_config()
+            saved = self.plugin.update_config.call_args.args[0]
+            self.assertIs(saved["recursive"], value)
+            self.assertIs(saved["cloud_recursive"], value)
+            self.assertIs(self.plugin.get_form()[1]["include_subdirectories"], value)
+
+    def test_legacy_recursive_mismatch_survives_upgrade(self):
+        self.plugin.init_plugin({"folder": str(self.folder), "recursive": False, "cloud_recursive": True})
+        self.assertFalse(self.plugin._recursive)
+        self.assertTrue(self.plugin._cloud_recursive)
+        self.assertIsNone(self.plugin.get_form()[1]["include_subdirectories"])
+        self.plugin._save_config()
+        saved = self.plugin.update_config.call_args.args[0]
+        self.assertFalse(saved["recursive"])
+        self.assertTrue(saved["cloud_recursive"])
+        self.plugin.init_plugin({**saved, "enabled": True, "include_subdirectories": None})
+        self.assertFalse(self.plugin._enabled)
+        self.assertFalse(self.plugin._recursive)
+        self.assertTrue(self.plugin._cloud_recursive)
+
     def test_natural_local_scan_and_ready_queue_order(self):
         self.assertTrue(self.module.filename_order("①"))
         for name in ("S01E10.mkv", "S01E2.mkv", "S01E1.mkv"):
