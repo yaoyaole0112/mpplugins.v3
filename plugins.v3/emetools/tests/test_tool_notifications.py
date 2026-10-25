@@ -278,11 +278,13 @@ class ScheduledNotificationTests(unittest.TestCase):
 
     def test_manual_trash_and_invalid_confirmation_follow_same_templates(self):
         self.plugin._trash_clear = MagicMock(return_value={"ok": True, "count": 3, "size_bytes": 1024})
-        asyncio.run(self.plugin.action(ToolAction(operation="trash_clear", token="test")))
+        token = self.plugin._remember("trash", {"count": 3, "items": []})
+        asyncio.run(self.plugin.action(ToolAction(operation="trash_clear", token=token)))
         self.assertEqual(self.last_message.title, "🧹 清空115 回收站")
         self.plugin._trash_clear.return_value = {"ok": True, "message": "回收站为空"}
-        asyncio.run(self.plugin.action(ToolAction(operation="trash_clear", token="test")))
-        self.assertEqual(self.sent.call_count, 1)
+        token = self.plugin._remember("trash", {"count": 0, "items": []})
+        asyncio.run(self.plugin.action(ToolAction(operation="trash_clear", token=token)))
+        self.assertIn("回收站为空", self.last_message.text)
         (self.root / "orphan.nfo").write_text("old", encoding="utf-8")
         snapshot = self.plugin._cleaner.start_scan(str(self.root))
         request = asyncio.run(self.plugin.action(ToolAction(

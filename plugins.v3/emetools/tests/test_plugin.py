@@ -767,7 +767,7 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(reply.userid, "123")
             self.assertEqual(self.plugin.chain.post_message.call_count, 2)
             self.plugin._handle_scheduled_confirmation(token, True, data)
-            self.assertEqual(self.plugin.chain.post_message.call_count, 3)
+            self.assertEqual(self.plugin.chain.post_message.call_count, 2)
 
     def test_telegram_cancel_consumes_token_and_keeps_file(self):
         orphan = Path(self.directory.name) / "orphan.nfo"
@@ -776,6 +776,7 @@ class PluginTests(unittest.TestCase):
         token = self.plugin._remember("scheduled_tools", self.plugin._cleaner.scan(self.directory.name))
         with patch.object(self.plugin, "_telegram_confirmation_sources", return_value={"安全 Bot": {"TELEGRAM_ADMINS": "123"}}), \
              patch("emetools.matches_channel_admin", return_value=True):
+            self.plugin._send_scheduled_telegram_confirmation(token, self.plugin._cleaner.scan(self.directory.name))
             self.plugin._handle_scheduled_confirmation(token, False, {"channel": NotificationChannel.Telegram,
                 "source": "安全 Bot", "userid": "123", "original_chat_id": "123"})
         self.assertTrue(orphan.exists())

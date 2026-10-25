@@ -79,6 +79,7 @@ const selected = ref([])
 const preview = ref(null)
 const cleanupToken = ref('')
 const pendingDeleteToken = ref('')
+const dataConfirmationState = ref('')
 const pendingJobs = ref([])
 const trash = ref(null)
 const moveInfo = ref(null)
@@ -524,6 +525,9 @@ async function pollP115Tasks() {
       }
     } catch {}
   }
+  if (!disposed && settingsLoaded.value) {
+    try { await getPending() } catch {}
+  }
   if (!disposed) p115PollTimer = setTimeout(pollP115Tasks, 3000)
 }
 async function work(callback) {
@@ -563,7 +567,38 @@ async function load() {
 }
 async function getPending() {
   const result = await execute('pending')
+  if (disposed) return
   pendingJobs.value = result.pending || []
+  const confirmations = result.confirmations || []
+  const activeStates = ['pending', 'processing', 'queued']
+  const latest = kind => confirmations.filter(item => item.kind === kind && activeStates.includes(item.state)).at(-1)
+  const sync = (kind, current, setValue) => {
+    if (current?.token) {
+      const status = confirmations.find(item => item.token === current.token)
+      if (!status || !activeStates.includes(status.state)) {
+        setValue(null)
+        notice.value = status?.message || (status?.state === 'completed' ? '操作已完成，网页与 TG 状态已同步' :
+          status?.state === 'cancelled' ? '本次操作已取消' : '确认已结束，请重新预览')
+      } else setValue({ ...current, ...status })
+    } else {
+      const pending = latest(kind)
+      if (pending) setValue(pending)
+    }
+  }
+  sync('trash', trash.value, value => { trash.value = value })
+  sync('move', moveInfo.value?.token ? moveInfo.value : null, value => { if (value || moveInfo.value?.token) moveInfo.value = value })
+  sync('manual_tools', pendingDeleteToken.value ? { token: pendingDeleteToken.value } : null, value => {
+    if (!value && pendingDeleteToken.value) { scan.value = null; selected.value = [] }
+    pendingDeleteToken.value = value?.token || ''
+    dataConfirmationState.value = value?.state || ''
+  })
+}
+async function cancelConfirmation(token) {
+  await work(async () => {
+    const result = await execute('confirmation_cancel', { token })
+    notice.value = result.message
+    await getPending()
+  })
 }
 async function saveBasicSettings() {
   if (!settingsLoaded.value) { error.value = '插件配置尚未加载，请刷新后重试'; return }
@@ -966,15 +1001,13 @@ async function startScan() {
 }
 async function deleteSelected() {
   if (!scan.value?.scan_token || !selected.value.length) return
-  const needsConfirmation = schedule.tools.confirm_cleanup
-  if (!needsConfirmation && !window.confirm(`将 ${selected.value.length} 项无效数据移入插件隔离区？清理前会再次核验。`)) return
   await work(async () => {
-    const result = await execute(needsConfirmation ? 'request_delete' : 'delete', {
+    const result = await execute('request_delete', {
       scan_token: scan.value.scan_token, paths: selected.value, path: scan.value.root || savedStrmRoot.value,
     })
-    notice.value = result.message || (needsConfirmation ? '待确认' : `已隔离 ${(result.deleted || []).length} 项`)
-    if (needsConfirmation) pendingDeleteToken.value = result.token
-    else { scan.value = null; selected.value = [] }
+    notice.value = result.message || '请确认隔离，也可在 TG 管理员私聊确认'
+    pendingDeleteToken.value = result.token
+    dataConfirmationState.value = 'pending'
   })
 }
 async function confirmDelete() {
@@ -1017,10 +1050,13 @@ async function confirmCleanup() {
   })
 }
 async function getTrash() {
-  await work(async () => { trash.value = await execute('trash_info') })
+  await work(async () => {
+    trash.value = await execute('trash_request')
+    notice.value = trash.value.message || '请核对后确认清空，也可在 TG 管理员私聊确认；清空后不可恢复'
+  })
 }
 async function clearTrash() {
-  if (!trash.value?.ok || !window.confirm(`确定彻底清空 115 回收站的 ${trash.value.count || 0} 个文件？此操作不可恢复。`)) return
+  if (!trash.value?.ok || !trash.value.token || !window.confirm(`确定彻底清空 115 回收站的 ${trash.value.count || 0} 个文件？此操作不可恢复。`)) return
   await work(async () => {
     const result = await execute('trash_clear', { token: trash.value.token })
     notice.value = result.message || '回收站已清空'
@@ -1030,16 +1066,21 @@ async function clearTrash() {
 async function getMove() {
   if (!settingsLoaded.value) { error.value = '转存规则尚未加载，请刷新后重试'; return }
   if (moveConfigDirty.value) { error.value = '转存规则有未保存的修改，请先保存后再查看'; return }
-  await work(async () => { moveInfo.value = await execute('move_info') })
+  await work(async () => {
+    moveInfo.value = await execute('move_request')
+    notice.value = moveInfo.value.message || '预览完成，请确认转存；也可在 TG 管理员私聊确认'
+  })
 }
 async function runMove() {
   if (!settingsLoaded.value) { error.value = '转存规则尚未加载，请刷新后重试'; return }
   if (moveConfigDirty.value) { error.value = '转存规则有未保存的修改，请先保存后再执行'; return }
+  if (['processing', 'queued'].includes(moveInfo.value?.state)) return
+  if (!moveInfo.value?.token) { await getMove(); return }
   const modes = new Set(rules.value.map(rule => rule.mode === 'copy' ? '复制' : '移动'))
   const modeSummary = [...modes].join('和') || '移动或复制'
   if (!window.confirm(`按插件中已保存的转存规则立即${modeSummary}源目录内容？复制规则仅处理新增项目；未保存的修改不会生效。`)) return
   await work(async () => {
-    const result = await execute('move_run')
+    const result = await execute('move_confirm', { token: moveInfo.value.token })
     notice.value = result.message || '转存完成'
     moveInfo.value = null
   })
@@ -1340,8 +1381,9 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           <p class="eme-hint">当前扫描目录：{{ savedStrmRoot }}（在“设置”页面更改）</p>
           <template v-if="scan"><p class="eme-hint">孤立资料 {{ scan.metadata_count || 0 }} 项 · 无 STRM 子目录 {{ scan.directory_count || 0 }} 项；请核对勾选内容。</p>
             <div class="eme-results"><label v-for="item in scan.items || []" :key="item.path" class="eme-result eme-switch-label"><input v-model="selected" class="eme-switch-input" type="checkbox" role="switch" :disabled="!!pendingDeleteToken" :value="item.path" /><span class="eme-switch-track" aria-hidden="true" /><span><strong>{{ item.path }}</strong><small>{{ item.reason || item.kind || '无效数据' }}</small></span></label><p v-if="!scan.items?.length">未发现需要清理的内容。</p></div>
-            <div class="eme-actions"><button class="eme-button danger" :disabled="busy || !selected.length || !!pendingDeleteToken" @click="deleteSelected">清理选中 {{ selected.length }} 项</button><button v-if="pendingDeleteToken" class="eme-button danger" :disabled="busy" @click="confirmDelete">确认隔离选中项目</button></div>
+            <div class="eme-actions"><button class="eme-button danger" :disabled="busy || !selected.length || !!pendingDeleteToken" @click="deleteSelected">清理选中 {{ selected.length }} 项</button></div>
           </template>
+          <div v-if="pendingDeleteToken" class="eme-actions"><button class="eme-button danger" :disabled="busy || dataConfirmationState !== 'pending'" @click="confirmDelete">{{ dataConfirmationState === 'pending' ? '确认隔离选中项目' : '⌛️清理中' }}</button><button class="eme-button secondary" :disabled="busy || dataConfirmationState !== 'pending'" @click="cancelConfirmation(pendingDeleteToken)">取消本次清理</button><span class="eme-hint">与 TG 共用一次性确认，执行前重新核验。</span></div>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><div><h3>定时清理</h3><p>需要确认时先生成待办并发送 MoviePilot 通知，不直接清理。</p></div><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('tools')">保存任务</button></div>
           <p v-if="scheduleDirty('tools')" class="eme-message eme-warning">定时清理任务有未保存的修改；请点击“保存任务”。</p>
@@ -1351,7 +1393,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           <p v-if="schedule.tools.path && schedule.tools.path !== savedStrmRoot" class="eme-message eme-error">当前定时任务仍扫描旧目录 {{ schedule.tools.path }}；保存此任务后才会改用设置中的 STRM 根目录。请确认清理范围。</p>
           <div class="eme-options eme-cleanup-settings"><label class="eme-switch-label"><input v-model="schedule.tools.auto_delete" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>自动隔离清理</span></label><label class="eme-confirm-mode"><span>定时清理确认方式</span><div class="eme-picker" @click.stop><button type="button" class="eme-picker-trigger" @click="toggleConfirmPicker"><span>{{ confirmModeLabel() }}</span><i class="mdi" :class="confirmPicker.open ? 'mdi-chevron-up' : 'mdi-chevron-down'" /></button><div v-if="confirmPicker.open" class="eme-picker-menu"><button v-for="item in confirmOptions" :key="item.value" type="button" class="eme-picker-option" :class="{ selected: schedule.tools.confirm_mode === item.value }" @click="selectConfirmMode(item.value)"><i class="mdi" :class="schedule.tools.confirm_mode === item.value ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'" />{{ item.title }}</button></div></div></label></div>
           <p v-if="schedule.tools.confirm_mode === 'telegram'" class="eme-hint">Telegram 按钮通过已启用“插件”通知的 Bot 发送；仅该 Bot 的管理员可在私聊中确认，30 分钟内有效。</p>
-          <div v-if="pendingJobs.length" class="eme-actions"><span>待确认的定时扫描：</span><button v-for="job in pendingJobs" :key="job.token" class="eme-button danger" :disabled="busy" @click="confirmScheduled(job.token)">确认隔离 {{ job.count }} 项</button><button class="eme-button secondary" @click="getPending">刷新待办</button></div>
+          <div v-if="pendingJobs.length" class="eme-actions"><span>待确认的定时扫描：</span><template v-for="job in pendingJobs" :key="job.token"><button class="eme-button danger" :disabled="busy" @click="confirmScheduled(job.token)">确认隔离 {{ job.count }} 项</button><button class="eme-button secondary" :disabled="busy" @click="cancelConfirmation(job.token)">取消</button></template><button class="eme-button secondary" @click="getPending">刷新待办</button></div>
         </section>
       </template>
       <template v-if="active === 'cleanup'">
@@ -1364,14 +1406,15 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
         <section class="eme-card"><div class="eme-card-heading"><h3>定时清理</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_cleanup')">保存任务</button></div><p v-if="scheduleDirty('p115_cleanup')" class="eme-message eme-warning">定时清理配置有未保存的修改；请点击“保存任务”。</p><div class="eme-options"><label class="eme-switch-label"><input v-model="schedule.p115_cleanup.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清理</span></label></div><label>执行周期（cron表达式）<input v-model.trim="schedule.p115_cleanup.cron" placeholder="0 */2 * * *" /></label></section>
       </template>
       <template v-if="active === 'trash'">
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>115 回收站</h3><p>清空是彻底删除，不能恢复。执行前必须核对当前数量。</p></div><button class="eme-button secondary" :disabled="busy" @click="getTrash">查询状态</button></div><div v-if="trash" class="eme-stat">当前 {{ trash.count || 0 }} 个文件 <button class="eme-button danger" :disabled="busy || !trash.count" @click="clearTrash">立即清空</button></div><p v-else class="eme-hint">请先查询回收站状态。</p></section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>115 回收站</h3><p>清空是彻底删除，不能恢复。网页与 TG 共用一次性确认，执行前再次核对回收站内容。</p></div><button class="eme-button secondary" :disabled="busy || !!trash?.token" @click="getTrash">预览待清空内容</button></div><div v-if="trash" class="eme-stat">当前 {{ trash.count || 0 }} 项 <button v-if="trash.token" class="eme-button danger" :disabled="busy || !trash.count || ['processing', 'queued'].includes(trash.state)" @click="clearTrash">{{ ['processing', 'queued'].includes(trash.state) ? '⌛️清空中' : '确认清空回收站' }}</button><button v-if="trash.token" class="eme-button secondary" :disabled="busy || ['processing', 'queued'].includes(trash.state)" @click="cancelConfirmation(trash.token)">取消本次清空</button></div><p v-else class="eme-hint">请先预览回收站状态，也可发送 /cleartrash 后在 TG 管理员私聊确认。</p></section>
         <section class="eme-card"><div class="eme-card-heading"><h3>定时清空</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_trash')">保存任务</button></div><p v-if="scheduleDirty('p115_trash')" class="eme-message eme-warning">回收站定时清空任务有未保存的修改；请点击“保存任务”。</p><label class="eme-switch-label"><input v-model="schedule.p115_trash.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清空（⚠️彻底删除，无法恢复）</span></label><label>执行周期（cron表达式）<input v-model.trim="schedule.p115_trash.cron" placeholder="0 3 * * *" /></label></section>
       </template>
       <template v-if="active === 'move'">
         <section class="eme-card"><div class="eme-card-heading"><div><h3>文件转存规则</h3><p>每条规则可选择移动或复制；复制只提交尚未成功复制过的新增项目，可清除复制记录以重新复制全部项目。</p></div><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存规则</button></div>
           <p v-if="moveConfigDirty" class="eme-message eme-warning">转存规则或监控配置有未保存的修改；请选择完整的源和目标目录并点击“保存规则”，才能查看或执行新规则。</p>
           <div v-for="(rule, index) in rules" :key="index" class="eme-move-row"><span class="eme-move-label">源</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.src_name || '选择源目录'" @click="browse('src', index)">{{ rule.src_name || '选择源目录' }}</button><span class="eme-move-arrow" aria-hidden="true">→</span><span class="eme-move-label">目标</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.dst_name || '选择目标目录'" @click="browse('dst', index)">{{ rule.dst_name || '选择目标目录' }}</button><div class="eme-move-mode-options" role="group" :aria-label="`转存方式 ${index + 1}`"><button v-for="item in moveModeOptions" :key="item.value" type="button" class="eme-move-mode-button" :class="{ selected: rule.mode === item.value }" :aria-pressed="rule.mode === item.value" @click="selectMoveMode(index, item.value)">{{ item.title }}</button></div><button class="eme-button text eme-remove" type="button" :aria-label="`移除转存规则 ${index + 1}`" @click="rules.splice(index, 1)">✕</button></div>
-          <div class="eme-actions"><button class="eme-button secondary" @click="rules.push({ src_id: '', src_name: '', dst_id: '', dst_name: '', mode: 'move' })">添加规则</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty" @click="getMove">查看待转存</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !rules.length" @click="runMove">立即执行已保存规则</button><button class="eme-button text" :disabled="busy || !settingsLoaded" @click="resetMoveCopyRecords">清理复制记录</button></div>
+          <div class="eme-actions"><button class="eme-button secondary" @click="rules.push({ src_id: '', src_name: '', dst_id: '', dst_name: '', mode: 'move' })">添加规则</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !!moveInfo?.token" @click="getMove">预览待转存内容</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !rules.length" @click="runMove">{{ ['processing', 'queued'].includes(moveInfo?.state) ? '⌛️转存中' : moveInfo?.token ? '确认执行转存' : '预览并确认转存' }}</button><button v-if="moveInfo?.token" class="eme-button secondary" :disabled="busy || ['processing', 'queued'].includes(moveInfo.state)" @click="cancelConfirmation(moveInfo.token)">取消本次转存</button><button class="eme-button text" :disabled="busy || !settingsLoaded" @click="resetMoveCopyRecords">清理复制记录</button></div>
+          <p class="eme-hint">手动转存需在网页或 TG 确认一次；两处同步状态。已启用的自动监控仍按保存的规则运行。</p>
           <p v-if="moveInfo" class="eme-hint">上次执行：{{ moveInfo.last_run || '暂无' }}；<span v-for="(item, key) in moveInfo.pending || {}" :key="key">{{ item.name }}：{{ item.count < 0 ? item.error : `${item.count} 项` }}；</span></p>
         </section>
         <section class="eme-card"><div class="eme-card-heading"><h3>实时监控</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存监控</button></div><label class="eme-switch-label"><input v-model="schedule.p115_move.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label>检查间隔（秒，最少 60）<input v-model.number="schedule.p115_move.check_interval" type="number" min="60" step="60" /></label></section>

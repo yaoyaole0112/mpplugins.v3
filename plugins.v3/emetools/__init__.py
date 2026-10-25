@@ -121,7 +121,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.43"
+    plugin_version = "2.10.44"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -310,11 +310,11 @@ class EmeTools(_PluginBase):
         return [{"cmd": command, "event": EventType.PluginAction, "desc": description,
                  "category": "工具", "data": {"action": f"emetools_{action}"}}
                 for command, action, description in (
-                    ("/cleanup", "cleanup", "扫描无效数据（在插件页面确认清理）"),
+                    ("/cleanup", "cleanup", "扫描无效数据并确认隔离（TG/网页同步）"),
                     ("/cleanfiles", "cleanfiles", "预览 115 清理目录并确认清理"),
-                    ("/cleartrash", "cleartrash", "查看 115 回收站（在插件页面确认清空）"),
+                    ("/cleartrash", "cleartrash", "预览并确认清空 115 回收站（不可恢复）"),
                     ("/cleandupes", "cleandupes", "扫描并确认清理低质版本"),
-                    ("/ememove", "move", "执行已保存的 115 文件转存规则"))]
+                    ("/ememove", "move", "预览并确认执行已保存的 115 文件转存规则"))]
 
     @eventmanager.register(EventType.PluginAction)
     def tool_command(self, event: Event) -> None:
@@ -336,27 +336,32 @@ class EmeTools(_PluginBase):
 
     def _run_tool_command_serial(self, action: str, data: dict) -> None:
         try:
+            if action in {"emetools_cleanup", "emetools_cleartrash", "emetools_move"}:
+                source, user = str(data["source"]), str(data["user"])
+                if (data["channel"] not in {NotificationChannel.Telegram, NotificationChannel.Telegram.value}
+                        or not matches_channel_admin(NotificationChannel.Telegram,
+                                                     self._telegram_command_sources().get(source), user)):
+                    self._media_bot_reply(source, user, "媒体增强", "❌ 当前 Telegram 用户没有执行权限。")
+                    return
             logger.info("媒体增强 Bot 命令开始：%s，来源=%s", action, _log_label(data["source"]))
             if action == "emetools_cleanup":
                 result = self._cleaner.start_scan(self._strm_root)
-                text = f"发现 {result['count']} 项无效数据。请在插件「清理无效数据」页面重新扫描并确认隔离。" if result["count"] else "未发现无效数据。"
+                if result["count"]:
+                    self._request_tool_bot_confirmation("manual_tools", data, scan=result)
+                    return
+                text = "未发现无效数据。"
             elif action == "emetools_cleanfiles":
                 self._request_file_bot_cleanup(data)
                 return
             elif action == "emetools_cleartrash":
-                result = self._trash_info()
-                text = f"回收站有 {result['count']} 项；请在插件「清空回收站」页面重新查询并二次确认。" if result["count"] else "回收站为空。"
+                self._request_tool_bot_confirmation("trash", data)
+                return
             elif action == "emetools_cleandupes":
                 self._request_media_bot_cleanup(data)
                 return
             else:
-                result = self._move_run()
-                text = result.get("message") or f"文件转存完成：移动 {result.get('moved', 0)} 项，失败 {len(result.get('errors') or [])} 项。"
-                notice = notices.file_move(result) if "moved" in result else None
-                if notice:
-                    # A command is a private reply to its originating bot, not a scheduled
-                    # notification to every bot subscribed to the Plugin message type.
-                    text = f"{notice[0]}\n{notice[1]}"
+                self._request_tool_bot_confirmation("move", data)
+                return
             self.chain.post_message(Message(channel=data["channel"], source=data["source"],
                                             userid=str(data["user"]), title="媒体增强", text=text))
             logger.info("媒体增强 Bot 命令完成：%s", action)
@@ -738,8 +743,8 @@ class EmeTools(_PluginBase):
             self._pending = {key: item for key, item in self._pending.items() if now - item[0] < 1800}
             token = uuid.uuid4().hex
             self._pending[token] = (now, kind, snapshot)
-            if kind == "cleanup":
-                self._cleanup_status[token] = {"state": "pending", "updated": now}
+            if kind in {"cleanup", "trash", "move", "manual_tools", "scheduled_tools"}:
+                self._cleanup_status[token] = {"state": "pending", "kind": kind, "updated": now}
                 self._cleanup_status = {key: value for key, value in self._cleanup_status.items()
                                         if now - value["updated"] < 3600}
             return token
@@ -753,12 +758,16 @@ class EmeTools(_PluginBase):
             previous = self._cleanup_status.get(token, {}).get("state")
             if expected_state is not None and previous != expected_state:
                 return False
-            if previous in {"completed", "cancelled", "failed"} and state != previous:
+            if previous in {"completed", "cancelled", "failed", "expired"} and state != previous:
                 return False
-            self._cleanup_status[token] = {"state": state, "message": message,
+            kind = self._cleanup_status.get(token, {}).get("kind", "cleanup")
+            self._cleanup_status[token] = {"state": state, "kind": kind, "message": message,
                                            "updated": time.monotonic()}
             references = list(self._cleanup_message_refs.get(token, [])) if previous != state else []
         for reference in references:
+            if kind != "cleanup":
+                self._edit_tool_confirmation_message(reference, token, kind, state, message)
+                continue
             self._edit_file_cleanup_message(reference, token,
                 "🗑️ 清理完成，详细结果见下方通知。" if state == "completed" else
                 "⌛️ 清理中：正在排队或复核目录；完成后会另行通知。" if state in {"queued", "processing"} else
@@ -775,18 +784,209 @@ class EmeTools(_PluginBase):
                 return {"state": "expired"}
             if status and time.monotonic() - status["updated"] < 3600:
                 return {key: value for key, value in status.items() if key != "updated"}
-            if pending and pending[1] == "cleanup" and time.monotonic() - pending[0] < 1800:
+            if pending and time.monotonic() - pending[0] < 1800:
                 return {"state": "pending"}
             return {"state": "expired"}
 
     def _consume(self, token: str, kind: str):
         with self._pending_lock:
-            pending = self._pending.pop(token, None)
+            pending = self._pending.get(token)
+            if not pending or pending[1] != kind or time.monotonic() - pending[0] >= 1800:
+                raise HTTPException(status_code=400, detail="确认已过期或已处理，请重新预览")
+            self._pending.pop(token)
             self._cleanup_telegram_sources.pop(token, None)
             self._cleanup_command_origins.pop(token, None)
-        if not pending or pending[1] != kind or time.monotonic() - pending[0] >= 1800:
-            raise HTTPException(status_code=400, detail="确认已过期或已处理，请重新预览")
         return pending[2]
+
+    @staticmethod
+    def _tool_confirmation_labels(kind):
+        return {"trash": ("trash", "清空回收站", "清空"), "move": ("move", "文件转存", "转存"),
+                "manual_tools": ("data", "清理无效数据", "清理"),
+                "scheduled_tools": ("data", "清理无效数据", "清理")}[kind]
+
+    @staticmethod
+    def _trash_fingerprint(items):
+        return sorted(tuple(str(item.get(key) or "") for key in
+                            ("id", "file_id", "file_name", "file_size", "dtime")) for item in items)
+
+    @staticmethod
+    def _move_fingerprint(files, folders):
+        return sorted((kind, str(item.get(identifier) or ""), str(item.get("size") or 0),
+                       str(item.get("name") or ""))
+                      for kind, identifier, items in (("file", "fid", files), ("directory", "cid", folders))
+                      for item in items)
+
+    def _publish_tool_confirmation(self, token, kind, text, command_origin=None):
+        prefix, label, verb = self._tool_confirmation_labels(kind)
+        try:
+            sources = {command_origin[0]: True} if command_origin else self._telegram_confirmation_sources()
+        except (RuntimeError, ValueError, OSError) as error:
+            logger.warning("媒体增强 %s：通知渠道读取失败（%s），保留网页确认", label, type(error).__name__)
+            sources = {}
+        with self._pending_lock:
+            self._cleanup_telegram_sources[token] = set(sources)
+            if command_origin:
+                self._cleanup_command_origins[token] = command_origin
+        buttons = [[{"text": f"✅ 确认{verb}", "callback_data": f"[PLUGIN]EmeTools|{prefix}:{token}:y"},
+                    {"text": "取消", "callback_data": f"[PLUGIN]EmeTools|{prefix}:{token}:n"}]] if sources else None
+        text += "\n\n确认有效期：30 分钟；服务重启后失效。网页和 TG 两处共用一次性确认，任一处操作后另一处同步失效。"
+        title = f"⚠️【{label}】待确认"
+        try:
+            if command_origin:
+                self._media_bot_reply(*command_origin, title, text, buttons=buttons)
+            else:
+                self._send_tool_notice(title, text, buttons=buttons)
+        except Exception:
+            if command_origin:
+                self._consume(token, kind)
+                self._set_cleanup_status(token, "failed", "确认通知发送失败，请重新发起")
+                raise
+            logger.warning("媒体增强 %s：确认通知发送失败，保留网页待办", label)
+
+    def _trash_request(self, command_origin=None):
+        result = self._trash_info()
+        if not result["count"]:
+            self._consume(result["token"], "trash")
+            self._set_cleanup_status(result["token"], "completed", "回收站为空")
+            return {"ok": True, "empty": True, "count": 0, "message": "回收站为空"}
+        self._publish_tool_confirmation(result["token"], "trash",
+            f"待彻底删除：{result['count']} 项（{notices.format_bytes(result['size_bytes'])}）。\n"
+            "⚠️ 彻底删除不可恢复！确认前请核对回收站内容；执行前将再次核验。", command_origin)
+        return {**result, "pending": True}
+
+    def _move_request(self, command_origin=None):
+        result = self._move_info(snapshot=True)
+        if not result["rules"] or any(item["count"] < 0 for item in result["pending"].values()):
+            return {"ok": False, "message": "未配置转存规则或部分源目录读取失败，请核实后重新预览"}
+        if not any(item["count"] for item in result["pending"].values()):
+            result.pop("entries", None)
+            result.pop("copy_records", None)
+            return {**result, "empty": True, "message": "没有新增待转存项目"}
+        token = self._remember("move", {"rules": result["rules"], "entries": result.pop("entries"),
+                                        "copy_records": result.pop("copy_records"),
+                                        "preview": copy.deepcopy(result)})
+        lines = [f"{'复制新增' if rule.get('mode') == 'copy' else '移动'}："
+                 f"{rule.get('src_name') or rule['src_id']} → {rule.get('dst_name') or rule['dst_id']}"
+                 f"（{result['pending'][rule['src_id']]['count']} 项）" for rule in result["rules"]]
+        self._publish_tool_confirmation(token, "move", "\n".join(lines) +
+            "\n仅执行已保存规则；规则或源目录项目变化后需重新预览。复制保留增量去重。", command_origin)
+        return {**result, "token": token, "pending_confirmation": True}
+
+    def _data_request(self, scan, paths, command_origin=None):
+        token = self._remember("manual_tools", {"scan_token": scan["scan_token"], "paths": list(paths),
+                                                "root": scan["root"]})
+        self._publish_tool_confirmation(token, "manual_tools",
+            f"扫描目录：{_log_label(scan['root'])}\n待隔离：{len(paths)} 项。\n"
+            "二次核验后移入插件隔离区，不会立即永久删除。", command_origin)
+        return {"ok": True, "token": token, "pending": True, "message": "请确认隔离，也可在 Telegram 管理员私聊确认"}
+
+    def _request_tool_bot_confirmation(self, kind, data, scan=None):
+        origin = (str(data["source"]), str(data["user"]))
+        if kind == "trash":
+            result = self._trash_request(origin)
+        elif kind == "move":
+            result = self._move_request(origin)
+        else:
+            result = self._data_request(scan, [item["path"] for item in scan["items"]], origin)
+        if not result.get("token"):
+            self._media_bot_reply(*origin, "媒体增强", result.get("message") or "没有待处理项目")
+
+    def _claim_tool_confirmation(self, token, kind):
+        with self._pending_lock:
+            pending = self._pending.get(token)
+            invalid = not pending or pending[1] != kind or time.monotonic() - pending[0] >= 1800
+        if invalid:
+            if pending and pending[1] == kind:
+                self._set_cleanup_status(token, "expired", "确认已过期，请重新预览", expected_state="pending")
+            raise HTTPException(status_code=400, detail="确认已过期或已处理，请重新预览")
+        if not self._set_cleanup_status(token, "processing", "已确认，正在排队或复核", expected_state="pending"):
+            raise HTTPException(status_code=409, detail="本次操作已提交或已结束，请勿重复确认")
+
+    def _execute_tool_confirmation(self, token, kind, *, command_origin=None):
+        try:
+            if not self._enabled:
+                raise ValueError("插件已停用，未执行操作")
+            if command_origin and not self._file_cleanup_actor_allowed(token, *command_origin):
+                raise ValueError("权限配置已变化，未执行操作")
+            if kind == "trash":
+                result = self._trash_clear(token)
+                notice = notices.empty_trash(result) if result.get("ok") and result.get("count") else None
+            elif kind == "move":
+                saved = self._consume(token, kind)
+                result = self._move_run(expected=saved)
+                notice = notices.file_move(result) if "moved" in result else None
+            elif kind == "scheduled_tools":
+                with self._pending_lock:
+                    root = self._pending.get(token, (0, "", {}))[2].get("root", "")
+                result = self._confirm_scheduled_tools(token, notify=False)
+                notice = notices.invalid_cleanup(result, root)
+            else:
+                saved = self._consume(token, kind)
+                result = self._locked("tools", lambda: self._cleaner.delete(saved["scan_token"], saved["paths"]))
+                self._log_quarantine(result)
+                notice = notices.invalid_cleanup(result, saved["root"])
+            successful = bool(result.get("ok")) and not result.get("failed") and not result.get("deferred")
+            self._set_cleanup_status(token, "completed" if successful else "failed", result.get("message", ""))
+            prefix, label, verb = self._tool_confirmation_labels(kind)
+            title, text = notice or (f"媒体增强 · {label}", result.get("message") or
+                                     f"已隔离 {len(result.get('deleted') or [])} 项，跳过 {len(result.get('failed') or [])} 项。")
+            if command_origin:
+                self._media_bot_reply(*command_origin, title, text)
+            else:
+                self._send_tool_notice(title, text)
+            return result
+        except Exception:
+            self._set_cleanup_status(token, "failed", "操作未完成，请核实结果后重新预览；未自动重发提交")
+            raise
+
+    def _edit_tool_confirmation_message(self, data, token, kind, state, message=""):
+        if not data.get("original_message_id") or not data.get("original_chat_id"):
+            return
+        prefix, label, verb = self._tool_confirmation_labels(kind)
+        status = f"✅{verb}完成" if state == "completed" else f"⌛️{verb}中" if state in {"processing", "queued"} else \
+                 "已取消" if state == "cancelled" else "已过期" if state == "expired" else f"⚠️{verb}未完成"
+        try:
+            self.chain.post_message(Message(channel=NotificationChannel.Telegram, source=data.get("source"),
+                userid=str(data.get("userid") or ""), title=f"【{label}】", text=f"{status}\n{message}",
+                buttons=[[{"text": status, "callback_data": f"[PLUGIN]EmeTools|{prefix}:{token}:p"}]],
+                parse_mode="plain", original_message_id=data["original_message_id"],
+                original_chat_id=data["original_chat_id"]))
+        except Exception as error:
+            logger.warning("媒体增强 %s：原确认通知状态更新失败（%s），不影响执行状态", label, type(error).__name__)
+
+    def _handle_tool_confirmation(self, token, approve, data):
+        source, user = str(data.get("source") or ""), str(data.get("userid") or "")
+        if (not self._enabled or data.get("channel") not in {NotificationChannel.Telegram, NotificationChannel.Telegram.value}
+                or not source or not user or str(data.get("original_chat_id") or "") != user
+                or not self._file_cleanup_actor_allowed(token, source, user)):
+            return
+        with self._pending_lock:
+            pending = self._pending.get(token)
+            if (not pending or pending[1] not in {"trash", "move", "manual_tools", "scheduled_tools"}
+                    or source not in self._cleanup_telegram_sources.get(token, set())):
+                return
+            kind = pending[1]
+            references = self._cleanup_message_refs.setdefault(token, [])
+            reference = {key: data.get(key) for key in ("source", "userid", "original_chat_id", "original_message_id")}
+            identity = lambda item: (str(item.get("source")), str(item.get("original_chat_id")),
+                                     str(item.get("original_message_id")))
+            if not any(identity(saved) == identity(reference) for saved in references):
+                references.append(reference)
+        try:
+            if not approve:
+                if self._set_cleanup_status(token, "cancelled", "本次操作已取消，网页确认同步失效", expected_state="pending"):
+                    self._consume(token, kind)
+                return
+            self._claim_tool_confirmation(token, kind)
+            execute = lambda: self._execute_tool_confirmation(token, kind, command_origin=(source, user))
+            if kind in {"trash", "move"}:
+                self._p115_tasks.run(f"confirm:{token}", self._tool_confirmation_labels(kind)[1], execute, manual=True)
+            else:
+                execute()
+        except HTTPException:
+            return
+        except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
+            self._media_bot_reply(source, user, "媒体增强", f"操作未完成（{type(error).__name__}），请核实结果并查看日志；未自动重发提交。")
 
     async def status(self) -> dict:
         return {"settings": self._settings(), "schedule": copy.deepcopy(self._schedule),
@@ -1138,7 +1338,7 @@ class EmeTools(_PluginBase):
             info = client.rb_list()
         logger.info("媒体增强 清空115回收站：查询完成，文件=%d，大小=%d 字节",
                     info["count"], sum(int(item.get("file_size") or 0) for item in info["items"]))
-        token = self._remember("trash", {"count": info["count"]})
+        token = self._remember("trash", {"count": info["count"], "items": copy.deepcopy(info["items"])})
         return {"ok": True, "count": info["count"],
                 "size_bytes": sum(int(item.get("file_size") or 0) for item in info["items"]),
                 "token": token}
@@ -1150,7 +1350,8 @@ class EmeTools(_PluginBase):
         def clear():
             with self._client() as client:
                 current = client.rb_list()
-                if current["count"] != expected["count"]:
+                if (current["count"] != expected["count"] or
+                        self._trash_fingerprint(current["items"]) != self._trash_fingerprint(expected["items"])):
                     logger.warning("媒体增强 清空115回收站：内容已变化，原=%d，现=%d，取消清空",
                                    expected["count"], current["count"])
                     return {"ok": False, "message": "回收站内容已变化，请重新查询"}
@@ -1387,15 +1588,17 @@ class EmeTools(_PluginBase):
         logger.info("媒体增强 文件转存：已清理复制记录 %d 条规则", len(records))
         return {"ok": True, "cleared": len(records), "message": "复制记录已清理，下次将重新复制源目录中的全部项目"}
 
-    def _move_info(self):
-        rules = self._schedule["p115_move"]["rules"]
+    def _move_info(self, *, snapshot=False):
+        rules = copy.deepcopy(self._schedule["p115_move"]["rules"])
         copy_records = self._load_move_copy_records()
         pending = {}
+        entries = {}
         if rules:
             with self._client() as client:
                 for rule in rules:
                     try:
                         files, folders = client.list_children(rule["src_id"])
+                        entries[rule["src_id"]] = self._move_fingerprint(files, folders)
                         identifiers = [str(item["fid"]) for item in files] + [str(item["cid"]) for item in folders]
                         if (rule.get("mode") or "move") == "copy":
                             copied = copy_records.get(self._move_copy_record_key(rule["src_id"], rule["dst_id"]), set())
@@ -1410,16 +1613,22 @@ class EmeTools(_PluginBase):
         logger.info("媒体增强 文件转存：待转存查询完成，规则=%d，待转存=%d，查询失败=%d",
                     len(rules), sum(max(0, item["count"]) for item in pending.values()),
                     sum(item["count"] < 0 for item in pending.values()))
-        return {"ok": True, "pending": pending, "rules": rules, "last_run": self._last_run.get("p115_move", "")}
+        result = {"ok": True, "pending": pending, "rules": rules, "last_run": self._last_run.get("p115_move", "")}
+        if snapshot:
+            result["entries"] = entries
+            result["copy_records"] = copy.deepcopy(copy_records)
+        return result
 
-    def _move_run(self):
-        rules = self._schedule["p115_move"]["rules"]
+    def _move_run(self, expected=None):
+        rules = copy.deepcopy(self._schedule["p115_move"]["rules"])
         if not rules:
             logger.info("媒体增强 文件转存：未配置规则，跳过")
             return {"ok": False, "message": "请先保存转存规则"}
         logger.info("媒体增强 文件转存：开始检查 %d 条转存规则", len(rules))
 
         def move():
+            if expected is not None and rules != expected["rules"]:
+                return {"ok": False, "message": "转存规则已变化，请重新预览并确认"}
             if time.monotonic() < getattr(self, "_move_retry_after", 0):
                 return {"ok": False, "deferred": True, "moved": 0, "errors": [], "details": [],
                         "message": "115 目录接口暂不可用，退避等待中；5 分钟后自动复查"}
@@ -1430,7 +1639,14 @@ class EmeTools(_PluginBase):
                 return {"ok": False, "deferred": True, "moved": 0, "errors": [], "details": [],
                         "message": message}
             moved, errors, details, copy_records = 0, [], [], self._load_move_copy_records()
+            if expected is not None and copy_records != expected["copy_records"]:
+                return {"ok": False, "message": "增量复制记录已变化，请重新预览并确认"}
             with self._client() as client:
+                if expected is not None:
+                    for source, fingerprint in expected["entries"].items():
+                        files, directories = client.list_children(source)
+                        if self._move_fingerprint(files, directories) != fingerprint:
+                            return {"ok": False, "message": "源目录内容已变化，请重新预览并确认"}
                 for rule in rules:
                     source, destination = rule["src_id"], rule["dst_id"]
                     mode = rule.get("mode") or "move"
@@ -1443,6 +1659,8 @@ class EmeTools(_PluginBase):
                     stage = "读取源目录"
                     try:
                         files, directories = client.list_children(source)
+                        if expected is not None and self._move_fingerprint(files, directories) != expected["entries"][source]:
+                            raise ValueError("源目录内容已变化，已停止此规则，请重新预览")
                         identifiers = [item["fid"] for item in files] + [item["cid"] for item in directories]
                         logger.info("媒体增强 文件转存：%s %s → %s，源文件=%d，源目录=%d",
                                     "复制" if mode == "copy" else "移动",
@@ -1589,7 +1807,7 @@ class EmeTools(_PluginBase):
 
     def _send_tracked_cleanup_confirmation(self, title, text, buttons, *, source=None, user=None):
         callback = buttons[0][0].get("callback_data", "") if buttons and buttons[0] else ""
-        match = re.fullmatch(r"\[PLUGIN\]EmeTools\|files:([a-f0-9]{32}):y", callback)
+        match = re.fullmatch(r"\[PLUGIN\]EmeTools\|(?:files|trash|move|data):([a-f0-9]{32}):y", callback)
         if not match:
             return False
         token = match.group(1)
@@ -1600,7 +1818,7 @@ class EmeTools(_PluginBase):
             clients = {name: service.instance for name, service in clients.items()
                        if service and service.instance}
         except Exception as error:
-            logger.warning("媒体增强 清理文件：无法读取通知实例（%s），使用原通知渠道", type(error).__name__)
+            logger.warning("媒体增强 确认通知：无法读取通知实例（%s），使用原通知渠道", type(error).__name__)
             return False
         if not clients:
             return False
@@ -1620,29 +1838,30 @@ class EmeTools(_PluginBase):
                             "userid": str(user or sent["chat_id"]), "original_chat_id": str(sent["chat_id"]),
                             "original_message_id": sent["message_id"]})
                 else:
-                    logger.warning("媒体增强 清理文件：通知渠道未返回消息ID，网页状态无法同步到原通知")
+                    logger.warning("媒体增强 确认通知：通知渠道未返回消息ID，网页状态无法同步到原通知")
             except Exception as error:
-                logger.warning("媒体增强 清理文件：确认通知发送未确认（%s），不重发，保留网页确认", type(error).__name__)
+                logger.warning("媒体增强 确认通知：发送未确认（%s），不重发，保留网页确认", type(error).__name__)
                 if source:
-                    raise RuntimeError("清理确认通知发送未确认") from None
+                    raise RuntimeError("操作确认通知发送未确认") from None
         return True
 
     def _send_scheduled_telegram_confirmation(self, token: str, snapshot: dict) -> None:
-        title = "⚠️【清理无效数据】待确认"
         text = (f"扫描目录：{_log_label(snapshot['root'])}\n待清理：{len(snapshot['items'])} 项\n"
                 "确认有效期：发送后 30 分钟；重启后失效。二次核验后移入隔离区，不会立即永久删除。")
         preview = "\n".join("• " + _log_label(os.path.basename(item["path"])) for item in snapshot["items"][:8])
-        buttons = [[{"text": "✅ 确认清理", "callback_data": f"[PLUGIN]EmeTools|data:{token}:y"},
-                    {"text": "取消", "callback_data": f"[PLUGIN]EmeTools|data:{token}:n"}]]
-        self.chain.post_message(Message(channel=NotificationChannel.Telegram, mtype=MessageType.Plugin,
-                                        title=title, text=f"{text}\n{preview}",
-                                        buttons=buttons, parse_mode="plain"))
+        self._publish_tool_confirmation(token, "scheduled_tools", f"{text}\n{preview}")
         logger.info("媒体增强 清理数据：已提交 Telegram 按钮确认，候选=%d", len(snapshot["items"]))
 
     @eventmanager.register(EventType.MessageAction)
     def scheduled_confirmation_action(self, event: Event) -> None:
         data = event.event_data if event else None
         if not data or str(data.get("plugin_id") or "").lower() != "emetools":
+            return
+        shared_match = re.fullmatch(r"(?:trash|move|data):([a-f0-9]{32}):([ynp])", str(data.get("text") or ""))
+        if shared_match:
+            if shared_match.group(2) != "p":
+                threading.Thread(target=self._handle_tool_confirmation,
+                                 args=(shared_match.group(1), shared_match.group(2) == "y", data.copy()), daemon=True).start()
             return
         files_match = re.fullmatch(r"files:([a-f0-9]{32}):([ynp])", str(data.get("text") or ""))
         if files_match and self._enabled:
@@ -1656,11 +1875,6 @@ class EmeTools(_PluginBase):
             threading.Thread(target=self._handle_media_bot_confirmation,
                              args=(media_match.group(1), media_match.group(2) == "y", data.copy()), daemon=True).start()
             return
-        match = re.fullmatch(r"data:([a-f0-9]{32}):([yn])", str(data.get("text") or ""))
-        if not match:
-            return
-        threading.Thread(target=self._handle_scheduled_confirmation,
-                         args=(match.group(1), match.group(2) == "y", data.copy()), daemon=True).start()
 
     def _edit_file_cleanup_message(self, data: dict, token: str, text: str, processing: bool = False,
                                    completed: bool = False) -> None:
@@ -1744,31 +1958,7 @@ class EmeTools(_PluginBase):
             self._media_bot_reply(source, user, "媒体增强", "确认已过期、已处理或执行失败，请重新预览并检查日志；未自动重发删除请求。")
 
     def _handle_scheduled_confirmation(self, token: str, approve: bool, data: dict) -> None:
-        source, user = str(data.get("source") or ""), str(data.get("userid") or "")
-        channel = data.get("channel")
-        if channel not in {NotificationChannel.Telegram, NotificationChannel.Telegram.value} or not source or not user:
-            return
-        # Confirmation is private and fail-closed: a forwarded button or group message
-        # cannot authorize cleanup, even if it carries the original callback token.
-        if str(data.get("original_chat_id") or "") != user or not matches_channel_admin(
-                NotificationChannel.Telegram, self._telegram_confirmation_sources().get(source), user):
-            logger.warning("媒体增强 清理数据：Telegram 确认被拒绝（非该 Bot 管理员私聊）")
-            return
-        if self._schedule["tools"].get("confirm_mode") != "telegram":
-            return
-        try:
-            if approve:
-                result = self._confirm_scheduled_tools(token, notify=False)
-                text = f"已隔离 {len(result.get('deleted') or [])} 项，跳过 {len(result.get('failed') or [])} 项。"
-            else:
-                self._consume(token, "scheduled_tools")
-                text = "已取消本次清理。"
-            logger.info("媒体增强 清理数据：Telegram %s完成", "确认" if approve else "取消")
-        except Exception as exc:
-            logger.warning("媒体增强 清理数据：Telegram 确认失败：%s", type(exc).__name__)
-            text = "确认已过期、已处理或执行失败，请在插件页面重新扫描并查看日志。"
-        self.chain.post_message(Message(channel=NotificationChannel.Telegram, source=source,
-                                        userid=user, title="媒体增强", text=text))
+        self._handle_tool_confirmation(token, approve, data)
 
     @staticmethod
     def _log_scan(snapshot: dict) -> None:
@@ -1890,9 +2080,36 @@ class EmeTools(_PluginBase):
     def _pending_info(self):
         with self._pending_lock:
             now = time.monotonic()
-            return {"ok": True, "pending": [{"token": token, "kind": kind, "count": len(snapshot.get("items", []))}
+            expired = [token for token, status in self._cleanup_status.items()
+                       if status.get("kind", "cleanup") != "cleanup" and status["state"] == "pending"
+                       and (token not in self._pending or now - self._pending[token][0] >= 1800)]
+        for token in expired:
+            self._set_cleanup_status(token, "expired", "确认已过期，请重新预览", expected_state="pending")
+        with self._pending_lock:
+            now = time.monotonic()
+            confirmations = []
+            for token, status in self._cleanup_status.items():
+                kind = status.get("kind", "cleanup")
+                if kind == "cleanup" or now - status["updated"] >= 3600:
+                    continue
+                saved = self._pending.get(token)
+                state = status["state"]
+                if state == "pending" and (not saved or now - saved[0] >= 1800):
+                    state = "expired"
+                item = {"token": token, "kind": kind, "state": state, "message": status.get("message", "")}
+                if saved and state in {"pending", "processing"}:
+                    snapshot = saved[2]
+                    if kind == "trash":
+                        item.update(count=snapshot["count"], ok=True)
+                    elif kind == "move":
+                        item.update(snapshot["preview"])
+                    elif kind in {"manual_tools", "scheduled_tools"}:
+                        item["count"] = len(snapshot.get("paths", snapshot.get("items", [])))
+                confirmations.append(item)
+            return {"ok": True, "confirmations": confirmations, "pending": [{"token": token, "kind": kind, "count": len(snapshot.get("items", []))}
                                            for token, (created, kind, snapshot) in self._pending.items()
-                                           if kind == "scheduled_tools" and now - created < 1800]}
+                                           if kind == "scheduled_tools" and now - created < 1800
+                                           and self._cleanup_status.get(token, {}).get("state") == "pending"]}
 
     def _confirm_scheduled_tools(self, token: str, notify: bool = True):
         snapshot = self._consume(token, "scheduled_tools")
@@ -1909,17 +2126,29 @@ class EmeTools(_PluginBase):
             return self._p115_tasks.job_status(action.token)
         if action.operation == "p115_tasks":
             return {"tasks": self._p115_tasks.status()}
-        labels = {"p115_dirs": "浏览115目录", "trash_info": "查询回收站", "trash_clear": "清空回收站",
+        confirmation_kinds = {"trash_clear": "trash", "move_confirm": "move",
+                              "confirm_delete": "manual_tools", "confirm_scheduled": "scheduled_tools"}
+        if action.operation in confirmation_kinds:
+            await asyncio.to_thread(self._claim_tool_confirmation, action.token, confirmation_kinds[action.operation])
+        labels = {"p115_dirs": "浏览115目录", "trash_info": "查询回收站", "trash_request": "预览回收站清空", "trash_clear": "清空回收站",
                   "cleanup_preview": "预览清理文件", "cleanup_request": "准备清理确认",
-                  "cleanup_confirm": "确认清理文件", "move_info": "查询待转存", "move_run": "执行文件转存",
+                  "cleanup_confirm": "确认清理文件", "move_info": "查询待转存", "move_run": "预览文件转存",
+                  "move_request": "预览文件转存", "move_confirm": "确认文件转存",
                   "move_copy_reset": "清理复制记录"}
         if action.operation not in labels:
             return await self._action_serial(action)
         saved = action.model_copy(deep=True)
         key = action.operation + (":" + action.cid if action.operation == "p115_dirs" else "")
-        if action.operation in {"cleanup_confirm", "trash_clear"}:
+        if action.operation in {"trash_clear", "move_confirm"}:
+            key = "confirm:" + action.token
+        elif action.operation == "cleanup_confirm":
             key += ":" + action.token
-        job = self._p115_tasks.submit(key, labels[action.operation], lambda: asyncio.run(self._action_serial(saved)))
+        try:
+            job = self._p115_tasks.submit(key, labels[action.operation], lambda: asyncio.run(self._action_serial(saved)))
+        except Exception:
+            if action.operation in confirmation_kinds:
+                await asyncio.to_thread(self._set_cleanup_status, action.token, "failed", "任务队列未接受本次操作，请重新预览")
+            raise
         if action.operation == "cleanup_confirm":
             await asyncio.to_thread(self._set_cleanup_status, action.token, "processing",
                                     "已提交清理确认，正在排队复核目录", expected_state="pending")
@@ -1937,6 +2166,12 @@ class EmeTools(_PluginBase):
         if operation not in {"dirs", "root_dirs", "p115_dirs", "pending", "move_info", "move_copy_reset"}:
             logger.info("媒体增强：页面操作 %s 开始", _log_label(operation))
         try:
+            confirmation_kinds = {"trash_clear": "trash", "move_confirm": "move",
+                                  "confirm_delete": "manual_tools", "confirm_scheduled": "scheduled_tools"}
+            if operation in confirmation_kinds:
+                if self._get_cleanup_status(action.token)["state"] == "pending":
+                    self._claim_tool_confirmation(action.token, confirmation_kinds[operation])
+                return await asyncio.to_thread(self._execute_tool_confirmation, action.token, confirmation_kinds[operation])
             if operation == "scan":
                 result = await asyncio.to_thread(self._cleaner.start_scan, action.path)
                 self._log_scan(result)
@@ -1953,24 +2188,9 @@ class EmeTools(_PluginBase):
                 if not action.scan_token or not action.paths:
                     raise HTTPException(status_code=400, detail="请先扫描并选择清理项目")
                 root = self._cleaner.resolve(action.path or self._strm_root)
-                token = self._remember("manual_tools", {"scan_token": action.scan_token, "paths": action.paths,
-                                                        "root": root})
-                logger.info("媒体增强 清理无效数据：手动申请隔离，待确认=%d 项，目录=%s",
-                            len(action.paths), _log_label(root))
-                self._send_tool_notice(*notices.invalid_confirmation(
-                    {"root": root, "items": [{"path": item} for item in action.paths]}))
-                return {"ok": True, "token": token, "pending": True, "message": "请在本页面再次确认隔离"}
-            if operation == "confirm_delete":
-                saved = self._consume(action.token, "manual_tools")
-                result = await asyncio.to_thread(self._locked, "tools", lambda: self._cleaner.delete(saved["scan_token"], saved["paths"]))
-                self._log_quarantine(result)
-                if result.get("ok") and (result.get("deleted") or result.get("failed")):
-                    self._send_tool_notice(*notices.invalid_cleanup(result, saved["root"]))
-                return result
+                return await asyncio.to_thread(self._data_request, {"root": root, "scan_token": action.scan_token}, action.paths)
             if operation == "pending":
-                return self._pending_info()
-            if operation == "confirm_scheduled":
-                return await asyncio.to_thread(self._confirm_scheduled_tools, action.token)
+                return await asyncio.to_thread(self._pending_info)
             if operation == "dirs":
                 root = self._cleaner.resolve(action.path)
                 directories = sorted(name for name in os.listdir(root)
@@ -1989,19 +2209,25 @@ class EmeTools(_PluginBase):
                 return await asyncio.to_thread(self._p115_dirs, action.cid)
             if operation == "trash_info":
                 return await asyncio.to_thread(self._trash_info)
-            if operation == "trash_clear":
-                result = await asyncio.to_thread(self._trash_clear, action.token)
-                if result.get("ok") and result.get("count"):
-                    self._send_tool_notice(*notices.empty_trash(result))
-                elif not result.get("ok"):
-                    self._send_tool_notice("", f"🧹 清空115 回收站失败：{result.get('message') or '未知错误'}")
-                return result
+            if operation == "trash_request":
+                return await asyncio.to_thread(self._trash_request)
             if operation == "cleanup_preview":
                 preview = await asyncio.to_thread(self._cleanup_preview)
                 preview.pop("snapshots", None)
                 return preview
-            if operation == "cleanup_status":
+            if operation in {"cleanup_status", "confirmation_status"}:
                 return self._get_cleanup_status(action.token)
+            if operation == "confirmation_cancel":
+                status = self._get_cleanup_status(action.token)
+                if status["state"] != "pending":
+                    return {"ok": False, "message": "确认已处理或已过期"}
+                if not self._set_cleanup_status(action.token, "cancelled", "本次操作已取消", expected_state="pending"):
+                    return {"ok": False, "message": "操作已开始，不能取消"}
+                with self._pending_lock:
+                    self._pending.pop(action.token, None)
+                    self._cleanup_telegram_sources.pop(action.token, None)
+                    self._cleanup_command_origins.pop(action.token, None)
+                return {"ok": True, "message": "本次操作已取消，TG 确认同步失效"}
             if operation == "cleanup_request":
                 return await asyncio.to_thread(self._cleanup_request)
             if operation == "cleanup_confirm":
@@ -2015,8 +2241,8 @@ class EmeTools(_PluginBase):
                 return await asyncio.to_thread(self._move_info)
             if operation == "move_copy_reset":
                 return await asyncio.to_thread(self._locked, "p115_move", self._reset_move_copy_records)
-            if operation == "move_run":
-                return await asyncio.to_thread(self._move_run)
+            if operation in {"move_request", "move_run"}:
+                return await asyncio.to_thread(self._move_request)
             raise HTTPException(status_code=400, detail="未知的工具操作")
         except HTTPException:
             if operation == "cleanup_confirm":
