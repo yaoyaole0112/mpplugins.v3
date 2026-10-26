@@ -56,7 +56,7 @@ onMounted(() => {
     node.style.setProperty('height', '92dvh', 'important')
     node.style.setProperty('max-height', '92dvh', 'important')
     node.style.setProperty('margin', '0 auto', 'important')
-    node.style.setProperty('background', 'rgb(var(--v-theme-background))', 'important')
+    node.style.setProperty('background', 'var(--eme-dialog-background, rgb(var(--v-theme-background)))', 'important')
     node.style.setProperty('overflow', 'hidden', 'important')
     node.classList.add('eme-mobile-dialog-host')
     for (const wrapper of ancestors) {

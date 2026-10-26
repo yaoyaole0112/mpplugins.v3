@@ -1,0 +1,42 @@
+html[data-theme="glass"] .eme-shell,
+html[data-theme="glass"] .eme-app-page-host,
+html[data-theme="glass"] .eme-dialog-page-root,
+html[data-theme="glass"] .eme-shell--dialog,
+html[data-theme="glass"] .eme-mobile-dialog-wrapper {
+  background: transparent !important;
+}
+
+html[data-theme="glass"] .eme-mobile-dialog-host {
+  --eme-dialog-background: var(--glass-surface-raised, var(--glass-surface));
+  background: var(--glass-surface-raised, var(--glass-surface)) !important;
+  border: 1px solid var(--glass-border-raised, var(--glass-border));
+  box-shadow: var(--glass-shadow-raised, var(--glass-shadow));
+  backdrop-filter: blur(var(--glass-blur-raised, var(--glass-blur)));
+  -webkit-backdrop-filter: blur(var(--glass-blur-raised, var(--glass-blur)));
+}
+
+html[data-theme="glass"] .eme-shell .eme-card,
+html[data-theme="glass"] .eme-shell .eme-sidebar-card {
+  background: var(--glass-surface) !important;
+  border-color: var(--glass-border) !important;
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(var(--glass-blur-surface, var(--glass-blur)));
+  -webkit-backdrop-filter: blur(var(--glass-blur-surface, var(--glass-blur)));
+}
+
+html[data-theme="glass"] .eme-shell input:not([type="checkbox"]),
+html[data-theme="glass"] .eme-shell select,
+html[data-theme="glass"] .eme-shell textarea,
+html[data-theme="glass"] .eme-dialog-page-close {
+  background: var(--glass-control, var(--glass-surface-soft)) !important;
+  border-color: var(--glass-border) !important;
+}
+
+html[data-theme="glass"] .eme-shell .eme-dialog,
+html[data-theme="glass"] .eme-shell .eme-toast {
+  background: var(--glass-surface-raised, var(--glass-surface)) !important;
+  border-color: var(--glass-border-raised, var(--glass-border)) !important;
+  box-shadow: var(--glass-shadow-raised, var(--glass-shadow));
+  backdrop-filter: blur(var(--glass-blur-raised, var(--glass-blur)));
+  -webkit-backdrop-filter: blur(var(--glass-blur-raised, var(--glass-blur)));
+}

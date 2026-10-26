@@ -36,6 +36,7 @@ from .missing_episodes import DEFAULT_MISSING, MissingAction, MissingEpisodeDete
 from .missing_fill import MissingFill
 from .media_cleanup import MediaCleanup, DEFAULT_CONFIG as DEFAULT_MEDIA_CLEANUP, DEFAULT_RULES, validate_rules
 from .data_enrichment import DataEnrichment, DEFAULT_ENRICH_CONFIG, validate_enrich_config
+from .enrichment_llm import llm_available, llm_setting
 from . import tool_notifications as notices
 
 ICON_URL = "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg"
@@ -121,7 +122,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.46"
+    plugin_version = "2.10.47"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -2293,11 +2294,8 @@ class EmeTools(_PluginBase):
 
     async def enrichment_config(self) -> dict:
         return {"config": copy.deepcopy(self._enrichment_config),
-                "ai_model": str(getattr(mp_settings, "LLM_MODEL", "") or ""),
-                "ai_available": bool(getattr(mp_settings, "LLM_API_KEY", "") and
-                                     getattr(mp_settings, "LLM_BASE_URL", "") and
-                                     getattr(mp_settings, "LLM_MODEL", "") and
-                                     str(getattr(mp_settings, "LLM_API_PROTOCOL", "auto") or "auto").lower() != "anthropic")}
+                "ai_model": str(llm_setting("LLM_MODEL") or ""),
+                "ai_available": llm_available()}
 
     async def save_enrichment_config(self, values: dict) -> dict:
         if not self._enabled:
@@ -2309,11 +2307,8 @@ class EmeTools(_PluginBase):
             config["preview_force"] = self._enrichment_config.get("preview_force", False)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if config["ai_enabled"] and not (getattr(mp_settings, "LLM_API_KEY", "") and
-                                        getattr(mp_settings, "LLM_BASE_URL", "") and
-                                        getattr(mp_settings, "LLM_MODEL", "") and
-                                        str(getattr(mp_settings, "LLM_API_PROTOCOL", "auto") or "auto").lower() != "anthropic"):
-            raise HTTPException(status_code=400, detail="请先在 MoviePilot 配置兼容 OpenAI 接口的 LLM 服务")
+        if config["ai_enabled"] and not llm_available():
+            raise HTTPException(status_code=400, detail="请先在 MoviePilot 配置 LLM 服务的认证与模型")
         self._enrichment_config = config
         self._persist()
         return {"config": copy.deepcopy(config)}

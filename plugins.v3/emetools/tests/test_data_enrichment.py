@@ -37,6 +37,12 @@ class EnrichmentTests(unittest.TestCase):
         baike_patch = patch.object(self.enrichment, '_baike_cast', new_callable=AsyncMock, return_value={})
         self.baike_cast = baike_patch.start()
         self.addCleanup(baike_patch.stop)
+        douban_patch = patch.object(self.enrichment, '_douban_data', new_callable=AsyncMock, return_value={})
+        self.douban_data = douban_patch.start()
+        self.addCleanup(douban_patch.stop)
+
+    def real_douban_data(self, *args, **kwargs):
+        return DataEnrichment._douban_data(self.enrichment, *args, **kwargs)
 
     def test_baike_supplements_chinese_cast_without_replacing_primary_ids(self):
         original = [{'id': 101, 'name': '演员甲', 'role': '主角', 'profile_path': '/primary.jpg'}]
@@ -247,10 +253,10 @@ class EnrichmentTests(unittest.TestCase):
             asyncio.run(self.enrichment._enrich_movie(emby, tmdb, 'movie1',
                 {'Type': 'Movie', 'ProviderIds': {'Tmdb': '969681'}}, 'credits',
                 {**DEFAULT_ENRICH_CONFIG, 'no_avatar': False, 'max_actors': 3, 'cast_lock_min': 2}, 'key'))
-        self.assertEqual([person['Name'] for person in saved[0]['People']], ['汤姆·赫兰德', '演员乙'])
+        self.assertEqual([person['Name'] for person in saved[0]['People']], ['汤姆·霍兰德', '演员乙'])
         self.assertIn('Cast', saved[0]['LockedFields'])
         self.assertEqual([person['Name'] for person in saved[1]['People']],
-                         ['汤姆·赫兰德', '演员乙', '无头像演员'])
+                         ['汤姆·霍兰德', '演员乙', '无头像演员'])
         asyncio.run(emby.aclose())
         asyncio.run(tmdb.aclose())
 
@@ -312,7 +318,7 @@ class EnrichmentTests(unittest.TestCase):
         real_client = httpx.AsyncClient
         with patch('emetools.data_enrichment.httpx.AsyncClient',
                    side_effect=lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs)):
-            result = asyncio.run(self.enrichment._douban_data(
+            result = asyncio.run(self.real_douban_data(
                 {'Name': '蜘蛛侠：崭新之日', 'ProviderIds': {'Douban': '18'}}, include_cast=True))
         self.assertEqual(result['casts'][0]['name'], '汤姆·赫兰德')
         self.assertEqual(result['casts'][0]['original_name'], 'Tom Holland')
@@ -847,7 +853,8 @@ class EnrichmentTests(unittest.TestCase):
              patch.object(self.enrichment, '_tmdb_client', return_value=tmdb), \
              patch.object(self.enrichment, '_douban_data', return_value={}), \
              patch('emetools.data_enrichment.settings.TMDB_API_KEY', 'test-key'):
-            asyncio.run(self.enrichment._enrich('Q4', '73025', 'all', DEFAULT_ENRICH_CONFIG))
+            asyncio.run(self.enrichment._enrich('Q4', '73025', 'all',
+                {**DEFAULT_ENRICH_CONFIG, 'episode_cast': True}))
         series = written['/emby/Items/73025']
         episode = written['/emby/Items/ep1']
         self.assertEqual(series['Name'], '新剧名')
@@ -939,8 +946,8 @@ class EnrichmentTests(unittest.TestCase):
 
         with patch('emetools.data_enrichment.httpx.AsyncClient', side_effect=client):
             item = {'Name': '庆余年', 'ProductionYear': 2019}
-            self.assertEqual(asyncio.run(self.enrichment._douban_data(item))['overview'], '豆瓣简介')
-            self.assertEqual(asyncio.run(self.enrichment._douban_data(item, 1))[1]['name'], '第一集')
+            self.assertEqual(asyncio.run(self.real_douban_data(item))['overview'], '豆瓣简介')
+            self.assertEqual(asyncio.run(self.real_douban_data(item, 1))[1]['name'], '第一集')
         self.assertIn('/j/subject/18', paths)
         self.assertIn('/j/tv/series/18', paths)
 
@@ -961,7 +968,7 @@ class EnrichmentTests(unittest.TestCase):
             return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
         with patch('emetools.data_enrichment.httpx.AsyncClient', side_effect=client):
-            result = asyncio.run(self.enrichment._douban_data(
+            result = asyncio.run(self.real_douban_data(
                 {'Name': '一瓯春', 'ProviderIds': {'Douban': '18'}}, include_cast=True))
         self.assertEqual(result['casts'][0]['name'], '许凯')
         self.assertEqual(paths, ['/j/subject/18', '/rexxar/api/v2/movie/18/celebrities'])
@@ -1181,23 +1188,14 @@ class EnrichmentTests(unittest.TestCase):
                 validate_enrich_config(invalid)
 
     def test_ai_translation_uses_moviepilot_llm_only_when_requested(self):
-        seen = []
-
-        def handler(request):
-            seen.append((request.url.path, json.loads(request.content)['model']))
-            return httpx.Response(200, json={'choices': [{'message': {
-                'content': '{"Name":"中文剧名"}'}}]})
-
-        llm = httpx.AsyncClient(base_url='https://llm.example/v1/', transport=httpx.MockTransport(handler))
-        with patch('emetools.data_enrichment.settings.LLM_API_KEY', 'test-only'), \
-             patch('emetools.data_enrichment.settings.LLM_BASE_URL', 'https://llm.example/v1'), \
-             patch('emetools.data_enrichment.settings.LLM_MODEL', 'test-model'), \
-             patch('emetools.data_enrichment.settings.LLM_API_PROTOCOL', 'auto'), \
-             patch('emetools.data_enrichment.settings.LLM_USE_PROXY', False), \
-             patch('emetools.data_enrichment.httpx.AsyncClient', return_value=llm):
+        with patch('emetools.data_enrichment.llm_available', return_value=True), \
+             patch('emetools.data_enrichment.llm_setting', return_value='test-only'), \
+             patch('emetools.data_enrichment.translate_with_moviepilot', new_callable=AsyncMock,
+                   return_value='```json\n{"Name":"中文剧名"}\n```') as translate:
             response = asyncio.run(self.enrichment._ai_map({'Name': 'English name'}, '剧集标题'))
         self.assertEqual(response, {'Name': '中文剧名'})
-        self.assertEqual(seen, [('/v1/chat/completions', 'test-model')])
+        translate.assert_awaited_once()
+        self.assertIn('English name', translate.call_args.args[0][1]['content'])
 
     def test_cast_settings_filter_limit_prefix_and_lock(self):
         saved = []

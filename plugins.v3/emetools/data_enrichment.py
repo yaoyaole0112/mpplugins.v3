@@ -33,7 +33,8 @@ from .baike_cast import fetch_baike_cast
 from .episode_plots import fetch_episode_plots, missing_episode_title, missing_episode_overview
 from .overview_quality import (overview_issues, overview_length, overview_signature,
                                duplicate_overviews)
-from .media_precheck import media_checks
+from .media_precheck import media_checks, foreign_text
+from .enrichment_llm import llm_available, llm_setting, translate_with_moviepilot
 from .emby_guard import EmbyClient, ReadRetryClient, ENRICHMENT_SLOT, RESOLVE_SLOTS
 
 
@@ -464,8 +465,7 @@ class DataEnrichment:
 
     @staticmethod
     def _foreign_label(value):
-        text = str(value or "").strip()
-        return bool(text and re.search(r"[A-Za-z]", text) and not re.search(r"[\u3400-\u9fff]", text))
+        return foreign_text(value)
 
     @staticmethod
     def _known_label_translation(value):
@@ -498,10 +498,14 @@ class DataEnrichment:
                 result.append(value)
         if pending and options.get("ai_enabled") and options.get("ai_metadata"):
             translated = await self._optional_ai_map(
-                pending, f"{context}。仅翻译已有名称为简体中文，不直译或编造公司身份；不确定时返回原文。")
+                pending, f"{context}。仅翻译已有名称为简体中文，优先通用中文名；无通用译名时忠实音译，"
+                         "保持机构身份，不扩写或编造公司业务；无法确认时返回原文。")
             for key, value in translated.items():
-                if self._is_chinese_title(value) and not re.search(r"[A-Za-z]", value):
+                if self._is_chinese_title(value) and not self._foreign_label(value):
                     result[int(key)] = value
+        remaining = sum(self._foreign_label(value) for value in result)
+        if remaining:
+            self.log(f"{context}：仍有 {remaining} 项未汉化；保留原名，不代表翻译成功")
         return list(dict.fromkeys(result))
 
     @classmethod
@@ -526,28 +530,35 @@ class DataEnrichment:
         return title
 
     async def _ai_map(self, mapping, context):
-        """Translate a bounded batch via MoviePilot's configured OpenAI-compatible LLM."""
+        """Use MoviePilot's provider/protocol routing, with legacy-host compatibility."""
         if not mapping:
             return {}
-        key = str(getattr(settings, "LLM_API_KEY", "") or "")
-        base = str(getattr(settings, "LLM_BASE_URL", "") or "").rstrip("/")
-        model = str(getattr(settings, "LLM_MODEL", "") or "")
-        if not (key and base and model):
+        key = str(llm_setting("LLM_API_KEY") or "")
+        base = str(llm_setting("LLM_BASE_URL") or "").rstrip("/")
+        model = str(llm_setting("LLM_MODEL") or "")
+        if not llm_available():
             raise ValueError("AI 补齐已启用，请先在 MoviePilot 配置 LLM 服务")
-        if str(getattr(settings, "LLM_API_PROTOCOL", "auto") or "auto").lower() == "anthropic":
-            raise ValueError("AI 补齐需要 MoviePilot 中支持 OpenAI 兼容接口的 LLM 服务")
         proxies = get_runtime_setting("PROXY", None) if getattr(settings, "LLM_USE_PROXY", False) else None
         proxy = proxies.get("https") if isinstance(proxies, dict) else proxies
         url = base if base.endswith("/chat/completions") else base + "/chat/completions"
         payload = {"model": model, "messages": [
             {"role": "system", "content": "你是影视元数据翻译助手。只翻译为简体中文，保留姓名和剧情事实；仅返回 JSON 对象，键必须与输入一致，值必须是字符串。"},
-            {"role": "user", "content": context[:150] + "\n" + json.dumps(mapping, ensure_ascii=False)}],
+            {"role": "user", "content": context[:800] + "\n" + json.dumps(mapping, ensure_ascii=False)}],
                    "temperature": 0.1, "max_tokens": 2200}
         try:
-            async with httpx.AsyncClient(proxy=proxy, timeout=90, trust_env=False) as client:
-                response = await client.post(url, headers={"Authorization": f"Bearer {key}"}, json=payload)
-                response.raise_for_status()
-                content = response.json()["choices"][0]["message"]["content"].strip()
+            try:
+                from app.agent.llm.helper import LLMHelper
+            except ImportError:
+                if not base or str(llm_setting("LLM_API_PROTOCOL", "auto")).lower() not in (
+                        "auto", "chat_completions"):
+                    raise ValueError("当前 MoviePilot 缺少统一 LLM 接口，请升级宿主后使用此协议")
+                async with httpx.AsyncClient(proxy=proxy, timeout=90, trust_env=False) as client:
+                    response = await client.post(url, headers={"Authorization": f"Bearer {key}"}, json=payload)
+                    response.raise_for_status()
+                    content = response.json()["choices"][0]["message"]["content"]
+            else:
+                content = await translate_with_moviepilot(payload["messages"])
+            content = content.strip()
             if content.startswith("```"):
                 content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.I)
             result = json.loads(content)
@@ -555,7 +566,7 @@ class DataEnrichment:
                 raise ValueError("AI 未返回 JSON 对象")
             return {k: v.strip()[:1000] for k, v in result.items()
                     if k in mapping and isinstance(v, str) and v.strip()}
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+        except Exception as exc:
             # Never log the LLM URL or headers: provider URLs may contain secrets.
             raise ValueError(f"MoviePilot LLM 请求或响应失败：{type(exc).__name__}") from None
 
@@ -572,38 +583,40 @@ class DataEnrichment:
         translations = {}
         translated_names = translated_roles = 0
         for index, person in enumerate(people):
-            if re.search(r"[A-Za-z]", person["Name"]):
+            if self._foreign_label(person["Name"]):
                 translations[f"n{index}"] = person["Name"][:130]
-            if re.search(r"[A-Za-z]", person["Role"]):
+            if self._foreign_label(person["Role"]):
                 translations[f"r{index}"] = person["Role"][:130]
-            elif not person["Role"] and options["resolve_role"] and person["Type"] == "Actor":
-                translations[f"r{index}"] = f"{person['Name']} 的角色名（若无法确定保持空字符串）"
         pending = translations
         context = (f"{media_type}：{str(title or '')[:70]}。"
-                   "将英文演员姓名翻译或音译成简体中文，将英文角色名翻译或音译成简体中文；"
+                   "将外文演员姓名翻译或音译成简体中文，将外文角色名翻译或音译成简体中文；"
                    "结果不得保留英文字母。保留已有中文及人物身份，不得编造角色或演员。"
                    "不确定时返回原文。")
         for _ in range(2):
             if not pending:
                 break
+            received_values = False
             unresolved = {}
             for start in range(0, len(pending), 25):
                 chunk = dict(list(pending.items())[start:start + 25])
                 translated = await self._optional_ai_map(chunk, context)
+                received_values = received_values or bool(translated)
                 for key_name, original in chunk.items():
                     value = translated.get(key_name, "")
                     if (value and value != original and
                             re.search(r"[\u3400-\u9fff]", value) and
-                            not re.search(r"[A-Za-z]", value)):
+                            not self._foreign_label(value)):
                         person = people[int(key_name[1:])]
                         person["Name" if key_name.startswith("n") else "Role"] = value
                         if key_name.startswith("n"):
                             translated_names += 1
                         else:
                             translated_roles += 1
-                    elif re.search(r"[A-Za-z]", original):
+                    elif self._foreign_label(original):
                         unresolved[key_name] = original
             pending = unresolved
+            if not received_values:
+                break
         remaining_names = sum(key.startswith("n") for key in pending)
         remaining_roles = sum(key.startswith("r") for key in pending)
         self.log(f"AI 演职人员汉化：姓名 {translated_names} 个、角色 {translated_roles} 个；"
@@ -774,22 +787,35 @@ class DataEnrichment:
                 data = response.json()
                 casts = data.get("casts") or []
                 directors = []
-                cast_needs_mobile = include_cast and (
-                    not casts or any(
-                        not re.search(r"[\u3400-\u9fff]", str(actor.get("name") or "")) or
-                        re.search(r"[A-Za-z]", str(actor.get("role") or ""))
-                        for actor in casts if isinstance(actor, dict)))
+                cast_needs_mobile = include_cast
                 if cast_needs_mobile:
                     # j/subject may omit cast; mobile celebrities includes names
                     # and photos, but its generic '演员' is not a character name.
                     try:
-                        mobile = await client.get(
-                            f"https://m.douban.com/rexxar/api/v2/movie/{subject_id}/celebrities",
-                            params={"start": 0, "count": 100},
-                            headers={"Referer": "https://m.douban.com/"})
-                        mobile.raise_for_status()
-                        mobile_data = mobile.json()
-                        celebrities = mobile_data.get("actors") or []
+                        celebrities, seen = [], set()
+                        mobile_data = {}
+                        for offset in range(0, 500, 100):
+                            mobile = await client.get(
+                                f"https://m.douban.com/rexxar/api/v2/movie/{subject_id}/celebrities",
+                                params={"start": offset, "count": 100},
+                                headers={"Referer": "https://m.douban.com/"})
+                            mobile.raise_for_status()
+                            page = mobile.json()
+                            if not mobile_data:
+                                mobile_data = page
+                            actors = page.get("actors") or []
+                            added = 0
+                            for actor in actors:
+                                if not isinstance(actor, dict) or not actor.get("name"):
+                                    continue
+                                identity = str(actor.get("id") or actor.get("name"))
+                                if identity not in seen:
+                                    seen.add(identity)
+                                    celebrities.append(actor)
+                                    added += 1
+                            if not added or len(actors) < 100:
+                                break
+                            await asyncio.sleep(0.2)
                         mobile_cast = [{"name": actor.get("name"), "role": actor.get("character"),
                                         "original_name": actor.get("latin_name"),
                                         "img": (actor.get("avatar") or {}).get("large") or
@@ -797,7 +823,10 @@ class DataEnrichment:
                                                (actor.get("avatar") or {}).get("small")}
                                        for actor in celebrities if isinstance(actor, dict)]
                         if mobile_cast:
-                            casts = mobile_cast
+                            casts = [{**actor, "img": actor.get("profile_path")} for actor in
+                                     self._merge_cast(mobile_cast, [{**actor,
+                                         "profile_path": actor.get("img") or actor.get("profile_path")}
+                                         for actor in casts if isinstance(actor, dict)])]
                         directors = [{"name": person.get("name"), "role": "导演",
                                       "original_name": person.get("latin_name"),
                                       "img": (person.get("avatar") or {}).get("large") or
@@ -856,8 +885,20 @@ class DataEnrichment:
             role = actor.get("role") or ""
             if is_placeholder(role) and counterpart and not is_placeholder(counterpart.get("role")):
                 role = counterpart["role"]
-            merged.append({"name": actor["name"], "role": "" if is_placeholder(role) else role,
-                           "profile_path": actor.get("img") or (counterpart or {}).get("profile_path"),
+            if (counterpart and foreign_text(role) and
+                    DataEnrichment._is_chinese_title(counterpart.get("role")) and
+                    not foreign_text(counterpart.get("role"))):
+                role = counterpart["role"]
+            actor_name = actor["name"]
+            if (counterpart and foreign_text(actor_name) and
+                    DataEnrichment._is_chinese_title(counterpart.get("name")) and
+                    not foreign_text(counterpart.get("name"))):
+                actor_name = counterpart["name"]
+            merged.append({**(counterpart or {}), **actor,
+                           "id": (counterpart or {}).get("id"),
+                           "name": actor_name, "role": "" if is_placeholder(role) else role,
+                           "profile_path": actor.get("img") or actor.get("profile_path") or
+                                           (counterpart or {}).get("profile_path"),
                            "order": len(merged)})
         # The secondary source only supplies actors not confidently identified
         # in Douban; existing Chinese entries retain their order and names.
@@ -876,16 +917,126 @@ class DataEnrichment:
             localized = dict(actor)
             if len(matches) == 1:
                 matched = matches[0]
-                if (not DataEnrichment._is_chinese_title(actor.get("name")) and
+                if ((not DataEnrichment._is_chinese_title(actor.get("name")) or
+                        DataEnrichment._foreign_label(actor.get("name"))) and
                         re.search(r"[\u3400-\u9fff]", matched.get("name") or "")):
                     localized["name"] = matched["name"]
                 role = matched.get("role") or ""
-                if re.search(r"[\u3400-\u9fff]", role):
+                if ((not DataEnrichment._is_chinese_title(actor.get("role")) or
+                        DataEnrichment._foreign_label(actor.get("role"))) and
+                        re.search(r"[\u3400-\u9fff]", role)):
                     localized["role"] = role
                 if not localized.get("profile_path") and matched.get("profile_path"):
                     localized["profile_path"] = matched["profile_path"]
             result.append(localized)
         return result
+
+    @classmethod
+    def _complete_primary_cast(cls, cast, secondary):
+        result = cls._localize_primary_cast(cast, secondary)
+        for actor in secondary:
+            if not isinstance(actor, dict) or not actor.get("name"):
+                continue
+            if any(len(cls._merge_cast([actor], [existing])) == 1 for existing in result):
+                continue
+            extra = cls._merge_cast([actor], [])[0]
+            extra["order"] = max((entry.get("order") or 0 for entry in result), default=-1) + 1
+            result.append(extra)
+        return result
+
+    def _select_actors(self, cast, options):
+        named = [actor for actor in cast if actor.get("name")]
+        eligible = [actor for actor in named if not options["no_avatar"] or actor.get("profile_path")]
+        selected = sorted(eligible, key=lambda actor: actor.get("order")
+                          if actor.get("order") is not None else 999)[:options["max_actors"]]
+        self.log(f"演员表：来源合并 {len(named)} 人；无头像过滤 {len(named) - len(eligible)} 人；"
+                 f"上限 {options['max_actors']} 人；本次拟写入 {len(selected)} 人")
+        return selected
+
+    async def _check_cast_completeness(self, series_id, collected, options):
+        self._cast_expectations = {}
+        item = collected[series_id][0]
+        provider = item.get("ProviderIds") or {}
+        identifier = provider.get("Tmdb") or provider.get("TMDB")
+        if item.get("Type") not in {"Movie", "Series"} or not str(identifier or "").isdecimal():
+            self.log("演职完整度：无已确认 TMDB ID，仅检查现有中文质量，不按人数猜测缺失演员")
+            return set()
+        api_key = str(getattr(settings, "TMDB_API_KEY", "") or "")
+        if not api_key:
+            return set()
+        try:
+            movie = item["Type"] == "Movie"
+            credits_key = "credits" if movie else "aggregate_credits"
+            async with self._tmdb_client() as client:
+                detail = await self._tmdb_json(client, f"{'movie' if movie else 'tv'}/{identifier}",
+                    {"api_key": api_key, "language": "zh-CN", "append_to_response": credits_key})
+            cast = [{**actor, "role": actor.get("character") or
+                     (actor.get("roles") or [{}])[0].get("character") or ""}
+                    for actor in (detail.get(credits_key) or {}).get("cast") or []
+                    if isinstance(actor, dict) and actor.get("name")]
+            secondary = (await self._douban_data(item, include_cast=True)).get("casts") or []
+            cast = (self._merge_cast(secondary, cast) if options["metadata_source"] == "douban"
+                    else self._complete_primary_cast(cast, secondary))
+            expected = len(self._select_actors(cast, options))
+            targets = set()
+            for key, (entry, checks) in collected.items():
+                if key != series_id and (entry.get("Type") != "Episode" or not options["episode_cast"]):
+                    continue
+                if "People" not in entry:
+                    continue
+                actual = sum(person.get("Type") == "Actor" for person in entry.get("People") or []
+                             if isinstance(person, dict))
+                if expected:
+                    self._cast_expectations[key] = expected
+                if expected > actual:
+                    targets.add(key)
+                    self.log(f"演职完整度：条目 {entry.get('Id')} 可见演员 {actual} 人，"
+                             f"可信来源按头像筛选/人数上限后 {expected} 人，加入补缺")
+            return targets
+        except (ValueError, httpx.HTTPError, TypeError, AttributeError) as error:
+            self.log(f"演员完整度核对未完成（{type(error).__name__}），不将中文正常等同演员齐全；继续修复已确认异常")
+            return set()
+
+    def _verify_cast_completeness(self, collected):
+        expectations = getattr(self, "_cast_expectations", {})
+        if not expectations:
+            return
+        for key, (entry, checks) in collected.items():
+            expected = expectations.get(key)
+            if not expected:
+                continue
+            actual = sum(person.get("Type") == "Actor" for person in entry.get("People") or []
+                         if isinstance(person, dict))
+            for check in checks:
+                if check["field"] not in {"演职员", "分集演职员"}:
+                    continue
+                if "People" not in entry:
+                    check["status"] = "待核实"
+                elif actual < expected:
+                    check["status"] = "疑似异常"
+                check["detail"] += f"；来源按设置筛选至少 {expected} 位演员，回读可见 {actual} 位"
+        result = self.state["overview_preview"]
+        categories = {}
+        for entry, checks in collected.values():
+            for check in checks:
+                if check["status"] in {"缺失", "疑似异常"}:
+                    categories[check["field"]] = categories.get(check["field"], 0) + 1
+        result["category_counts"] = categories
+        result["issues"] = sum(any(check["status"] in {"缺失", "疑似异常"} for check in checks)
+                               for entry, checks in collected.values())
+        result["unknown"] = sum(any(check["status"] == "待核实" for check in checks)
+                                for entry, checks in collected.values())
+        for row in result.get("items", []):
+            if row.get("id") not in collected:
+                continue
+            checks = collected[row["id"]][1]
+            problems = [f"{check['field']}：{check['status']}" for check in checks
+                        if check["status"] in {"缺失", "疑似异常"}]
+            row["checks"] = checks
+            row["reasons"] = list(dict.fromkeys([*row.get("reasons", []), *problems]))
+            row["uncertain"] = any(check["status"] == "待核实" for check in checks)
+            if problems:
+                row["plan"] = "仍有未确认修复的项目，请核对来源筛选与 Emby 人物隐藏规则，不代表全部补齐"
 
     @staticmethod
     def _needs_chinese_cast(cast, limit):
@@ -1223,9 +1374,12 @@ class DataEnrichment:
         field_map = {"标题": "Name", "分集标题": "Name", "简介/概要": "Overview", "分集简介": "Overview",
                      "类型": "Genres", "工作室/播出平台": "Studios", "演职员": "People", "分集演职员": "People"}
         scope, images, media = {}, [], []
+        incomplete_cast = await self._check_cast_completeness(series_id, collected, options)
         for key, (entry, checks) in collected.items():
             problems = {check["field"]: check for check in checks if check["status"] in {"缺失", "疑似异常"}}
             fields = {field_map[field] for field in problems if field in field_map}
+            if key in incomplete_cast:
+                fields.add("People")
             if fields:
                 scope[key] = fields
             if "分集图片" in problems:
@@ -1307,6 +1461,7 @@ class DataEnrichment:
         self.log("正在重新预检所选媒体，核实修复结果；无可靠来源的内容不编造")
         verified = {}
         await self._overview_preview(series_id, None, options, verified)
+        self._verify_cast_completeness(verified)
         result = self.state["overview_preview"]
         locks = {"fields": 0, "items": 0}
         if options["overview_lock"]:
@@ -1802,11 +1957,18 @@ class DataEnrichment:
                 update["Genres"] = await self._localize_labels(
                     [genre["name"] for genre in detail["genres"] if genre.get("name")], options,
                     "电影类型汉化")
+            elif item.get("Genres"):
+                update["Genres"] = await self._localize_labels(item["Genres"], options, "现有电影类型汉化")
             studios = [company.get("name") for company in detail.get("production_companies") or []
                        if isinstance(company, dict) and company.get("name")]
             if studios:
                 studios = await self._localize_labels(studios, options, "电影工作室或播出平台汉化")
                 update["Studios"] = [{"Name": name} for name in studios][:30]
+            elif item.get("Studios"):
+                studios = await self._localize_labels([
+                    entry.get("Name", "") if isinstance(entry, dict) else str(entry)
+                    for entry in item["Studios"]], options, "现有电影工作室或播出平台汉化")
+                update["Studios"] = [{"Name": name} for name in studios]
             providers = dict(provider)
             providers["Tmdb"] = str(tmdb_id)
             imdb_id = (detail.get("external_ids") or {}).get("imdb_id") or detail.get("imdb_id")
@@ -1828,13 +1990,13 @@ class DataEnrichment:
                      "order": actor.get("order")}
                     for actor in credits.get("cast") or [] if actor.get("name")]
             douban_cast = douban.get("casts") or []
-            if self._needs_chinese_cast(cast, options["max_actors"]) and not douban_cast:
+            if not douban_cast:
                 secondary = await self._douban_data(item, include_cast=True)
                 douban_cast = secondary.get("casts") or []
                 if douban_cast and options["metadata_source"] == "tmdb":
-                    self.log("TMDB 作为电影主数据源，豆瓣仅补充中文演职与角色")
+                    self.log("TMDB 作为电影主数据源，豆瓣补充中文演职、角色及已确认的缺失演员")
             if douban_cast:
-                cast = (self._localize_primary_cast(cast, douban_cast)
+                cast = (self._complete_primary_cast(cast, douban_cast)
                         if options["metadata_source"] == "tmdb" else self._merge_cast(douban_cast, cast))
             if self._needs_chinese_cast(cast, options["max_actors"]):
                 tvmao_cast = await self._tvmao_cast(item)
@@ -1846,21 +2008,21 @@ class DataEnrichment:
                         self.log(f"电影电视猫中文演职补缺：汉化姓名 {replaced} 人，新增 {added} 人")
             cast, baike_directors = await self._supplement_baike_cast(cast, item, options, 'movie')
             for actor in cast[:options["max_actors"]]:
-                if actor.get("id"):
+                if actor.get("id") and (self._foreign_label(actor.get("name")) or
+                                        not actor.get("profile_path")):
                     try:
                         person = await self._tmdb_json(tmdb, f"person/{actor['id']}",
                             {"api_key": api_key, "language": "zh-CN"})
                         names = [person.get("name"), *(person.get("also_known_as") or [])]
                         chinese = next((value for value in names if self._is_chinese_title(value)
                                         and not re.search(r"[A-Za-z]", value)), None)
-                        if chinese:
+                        if chinese and self._foreign_label(actor.get("name")):
                             actor["name"] = chinese
                         if not actor.get("profile_path") and person.get("profile_path"):
                             actor["profile_path"] = person["profile_path"]
                     except ValueError:
                         self.log("TMDB 人物中文别名读取失败，保留姓名继续补全")
-            cast = [actor for actor in cast if actor.get("name") and
-                    (not options["no_avatar"] or actor.get("profile_path"))]
+            cast = self._select_actors(cast, options)
             people = [{"Name": actor["name"], "Type": "Actor", "Role": actor.get("role") or ""}
                       for actor in cast if actor.get("name")][:options["max_actors"]]
             tmdb_directors = [{"name": crew["name"], "original_name": crew.get("original_name"),
@@ -1886,13 +2048,16 @@ class DataEnrichment:
                 update["People"] = people
                 locked = [field for field in update.get("LockedFields") or [] if field != "Cast"]
                 actors = [person for person in people if person["Type"] == "Actor"]
-                if (len(actors) >= options["cast_lock_min"] and
-                        all(not self._needs_translation(person["Name"]) for person in actors) and
+                if (getattr(self, "_repair_scope", None) is None and
+                        len(actors) >= options["cast_lock_min"] and
+                        all(not self._foreign_label(person["Name"]) and
+                            not self._foreign_label(person["Role"]) for person in actors) and
                         (not options["role_prefix"] or all(
                             person["Role"].startswith(("饰", "配")) for person in actors))):
                     locked.append("Cast")
                 update["LockedFields"] = locked
-                unresolved = [person for person in people if re.search(r"[A-Za-z]", person["Name"] + " " + person["Role"])]
+                unresolved = [person for person in people if self._foreign_label(person["Name"]) or
+                              self._foreign_label(person["Role"])]
                 if unresolved:
                     if options["ai_enabled"] and options["ai_credits"]:
                         hint = "AI 演职翻译已开启并执行；部分字段未取得可用中文结果，请检查上方 AI 请求或翻译日志。保留原文，不代表完整汉化"
@@ -2080,8 +2245,6 @@ class DataEnrichment:
 
     async def _enrich_impl(self, name, identifier, mode, options=None):
         options = validate_enrich_config(options or self.options())
-        if mode == "all" and getattr(self, "_repair_scope", None) is None:
-            options.update(episode_cast=True, ai_title=True, ai_credits=True)
         api_key = str(getattr(settings, "TMDB_API_KEY", "") or "")
         if not api_key:
             raise ValueError("请先在 MoviePilot 配置 TMDB API Key")
@@ -2140,12 +2303,19 @@ class DataEnrichment:
                     if detail.get("genres"):
                         update["Genres"] = await self._localize_labels(
                             [g["name"] for g in detail["genres"] if g.get("name")], options, "剧集类型汉化")
+                    elif item.get("Genres"):
+                        update["Genres"] = await self._localize_labels(item["Genres"], options, "现有剧集类型汉化")
                     studios = [entry.get("name") for entry in
                                (detail.get("networks") or []) + (detail.get("production_companies") or [])
                                if isinstance(entry, dict) and entry.get("name")]
                     if studios:
                         studios = await self._localize_labels(studios, options, "剧集工作室或播出平台汉化")
                         update["Studios"] = [{"Name": name} for name in studios][:30]
+                    elif item.get("Studios"):
+                        studios = await self._localize_labels([
+                            entry.get("Name", "") if isinstance(entry, dict) else str(entry)
+                            for entry in item["Studios"]], options, "现有剧集工作室或播出平台汉化")
+                        update["Studios"] = [{"Name": name} for name in studios]
                     providers = dict(item.get("ProviderIds") or {})
                     providers["Tmdb"] = str(tmdb_id)
                     external = detail.get("external_ids") or {}
@@ -2165,7 +2335,7 @@ class DataEnrichment:
                                            and not re.search(r"[A-Za-z]", value)})
                 if mode != "metadata":
                     tmdb_cast = (detail.get("aggregate_credits") or {}).get("cast") or []
-                    cast = [{"name": p["name"], "original_name": p.get("original_name"),
+                    cast = [{"name": p["name"], "original_name": p.get("original_name"), "id": p.get("id"),
                              "profile_path": p.get("profile_path"), "order": p.get("order"),
                              "role": (p.get("roles") or [{}])[0].get("character", "") or ""}
                             for p in tmdb_cast if p.get("name")]
@@ -2176,21 +2346,19 @@ class DataEnrichment:
                     else:
                         self.log(f"演职人员来源：TMDB（{len(cast)} 人）" +
                                  ("；豆瓣没有可用演员，已回退" if options["metadata_source"] == "douban" else ""))
+                    if options["metadata_source"] != "douban":
+                        douban_cast = (await self._douban_data(item, include_cast=True)).get("casts") or []
+                        if douban_cast:
+                            cast = self._complete_primary_cast(cast, douban_cast)
+                            self.log(f"TMDB 为主，豆瓣汉化及演员完整度补缺（{len(douban_cast)} 人）")
                     if self._needs_chinese_cast(cast, options["max_actors"]):
-                        if options["metadata_source"] != "douban":
-                            douban_cast = (await self._douban_data(item, include_cast=True)).get("casts") or []
-                            if douban_cast:
-                                cast = self._merge_cast(douban_cast, cast)
-                                self.log(f"TMDB 中文演职不足，豆瓣补缺（{len(douban_cast)} 人）")
                         if self._needs_chinese_cast(cast, options["max_actors"]):
                             web_cast = await self._tvmao_cast(item)
                             if web_cast:
                                 cast, replaced, added = self._merge_tvmao_cast(cast, web_cast)
                                 self.log(f"电视猫中文演职补缺：汉化姓名 {replaced} 人，新增 {added} 人")
                     cast, baike_directors = await self._supplement_baike_cast(cast, item, options)
-                    cast = sorted((p for p in cast if p.get("name") and
-                                   (not options["no_avatar"] or p.get("profile_path"))),
-                                  key=lambda p: p.get("order") if p.get("order") is not None else 999)
+                    cast = self._select_actors(cast, options)
                     people = [{"Name": p["name"], "Type": "Actor",
                                "Role": p.get("role") or ""}
                               for p in cast[:options["max_actors"]]]
@@ -2205,8 +2373,10 @@ class DataEnrichment:
                                     person["Role"] = prefix + person["Role"]
                         update["People"] = people
                         locked = [field for field in update.get("LockedFields") or [] if field != "Cast"]
-                        if (sum(person['Type'] == 'Actor' for person in people) >= options["cast_lock_min"] and
-                                all(not self._needs_translation(person["Name"]) for person in people) and
+                        if (getattr(self, "_repair_scope", None) is None and
+                                sum(person['Type'] == 'Actor' for person in people) >= options["cast_lock_min"] and
+                                all(not self._foreign_label(person["Name"]) and
+                                    not self._foreign_label(person["Role"]) for person in people) and
                                 (not options["role_prefix"] or all(
                                     person['Type'] != 'Actor' or person["Role"].startswith(("饰", "配")) for person in people))):
                             locked.append("Cast")

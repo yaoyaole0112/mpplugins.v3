@@ -12,9 +12,16 @@ def positive_number(value):
 
 
 def foreign_text(value):
-    """Return true for labels that contain no Chinese text but do contain letters."""
+    """Detect untranslated labels, including mixed Chinese and foreign scripts."""
     text = str(value or "").strip()
-    return bool(text and re.search(r"[A-Za-z]", text) and not re.search(r"[\u3400-\u9fff]", text))
+    if re.search(r"[\u3040-\u30ff\u1100-\u11ff\u3130-\u318f\uac00-\ud7ff\u0e00-\u0e7f]", text):
+        return True
+    latin = re.findall(r"[A-Za-z]+", text)
+    if not latin:
+        return False
+    if not re.search(r"[\u3400-\u9fff]", text):
+        return True
+    return any(token.upper() not in {"TV", "HBO", "CCTV", "BBC", "IMAX", "AI"} for token in latin)
 
 
 def media_checks(item, options, *, episode=False, duplicated=False):
@@ -57,7 +64,7 @@ def media_checks(item, options, *, episode=False, duplicated=False):
         add(field, "疑似异常", "未返回有效演职员；可能缺失或被服务器隐藏" +
             ("；分集演职写入未开启" if episode and not options["episode_cast"] else ""))
     else:
-        foreign = sum(bool(re.search(r"[A-Za-z]", str(person.get("Name") or "") + str(person.get("Role") or ""))) for person in people)
+        foreign = sum(foreign_text(person.get("Name")) or foreign_text(person.get("Role")) for person in people)
         roles = sum(person.get("Type") == "Actor" and (not str(person.get("Role") or "").strip() or
                     (options["role_prefix"] and not str(person.get("Role") or "").startswith(("饰", "配")))) for person in people)
         add(field, "疑似异常" if foreign or roles else "正常",
