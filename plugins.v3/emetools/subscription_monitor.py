@@ -5,6 +5,7 @@ import re
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -116,6 +117,12 @@ class SubscriptionMonitor:
         self._load_checkpoints()
         self._subscriptions = []
         self._last_refresh = 0
+        self._subscription_task = None
+        self._subscription_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="emetools-subscriptions")
+        self._subscription_retry_after = 0
+        self._subscription_failures = 0
+        self._subscription_error = ""
+        self._subscription_timeout = 12
         self._watchdog = None
         self.last_error = ""
         self.last_event = ""
@@ -366,6 +373,10 @@ class SubscriptionMonitor:
         if self._watchdog:
             self._watchdog.cancel()
             self._watchdog = None
+        if self._subscription_task and not self._subscription_task.done():
+            self._subscription_task.cancel()
+            await asyncio.gather(self._subscription_task, return_exceptions=True)
+        self._subscription_executor.shutdown(wait=False, cancel_futures=True)
         if self.client:
             await self.client.disconnect()
             self.client = None
@@ -419,6 +430,8 @@ class SubscriptionMonitor:
                 "listening_channels": {scope: len(self.channel_ids[scope]) for scope in ("sub", "kw")},
                 "channel_titles": {scope: dict(self.channel_titles[scope]) for scope in ("sub", "kw")},
                 "subscription_count": len(self._subscriptions),
+                "subscription_warning": self._subscription_error,
+                "subscription_refreshing": bool(self._subscription_task and not self._subscription_task.done()),
                 "sub": dict(self.plugin._monitor_config["sub"]), "kw": dict(self.plugin._monitor_config["kw"])}
 
     async def _poll_channels(self):
@@ -426,7 +439,7 @@ class SubscriptionMonitor:
         while any(self.plugin._monitor_config[scope]["enabled"] for scope in ("sub", "kw")):
             stage = "连接 Telegram"
             try:
-                if self.plugin._monitor_config["sub"]["enabled"] and time.monotonic() - self._last_refresh > 300:
+                if self.plugin._monitor_config["sub"]["enabled"] and (not self._last_refresh or time.monotonic() - self._last_refresh > 300):
                     await self._refresh_subscriptions()
                 for scope in ("sub", "kw"):
                     if self.plugin._monitor_config[scope]["enabled"] and not self.channel_ids[scope]:
@@ -485,14 +498,46 @@ class SubscriptionMonitor:
             await asyncio.sleep(60)
 
     async def _refresh_subscriptions(self):
+        if self._subscription_task and not self._subscription_task.done():
+            return bool(self._last_refresh)
+        if time.monotonic() < self._subscription_retry_after:
+            return bool(self._last_refresh)
+        self._subscription_task = asyncio.create_task(self._load_subscriptions())
         try:
-            self._subscriptions = await asyncio.wait_for(
-                asyncio.to_thread(self.plugin._subscription_items), timeout=12)
+            return await asyncio.wait_for(asyncio.shield(self._subscription_task), timeout=self._subscription_timeout)
+        except TimeoutError:
+            if self._subscription_task.done() and not self._subscription_task.cancelled():
+                return self._subscription_task.result()
+            self._subscription_failed("读取超时，后台查询仍在等待完成")
+            return bool(self._last_refresh)
+
+    def _subscription_failed(self, reason):
+        self._subscription_failures += 1
+        delay = min(300, 30 * 2 ** min(self._subscription_failures - 1, 4))
+        self._subscription_retry_after = time.monotonic() + delay
+        fallback = f"继续使用上次成功读取的 {len(self._subscriptions)} 条订阅" if self._last_refresh else "暂缓订阅匹配，保留消息等待补漏"
+        self._subscription_error = f"读取 MoviePilot 订阅失败：{reason}；{fallback}，自动恢复中"
+        logger.warning("媒体增强读取订阅暂未完成：%s；%s；最早 %d 秒后重试，同一时间仅保留一个查询",
+                       reason, fallback, delay)
+
+    async def _load_subscriptions(self):
+        try:
+            subscriptions = await asyncio.get_running_loop().run_in_executor(
+                self._subscription_executor, self.plugin._subscription_items)
+            self._subscriptions = subscriptions
             self._last_refresh = time.monotonic()
+            self._subscription_retry_after = 0
+            self._subscription_failures = 0
+            self._subscription_error = ""
+            if self.last_error.startswith(("读取 MoviePilot 订阅失败", "获取MoviePilot订阅失败")):
+                self.last_error = ""
             logger.info("媒体增强 Telegram：已同步 MoviePilot 订阅 %d 条", len(self._subscriptions))
+            return True
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            self.last_error = f"读取 MoviePilot 订阅失败：{type(exc).__name__}"
-            logger.warning("媒体增强读取订阅失败: %s", type(exc).__name__)
+            self._subscription_failed(type(exc).__name__)
+            return bool(self._last_refresh)
 
     async def resolve_forward_bot(self):
         """复用转发 Bot 配置，按宿主 HTTPS 代理解析目标用户名。"""
@@ -546,15 +591,17 @@ class SubscriptionMonitor:
         logger.info("媒体增强 Telegram：收到频道消息，频道ID=%s，消息ID=%s，监控=%s，正文=%d 字",
                     event.chat_id, event.id, "/".join(scopes), len(text))
         names = []
+        subscriptions_ready = True
         if "sub" in scopes:
-            if time.monotonic() - self._last_refresh > 300:
-                await self._refresh_subscriptions()
-                if not self._last_refresh:
-                    return
-            names.extend(sub["name"] for sub in self._subscriptions if matches_subscription(text, sub))
+            if not self._last_refresh or time.monotonic() - self._last_refresh > 300:
+                subscriptions_ready = await self._refresh_subscriptions()
+            if subscriptions_ready:
+                names.extend(sub["name"] for sub in self._subscriptions if matches_subscription(text, sub))
         if "kw" in scopes and matches_keyword(text, self.plugin._monitor_config["kw"]["keywords"], self.plugin._monitor_config["kw"]["blacklist"]):
             names.append("关键词匹配")
         if not names:
+            if not subscriptions_ready or ("sub" in scopes and self._subscription_error):
+                return False
             logger.info("媒体增强 Telegram：频道ID=%s 消息ID=%s 未命中（已比较订阅=%d）",
                         event.chat_id, event.id, len(self._subscriptions) if "sub" in scopes else 0)
             self._mark_seen(key)

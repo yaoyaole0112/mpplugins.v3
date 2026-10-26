@@ -1,5 +1,7 @@
 import asyncio
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -235,9 +237,199 @@ https://115.com/s/example?password=r3f3"""
         monitor.channel_ids["sub"] = {12345}
         event = SimpleNamespace(chat_id=-10012345, id=17, raw_text="星际旅程 S02")
         asyncio.run(monitor._on_message(event))
-        self.assertIn("读取 MoviePilot 订阅失败", monitor.last_error)
-        self.assertNotIn("hidden database detail", monitor.last_error)
+        self.assertIn("读取 MoviePilot 订阅失败", monitor._subscription_error)
+        self.assertNotIn("hidden database detail", monitor._subscription_error)
         self.assertNotIn((event.chat_id, event.id), monitor._seen)
+
+
+class SubscriptionRefreshTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.plugin = MagicMock()
+        self.plugin.get_data.return_value = None
+        self.plugin._tg_session = ''
+        self.plugin._tg_api_id = ''
+        self.plugin._monitor_config = {
+            'sub': {'enabled': True, 'channels': []},
+            'kw': {'enabled': False, 'channels': [], 'keywords': [], 'blacklist': []},
+        }
+        self.monitor = SubscriptionMonitor(self.plugin)
+        self.monitor._subscription_timeout = 0.02
+        self.addAsyncCleanup(self.monitor.shutdown)
+
+    def block_query(self, result):
+        released = threading.Event()
+        started = threading.Event()
+        self.addCleanup(released.set)
+        def query():
+            started.set()
+            if not released.wait(2):
+                raise RuntimeError('test query was not released')
+            return result
+        self.plugin._subscription_items = MagicMock(side_effect=query)
+        return started, released
+
+    async def test_timeout_keeps_one_inflight_query_and_accepts_late_success(self):
+        started, released = self.block_query([{'name': '示例剧集'}])
+        self.assertFalse(await self.monitor._refresh_subscriptions())
+        self.assertTrue(started.is_set())
+        self.assertIn('后台查询', self.monitor._subscription_error)
+        await asyncio.gather(*(self.monitor._refresh_subscriptions() for _ in range(15)))
+        self.plugin._subscription_items.assert_called_once()
+        self.assertFalse(self.monitor._subscription_task.done())
+        released.set()
+        await asyncio.wait_for(self.monitor._subscription_task, 1)
+        self.assertEqual(self.monitor._subscriptions, [{'name': '示例剧集'}])
+        self.assertFalse(self.monitor._subscription_error)
+        self.assertGreater(self.monitor._last_refresh, 0)
+
+    async def test_cached_subscriptions_remain_available_after_timeout(self):
+        self.monitor._subscriptions = [{'name': '已有订阅'}]
+        self.monitor._last_refresh = time.monotonic() - 400
+        started, released = self.block_query([{'name': '更新订阅'}])
+        self.assertTrue(await self.monitor._refresh_subscriptions())
+        self.assertEqual(self.monitor._subscriptions, [{'name': '已有订阅'}])
+        self.assertIn('继续使用上次成功读取的 1 条订阅', self.monitor._subscription_error)
+        released.set()
+        await asyncio.wait_for(self.monitor._subscription_task, 1)
+        self.assertEqual(self.monitor._subscriptions, [{'name': '更新订阅'}])
+
+    async def test_recovery_clears_only_subscription_errors(self):
+        self.monitor.last_error = '读取 MoviePilot 订阅失败：TimeoutError'
+        self.monitor._subscription_error = self.monitor.last_error
+        self.plugin._subscription_items.return_value = []
+        self.assertTrue(await self.monitor._refresh_subscriptions())
+        self.assertFalse(self.monitor.last_error)
+        self.assertFalse(self.monitor._subscription_error)
+        self.monitor.last_error = '转发失败：RuntimeError'
+        await self.monitor._refresh_subscriptions()
+        self.assertEqual(self.monitor.last_error, '转发失败：RuntimeError')
+
+    async def test_failure_has_backoff_and_does_not_replace_cache(self):
+        self.monitor._subscriptions = [{'name': '缓存订阅'}]
+        self.monitor._last_refresh = time.monotonic() - 400
+        self.plugin._subscription_items.side_effect = RuntimeError('private database URL')
+        self.assertTrue(await self.monitor._refresh_subscriptions())
+        for _ in range(10):
+            self.assertTrue(await self.monitor._refresh_subscriptions())
+        self.plugin._subscription_items.assert_called_once()
+        self.assertEqual(self.monitor._subscriptions, [{'name': '缓存订阅'}])
+        self.assertNotIn('private database URL', self.monitor._subscription_error)
+        self.monitor._subscription_retry_after = 0
+        self.plugin._subscription_items.side_effect = None
+        self.plugin._subscription_items.return_value = []
+        self.assertTrue(await self.monitor._refresh_subscriptions())
+        self.assertEqual(self.monitor._subscriptions, [])
+        self.assertFalse(self.monitor._subscription_error)
+
+    async def test_caller_cancellation_does_not_cancel_database_read(self):
+        started, released = self.block_query([])
+        refresh = asyncio.create_task(self.monitor._refresh_subscriptions())
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        refresh.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await refresh
+        self.assertFalse(self.monitor._subscription_task.cancelled())
+        released.set()
+        await asyncio.wait_for(self.monitor._subscription_task, 1)
+        self.assertGreater(self.monitor._last_refresh, 0)
+
+    async def test_failed_initial_query_keeps_message_and_checkpoint_retryable(self):
+        self.monitor.channel_ids['sub'] = {12345}
+        self.monitor._last_msg_ids = {'12345': 16}
+        self.plugin._subscription_items.side_effect = TimeoutError('private SQL detail')
+        event = SimpleNamespace(chat_id=-10012345, id=17, raw_text='新剧 S01')
+        self.assertIs(await self.monitor._on_message(event), False)
+        self.assertNotIn((12345, 17), self.monitor._seen)
+        self.assertEqual(self.monitor._last_msg_ids['12345'], 16)
+
+    async def test_poll_keeps_cursor_when_initial_subscription_read_failed(self):
+        self.monitor.channel_ids['sub'] = {12345}
+        self.monitor._last_msg_ids = {'12345': 16}
+        self.plugin._subscription_items.side_effect = TimeoutError()
+        client = MagicMock()
+        client.get_messages = AsyncMock(return_value=[SimpleNamespace(
+            chat_id=-10012345, id=17, raw_text='新剧 S01')])
+        self.monitor._authorized = AsyncMock(return_value=client)
+        async def stop(_seconds):
+            self.plugin._monitor_config['sub']['enabled'] = False
+        with patch('emetools.subscription_monitor.asyncio.sleep', side_effect=stop):
+            await self.monitor._poll_channels()
+        self.assertEqual(self.monitor._last_msg_ids['12345'], 16)
+        self.assertNotIn((12345, 17), self.monitor._seen)
+
+    async def test_keyword_monitor_still_matches_when_subscriptions_are_unavailable(self):
+        self.monitor.channel_ids = {'sub': {12345}, 'kw': {12345}}
+        self.plugin._monitor_config['kw'].update(enabled=True, keywords=['资源'])
+        self.plugin._subscription_items.side_effect = RuntimeError()
+        self.monitor.resolve_forward_bot = AsyncMock(return_value='destination')
+        self.monitor._deliver_message = AsyncMock(return_value='原消息转发')
+        event = SimpleNamespace(chat_id=-10012345, id=17, raw_text='资源发布', message=object())
+        await self.monitor._on_message(event)
+        self.monitor._deliver_message.assert_awaited_once()
+        self.assertIn((12345, 17), self.monitor._seen)
+        self.assertTrue(self.monitor._subscription_error)
+
+    async def test_status_exposes_subscription_warning_without_login_error(self):
+        self.plugin._subscription_items.side_effect = TimeoutError()
+        await self.monitor._refresh_subscriptions()
+        status = await self.monitor.status()
+        self.assertIn('暂缓订阅匹配', status['subscription_warning'])
+        self.assertFalse(status['last_error'])
+        self.plugin._subscription_items.side_effect = None
+        self.plugin._subscription_items.return_value = []
+        self.monitor._subscription_retry_after = 0
+        await self.monitor._refresh_subscriptions()
+        self.assertFalse((await self.monitor.status())['subscription_warning'])
+
+    async def test_cached_miss_during_database_failure_is_not_marked_processed(self):
+        self.monitor._subscriptions = [{'name': '原有剧集'}]
+        self.monitor._last_refresh = time.monotonic() - 400
+        self.plugin._subscription_items.side_effect = RuntimeError()
+        self.monitor.channel_ids['sub'] = {12345}
+        event = SimpleNamespace(chat_id=-10012345, id=17, raw_text='新增订阅剧集 S01')
+        self.assertIs(await self.monitor._on_message(event), False)
+        self.assertNotIn((12345, 17), self.monitor._seen)
+        self.assertNotIn('12345', self.monitor._last_msg_ids)
+
+    async def test_empty_success_is_distinct_from_no_initial_snapshot(self):
+        self.plugin._subscription_items.return_value = []
+        self.monitor.channel_ids['sub'] = {12345}
+        event = SimpleNamespace(chat_id=-10012345, id=17, raw_text='未订阅资源 S01')
+        await self.monitor._on_message(event)
+        self.assertGreater(self.monitor._last_refresh, 0)
+        self.assertIn((12345, 17), self.monitor._seen)
+        self.assertEqual(self.monitor._last_msg_ids['12345'], 17)
+
+    async def test_deferred_message_can_forward_once_after_subscription_recovery(self):
+        self.monitor.channel_ids['sub'] = {12345}
+        self.plugin._subscription_items.side_effect = TimeoutError()
+        self.monitor.resolve_forward_bot = AsyncMock(return_value='destination')
+        self.monitor._deliver_message = AsyncMock(return_value='原消息转发')
+        event = SimpleNamespace(chat_id=-10012345, id=17, raw_text='示例长剧名 S01', message=object())
+        self.assertIs(await self.monitor._on_message(event), False)
+        self.plugin._subscription_items.side_effect = None
+        self.plugin._subscription_items.return_value = [{'name': '示例长剧名', 'season': 1, 'type': '电视剧'}]
+        self.monitor._subscription_retry_after = 0
+        await self.monitor._on_message(event)
+        await self.monitor._on_message(event)
+        self.monitor._deliver_message.assert_awaited_once()
+        self.assertFalse(self.monitor._subscription_error)
+
+    async def test_cached_match_still_forwards_without_hiding_subscription_warning(self):
+        self.monitor.channel_ids['sub'] = {12345}
+        self.monitor._subscriptions = [{'name': '已有长剧名', 'season': 1, 'type': '电视剧'}]
+        self.monitor._last_refresh = time.monotonic() - 400
+        self.plugin._subscription_items.side_effect = RuntimeError()
+        self.monitor.resolve_forward_bot = AsyncMock(return_value='destination')
+        self.monitor._deliver_message = AsyncMock(return_value='原消息转发')
+        event = SimpleNamespace(chat_id=-10012345, id=17, raw_text='已有长剧名 S01', message=object())
+        await self.monitor._on_message(event)
+        self.monitor._deliver_message.assert_awaited_once()
+        self.assertTrue(self.monitor._subscription_error)
+        self.assertFalse(self.monitor.last_error)
 
 
 class ForwardingTests(unittest.TestCase):
