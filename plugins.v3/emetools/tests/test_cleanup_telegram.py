@@ -314,18 +314,19 @@ class FileCleanupTelegramTests(unittest.TestCase):
         self.assertEqual(edited.original_chat_id, '123')
         self.assertEqual(edited.buttons, [[{
             'text': '🗑️清理完成', 'callback_data': f'[PLUGIN]EmeTools|files:{token}:p'}]])
-        self.assertNotIn('已删除', edited.text)
+        self.assertIn('已删除', edited.text)
+        self.assertIn('📁111', edited.text)
+        self.assertNotIn('清理文件', edited.text)
 
-    def test_confirmation_sends_only_one_new_result_without_queue_reply(self):
+    def test_confirmation_merges_result_without_new_completion_message(self):
         token = self.request()
         self.plugin.chain.post_message.reset_mock()
         self.plugin._handle_file_cleanup_confirmation(token, True, self.data)
         messages = [call.args[0] for call in self.plugin.chain.post_message.call_args_list]
         new_messages = [message for message in messages if not message.original_message_id]
-        self.assertEqual(len(new_messages), 1)
-        self.assertIn('已删除', new_messages[0].text)
+        self.assertEqual(len(new_messages), 0)
         self.assertEqual(sum('已删除' in message.text for message in messages), 1)
-        self.assertFalse(any('已提交清理确认' in message.text for message in messages))
+        self.assertFalse(any('详细结果见下方' in message.text or '另行通知' in message.text for message in messages))
 
     def test_failed_cleanup_does_not_show_completed_button(self):
         token = self.request()

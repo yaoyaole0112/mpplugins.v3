@@ -121,7 +121,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.45"
+    plugin_version = "2.10.46"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -444,35 +444,39 @@ class EmeTools(_PluginBase):
 
     def _handle_media_bot_confirmation_serial(self, token: str, approve: bool, data: dict) -> None:
         source, user = str(data.get("source") or ""), str(data.get("userid") or "")
-        if (data.get("channel") not in {NotificationChannel.Telegram, NotificationChannel.Telegram.value}
+        if (not self._enabled or data.get("channel") not in {NotificationChannel.Telegram, NotificationChannel.Telegram.value}
                 or not source or not user or str(data.get("original_chat_id") or "") != user
                 or not matches_channel_admin(NotificationChannel.Telegram,
                                              self._telegram_command_sources().get(source), user)):
             logger.warning("媒体增强 媒体清理：Telegram 确认被拒绝（需要原 Bot 管理员私聊）")
             return
         try:
-            # Validate ownership before consuming: another administrator must not
-            # invalidate the originating bot's confirmation by pressing its button.
             with self._pending_lock:
                 pending = self._pending.get(token)
                 if (not pending or pending[1] != "media_bot" or time.monotonic() - pending[0] >= 1800
                         or pending[2]["source"] != source or pending[2]["user"] != user):
-                    raise ValueError("确认已过期或发起的 Bot、用户不匹配")
-                record = self._pending.pop(token)[2]
+                    return
+            self._register_confirmation_message(token, data)
             if not approve:
-                text = "已取消本次清理。"
-            else:
-                if record["scan"] != self._media.last_scan:
-                    raise ValueError("扫描结果已更新，请重新发送命令")
-                result = self._media.delete(record["paths"])
-                if result["deleted"]:
-                    self._media.refresh_emby()
-                notice = notices.media_cleanup(result)
-                text = f"{notice[0]}\n{notice[1]}" if notice else "✅ 未发现需删除的低质版本。"
-            self._media_bot_reply(source, user, "媒体增强", text)
+                if self._set_cleanup_status(token, "cancelled", "已取消本次清理。", expected_state="pending"):
+                    self._consume(token, "media_bot")
+                return
+            if not self._set_cleanup_status(token, "processing", "正在复核并清理低质版本，请勿重复操作。",
+                                            expected_state="pending"):
+                return
+            record = self._consume(token, "media_bot")
+            if record["scan"] != self._media.last_scan:
+                raise ValueError("扫描结果已更新，请重新发送命令")
+            result = self._media.delete(record["paths"])
+            if result["deleted"]:
+                self._media.refresh_emby()
+            self._finish_confirmation(token, "failed" if result.get("failures") else "completed",
+                notices.media_cleanup(result) or ("媒体增强 · 媒体清理", "✅ 未发现需删除的低质版本。"),
+                command_origin=(source, user))
         except Exception as error:
             logger.warning("媒体增强 媒体清理：Telegram 确认失败：%s", type(error).__name__)
-            self._media_bot_reply(source, user, "媒体增强", f"❌ 确认已过期、已处理或执行失败：{_log_label(error)}")
+            self._finish_confirmation(token, "failed", ("媒体增强 · 媒体清理",
+                f"❌ 确认已过期、已处理或执行失败：{_log_label(error)}"), command_origin=(source, user))
 
     def stop_service(self) -> None:
         logger.info("媒体增强：停止插件服务和 Telegram 监控")
@@ -743,7 +747,7 @@ class EmeTools(_PluginBase):
             self._pending = {key: item for key, item in self._pending.items() if now - item[0] < 1800}
             token = uuid.uuid4().hex
             self._pending[token] = (now, kind, snapshot)
-            if kind in {"cleanup", "trash", "move", "manual_tools", "scheduled_tools"}:
+            if kind in {"cleanup", "trash", "move", "manual_tools", "scheduled_tools", "media_bot"}:
                 self._cleanup_status[token] = {"state": "pending", "kind": kind, "updated": now}
                 self._cleanup_status = {key: value for key, value in self._cleanup_status.items()
                                         if now - value["updated"] < 3600}
@@ -755,25 +759,65 @@ class EmeTools(_PluginBase):
 
     def _sync_cleanup_status(self, token: str, state: str, message: str, *, expected_state=None) -> bool:
         with self._pending_lock:
-            previous = self._cleanup_status.get(token, {}).get("state")
+            previous_status = self._cleanup_status.get(token, {})
+            previous = previous_status.get("state")
             if expected_state is not None and previous != expected_state:
                 return False
             if previous in {"completed", "cancelled", "failed", "expired"} and state != previous:
                 return False
             kind = self._cleanup_status.get(token, {}).get("kind", "cleanup")
-            self._cleanup_status[token] = {"state": state, "kind": kind, "message": message,
+            self._cleanup_status[token] = {**previous_status, "state": state, "kind": kind, "message": message,
                                            "updated": time.monotonic()}
-            references = list(self._cleanup_message_refs.get(token, [])) if previous != state else []
+            references = list(self._cleanup_message_refs.get(token, []))
         for reference in references:
-            if kind != "cleanup":
-                self._edit_tool_confirmation_message(reference, token, kind, state, message)
+            synced = reference.get("synced_result")
+            if synced and synced[0] == state and (
+                    state not in {"completed", "cancelled", "failed", "expired"} or synced[1] == message):
                 continue
-            self._edit_file_cleanup_message(reference, token,
-                "🗑️ 清理完成，详细结果见下方通知。" if state == "completed" else
-                "⌛️ 清理中：正在排队或复核目录；完成后会另行通知。" if state in {"queued", "processing"} else
-                "已取消本次文件清理。" if state == "cancelled" else "清理未完成，请重新预览并核实结果。",
-                processing=state in {"queued", "processing"}, completed=state == "completed")
+            if kind != "cleanup":
+                edited = self._edit_tool_confirmation_message(reference, token, kind, state, message)
+            else:
+                edited = self._edit_file_cleanup_message(reference, token, message or (
+                    "⌛️ 清理中：正在排队或复核目录，请勿重复操作。" if state in {"queued", "processing"} else
+                    "🗑️ 清理完成。" if state == "completed" else
+                    "已取消本次文件清理。" if state == "cancelled" else "清理未完成，请重新预览并核实结果。"),
+                    processing=state in {"queued", "processing"}, completed=state == "completed")
+            if edited:
+                reference["synced_result"] = (state, message)
         return True
+
+    def _finish_confirmation(self, token, state, notice, *, command_origin=None):
+        title, text = notice
+        with self._cleanup_message_lock:
+            with self._pending_lock:
+                status = self._cleanup_status.get(token)
+                if not status or status.get("notice_sent"):
+                    return
+            if not self._sync_cleanup_status(token, state, text):
+                return
+            with self._pending_lock:
+                self._cleanup_status[token]["notice_sent"] = True
+                references = list(self._cleanup_message_refs.get(token, []))
+        origins = list(dict.fromkeys((str(reference["source"]), str(reference["userid"]))
+            for reference in references if reference.get("synced_result") != (state, text))) if references else [command_origin]
+        for origin in origins:
+            try:
+                if origin:
+                    self._media_bot_reply(*origin, title, text)
+                else:
+                    self._send_tool_notice(title, text)
+            except Exception as error:
+                logger.warning("媒体增强 确认结果兜底通知失败：%s，不影响执行结果", type(error).__name__)
+
+    def _register_confirmation_message(self, token, data):
+        reference = {key: data.get(key) for key in
+                     ("source", "userid", "original_chat_id", "original_message_id")}
+        identity = lambda item: tuple(str(item.get(key)) for key in
+                                     ("source", "original_chat_id", "original_message_id"))
+        with self._pending_lock:
+            references = self._cleanup_message_refs.setdefault(token, [])
+            if not any(identity(saved) == identity(reference) for saved in references):
+                references.append(reference)
 
     def _get_cleanup_status(self, token: str) -> dict:
         with self._pending_lock:
@@ -783,7 +827,7 @@ class EmeTools(_PluginBase):
                     not pending or time.monotonic() - pending[0] >= 1800):
                 return {"state": "expired"}
             if status and time.monotonic() - status["updated"] < 3600:
-                return {key: value for key, value in status.items() if key != "updated"}
+                return {key: value for key, value in status.items() if key not in {"updated", "notice_sent"}}
             if pending and time.monotonic() - pending[0] < 1800:
                 return {"state": "pending"}
             return {"state": "expired"}
@@ -802,7 +846,8 @@ class EmeTools(_PluginBase):
     def _tool_confirmation_labels(kind):
         return {"trash": ("trash", "清空回收站", "清空"), "move": ("move", "文件转存", "转存"),
                 "manual_tools": ("data", "清理无效数据", "清理"),
-                "scheduled_tools": ("data", "清理无效数据", "清理")}[kind]
+                "scheduled_tools": ("data", "清理无效数据", "清理"),
+                "media_bot": ("media", "媒体清理", "清理")}[kind]
 
     @staticmethod
     def _trash_fingerprint(items):
@@ -926,33 +971,33 @@ class EmeTools(_PluginBase):
                 self._log_quarantine(result)
                 notice = notices.invalid_cleanup(result, saved["root"])
             successful = bool(result.get("ok")) and not result.get("failed") and not result.get("deferred")
-            self._set_cleanup_status(token, "completed" if successful else "failed", result.get("message", ""))
             prefix, label, verb = self._tool_confirmation_labels(kind)
             title, text = notice or (f"媒体增强 · {label}", result.get("message") or
                                      f"已隔离 {len(result.get('deleted') or [])} 项，跳过 {len(result.get('failed') or [])} 项。")
-            if command_origin:
-                self._media_bot_reply(*command_origin, title, text)
-            else:
-                self._send_tool_notice(title, text)
+            self._finish_confirmation(token, "completed" if successful else "failed", (title, text),
+                                      command_origin=command_origin)
             return result
         except Exception:
-            self._set_cleanup_status(token, "failed", "操作未完成，请核实结果后重新预览；未自动重发提交")
+            self._finish_confirmation(token, "failed", ("媒体增强", "操作未完成，请核实结果后重新预览；未自动重发提交"),
+                                      command_origin=command_origin)
             raise
 
     def _edit_tool_confirmation_message(self, data, token, kind, state, message=""):
         if not data.get("original_message_id") or not data.get("original_chat_id"):
-            return
+            return False
         prefix, label, verb = self._tool_confirmation_labels(kind)
         status = f"✅{verb}完成" if state == "completed" else f"⌛️{verb}中" if state in {"processing", "queued"} else \
                  "已取消" if state == "cancelled" else "已过期" if state == "expired" else f"⚠️{verb}未完成"
         try:
             self.chain.post_message(Message(channel=NotificationChannel.Telegram, source=data.get("source"),
-                userid=str(data.get("userid") or ""), title=f"【{label}】", text=f"{status}\n{message}",
+                userid=str(data.get("userid") or ""), title=f"【{label}】", text=message or status,
                 buttons=[[{"text": status, "callback_data": f"[PLUGIN]EmeTools|{prefix}:{token}:p"}]],
                 parse_mode="plain", original_message_id=data["original_message_id"],
                 original_chat_id=data["original_chat_id"]))
+            return True
         except Exception as error:
             logger.warning("媒体增强 %s：原确认通知状态更新失败（%s），不影响执行状态", label, type(error).__name__)
+            return False
 
     def _handle_tool_confirmation(self, token, approve, data):
         source, user = str(data.get("source") or ""), str(data.get("userid") or "")
@@ -986,7 +1031,8 @@ class EmeTools(_PluginBase):
         except HTTPException:
             return
         except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
-            self._media_bot_reply(source, user, "媒体增强", f"操作未完成（{type(error).__name__}），请核实结果并查看日志；未自动重发提交。")
+            self._finish_confirmation(token, "failed", ("媒体增强", f"操作未完成（{type(error).__name__}），请核实结果并查看日志；未自动重发提交。"),
+                                      command_origin=(source, user))
 
     async def status(self) -> dict:
         return {"settings": self._settings(), "schedule": copy.deepcopy(self._schedule),
@@ -1557,7 +1603,8 @@ class EmeTools(_PluginBase):
             self._set_cleanup_status(token, "failed", str(error))
             raise
         state = "completed" if result.get("ok") else "failed"
-        self._set_cleanup_status(token, state, result.get("message", ""))
+        notice = notices.file_cleanup(result, {"folders": []}) if "deleted" in result else None
+        self._set_cleanup_status(token, state, notice[1] if notice else result.get("message", ""))
         return result
 
     _MOVE_COPY_RECORDS_KEY = "p115_move_copy_records"
@@ -1807,7 +1854,7 @@ class EmeTools(_PluginBase):
 
     def _send_tracked_cleanup_confirmation(self, title, text, buttons, *, source=None, user=None):
         callback = buttons[0][0].get("callback_data", "") if buttons and buttons[0] else ""
-        match = re.fullmatch(r"\[PLUGIN\]EmeTools\|(?:files|trash|move|data):([a-f0-9]{32}):y", callback)
+        match = re.fullmatch(r"\[PLUGIN\]EmeTools\|(?:files|trash|move|data|media):([a-f0-9]{32}):y", callback)
         if not match:
             return False
         token = match.group(1)
@@ -1870,18 +1917,20 @@ class EmeTools(_PluginBase):
             threading.Thread(target=self._handle_file_cleanup_confirmation,
                              args=(files_match.group(1), files_match.group(2) == "y", data.copy()), daemon=True).start()
             return
-        media_match = re.fullmatch(r"media:([a-f0-9]{32}):([yn])", str(data.get("text") or ""))
+        media_match = re.fullmatch(r"media:([a-f0-9]{32}):([ynp])", str(data.get("text") or ""))
         if media_match:
+            if media_match.group(2) == "p":
+                return
             threading.Thread(target=self._handle_media_bot_confirmation,
                              args=(media_match.group(1), media_match.group(2) == "y", data.copy()), daemon=True).start()
             return
 
     def _edit_file_cleanup_message(self, data: dict, token: str, text: str, processing: bool = False,
-                                   completed: bool = False) -> None:
+                                   completed: bool = False) -> bool:
         message_id = data.get("original_message_id")
         chat_id = data.get("original_chat_id")
         if not message_id or not chat_id:
-            return
+            return False
         status_text = "🗑️清理完成" if completed else "⌛️清理中" if processing else "清理已结束"
         buttons = [[{"text": status_text, "callback_data": f"[PLUGIN]EmeTools|files:{token}:p"}]] if status_text else None
         try:
@@ -1889,8 +1938,10 @@ class EmeTools(_PluginBase):
                                         userid=str(data.get("userid") or ""), title="⚠️【清理文件】",
                                         text=text, buttons=buttons, parse_mode="plain" if buttons else None,
                                         original_message_id=message_id, original_chat_id=chat_id))
+            return True
         except Exception as error:
             logger.warning("媒体增强 清理文件：更新原通知失败：%s，不影响清理状态", type(error).__name__)
+            return False
 
     def _handle_file_cleanup_confirmation(self, token: str, action: str | bool, data: dict) -> None:
         if isinstance(action, bool):
@@ -1901,35 +1952,24 @@ class EmeTools(_PluginBase):
                 or not self._file_cleanup_actor_allowed(token, source, user)):
             logger.warning("媒体增强 清理文件：Telegram确认被拒绝（需要已配置Bot的管理员私聊）")
             return
-        tracked_message = False
         try:
             with self._pending_lock:
                 if self._cleanup_status.get(token, {}).get("state") in {"completed", "cancelled", "failed"}:
                     return
-                tracked_message = any(
-                    (reference.get("source"), str(reference.get("original_chat_id")),
-                     str(reference.get("original_message_id"))) ==
-                    (source, str(data.get("original_chat_id")), str(data.get("original_message_id")))
-                    for reference in self._cleanup_message_refs.get(token, []))
                 pending = self._pending.get(token)
                 if (not pending or pending[1] != "cleanup" or time.monotonic() - pending[0] >= 1800
                         or source not in self._cleanup_telegram_sources.get(token, set())):
                     raise ValueError("确认已过期、已处理或Bot不匹配，请重新预览")
+            self._register_confirmation_message(token, data)
             if action == "p":
-                self._edit_file_cleanup_message(data, token, "⌛️ 清理正在排队或执行，请勿重复操作。")
                 return
             if action == "n":
                 self._consume(token, "cleanup")
-                self._set_cleanup_status(token, "cancelled", "已取消本次文件清理")
-                if not tracked_message:
-                    self._edit_file_cleanup_message(data, token, "已取消本次文件清理。")
-                self._media_bot_reply(source, user, "媒体增强", "已取消本次文件清理；网页中的同一确认也已失效。")
+                self._set_cleanup_status(token, "cancelled", "已取消本次文件清理；网页中的同一确认也已失效。")
                 return
             if not self._set_cleanup_status(token, "processing", "已提交清理确认，正在排队复核目录",
                                             expected_state="pending"):
                 return
-            if not tracked_message:
-                self._edit_file_cleanup_message(data, token, "⌛️ 清理中：正在排队复核目录；完成后会另行通知。", processing=True)
 
             def confirm():
                 if not self._enabled:
@@ -1941,21 +1981,14 @@ class EmeTools(_PluginBase):
             result = self._p115_tasks.run("cleanup_confirm:" + token, "Telegram确认清理文件", confirm, manual=True)
             if result.get("queued"):
                 return
-            self._set_cleanup_status(token, "completed" if result.get("ok") else "failed",
-                                     result.get("message", ""))
             notice = notices.file_cleanup(result, {"folders": []}) if "deleted" in result else None
             title, text = notice or ("媒体增强", result.get("message") or "清理已结束")
-            if not tracked_message:
-                self._edit_file_cleanup_message(data, token,
-                                               "🗑️ 清理完成，详细结果见下方通知。" if result.get("ok") else "清理未全部完成，详细结果见下方通知。",
-                                               completed=bool(result.get("ok")))
-            self._media_bot_reply(source, user, title, text)
+            self._finish_confirmation(token, "completed" if result.get("ok") else "failed", (title, text),
+                                      command_origin=(source, user))
         except (HTTPException, RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
             logger.warning("媒体增强 清理文件：Telegram确认未完成：%s", type(error).__name__)
-            self._set_cleanup_status(token, "failed", str(error))
-            if not tracked_message:
-                self._edit_file_cleanup_message(data, token, "清理未完成，请重新预览并确认。")
-            self._media_bot_reply(source, user, "媒体增强", "确认已过期、已处理或执行失败，请重新预览并检查日志；未自动重发删除请求。")
+            self._finish_confirmation(token, "failed", ("媒体增强", "确认已过期、已处理或执行失败，请重新预览并检查日志；未自动重发删除请求。"),
+                                      command_origin=(source, user))
 
     def _handle_scheduled_confirmation(self, token: str, approve: bool, data: dict) -> None:
         self._handle_tool_confirmation(token, approve, data)
@@ -2090,7 +2123,7 @@ class EmeTools(_PluginBase):
             confirmations = []
             for token, status in self._cleanup_status.items():
                 kind = status.get("kind", "cleanup")
-                if kind == "cleanup" or now - status["updated"] >= 3600:
+                if kind in {"cleanup", "media_bot"} or now - status["updated"] >= 3600:
                     continue
                 saved = self._pending.get(token)
                 state = status["state"]
@@ -2234,8 +2267,8 @@ class EmeTools(_PluginBase):
                 self._set_cleanup_status(action.token, "processing", "正在复核目录并清理")
                 result = await asyncio.to_thread(self._cleanup_confirm, action.token)
                 notification = notices.file_cleanup(result, {"folders": []}) if "deleted" in result else None
-                if notification:
-                    self._send_tool_notice(*notification)
+                self._finish_confirmation(action.token, "completed" if result.get("ok") else "failed",
+                    notification or ("媒体增强 · 清理文件", result.get("message") or "清理已结束"))
                 return result
             if operation == "move_info":
                 return await asyncio.to_thread(self._move_info)
@@ -2246,11 +2279,11 @@ class EmeTools(_PluginBase):
             raise HTTPException(status_code=400, detail="未知的工具操作")
         except HTTPException:
             if operation == "cleanup_confirm":
-                self._set_cleanup_status(action.token, "failed", "确认已过期或已处理，请重新预览")
+                self._finish_confirmation(action.token, "failed", ("媒体增强 · 清理文件", "确认已过期或已处理，请重新预览"))
             raise
         except (OSError, RuntimeError, ValueError, httpx.HTTPError) as error:
             if operation == "cleanup_confirm":
-                self._set_cleanup_status(action.token, "failed", str(error))
+                self._finish_confirmation(action.token, "failed", ("媒体增强 · 清理文件", "清理未完成，请核实结果并检查日志；未自动重发删除请求。"))
             logger.warning("媒体增强：页面操作 %s 失败：%s（敏感详情未记录）",
                            _log_label(operation), type(error).__name__)
             return {"ok": False, "message": str(error)}
