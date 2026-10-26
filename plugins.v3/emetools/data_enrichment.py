@@ -34,7 +34,9 @@ from .episode_plots import fetch_episode_plots, missing_episode_title, missing_e
 from .overview_quality import (overview_issues, overview_length, overview_signature,
                                duplicate_overviews)
 from .media_precheck import media_checks, foreign_text
-from .enrichment_llm import llm_available, llm_setting, translate_with_moviepilot
+from .enrichment_llm import (llm_available, llm_setting, translate_with_moviepilot,
+                             search_portraits_with_moviepilot)
+from .cast_portraits import CastPortraits
 from .emby_guard import EmbyClient, ReadRetryClient, ENRICHMENT_SLOT, RESOLVE_SLOTS
 
 
@@ -51,6 +53,7 @@ DEFAULT_ENRICH_CONFIG = {
     "metadata_source": "tmdb",
     "auto_on_import": True,
     "ai_enabled": False, "no_avatar": True, "episode_cast": False,
+    "ai_portraits": True,
     "role_prefix": True, "ai_title": True, "ai_credits": True, "ai_metadata": True,
     "ai_overview": False, "resolve_role": True,
     "max_actors": 30, "cast_lock_min": 10,
@@ -254,6 +257,8 @@ class DataEnrichment:
         self._verification_incomplete = False
         self._verification_detail = ""
         self._resolve_recent = {}
+        self._portraits = CastPortraits(lambda client, path, params: self._tmdb_json(client, path, params),
+                                       lambda item, actors: search_portraits_with_moviepilot(item, actors), self.log)
         records = owner.get_data("enrichment_records") if hasattr(owner, "get_data") else []
         self._records = [entry for entry in records if isinstance(entry, dict)][-200:] if isinstance(records, list) else []
         self.state.update(overview_preview=None, records=list(reversed(self._records)))
@@ -970,13 +975,14 @@ class DataEnrichment:
             async with self._tmdb_client() as client:
                 detail = await self._tmdb_json(client, f"{'movie' if movie else 'tv'}/{identifier}",
                     {"api_key": api_key, "language": "zh-CN", "append_to_response": credits_key})
-            cast = [{**actor, "role": actor.get("character") or
-                     (actor.get("roles") or [{}])[0].get("character") or ""}
-                    for actor in (detail.get(credits_key) or {}).get("cast") or []
-                    if isinstance(actor, dict) and actor.get("name")]
-            secondary = (await self._douban_data(item, include_cast=True)).get("casts") or []
-            cast = (self._merge_cast(secondary, cast) if options["metadata_source"] == "douban"
-                    else self._complete_primary_cast(cast, secondary))
+                cast = [{**actor, "role": actor.get("character") or
+                         (actor.get("roles") or [{}])[0].get("character") or ""}
+                        for actor in (detail.get(credits_key) or {}).get("cast") or []
+                        if isinstance(actor, dict) and actor.get("name")]
+                secondary = (await self._douban_data(item, include_cast=True)).get("casts") or []
+                cast = (self._merge_cast(secondary, cast) if options["metadata_source"] == "douban"
+                        else self._complete_primary_cast(cast, secondary))
+                cast = await self._portraits.complete(cast, client, api_key, item, options, allow_ai=False)
             expected = len(self._select_actors(cast, options))
             targets = set()
             for key, (entry, checks) in collected.items():
@@ -2007,21 +2013,7 @@ class DataEnrichment:
                         cast, replaced, added = self._merge_tvmao_cast(cast, tvmao_cast)
                         self.log(f"电影电视猫中文演职补缺：汉化姓名 {replaced} 人，新增 {added} 人")
             cast, baike_directors = await self._supplement_baike_cast(cast, item, options, 'movie')
-            for actor in cast[:options["max_actors"]]:
-                if actor.get("id") and (self._foreign_label(actor.get("name")) or
-                                        not actor.get("profile_path")):
-                    try:
-                        person = await self._tmdb_json(tmdb, f"person/{actor['id']}",
-                            {"api_key": api_key, "language": "zh-CN"})
-                        names = [person.get("name"), *(person.get("also_known_as") or [])]
-                        chinese = next((value for value in names if self._is_chinese_title(value)
-                                        and not re.search(r"[A-Za-z]", value)), None)
-                        if chinese and self._foreign_label(actor.get("name")):
-                            actor["name"] = chinese
-                        if not actor.get("profile_path") and person.get("profile_path"):
-                            actor["profile_path"] = person["profile_path"]
-                    except ValueError:
-                        self.log("TMDB 人物中文别名读取失败，保留姓名继续补全")
+            cast = await self._portraits.complete(cast, tmdb, api_key, item, options)
             cast = self._select_actors(cast, options)
             people = [{"Name": actor["name"], "Type": "Actor", "Role": actor.get("role") or ""}
                       for actor in cast if actor.get("name")][:options["max_actors"]]
@@ -2069,14 +2061,37 @@ class DataEnrichment:
         if mode != "credits":
             self._lock_overview(item, update, options)
         issues = overview_issues(update.get("Overview"), options["overview_movie_min"]) if mode != "credits" else []
-        if not await self._save_item(emby, identifier, item, update, user=user,
-                                     audit={"server": server, "source": overview_source, "issues": issues}):
+        saved = await self._save_item(emby, identifier, item, update, user=user,
+                                     audit={"server": server, "source": overview_source, "issues": issues})
+        if mode != "metadata":
+            await self._sync_cast_portraits(emby, cast, people, server, identifier, item, update, user)
+        if not saved:
             self.log("电影资料未确认修复，保留失败记录，继续其他类别" if self._verification_detail else "电影资料未变化，跳过重复写入")
             return
         if self._verification_incomplete:
             self.log("电影资料已提交；演职回读不完整，请查看逐项补全记录，未确认全部人员已保存")
         else:
             self.log("电影资料及演职人员已更新" if mode == "all" else "电影资料已更新" if mode == "metadata" else "电影演职人员已更新")
+
+    async def _sync_cast_portraits(self, emby, cast, people, server, identifier, original, update, user):
+        scope = getattr(self, "_repair_scope", None)
+        if scope is not None and "People" not in scope.get(f"{server}::{identifier}", set()):
+            return
+        actors = [person for person in people if person.get("Type") == "Actor"]
+        proxies = get_runtime_setting("PROXY", None)
+        proxy = proxies.get("https") if isinstance(proxies, dict) else proxies
+        async with httpx.AsyncClient(proxy=proxy, timeout=15, follow_redirects=False, trust_env=False) as client:
+            completed = await self._portraits.sync(emby, client, zip(cast, actors), self._ensure_active)
+        if completed and self._verification_incomplete:
+            try:
+                confirmed = await self._verify_saved_item(emby, identifier, original, update, ["People"], user)
+                if not confirmed:
+                    self._verification_incomplete = True
+                elif not self._verification_incomplete:
+                    self.log("演员头像补充后，完整演职表已通过回读核验")
+            except (ValueError, httpx.HTTPError) as error:
+                self._verification_incomplete = True
+                self.log(f"头像补充后演职回读仍待核实（{type(error).__name__}），不重放资料写入")
 
     async def _sync_episode_people(self, emby, user, series_id, people):
         """Propagate the freshly saved series cast without changing episode metadata."""
@@ -2358,6 +2373,7 @@ class DataEnrichment:
                                 cast, replaced, added = self._merge_tvmao_cast(cast, web_cast)
                                 self.log(f"电视猫中文演职补缺：汉化姓名 {replaced} 人，新增 {added} 人")
                     cast, baike_directors = await self._supplement_baike_cast(cast, item, options)
+                    cast = await self._portraits.complete(cast, tmdb, api_key, item, options)
                     cast = self._select_actors(cast, options)
                     people = [{"Name": p["name"], "Type": "Actor",
                                "Role": p.get("role") or ""}
@@ -2386,6 +2402,8 @@ class DataEnrichment:
                 saved = await self._save_item(emby, identifier, original_item, update, user=user,
                     audit={"server": name, "source": overview_source if mode != "credits" else "演职来源",
                            "issues": overview_issues(update.get("Overview"), options["overview_movie_min"]) if mode != "credits" else []})
+                if mode != "metadata":
+                    await self._sync_cast_portraits(emby, cast, people, name, identifier, original_item, update, user)
                 if saved and self._verification_incomplete:
                     self.log("剧集资料已提交；演职回读不完整，请查看逐项补全记录，继续分集补全")
                 else:

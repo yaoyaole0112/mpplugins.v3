@@ -27,9 +27,25 @@ html[data-theme="glass"] .eme-shell .eme-sidebar-card {
 html[data-theme="glass"] .eme-shell input:not([type="checkbox"]),
 html[data-theme="glass"] .eme-shell select,
 html[data-theme="glass"] .eme-shell textarea,
+html[data-theme="glass"] .eme-shell .eme-picker-trigger,
+html[data-theme="glass"] .eme-shell .eme-folder-choice,
+html[data-theme="glass"] .eme-shell .eme-move-mode-button:not(.selected),
 html[data-theme="glass"] .eme-dialog-page-close {
-  background: var(--glass-control, var(--glass-surface-soft)) !important;
+  background: color-mix(in srgb, var(--glass-control, var(--glass-surface-soft)) 55%, transparent) !important;
   border-color: var(--glass-border) !important;
+}
+
+html[data-theme="glass"] .eme-shell .eme-picker-trigger:hover,
+html[data-theme="glass"] .eme-shell .eme-picker-trigger:focus-visible {
+  border-color: rgba(var(--v-theme-primary), .7) !important;
+}
+
+html[data-theme="glass"] .eme-shell .eme-picker-menu {
+  background: var(--glass-surface-raised, var(--glass-surface)) !important;
+  border-color: var(--glass-border-raised, var(--glass-border)) !important;
+  box-shadow: var(--glass-shadow-raised, var(--glass-shadow));
+  backdrop-filter: blur(var(--glass-blur-raised, var(--glass-blur)));
+  -webkit-backdrop-filter: blur(var(--glass-blur-raised, var(--glass-blur)));
 }
 
 html[data-theme="glass"] .eme-shell .eme-dialog,

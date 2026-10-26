@@ -28,6 +28,13 @@ class EnrichmentTests(unittest.TestCase):
         owner = SimpleNamespace(_strm_root=str(root), get_data=lambda key: self.storage.get(key),
                                 save_data=lambda key, value: self.storage.__setitem__(key, value))
         self.enrichment = DataEnrichment(owner)
+        portrait_patch = patch.object(self.enrichment, '_sync_cast_portraits', new_callable=AsyncMock)
+        portrait_patch.start()
+        self.addCleanup(portrait_patch.stop)
+        portrait_ai_patch = patch('emetools.data_enrichment.search_portraits_with_moviepilot',
+                                  new_callable=AsyncMock, return_value={})
+        portrait_ai_patch.start()
+        self.addCleanup(portrait_ai_patch.stop)
         verify_patch = patch.object(self.enrichment, '_verify_saved_item', new_callable=AsyncMock, return_value=True)
         verify_patch.start()
         self.addCleanup(verify_patch.stop)
@@ -240,8 +247,8 @@ class EnrichmentTests(unittest.TestCase):
             if endpoint.startswith('movie/'):
                 return detail
             if endpoint == 'person/1136406':
-                return {'name': '汤姆·赫兰德', 'profile_path': '/tom.jpg'}
-            return {'name': '演员乙', 'profile_path': '/other.jpg'}
+                return {'id': 1136406, 'name': '汤姆·赫兰德', 'profile_path': '/tom.jpg'}
+            return {'id': 2, 'name': '演员乙', 'profile_path': '/other.jpg'}
         with patch.object(self.enrichment, '_tmdb_json', side_effect=fetch), \
              patch.object(self.enrichment, '_douban_data', new_callable=AsyncMock,
                           return_value={'casts': [{'name': '汤姆·霍兰德', 'original_name': 'Tom Holland',

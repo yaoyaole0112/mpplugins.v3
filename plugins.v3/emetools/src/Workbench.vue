@@ -158,7 +158,7 @@ const enrich = reactive({ query: '', items: [], selected: null, searching: false
 const enrichSettings = reactive({ open: false, ai_available: false, ai_model: '', draft: {
   metadata_source: 'tmdb',
   auto_on_import: true,
-  ai_enabled: false, no_avatar: true, episode_cast: false, role_prefix: true,
+  ai_enabled: false, ai_portraits: true, no_avatar: true, episode_cast: false, role_prefix: true,
   ai_title: true, ai_credits: true, ai_overview: false, ai_metadata: true, resolve_role: true,
   max_actors: 30, cast_lock_min: 10,
   overview_movie_min: 120, overview_episode_min: 40,
@@ -1439,6 +1439,8 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
             <div class="eme-enrich-settings-numbers"><label>电影／整剧简介最低字数<input v-model.number="enrichSettings.draft.overview_movie_min" type="number" min="0" max="2000" /></label><label>分集简介最低字数<input v-model.number="enrichSettings.draft.overview_episode_min" type="number" min="0" max="2000" /></label></div>
             <p class="eme-hint">字数按非空白字符计算，阈值仅用于质量诊断与真实来源补缺，不为凑字数生成剧情。英文兜底需同时开启 AI 和简介汉化；分集优先核对电视猫／百度百科。开启锁定后，复查正常的标题、简介、类型、工作室/播出平台和演职员会分别锁定；单集或电影的全部可检查项目均正常时，额外启用 Emby“锁定此项目”。异常或待核实字段保持可补全，关闭开关不会解除已有锁定。锁定串行执行并回读验证，不自动重放写入。</p>
             <div class="eme-enrich-settings-group"><strong>演职人员处理</strong><label class="eme-switch-label"><input v-model="enrichSettings.draft.no_avatar" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>过滤无头像演员（电影与剧集）</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.episode_cast" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>分集写入演职员（仅剧集，电影直接写入本片）</span></label><label class="eme-switch-label"><input v-model="enrichSettings.draft.role_prefix" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>角色名前加“饰/配”</span></label></div>
+            <label class="eme-switch-label"><input v-model="enrichSettings.draft.ai_portraits" class="eme-switch-input" type="checkbox" role="switch" :disabled="!enrichSettings.draft.ai_enabled" /><span class="eme-switch-track" aria-hidden="true" /><span>AI 联网检索演员头像兜底（电影与剧集）</span></label>
+            <p class="eme-hint">先合并 TMDB、豆瓣等来源头像，再补取人物详情及头像图集，最后过滤仍无可靠头像的演员。AI 兜底仅在启用 AI 且宿主模型支持原生联网搜索时执行，每部最多查询 10 人；结果必须经过 TMDB 姓名和出演作品核验，不生成头像或猜测图片地址。已选演员头像会真实上传至 Emby 并回读核验，已有头像不覆盖；失败单独记录，不重放上传。</p>
             <div class="eme-enrich-settings-numbers"><label>每部作品写入演员数<input v-model.number="enrichSettings.draft.max_actors" type="number" min="1" max="200" /></label><label>锁定所需最低演员数<input v-model.number="enrichSettings.draft.cast_lock_min" type="number" min="1" max="200" /></label></div>
             <p class="eme-hint">仅当演员人数达到阈值且姓名已是中文时，才锁定 Emby 演职人员；AI 默认关闭，只有开启相应选项后才会产生 LLM 请求。</p>
           </div>

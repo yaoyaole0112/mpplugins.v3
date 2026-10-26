@@ -190,17 +190,20 @@ class PluginTests(unittest.TestCase):
         self.assertFalse(self.plugin._enrichment_config['preview_force'])
 
     def test_enrichment_settings_are_validated_and_persisted(self):
-        response = self.run_async(self.plugin.save_enrichment_config({"max_actors": 12, "no_avatar": False}))
+        response = self.run_async(self.plugin.save_enrichment_config({"max_actors": 12, "no_avatar": False,
+                                                                      "ai_portraits": False}))
         self.assertEqual(response["config"]["max_actors"], 12)
         self.assertFalse(self.run_async(self.plugin.enrichment_config())["config"]["no_avatar"])
         persisted = self.plugin.update_config.call_args.args[0]["enrichment"]
         self.assertEqual(persisted["max_actors"], 12)
+        self.assertFalse(persisted["ai_portraits"])
         for invalid in ({"max_actors": 201}, {"ai_enabled": "false"}, {"irrelevant": True}):
             with self.assertRaises(HTTPException):
                 self.run_async(self.plugin.save_enrichment_config(invalid))
         with patch('emetools.missing_episodes.SubscribeChain', return_value=MagicMock()):
             self.plugin.init_plugin({"strm_root": self.directory.name, "enrichment": persisted})
         self.assertEqual(self.plugin._enrichment.options()["max_actors"], 12)
+        self.assertFalse(self.plugin._enrichment.options()["ai_portraits"])
 
     def test_notification_settings_are_persisted_and_filter_success(self):
         result = self.run_async(self.plugin.save_settings({"notifications": {

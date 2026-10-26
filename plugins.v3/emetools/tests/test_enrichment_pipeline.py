@@ -14,6 +14,13 @@ from emetools.media_precheck import foreign_text
 class EnrichmentPipelineTests(unittest.TestCase):
     def setUp(self):
         self.engine = DataEnrichment(SimpleNamespace())
+        portrait_patch = patch.object(self.engine, '_sync_cast_portraits', new_callable=AsyncMock)
+        portrait_patch.start()
+        self.addCleanup(portrait_patch.stop)
+        portrait_ai_patch = patch('emetools.data_enrichment.search_portraits_with_moviepilot',
+                                  new_callable=AsyncMock, return_value={})
+        portrait_ai_patch.start()
+        self.addCleanup(portrait_ai_patch.stop)
         self.options = {**DEFAULT_ENRICH_CONFIG, 'ai_enabled': True}
 
     def test_primary_cast_retains_identity_order_and_existing_chinese_role(self):
