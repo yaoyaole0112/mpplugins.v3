@@ -65,10 +65,33 @@ test('open picker cards rise above sibling glass stacking contexts only while a 
   assert.equal(/\.eme-card\s*\{[^}]*z-index:/.test(css), false)
 })
 
-test('dropdown menus use a readable near-opaque theme surface rather than the translucent control fill', () => {
+test('dropdown menus blend host glass with a readable translucent surface and stronger frost', () => {
   const rule = read('glass.css').match(/\.eme-shell \.eme-picker-menu\s*\{([^}]+)\}/)?.[1]
-  assert.ok(rule?.includes('background: rgba(var(--v-theme-surface), .96) !important'))
+  assert.ok(rule?.includes('--eme-picker-glass: color-mix(in srgb, var(--glass-surface-raised'))
+  assert.ok(rule?.includes('rgba(var(--v-theme-surface), .8)'))
+  assert.ok(rule?.includes('background: linear-gradient('))
   assert.ok(rule?.includes('color: rgb(var(--v-theme-on-surface))'))
-  assert.ok(rule?.includes('backdrop-filter: blur('))
-  assert.equal(rule?.includes('background: var(--glass-surface-raised'), false)
+  assert.ok(rule?.includes('blur(max(28px,'))
+  assert.ok(rule?.includes('saturate(1.12)'))
+  assert.equal(rule?.includes('.96'), false)
+})
+
+test('open cards retain their frost on a noninteractive backdrop so nested menus can blur sibling content', () => {
+  const css = read('glass.css')
+  const card = css.match(/\.eme-card:has\(\.eme-picker-menu\)\s*\{([^}]+)\}/)?.[1]
+  const backdrop = css.match(/\.eme-card:has\(\.eme-picker-menu\)::before\s*\{([^}]+)\}/)?.[1]
+  assert.ok(card?.includes('backdrop-filter: none'))
+  for (const declaration of ['pointer-events: none', 'z-index: -1', 'background: var(--glass-surface)', 'backdrop-filter: blur(']) {
+    assert.ok(backdrop?.includes(declaration))
+  }
+})
+
+test('search and selected rows stay legible without reverting to solid colored blocks', () => {
+  const css = read('glass.css')
+  const selected = css.match(/\.eme-picker-menu \.eme-picker-option\.selected\s*\{([^}]+)\}/)?.[1]
+  assert.ok(selected?.includes('background: rgba(var(--v-theme-primary), .2)'))
+  assert.ok(selected?.includes('color: rgb(var(--v-theme-on-surface))'))
+  assert.ok(css.includes('.eme-picker-option:focus-visible'))
+  assert.ok(css.includes('.eme-picker-option.selected i'))
+  assert.ok(css.includes('background: rgba(var(--v-theme-on-surface), .055) !important'))
 })

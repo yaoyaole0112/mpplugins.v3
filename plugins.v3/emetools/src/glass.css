@@ -27,6 +27,21 @@ html[data-theme="glass"] .eme-shell .eme-sidebar-card {
 html[data-theme="glass"] .eme-shell .eme-card:has(.eme-picker-menu) {
   position: relative;
   z-index: 40;
+  background: transparent !important;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+html[data-theme="glass"] .eme-shell .eme-card:has(.eme-picker-menu)::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: var(--glass-surface);
+  backdrop-filter: blur(var(--glass-blur-surface, var(--glass-blur)));
+  -webkit-backdrop-filter: blur(var(--glass-blur-surface, var(--glass-blur)));
 }
 
 html[data-theme="glass"] .eme-shell .eme-card:has(.eme-picker-menu):focus-within {
@@ -54,12 +69,34 @@ html[data-theme="glass"] .eme-shell .eme-picker-trigger:focus-visible {
 }
 
 html[data-theme="glass"] .eme-shell .eme-picker-menu {
-  background: rgba(var(--v-theme-surface), .96) !important;
+  --eme-picker-glass: color-mix(in srgb, var(--glass-surface-raised, var(--glass-surface, rgba(var(--v-theme-surface), .8))) 16%, rgba(var(--v-theme-surface), .8));
+  background: linear-gradient(145deg, rgba(var(--v-theme-on-surface), .065), rgba(var(--v-theme-on-surface), 0) 60%), var(--eme-picker-glass) !important;
   color: rgb(var(--v-theme-on-surface));
   border-color: var(--glass-border-raised, var(--glass-border)) !important;
   box-shadow: var(--glass-shadow-raised, var(--glass-shadow));
-  backdrop-filter: blur(var(--glass-blur-raised, var(--glass-blur)));
-  -webkit-backdrop-filter: blur(var(--glass-blur-raised, var(--glass-blur)));
+  backdrop-filter: blur(max(28px, var(--glass-blur-raised, var(--glass-blur, 28px)))) saturate(1.12);
+  -webkit-backdrop-filter: blur(max(28px, var(--glass-blur-raised, var(--glass-blur, 28px)))) saturate(1.12);
+}
+
+html[data-theme="glass"] .eme-shell .eme-picker-menu .eme-picker-search {
+  background: rgba(var(--v-theme-on-surface), .055) !important;
+  border-color: rgba(var(--v-theme-on-surface), .14) !important;
+  color: rgb(var(--v-theme-on-surface));
+}
+
+html[data-theme="glass"] .eme-shell .eme-picker-menu .eme-picker-option.selected {
+  background: rgba(var(--v-theme-primary), .2);
+  color: rgb(var(--v-theme-on-surface));
+}
+
+html[data-theme="glass"] .eme-shell .eme-picker-menu .eme-picker-option.selected i {
+  color: rgb(var(--v-theme-primary));
+}
+
+html[data-theme="glass"] .eme-shell .eme-picker-menu .eme-picker-option:hover,
+html[data-theme="glass"] .eme-shell .eme-picker-menu .eme-picker-option:focus-visible {
+  background: rgba(var(--v-theme-primary), .16);
+  color: rgb(var(--v-theme-on-surface));
 }
 
 html[data-theme="glass"] .eme-shell .eme-dialog,
