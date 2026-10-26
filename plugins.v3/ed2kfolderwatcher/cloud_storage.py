@@ -1,4 +1,5 @@
 import hashlib
+import importlib
 import json
 import posixpath
 import re
@@ -20,6 +21,29 @@ LIFE_EVENT_FIELDS = (
 
 class CloudError(ValueError):
     pass
+
+
+def transient_read_error(error):
+    classes = [TimeoutError, ConnectionError, httpx.TransportError]
+    for module, names in (
+        ("urllib3.exceptions", ("TimeoutError", "ProtocolError", "NewConnectionError")),
+        ("urllib3_future.exceptions", ("TimeoutError", "ProtocolError", "NewConnectionError")),
+        ("requests.exceptions", ("Timeout", "ConnectionError")),
+    ):
+        try:
+            imported = importlib.import_module(module)
+        except ImportError:
+            continue
+        classes.extend(getattr(imported, name) for name in names)
+    seen = set()
+    while isinstance(error, BaseException) and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, CloudError):
+            return False
+        if isinstance(error, tuple(classes)):
+            return True
+        error = getattr(error, "reason", None) or error.__cause__ or error.__context__
+    return False
 
 
 def cloud_path(value):

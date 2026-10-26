@@ -161,7 +161,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.12.0"
+    plugin_version = "1.12.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -315,6 +315,30 @@ class Ed2kFolderWatcher(_PluginBase):
                 self.queue_cloud_scan()
         if self._enabled and self._folder and self._monitor_enabled:
             self._start_monitor()
+        if self._enabled and self._cloud_enabled and self._cloud_delete_enabled and self._delete_source:
+            self._restore_cloud_delete_checks()
+
+    def _restore_cloud_delete_checks(self):
+        try:
+            _, _, cache_path = self._paths()
+            with self._lock:
+                records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+                for record in records.values():
+                    if record.get("cloud_delete_state") != "check_retry" or record.get("source_deleted"):
+                        continue
+                    if record.get("cloud_delete_scope") != self._cloud_delete_scope or not self._cloud_delete_scope:
+                        continue
+                    if record.get("cloud_delete_check_attempts", 0) >= 3 or record.get("cloud_delete_attempts", 0) >= 3:
+                        continue
+                    identity = record.get("cloud_fingerprint")
+                    if not isinstance(identity, list) or len(identity) != 6 or record_problem(record):
+                        continue
+                    item = dict(zip(("storage", "fileid", "path", "name", "size", "modify_time"), identity))
+                    item["type"] = "file"
+                    if item["storage"] == "115网盘Plus" and self._cloud_item_is_eligible(item):
+                        self._queue_cloud_file(item, delay=max(1, record.get("cloud_delete_retry_at", 0) - time.time()))
+        except (OSError, ValueError, TypeError) as failure:
+            logger.warning(f"自动生成ED2K链接：恢复删源校验队列失败，保留源文件（{type(failure).__name__}）")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -788,6 +812,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._maybe_delete_cloud_source(storage, item, record, output, cache_path, records, stopping)
 
     def _maybe_delete_cloud_source(self, storage, item, record, output, cache_path, records, stopping):
+        from .cloud_storage import CloudError, transient_read_error
         if stopping is not self._stopping or stopping.is_set() or not self._delete_source or not self._cloud_delete_enabled:
             return
         if item.get("storage") != "115网盘Plus" or not self._cloud_delete_scope or record.get("cloud_delete_scope") != self._cloud_delete_scope:
@@ -800,18 +825,36 @@ class Ed2kFolderWatcher(_PluginBase):
             return
         if record.get("cloud_delete_attempts", 0) >= 3:
             return
+        if record.get("cloud_delete_check_attempts", 0) >= 3:
+            return
         if record.get("cloud_delete_retry_at", 0) > time.time():
             self._queue_cloud_file(item, delay=max(1, record["cloud_delete_retry_at"] - time.time()))
             return
         try:
             current = storage.prepare_delete(item, record.get("cloud_sha1"), self._cloud_folder, self._cloud_recursive, self._cloud_delete_scope)
         except Exception as failure:
-            record.update(cloud_delete_state="blocked", cloud_delete_note="文件身份或授权校验未通过，保留源文件", delete_failed=True)
+            if transient_read_error(failure):
+                attempts = record.get("cloud_delete_check_attempts", 0) + 1
+                delay = 300 * 2 ** (attempts - 1)
+                note = "删源前查询网络超时或连接失败，尚未发送删除请求"
+                note += "；稍后重新校验" if attempts < 3 else "；已达3次上限，保留源文件"
+                record.update(cloud_delete_state="check_retry", cloud_delete_note=note,
+                              cloud_delete_check_attempts=attempts, cloud_delete_check_error=type(failure).__name__,
+                              cloud_delete_retry_at=time.time() + delay, delete_failed=True)
+                self._write_results(output, cache_path, records)
+                if attempts < 3 and stopping is self._stopping and not stopping.is_set():
+                    self._queue_cloud_file(item, delay=delay)
+                logger.warning(f"自动生成ED2K链接：{note}：{item['name']}（{type(failure).__name__}，校验{attempts}/3）")
+                return
+            note = str(failure) if isinstance(failure, CloudError) else f"删源前查询异常（{type(failure).__name__}），未发送删除请求"
+            record.update(cloud_delete_state="blocked", cloud_delete_note=note, delete_failed=True)
             self._write_results(output, cache_path, records)
             logger.warning(f"自动生成ED2K链接：网盘删源校验未通过，保留文件：{item['name']}（{type(failure).__name__}）")
             return
         if stopping is not self._stopping or stopping.is_set():
             return
+        record.pop("cloud_delete_check_attempts", None)
+        record.pop("cloud_delete_check_error", None)
         record.update(cloud_delete_state="inflight", cloud_delete_note="删除请求处理中，异常中断后不自动重删", cloud_delete_requested_at=time.time(), cloud_delete_attempts=record.get("cloud_delete_attempts", 0) + 1)
         self._write_results(output, cache_path, records)
         try:

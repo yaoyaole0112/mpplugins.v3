@@ -221,6 +221,71 @@ class Ed2kTests(unittest.TestCase):
             self.plugin._process_cloud_file(item)
         storage.delete_prepared.assert_not_called()
 
+    def test_cloud_delete_read_timeout_retries_checks_without_rehash_or_resend(self):
+        item, storage = self.cloud_delete_fixture()
+        from urllib3_future.exceptions import ReadTimeoutError
+        storage.prepare_delete.side_effect = [ReadTimeoutError(None, "private", "timeout"), item]
+        key = self.cloud_module.record_key(item)
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32) as hashing, patch.object(self.plugin, "_notify_record") as notify:
+            self.plugin._process_cloud_file(item)
+            record = self.records()[key]
+            self.assertEqual(record["cloud_delete_state"], "check_retry")
+            self.assertNotIn("private", record["cloud_delete_note"])
+            storage.delete_prepared.assert_not_called()
+            self.plugin._process_cloud_file(item)
+            self.assertEqual(storage.prepare_delete.call_count, 1)
+            record["cloud_delete_retry_at"] = 0
+            (self.root / "data" / "records.json").write_text(json.dumps({key: record}))
+            self.plugin._process_cloud_file(item)
+        hashing.assert_called_once()
+        notify.assert_called_once()
+        storage.delete_prepared.assert_called_once()
+        self.assertTrue(self.records()[key]["source_deleted"])
+
+    def test_cloud_delete_read_timeouts_stop_after_three_checks(self):
+        item, storage = self.cloud_delete_fixture()
+        storage.prepare_delete.side_effect = TimeoutError("private")
+        key = self.cloud_module.record_key(item)
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32) as hashing:
+            for attempt in range(5):
+                if attempt:
+                    records = self.records()
+                    records[key]["cloud_delete_retry_at"] = 0
+                    (self.root / "data" / "records.json").write_text(json.dumps(records))
+                self.plugin._process_cloud_file(item)
+        self.assertEqual(storage.prepare_delete.call_count, 3)
+        hashing.assert_called_once()
+        storage.delete_prepared.assert_not_called()
+        self.assertFalse(self.records()[key]["source_deleted"])
+
+    def test_cloud_delete_check_retry_restores_after_restart_but_blocked_does_not(self):
+        item, storage = self.cloud_delete_fixture()
+        storage.prepare_delete.side_effect = TimeoutError()
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32):
+            self.plugin._process_cloud_file(item)
+        key = self.cloud_module.record_key(item)
+        self.plugin._pending.clear()
+        self.plugin._restore_cloud_delete_checks()
+        self.assertIn(key, self.plugin._pending)
+        self.plugin._pending.clear()
+        records = self.records()
+        records[key]["cloud_delete_state"] = "blocked"
+        (self.root / "data" / "records.json").write_text(json.dumps(records))
+        self.plugin._restore_cloud_delete_checks()
+        self.assertNotIn(key, self.plugin._pending)
+
+    def test_cloud_delete_identity_failure_is_permanent_with_reason(self):
+        item, storage = self.cloud_delete_fixture()
+        storage.prepare_delete.side_effect = self.cloud_module.CloudError("网盘文件SHA1变化或缺失，拒绝删除")
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32):
+            self.plugin._process_cloud_file(item)
+            self.plugin._process_cloud_file(item)
+        storage.prepare_delete.assert_called_once()
+        storage.delete_prepared.assert_not_called()
+        record = self.records()[self.cloud_module.record_key(item)]
+        self.assertEqual(record["cloud_delete_state"], "blocked")
+        self.assertIn("SHA1", record["cloud_delete_note"])
+
     def test_cloud_delete_post_request_checkpoint_failure_stays_inflight_on_disk(self):
         item, storage = self.cloud_delete_fixture()
         original = self.plugin._write_results

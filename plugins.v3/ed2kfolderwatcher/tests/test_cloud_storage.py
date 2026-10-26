@@ -20,6 +20,14 @@ def md4(data):
 
 
 class CloudStorageTests(unittest.TestCase):
+    def test_transient_read_errors_are_not_identity_failures(self):
+        from urllib3_future.exceptions import ReadTimeoutError, MaxRetryError
+        timeout = ReadTimeoutError(None, "https://private.invalid", "timeout")
+        for error in (timeout, MaxRetryError(None, "private", timeout), TimeoutError(), ConnectionError(), httpx.ReadTimeout("private")):
+            self.assertTrue(cloud.transient_read_error(error))
+        for error in (cloud.CloudError("SHA1 changed"), ValueError("bad metadata"), RuntimeError("unknown")):
+            self.assertFalse(cloud.transient_read_error(error))
+
     def deletion_fixture(self):
         storage = object.__new__(cloud.CloudStorage)
         storage.storage = "115网盘Plus"
