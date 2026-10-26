@@ -26,7 +26,7 @@ test('glass overrides are limited to the official glass theme and plugin element
   assert.ok(css.includes('background: transparent !important'))
   assert.ok(css.includes('background: var(--glass-surface) !important'))
   assert.ok(css.includes('blur(var(--glass-blur-surface, var(--glass-blur)))'))
-  assert.equal(/(?:width|height|position|overflow)\s*:/.test(css), false)
+  assert.equal(/(?:width|height|overflow)\s*:/.test(css), false)
 })
 
 test('dialog host follows live theme variables rather than a captured theme value', () => {
@@ -53,4 +53,22 @@ test('portrait fallback is a persisted shared enrichment setting with honest cap
   assert.ok(source.includes('v-model="enrichSettings.draft.ai_portraits"'))
   assert.ok(source.includes('宿主模型支持原生联网搜索'))
   assert.ok(source.includes('不生成头像'))
+})
+
+test('open picker cards rise above sibling glass stacking contexts only while a menu exists', () => {
+  const css = read('glass.css')
+  const rule = css.match(/\.eme-card:has\(\.eme-picker-menu\)\s*\{([^}]+)\}/)?.[1]
+  assert.ok(rule?.includes('position: relative'))
+  assert.ok(rule?.includes('z-index: 40'))
+  assert.ok(css.includes('.eme-card:has(.eme-picker-menu):focus-within'))
+  assert.ok(css.includes('.eme-picker:has(> .eme-picker-menu)'))
+  assert.equal(/\.eme-card\s*\{[^}]*z-index:/.test(css), false)
+})
+
+test('dropdown menus use a readable near-opaque theme surface rather than the translucent control fill', () => {
+  const rule = read('glass.css').match(/\.eme-shell \.eme-picker-menu\s*\{([^}]+)\}/)?.[1]
+  assert.ok(rule?.includes('background: rgba(var(--v-theme-surface), .96) !important'))
+  assert.ok(rule?.includes('color: rgb(var(--v-theme-on-surface))'))
+  assert.ok(rule?.includes('backdrop-filter: blur('))
+  assert.equal(rule?.includes('background: var(--glass-surface-raised'), false)
 })
