@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import re
 from html import unescape
 from threading import Event as StopEvent, Lock, Thread
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import unquote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from app.core.event import Event, eventmanager
 from app.log import logger
@@ -25,6 +26,98 @@ U115_PASSWORD_RE = re.compile(r"(?:password|提取码|访问码|密码)\s*[=:：
 MAGNET_RE = re.compile(r"magnet:\?[^\s<>]+", re.I)
 ED2K_RE = re.compile(r"ed2k://\|file\|[^\r\n<>]+?\|/", re.I)
 TORRENT_RE = re.compile(r"https?://[^\s<>]+?\.torrent(?:\?[^\s<>]*)?", re.I)
+WEB_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
+TELEGRAPH_HOSTS = {"telegra.ph", "www.telegra.ph", "graph.org", "www.graph.org"}
+MAX_TELEGRAPH_PAGES = 3
+MAX_TELEGRAPH_BYTES = 1024 * 1024
+
+
+def telegraph_paths(text: str) -> List[str]:
+    paths = []
+    for match in WEB_URL_RE.finditer(unescape(text or "")):
+        try:
+            parsed = urlsplit(match.group().rstrip(".,;!，。；！）)]}"))
+            if (parsed.hostname not in TELEGRAPH_HOSTS or parsed.username is not None
+                    or parsed.password is not None or parsed.port not in (None, 80, 443)):
+                continue
+            path = unquote(parsed.path).strip("/")
+            if not path or len(path) > 512 or "/" in path or path in {".", ".."}:
+                continue
+        except ValueError:
+            continue
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def telegraph_text(content: List[Any]) -> str:
+    parts = []
+    size = 0
+    nodes = 0
+
+    def append(value):
+        nonlocal size
+        size += len(value)
+        if size > MAX_TELEGRAPH_BYTES:
+            raise P115OperationError("Telegraph页面内容过大，未提交任务；请单独发送资源链接")
+        parts.append(value)
+
+    def visit(node, depth):
+        nonlocal nodes
+        nodes += 1
+        if depth > 64 or nodes > 20000:
+            raise P115OperationError("Telegraph页面结构过于复杂，未提交任务；请单独发送资源链接")
+        if isinstance(node, str):
+            append(node)
+        elif isinstance(node, dict):
+            tag = node.get("tag")
+            block = tag in {"p", "pre", "blockquote", "li", "h3", "h4", "br", "hr", "figure"}
+            if block:
+                append("\n")
+            href = (node.get("attrs") or {}).get("href")
+            if isinstance(href, str):
+                append(href + " ")
+            for child in node.get("children") or []:
+                visit(child, depth + 1)
+            if block:
+                append("\n")
+
+    for node in content:
+        visit(node, 0)
+    return "".join(parts)
+
+
+def parse_share_links(text: str) -> List[Tuple[str, str]]:
+    value = unescape(text or "")
+    matches = list(U115_RE.finditer(value))
+    shares = []
+    for index, match in enumerate(matches):
+        link = urlsplit(match.group())
+        password = next(iter(parse_qs(link.query).get("password", [])), "")
+        if not re.fullmatch(r"[A-Za-z0-9]{4}", password):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(value)
+            context = value[match.end():end]
+            password_match = U115_PASSWORD_RE.search(context)
+            if password_match is None and len(matches) == 1:
+                password_match = U115_PASSWORD_RE.search(value)
+            password = password_match.group("password") if password_match else ""
+        share = (match.group("code"), password)
+        if share not in shares:
+            shares.append(share)
+    return shares
+
+
+def telegram_message_text(message: Dict[str, Any]) -> str:
+    parts = [str(message.get("text") or message.get("caption") or "")]
+    for field in ("entities", "caption_entities"):
+        for entity in message.get(field) or []:
+            if entity.get("type") == "text_link" and isinstance(entity.get("url"), str):
+                parts.append(entity["url"])
+    for row in (message.get("reply_markup") or {}).get("inline_keyboard") or []:
+        for button in row:
+            if isinstance(button.get("url"), str):
+                parts.append(button["url"])
+    return "\n".join(parts)
 
 
 def parse_input(text: str) -> Tuple[List[str], List[str], Optional[Tuple[str, str]]]:
@@ -99,9 +192,9 @@ def validate_offline_links(links):
 
 class P115Transfer(_PluginBase):
     plugin_name = "115转存/离线"
-    plugin_desc = "通过 MoviePilot Telegram Bot 接收 115分享、magnet、ed2k 或 torrent 链接并转存到指定115目录。"
+    plugin_desc = "通过Telegram Bot接收115分享及离线链接，支持Telegraph资源页面和消息URL按钮，保存到指定115目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.2.3"
+    plugin_version = "1.3.0"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "p115transfer_"
@@ -181,7 +274,7 @@ class P115Transfer(_PluginBase):
 
         return [{"component": "VForm", "props": {"class": "pa-4"}, "content": [
             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用115转存/离线", "class": "mb-4"}},
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-6", "text": "自动读取115网盘STRM助手的Cookie，无需重复填写。独立Bot必须配置允许的用户ID，且不要与其他程序共用接收Bot。"}},
+            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-6", "text": "自动读取115网盘STRM助手的Cookie，无需重复填写。独立Bot必须配置允许的用户ID，且不要与其他程序共用接收Bot。支持转发含Telegraph链接的消息及URL按钮；若转发后按钮丢失，请直接发送页面链接。"}},
             field("bot_token", "接收链接的 Bot", "填写你自己的 Bot Token，让该 Bot 独立接收链接；留空则继续使用 MoviePilot 已配置的 Bot。", "Bot Token（可选）", type="password"),
             field("allowed_users", "允许使用 Bot 的用户", "使用独立 Bot 时必填。只接受这些 Telegram 用户的私聊消息；填写数字用户ID，多个ID用逗号分隔，不是 @用户名。", "Telegram 用户ID", placeholder="123456789,987654321"),
             field("bot_proxy", "Bot 网络代理", "仅用于独立 Bot 访问 Telegram API。填写后优先使用此代理；留空自动使用 MoviePilot 的网络代理，MP未配置时使用运行环境网络。地址必须能从MP容器访问，127.0.0.1指容器自身。", "代理地址（可选）", placeholder="http://代理服务器地址:7890"),
@@ -298,10 +391,62 @@ class P115Transfer(_PluginBase):
             count = len(links)
         return f"已提交 {count} 条离线任务，目标目录：{self._target_cid or self._target_path}（尚未确认下载完成）"
 
+    def _fetch_telegraph(self, path: str) -> str:
+        import httpx
+
+        url = "https://api.telegra.ph/getPage/" + quote(path, safe="")
+        for _, proxy in self._resolve_bot_proxies():
+            try:
+                with httpx.Client(timeout=httpx.Timeout(12, connect=8), proxy=proxy,
+                                  trust_env=False, follow_redirects=False) as client:
+                    with client.stream("GET", url, params={"return_content": "true"}) as response:
+                        response.raise_for_status()
+                        body = bytearray()
+                        for chunk in response.iter_bytes(chunk_size=65536):
+                            body.extend(chunk)
+                            if len(body) > MAX_TELEGRAPH_BYTES:
+                                raise P115OperationError("Telegraph页面内容过大，未提交任务；请单独发送资源链接")
+                payload = json.loads(body)
+                if not isinstance(payload, dict) or not payload.get("ok"):
+                    raise P115OperationError("Telegraph页面不存在或不可读取，未提交任务；请检查页面链接")
+                content = (payload.get("result") or {}).get("content")
+                if not isinstance(content, list):
+                    raise P115OperationError("Telegraph未返回页面正文，未提交任务；请直接发送资源链接")
+                return telegraph_text(content)
+            except P115OperationError:
+                raise
+            except Exception:
+                continue
+        raise P115OperationError("Telegraph页面读取失败，已尝试可用网络方式；未提交任务，请稍后重新发送")
+
+    def _resolve_resources(self, text: str) -> Tuple[List[str], List[Tuple[str, str]]]:
+        paths = telegraph_paths(text)
+        if len(paths) > MAX_TELEGRAPH_PAGES:
+            raise P115OperationError(f"每条消息最多解析{MAX_TELEGRAPH_PAGES}个Telegraph页面，未提交任务；请分开发送")
+        sources = [text] + [self._fetch_telegraph(path) for path in paths]
+        offline = []
+        shares = []
+        for source in sources:
+            for link in parse_input(source)[0]:
+                if link not in offline:
+                    offline.append(link)
+            for share in parse_share_links(source):
+                if share not in shares:
+                    shares.append(share)
+        validate_offline_links(offline)
+        return offline, shares
+
     def _handle(self, data: Dict[str, Any], text: str) -> None:
-        offline, _, share = parse_input(text)
-        if not offline and not share:
-            self._reply(data, "未识别链接。支持：115分享链接、magnet、ed2k、HTTP(S) .torrent。")
+        try:
+            offline, shares = self._resolve_resources(text)
+        except P115OperationError as exc:
+            logger.warning("115转存/离线：%s", str(exc))
+            self._reply(data, str(exc))
+            return
+        if data.get("bot_client") and self._stop.is_set():
+            return
+        if not offline and not shares:
+            self._reply(data, "未识别到可转存的资源链接。支持115分享、magnet、ed2k、HTTP(S) .torrent及Telegraph页面。转发消息若未保留“查看资源”按钮，请复制按钮对应的页面链接发送给我。")
             return
         try:
             with self._client_lock:
@@ -316,8 +461,8 @@ class P115Transfer(_PluginBase):
         try:
             results = []
             with self._client_lock:
-                if share:
-                    results.append(self._receive_share(client, share[0], share[1]))
+                for code, password in shares:
+                    results.append(self._receive_share(client, code, password))
                 if offline:
                     results.append(self._offline(client, offline))
             self._reply(data, "\n".join(results))
@@ -338,10 +483,10 @@ class P115Transfer(_PluginBase):
         if not self._enabled or self._bot_token:
             return
         data = event.event_data or {}
-        text = str(data.get("text") or "").strip()
+        text = telegram_message_text(data).strip()
         if text.startswith("/"):
             return
-        if U115_RE.search(text) or MAGNET_RE.search(text) or ED2K_RE.search(text) or TORRENT_RE.search(text):
+        if U115_RE.search(text) or MAGNET_RE.search(text) or ED2K_RE.search(text) or TORRENT_RE.search(text) or telegraph_paths(text):
             self._handle(data, text)
 
     def stop_service(self) -> None:
@@ -447,10 +592,7 @@ class P115Transfer(_PluginBase):
         chat = message.get("chat") or {}
         if sender not in self._allowed_users or chat.get("type") != "private":
             return
-        text = str(message.get("text") or message.get("caption") or "")
-        for entity in message.get("entities") or message.get("caption_entities") or []:
-            if entity.get("type") == "text_link" and entity.get("url"):
-                text += "\n" + entity["url"]
+        text = telegram_message_text(message)
         if text.startswith("/"):
             parts = text.split(maxsplit=1)
             if parts[0].split("@")[0] not in self._commands:
