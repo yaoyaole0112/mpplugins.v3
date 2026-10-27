@@ -148,6 +148,93 @@ class TransferPluginTest(unittest.TestCase):
             runtime.get_runtime_setting.return_value = None
             self.assertIsNone(plugin._resolve_bot_proxy())
 
+    def test_bot_proxy_candidates_fail_over_and_deduplicate(self):
+        plugin = self.module.P115Transfer()
+        plugin._bot_proxy = "socks5://plugin-proxy:6153"
+        runtime = types.ModuleType("app.runtime.settings")
+        runtime.get_runtime_setting = Mock(return_value={"https": "http://mp-proxy:6152"})
+        with patch.dict(sys.modules, {"app.runtime.settings": runtime}):
+            self.assertEqual(
+                plugin._resolve_bot_proxies(),
+                [
+                    ("插件配置", "socks5://plugin-proxy:6153"),
+                    ("MoviePilot配置", "http://mp-proxy:6152"),
+                    ("运行环境网络", None),
+                ],
+            )
+            runtime.get_runtime_setting.return_value = {
+                "https": "socks5://plugin-proxy:6153"
+            }
+            self.assertEqual(
+                plugin._resolve_bot_proxies(),
+                [
+                    ("插件配置", "socks5://plugin-proxy:6153"),
+                    ("运行环境网络", None),
+                ],
+            )
+            plugin._bot_proxy = ""
+            runtime.get_runtime_setting.return_value = None
+            self.assertEqual(plugin._resolve_bot_proxies(), [("运行环境网络", None)])
+
+    def test_bot_network_failure_switches_proxy_without_replaying_updates(self):
+        plugin = self.module.P115Transfer()
+        plugin._bot_proxy = "socks5://plugin-proxy:6153"
+        plugin.get_data = Mock(return_value=0)
+        runtime = types.ModuleType("app.runtime.settings")
+        runtime.get_runtime_setting = Mock(return_value={"https": "http://mp-proxy:6152"})
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Timeout = Mock(return_value=object())
+        httpx.Limits = Mock(return_value=object())
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=[httpx.ConnectError("secret-token"), {}, []])
+        stop = Mock()
+        stop.is_set.side_effect = [False, False, True]
+        with patch.dict(sys.modules, {"app.runtime.settings": runtime, "httpx": httpx}), \
+             patch.object(self.module, "logger") as log:
+            plugin._poll_bot(stop)
+        self.assertEqual(httpx.Client.call_count, 2)
+        self.assertEqual(httpx.Client.call_args_list[0].kwargs["proxy"], "socks5://plugin-proxy:6153")
+        self.assertEqual(httpx.Client.call_args_list[1].kwargs["proxy"], "http://mp-proxy:6152")
+        self.assertEqual(plugin._bot_proxy_source, "MoviePilot配置")
+        self.assertEqual(log.warning.call_count, 1)
+        self.assertNotIn("secret-token", plugin._bot_error)
+        self.assertEqual(plugin._bot_error, "")
+
+    def test_all_bot_paths_fail_then_backoff_before_retry(self):
+        plugin = self.module.P115Transfer()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxies = Mock(return_value=[
+            ("插件配置", "socks5://plugin-proxy:6153"),
+            ("MoviePilot配置", "http://mp-proxy:6152"),
+            ("运行环境网络", None),
+        ])
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Timeout = Mock(return_value=object())
+        httpx.Limits = Mock(return_value=object())
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=[
+            httpx.ConnectError("secret-token"),
+            httpx.ConnectError("secret-token"),
+            httpx.ConnectError("secret-token"),
+            {}, [],
+        ])
+        stop = Mock()
+        stop.is_set.side_effect = [False] * 4 + [True]
+        with patch.dict(sys.modules, {"httpx": httpx}), patch.object(self.module, "logger") as log:
+            plugin._poll_bot(stop)
+        self.assertEqual(
+            [call.kwargs["proxy"] for call in httpx.Client.call_args_list],
+            ["socks5://plugin-proxy:6153", "http://mp-proxy:6152", None, "socks5://plugin-proxy:6153"],
+        )
+        stop.wait.assert_called_once_with(30)
+        self.assertEqual(log.warning.call_count, 1)
+        self.assertNotIn("secret-token", str(log.mock_calls))
+        self.assertNotIn("plugin-proxy", str(log.mock_calls))
+        self.assertNotIn("mp-proxy", str(log.mock_calls))
+        self.assertEqual(plugin._bot_error, "")
+
     def test_startup_connect_error_retries_and_recovers(self):
         plugin = self.module.P115Transfer()
         plugin.get_data = Mock(return_value=0)
@@ -216,8 +303,8 @@ class TransferPluginTest(unittest.TestCase):
         with patch.dict(sys.modules, {"httpx": httpx}):
             plugin._poll_bot(stop)
         self.assertEqual(httpx.Client.call_count, 2)
-        self.assertEqual(httpx.Client.call_args.kwargs["timeout"], httpx.Timeout.return_value)
-        self.assertEqual(httpx.Client.call_args.kwargs["proxy"], "http://proxy:7890")
+        self.assertEqual(httpx.Client.call_args_list[0].kwargs["timeout"], httpx.Timeout.return_value)
+        self.assertEqual(httpx.Client.call_args_list[0].kwargs["proxy"], "http://proxy:7890")
         self.assertTrue(httpx.Client.return_value.close.called)
 
     def test_read_timeout_warning_is_coalesced_and_recovery_clears_error(self):

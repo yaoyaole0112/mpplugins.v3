@@ -101,7 +101,7 @@ class P115Transfer(_PluginBase):
     plugin_name = "115转存/离线"
     plugin_desc = "通过 MoviePilot Telegram Bot 接收 115分享、magnet、ed2k 或 torrent 链接并转存到指定115目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.2.2"
+    plugin_version = "1.2.3"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "p115transfer_"
@@ -364,17 +364,83 @@ class P115Transfer(_PluginBase):
             raise RuntimeError("Telegram请求失败")
         return result.get("result")
 
+    @staticmethod
+    def _normalise_runtime_proxy(proxy):
+        if isinstance(proxy, dict):
+            proxy = (proxy.get("https") or proxy.get("https://") or proxy.get("http")
+                     or proxy.get("http://") or proxy.get("all") or proxy.get("all://"))
+        return (str(proxy).strip() or None) if proxy else None
+
+    def _runtime_bot_proxy(self):
+        from app.runtime.settings import get_runtime_setting
+
+        return self._normalise_runtime_proxy(get_runtime_setting("PROXY", None))
+
     def _resolve_bot_proxy(self):
         if self._bot_proxy:
             self._bot_proxy_source = "插件配置"
             return self._bot_proxy
-        from app.runtime.settings import get_runtime_setting
-
-        proxy = get_runtime_setting("PROXY", None)
-        if isinstance(proxy, dict):
-            proxy = proxy.get("https") or proxy.get("https://") or proxy.get("all") or proxy.get("all://")
+        proxy = self._runtime_bot_proxy()
         self._bot_proxy_source = "MoviePilot配置" if proxy else "运行环境网络"
-        return proxy or None
+        return proxy
+
+    def _resolve_bot_proxies(self):
+        """返回按优先级排列的代理候选，最后始终保留直连。"""
+        candidates = []
+
+        def add(source, proxy):
+            proxy = self._normalise_runtime_proxy(proxy)
+            if proxy is None and source != "运行环境网络":
+                return
+            key = proxy or "__direct__"
+            if any(existing_key == key for _, _, existing_key in candidates):
+                return
+            candidates.append((source, proxy, key))
+
+        if self._bot_proxy:
+            add("插件配置", self._bot_proxy)
+            try:
+                add("MoviePilot配置", self._runtime_bot_proxy())
+            except (ImportError, AttributeError):
+                pass
+        else:
+            try:
+                add("MoviePilot配置", self._runtime_bot_proxy())
+            except (ImportError, AttributeError):
+                try:
+                    add("MoviePilot配置", self._resolve_bot_proxy())
+                except Exception:
+                    pass
+        add("运行环境网络", None)
+        return [(source, proxy) for source, proxy, _ in candidates]
+
+    @staticmethod
+    def _is_proxy_failover_error(exc, httpx):
+        error_types = tuple(
+            error_type
+            for name in (
+                "ConnectError", "ConnectTimeout", "ReadTimeout", "WriteError",
+                "ReadError", "RemoteProtocolError", "PoolTimeout",
+            )
+            if isinstance(error_type := getattr(httpx, name, None), type)
+        )
+        if error_types and isinstance(exc, error_types):
+            return True
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        return isinstance(status_code, int) and status_code >= 500
+
+    @staticmethod
+    def _bot_error_reason(exc, httpx):
+        if isinstance(exc, tuple(error_type for name in ("ConnectError", "ConnectTimeout")
+                           if isinstance(error_type := getattr(httpx, name, None), type))):
+            return "连接失败，请检查容器到Telegram的DNS、代理及网络连通性"
+        if isinstance(exc, tuple(error_type for name in ("ReadTimeout", "PoolTimeout")
+                           if isinstance(error_type := getattr(httpx, name, None), type))):
+            return "Telegram长轮询超时，已重建连接；请检查代理空闲连接超时"
+        status_code = getattr(getattr(exc, "response", None), "status_code", "未知")
+        if status_code != "未知":
+            return f"Telegram返回HTTP {status_code}，已重建连接；请检查代理及Telegram连通性"
+        return "请求未完成，请检查网络或代理"
 
     def _bot_message(self, client, message):
         sender = str((message.get("from") or {}).get("id") or "")
@@ -402,8 +468,11 @@ class P115Transfer(_PluginBase):
         offset = int(self.get_data(offset_key) or 0)
         client = None
         try:
-            proxy = self._resolve_bot_proxy()
-            logger.info("115转存/离线：Bot连接方式：%s", self._bot_proxy_source)
+            proxies = self._resolve_bot_proxies()
+            proxy_index = 0
+            proxy_source, proxy = proxies[proxy_index]
+            self._bot_proxy_source = proxy_source
+            logger.info("115转存/离线：Bot连接方式：%s", proxy_source)
             timeout = httpx.Timeout(connect=15, read=45, write=15, pool=15)
             limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
             webhook_checked = False
@@ -430,8 +499,8 @@ class P115Transfer(_PluginBase):
                         "getUpdates",
                         {"offset": offset, "timeout": 25, "allowed_updates": ["message"]},
                     )
-                    if failures:
-                        logger.info("115转存/离线：Bot连接已恢复，继续监听")
+                    if outage_reported:
+                        logger.info("115转存/离线：Bot连接已恢复，当前连接方式：%s，继续监听", proxy_source)
                     failures = 0
                     outage_reported = False
                     self._bot_error = ""
@@ -446,17 +515,35 @@ class P115Transfer(_PluginBase):
                     logger.warning("115转存/离线：%s", self._bot_error)
                     return
                 except Exception as exc:
+                    if self._is_proxy_failover_error(exc, httpx) and proxy_index + 1 < len(proxies):
+                        failed_source = proxy_source
+                        if client is not None:
+                            client.close()
+                            client = None
+                        proxy_index += 1
+                        proxy_source, proxy = proxies[proxy_index]
+                        self._bot_proxy_source = proxy_source
+                        webhook_checked = False
+                        reason = self._bot_error_reason(exc, httpx)
+                        self._bot_error = f"{type(exc).__name__}：{reason}；正在切换连接方式"
+                        if not outage_reported:
+                            logger.warning(
+                                "115转存/离线：%s（%s），正在切换到%s；不重放转存",
+                                self._bot_error,
+                                failed_source,
+                                proxy_source,
+                            )
+                            outage_reported = True
+                        else:
+                            logger.info(
+                                "115转存/离线：Bot连接方式%s失败，切换到%s",
+                                failed_source,
+                                proxy_source,
+                            )
+                        continue
                     failures += 1
                     delay = min(300, 30 * 2 ** min(failures - 1, 4))
-                    if isinstance(exc, httpx.ConnectError):
-                        reason = "连接失败，请检查容器到Telegram的DNS、代理及网络连通性"
-                    elif isinstance(exc, httpx.ReadTimeout):
-                        reason = "Telegram长轮询超时，已重建连接；请检查代理空闲连接超时"
-                    elif isinstance(exc, httpx.HTTPStatusError):
-                        status_code = getattr(getattr(exc, "response", None), "status_code", "未知")
-                        reason = f"Telegram返回HTTP {status_code}，已重建连接；请检查代理及Telegram连通性"
-                    else:
-                        reason = "请求未完成，请检查网络或代理"
+                    reason = self._bot_error_reason(exc, httpx)
                     self._bot_error = f"{type(exc).__name__}：{reason}；{delay}秒后重试"
                     if not outage_reported:
                         logger.warning("115转存/离线：%s（%s）；不重放转存", self._bot_error, self._bot_proxy_source)
@@ -466,6 +553,9 @@ class P115Transfer(_PluginBase):
                     if client is not None:
                         client.close()
                         client = None
+                    proxy_index = 0
+                    proxy_source, proxy = proxies[proxy_index]
+                    self._bot_proxy_source = proxy_source
                     stop.wait(delay)
         except Exception as exc:
             self._bot_error = f"{type(exc).__name__}：Bot初始化失败，请检查代理配置并重新保存"
