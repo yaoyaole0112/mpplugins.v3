@@ -415,7 +415,7 @@ class Ed2kTests(unittest.TestCase):
         saved = self.plugin.update_config.call_args.args[0]
         self.assertEqual(self.module.minimum_file_bytes(saved["min_file_size"]), 512 * 1024 ** 2)
         self.assertNotIn("min_file_size_gb", saved)
-        self.assertEqual(self.plugin.get_form()[1]["min_file_size_gb"], "0.5")
+        self.assertEqual(self.plugin.get_form()[1]["min_file_size_gb"], "0.50")
 
     def test_small_file_delete_without_hash_notification_or_output(self):
         path = self.create("small.mkv", b"hello")
@@ -525,6 +525,35 @@ class Ed2kTests(unittest.TestCase):
         self.assertEqual(self.plugin._cloud_life_cursor, 3)
         storage.item_from_life_event.assert_called_once_with(storage.life_events.return_value[0])
         self.assertEqual(self.plugin.get_service()[-1]["id"], "Ed2kFolderWatcherLife")
+
+    def test_recursive_cloud_monitor_accepts_subdirectory_events(self):
+        item, storage, event = self.life_fixture()
+        self.plugin._cloud_folder = "/cloud-test"
+        self.plugin._cloud_recursive = True
+        nested = {**item, "path": "/cloud-test/电视剧/a.mkv"}
+        storage.item_from_life_event.return_value = nested
+        self.plugin.poll_cloud_events()
+        self.assertIn(self.cloud_module.record_key(nested), self.plugin._pending)
+
+    def test_shared_events_report_upstream_timestamp_and_use_cursor(self):
+        item, storage, event = self.life_fixture()
+        storage.life_source_latest = time.time() - 3600
+        self.plugin.poll_cloud_events()
+        storage.life_events.assert_called_once_with(self.plugin._cloud_life_source, after_id=0, since_time=self.plugin._cloud_life_started)
+        self.assertEqual(self.plugin._cloud_status["life_source_latest"], storage.life_source_latest)
+        self.assertIn("15分钟", self.plugin._cloud_status["life_source_notice"])
+        storage.life_source_latest = time.time()
+        self.plugin.poll_cloud_events()
+        self.assertEqual(self.plugin._cloud_status["life_source_notice"], "")
+
+    def test_shared_backlog_does_not_advance_cursor_when_candidates_are_full(self):
+        item, storage, event = self.life_fixture()
+        now = time.monotonic()
+        self.plugin._cloud_life_candidates = {str(index): {"event": event, "expires": now+900, "attempts": 0, "due": now+60} for index in range(449)}
+        self.plugin.poll_cloud_events()
+        storage.life_events.assert_not_called()
+        self.assertEqual(self.plugin._cloud_life_cursor, 0)
+        self.assertTrue(self.plugin._cloud_status["life_truncated"])
 
     def test_life_events_skip_directories_outside_files_and_filters(self):
         item, storage = self.cloud_fixture()

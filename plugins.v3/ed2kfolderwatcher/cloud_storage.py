@@ -235,7 +235,7 @@ class CloudStorage:
             if stopping.wait(.1):
                 raise InterruptedError("任务已停止")
 
-    def life_events(self, source):
+    def life_events(self, source, after_id=None, since_time=None):
         if self.storage != "115网盘Plus":
             raise CloudError("115生活事件仅支持115网盘Plus；CloudDrive请使用定时补扫")
         if source == "shared":
@@ -253,8 +253,16 @@ class CloudStorage:
             from sqlalchemy import select
             model = models.LifeEvent
             with database.ct_db_manager.get_database().session() as session:
+                latest = session.scalar(select(model.update_time).order_by(model.id.desc()).limit(1))
+                self.life_source_latest = float(latest) if latest else None
+                query = select(model)
+                if after_id is not None:
+                    query = query.where(model.id > after_id)
+                if since_time is not None:
+                    query = query.where(model.update_time >= since_time)
+                query = query.order_by(model.id.asc() if after_id is not None else model.id.desc()).limit(64)
                 return [{field: getattr(row, field, None) for field in LIFE_EVENT_FIELDS}
-                        for row in session.scalars(select(model).order_by(model.id.desc()).limit(64))]
+                        for row in session.scalars(query)]
         if source != "direct":
             raise CloudError("生活事件来源无效")
         result = self.oper.client.life_behavior_detail({"limit": 64, "offset": 0})

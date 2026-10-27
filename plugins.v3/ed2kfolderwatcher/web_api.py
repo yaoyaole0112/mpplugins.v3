@@ -44,7 +44,7 @@ def validate_settings(plugin, values):
         if "min_file_size" in values:
             raise UserAccountError("大小阈值配置重复，请刷新页面重试")
         try:
-            values["min_file_size"] = minimum_gb_setting(values.pop("min_file_size_gb"))
+            values["min_file_size"] = minimum_gb_setting(values.pop("min_file_size_gb"), previous=plugin._min_file_size)
         except ValueError as failure:
             raise UserAccountError(str(failure)) from None
     if set(values) - set(CONFIG_FIELDS) - {"telegram_token"}:

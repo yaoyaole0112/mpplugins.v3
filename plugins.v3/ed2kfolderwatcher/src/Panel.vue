@@ -191,8 +191,10 @@ onUnmounted(() => {
       <p v-if="cloud.retry_at" class="warning">失败任务下次允许重试：{{ new Date(cloud.retry_at * 1000).toLocaleString() }}；连续失败按 5、10、20…分钟退避，最长一小时。</p>
       <p v-if="cloud.life_enabled">生活事件已启用 · {{ cloud.life_source === 'shared' ? '复用115插件' : '独立轮询' }} · 已排队 {{ cloud.life_events || 0 }} 个新增文件<span v-if="cloud.life_last_poll"> · 最近检查 {{ new Date(cloud.life_last_poll * 1000).toLocaleString() }}</span></p>
       <p v-if="cloud.life_error" class="warning">{{ cloud.life_error }}</p>
+      <p v-if="cloud.life_source === 'shared' && cloud.life_source_latest">复用事件库最新事件：{{ new Date(cloud.life_source_latest * 1000).toLocaleString() }}</p>
+      <p v-if="cloud.life_source_notice" class="warning">{{ cloud.life_source_notice }}</p>
       <p v-if="cloud.life_retry_at" class="warning">生活事件下次允许检查：{{ new Date(cloud.life_retry_at * 1000).toLocaleString() }}；失败时自动退避，不持续请求。</p>
-      <p v-if="cloud.life_truncated" class="warning">本次生活事件达到64条上限，可能遗漏更早事件；请保留定时兜底，必要时手动补扫。</p>
+      <p v-if="cloud.life_truncated" class="warning">{{ cloud.life_source === 'shared' ? '本批读取64条新增事件，下轮按游标继续读取；不额外请求115。批量事件可能延迟，请保留定时兜底。' : '本次生活事件达到64条上限，可能遗漏更早事件；请保留定时兜底，必要时手动补扫。' }}</p>
       <small>网盘复用“通用设置”及“ED2K链接自动转发”设置。修改后先点右上角“保存插件设置”。关闭定时补扫不会取消已排队任务或失败重试。续读只保留内存中的哈希状态，不保存完整临时文件；服务不支持安全续读、重连耗尽或插件重启后，下次任务仍需从头读取，不生成不完整链接。</small>
     </article>
 

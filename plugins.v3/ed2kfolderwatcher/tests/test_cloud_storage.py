@@ -286,6 +286,15 @@ class CloudStorageTests(unittest.TestCase):
         modules = {"app.plugins.p115strmhelper.service": types.SimpleNamespace(servicer=worker), "app.plugins.p115strmhelper.db_manager": database, "app.plugins.p115strmhelper.db_manager.models.life_event": types.SimpleNamespace(LifeEvent=LifeEvent)}
         with patch.dict(sys.modules, modules):
             self.assertEqual(storage.life_events("shared"), [self.life_event(id=7, type=1, update_time=123)])
+            with Session(engine) as session:
+                session.add_all([LifeEvent(id=index, type=1, update_time=200) for index in range(8, 138)])
+                session.commit()
+            first = storage.life_events("shared", after_id=7, since_time=150)
+            second = storage.life_events("shared", after_id=first[-1]["id"], since_time=150)
+            third = storage.life_events("shared", after_id=second[-1]["id"], since_time=150)
+            self.assertEqual([row["id"] for row in first+second+third], list(range(8, 138)))
+            self.assertEqual(storage.life_source_latest, 200)
+            self.assertEqual(storage.life_events("shared", after_id=0, since_time=201), [])
             worker.client.user_id = 99
             with self.assertRaises(cloud.CloudError):
                 storage.life_events("shared")

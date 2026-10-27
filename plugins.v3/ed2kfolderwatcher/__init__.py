@@ -161,7 +161,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.12.1"
+    plugin_version = "1.12.2"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -242,7 +242,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._min_file_size = str(config.get("min_file_size") or "").strip()
         try:
             if "min_file_size_gb" in config:
-                self._min_file_size = minimum_gb_setting(config["min_file_size_gb"])
+                self._min_file_size = minimum_gb_setting(config["min_file_size_gb"], previous=self._min_file_size if "min_file_size" in config else None)
             minimum_file_bytes(self._min_file_size)
         except ValueError as failure:
             self._enabled = False
@@ -534,7 +534,8 @@ class Ed2kFolderWatcher(_PluginBase):
         try:
             from .cloud_storage import CloudStorage, CloudError
             storage = self._cloud_adapter or CloudStorage(self._cloud_storage)
-            events = storage.life_events(self._cloud_life_source)
+            backlog_full = self._cloud_life_source == "shared" and len(self._cloud_life_candidates) > 448
+            events = [] if backlog_full else storage.life_events(self._cloud_life_source, after_id=self._cloud_life_cursor, since_time=self._cloud_life_started)
             if stopping.is_set() or stopping is not self._stopping:
                 return
             parsed = []
@@ -546,7 +547,11 @@ class Ed2kFolderWatcher(_PluginBase):
             new = [entry for entry in parsed if entry[0] > self._cloud_life_cursor and entry[2] >= self._cloud_life_started]
             if parsed:
                 self._cloud_life_cursor = max(self._cloud_life_cursor, max(entry[0] for entry in parsed))
-            self._cloud_status.update(life_last_poll=time.time(), life_truncated=len(events) >= 64)
+            self._cloud_status.update(life_last_poll=time.time(), life_truncated=backlog_full or len(events) >= 64)
+            latest = getattr(storage, "life_source_latest", None)
+            if self._cloud_life_source == "shared" and isinstance(latest, (int, float)):
+                self._cloud_status["life_source_latest"] = latest
+                self._cloud_status["life_source_notice"] = "复用事件库已有15分钟未出现新记录；可能暂无事件，也可能115插件正等待整理任务或监听延迟。最近检查不代表115端实时同步；定时补扫仍独立生效。" if time.time() - latest > 900 else ""
             now = time.monotonic()
             for file_id, candidate in list(self._cloud_life_candidates.items()):
                 if candidate["expires"] <= now or candidate["attempts"] >= 10:

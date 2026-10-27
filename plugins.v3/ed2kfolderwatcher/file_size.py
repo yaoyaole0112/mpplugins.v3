@@ -1,15 +1,15 @@
 import re
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 
 
 def minimum_gb_value(value):
     from decimal import localcontext
     with localcontext() as context:
         context.prec = 64
-        return format(Decimal(minimum_file_bytes(value)) / Decimal(1024 ** 3), "f")
+        return format((Decimal(minimum_file_bytes(value)) / Decimal(1024 ** 3)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), "f")
 
 
-def minimum_gb_setting(value):
+def minimum_gb_setting(value, previous=None):
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ValueError("最小文件大小请填写GB数值，例如0.5；留空或0不限制")
     text = str(value).strip()
@@ -20,6 +20,8 @@ def minimum_gb_setting(value):
     from decimal import localcontext
     with localcontext() as context:
         context.prec = 64
+        if previous is not None and Decimal(text) == Decimal(minimum_gb_value(previous)):
+            return previous
         size = Decimal(text) * 1024 ** 3
         if size > 1024 ** 5:
             raise ValueError("最小文件大小不能超过1048576GB")

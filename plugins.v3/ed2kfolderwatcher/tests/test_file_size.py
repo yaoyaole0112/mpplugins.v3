@@ -9,12 +9,13 @@ SPEC.loader.exec_module(sizes)
 
 
 class FileSizeTests(unittest.TestCase):
-    def test_gb_input_and_legacy_conversion_preserve_exact_threshold(self):
+    def test_gb_display_rounds_to_two_places_and_input_keeps_byte_precision(self):
         for legacy in ("500M", "100M", "1B", "1024T", "0.001K", "1.5G", ""):
             with self.subTest(legacy=legacy):
                 gb = sizes.minimum_gb_value(legacy)
-                self.assertEqual(sizes.minimum_file_bytes(sizes.minimum_gb_setting(gb)), sizes.minimum_file_bytes(legacy))
-        self.assertEqual(sizes.minimum_gb_value("500M"), "0.48828125")
+                self.assertRegex(gb, r"^\d+\.\d{2}$")
+        self.assertEqual(sizes.minimum_gb_value("500M"), "0.49")
+        self.assertEqual(sizes.minimum_gb_value(sizes.minimum_gb_setting("0.3")), "0.30")
         self.assertEqual(sizes.minimum_file_bytes(sizes.minimum_gb_setting("0.5")), 512 * 1024 ** 2)
         self.assertEqual(sizes.minimum_gb_setting(""), "")
         for invalid in (True, None, "500M", "-1", "NaN", "1e3", "1048577", "0." ):
