@@ -161,7 +161,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.12.2"
+    plugin_version = "1.13.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -235,6 +235,13 @@ class Ed2kFolderWatcher(_PluginBase):
             self._enabled = False
             logger.error("自动生成ED2K链接：请明确选择是否包含子目录，已停止插件")
         self._folder = str(config.get("folder") or "").strip()
+        try:
+            from .cloud_storage import monitor_roots
+            self._folder = "\n".join(monitor_roots(self._folder))
+        except ValueError as failure:
+            self._enabled = False
+            self._folder = ""
+            logger.error(f"自动生成ED2K链接：本地目录配置无效：{failure}")
         self._recursive = shared_recursive if isinstance(shared_recursive, bool) else bool(config.get("recursive", True))
         self._cron = str(config.get("cron") or DEFAULT_CRON).strip()
         self._output = str(config.get("output") or "").strip()
@@ -288,14 +295,15 @@ class Ed2kFolderWatcher(_PluginBase):
         except (ValueError, TypeError):
             self._cloud_cron = DEFAULT_CRON
         if self._cloud_enabled:
-            from .cloud_storage import SUPPORTED_STORAGES, cloud_path, CloudError
+            from .cloud_storage import SUPPORTED_STORAGES, monitor_roots, CloudError
             try:
                 if self._cloud_storage not in SUPPORTED_STORAGES:
                     raise CloudError("不支持此网盘存储")
-                self._cloud_folder = cloud_path(self._cloud_folder)
-                if self._cloud_folder == "/":
-                    raise CloudError("请指定网盘子目录，不允许扫描整个网盘根目录")
-            except CloudError as failure:
+                roots = monitor_roots(self._cloud_folder, cloud=True)
+                if not roots:
+                    raise CloudError("请至少指定一个网盘监控目录")
+                self._cloud_folder = "\n".join(roots)
+            except ValueError as failure:
                 self._cloud_enabled = False
                 self._cloud_status["error"] = str(failure)
                 logger.warning(f"自动生成ED2K链接：网盘来源配置无效：{failure}")
@@ -371,7 +379,9 @@ class Ed2kFolderWatcher(_PluginBase):
         return []
 
     def _paths(self) -> Tuple[Path, Path, Path]:
-        folder = Path(self._folder).expanduser()
+        from .cloud_storage import monitor_roots
+        roots = monitor_roots(self._folder)
+        folder = Path(roots[0]) if roots else Path()
         output = Path(self._output).expanduser() if self._output else (folder if self._folder else Path(self.get_data_path())) / "ed2k.txt"
         cache = Path(self.get_data_path()) / "records.json"
         legacy = output.with_name(f".{output.name}.cache.json")
@@ -380,13 +390,34 @@ class Ed2kFolderWatcher(_PluginBase):
             self._atomic_write(cache, json.dumps(records, ensure_ascii=False))
         return folder, output, cache
 
+    def _local_roots(self):
+        from .cloud_storage import monitor_roots
+        roots = [Path(root) for root in monitor_roots(self._folder)]
+        unique = {}
+        for root in roots:
+            unique.setdefault(root.resolve(), root)
+        return [root for resolved, root in unique.items() if not self._recursive or not any(
+            resolved != parent and resolved.is_relative_to(parent) for parent in unique)]
+
+    def _local_root_for(self, path):
+        resolved = path.resolve()
+        for root in self._local_roots():
+            folder = root.resolve()
+            if resolved.is_relative_to(folder) and (self._recursive or resolved.parent == folder):
+                return root
+        return None
+
     def _start_monitor(self) -> None:
         if Observer is None or FileSystemEventHandler is None:
             logger.warning("自动生成ED2K链接：watchdog 不可用，实时监控未启动")
             return
-        folder = Path(self._folder).expanduser()
-        if not folder.is_dir():
-            logger.warning(f"自动生成ED2K链接：监控目录不存在：{folder}")
+        folders = []
+        for folder in self._local_roots():
+            if folder.is_dir():
+                folders.append(folder)
+            else:
+                logger.warning(f"自动生成ED2K链接：监控目录不存在：{folder}")
+        if not folders:
             return
         plugin = self
 
@@ -414,22 +445,26 @@ class Ed2kFolderWatcher(_PluginBase):
 
         try:
             self._observer = Observer()
-            self._observer.schedule(Handler(), str(folder), recursive=self._recursive)
+            handler = Handler()
+            for folder in folders:
+                self._observer.schedule(handler, str(folder), recursive=self._recursive)
             self._observer.start()
-            logger.info(f"自动生成ED2K链接：已启动实时文件监控：{folder}")
+            logger.info(f"自动生成ED2K链接：已启动实时文件监控，共 {len(folders)} 个目录")
         except Exception as err:
+            if self._observer is not None:
+                self._observer.stop()
+                if self._observer.is_alive():
+                    self._observer.join(timeout=10)
             self._observer = None
             logger.error(f"自动生成ED2K链接：启动实时文件监控失败：{err}")
 
     def _eligible(self, path: Path) -> bool:
         folder, output, cache = self._paths()
         resolved = path.resolve()
-        if path.is_symlink() or not path.is_file() or not resolved.is_relative_to(folder.resolve()):
+        if path.is_symlink() or not path.is_file() or self._local_root_for(path) is None:
             return False
         excluded = {output.resolve(), cache.resolve(), output.with_name(f".{output.name}.cache.json").resolve()}
         if resolved in excluded or path.name.startswith(".ed2k-write-"):
-            return False
-        if not self._recursive and resolved.parent != folder.resolve():
             return False
         if path.suffix.lower() in {".part", ".tmp", ".!qb", ".crdownload"}:
             return False
@@ -655,10 +690,10 @@ class Ed2kFolderWatcher(_PluginBase):
         return not self._cloud_item_skip_reason(item)
 
     def _cloud_item_skip_reason(self, item: dict) -> str:
-        from .cloud_storage import allowed_item, cloud_path
-        if not allowed_item(item, self._cloud_storage, self._cloud_folder):
+        from .cloud_storage import allowed_roots
+        if not allowed_roots(item, self._cloud_storage, self._cloud_folder):
             return "不在所选网盘存储或监控目录"
-        if not self._cloud_recursive and Path(cloud_path(item.get("path"))).parent.as_posix() != self._cloud_folder:
+        if not allowed_roots(item, self._cloud_storage, self._cloud_folder, self._cloud_recursive):
             return "子目录未开启监控"
         try:
             size = int(item.get("size") or 0)
@@ -677,12 +712,26 @@ class Ed2kFolderWatcher(_PluginBase):
         return ""
 
     def _cloud_scan_step(self) -> None:
-        from .cloud_storage import CloudStorage
+        from .cloud_storage import CloudStorage, CloudError, monitor_roots
         if self._stopping.is_set() or not self._cloud_enabled:
             return
         if self._cloud_iterator is None:
             self._cloud_adapter = CloudStorage(self._cloud_storage)
-            self._cloud_iterator = self._cloud_adapter.walk(self._cloud_folder, self._cloud_recursive, self._stopping)
+            adapter = self._cloud_adapter
+            roots = monitor_roots(self._cloud_folder, cloud=True, recursive=self._cloud_recursive)
+
+            def walk_roots():
+                for root in roots:
+                    if self._stopping.is_set():
+                        return
+                    try:
+                        yield from adapter.walk(root, self._cloud_recursive, self._stopping)
+                    except CloudError as failure:
+                        self._cloud_status["error"] = f"目录 {root}：{failure}"
+                        logger.warning(f"自动生成ED2K链接：网盘目录补扫未完成：{root}：{failure}")
+                        yield None
+
+            self._cloud_iterator = walk_roots()
             self._cloud_status.update(scanning=True, error="")
         with self._condition:
             count = sum(key.startswith("cloud:") for key in self._pending)
@@ -702,7 +751,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._pending["__cloud_scan__"] = (time.monotonic() + 1, None)
 
     def _process_cloud_file(self, item: dict) -> None:
-        from .cloud_storage import CloudStorage, CloudError, fingerprint, fingerprint_matches, hash_remote, record_key, legacy_record_key, allowed_item
+        from .cloud_storage import CloudStorage, CloudError, fingerprint, fingerprint_matches, hash_remote, record_key, legacy_record_key
         if not self._cloud_enabled or self._stopping.is_set() or not self._cloud_item_is_eligible(item):
             return
         stopping = self._stopping
@@ -1147,17 +1196,18 @@ class Ed2kFolderWatcher(_PluginBase):
         if not self._folder or self._stopping.is_set():
             return
         folder, output, cache_path = self._paths()
-        if not folder.is_dir():
-            logger.warning(f"自动生成ED2K链接：目录不存在：{folder}")
-            return
         with self._lock:
             records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
             if self._output_enabled:
                 self._write_results(output, cache_path, records)
-        for path in self._iter_files(folder):
-            if self._stopping.is_set():
-                break
-            self._queue_event(path)
+        for folder in self._local_roots():
+            if not folder.is_dir():
+                logger.warning(f"自动生成ED2K链接：目录不存在：{folder}")
+                continue
+            for path in self._iter_files(folder):
+                if self._stopping.is_set():
+                    return
+                self._queue_event(path)
         logger.info("自动生成ED2K链接：增量补扫已入队，已有链接不会重复计算")
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -1199,9 +1249,12 @@ class Ed2kFolderWatcher(_PluginBase):
         return True
 
     def _unlink_source(self, path: Path, expected) -> None:
-        folder = Path(self._folder).expanduser().resolve()
+        root = self._local_root_for(path)
+        if root is None:
+            raise ValueError("源文件不在当前监控目录，取消删除")
+        folder = root.resolve()
         try:
-            relative = path.absolute().relative_to(Path(self._folder).expanduser().absolute())
+            relative = path.absolute().relative_to(root.absolute())
         except ValueError:
             relative = path.absolute().relative_to(folder)
         if not relative.parts or ".." in relative.parts:
@@ -1334,7 +1387,7 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextField", "min_age", "公共稳定等待秒数", type="number", hint="本地和网盘共用，请选择上传完成目录。", persistent_hint=True),
             field("VTextField", "min_file_size_gb", "生成链接最小文件大小（GB）", type="number", step="any", min=0, placeholder="例如0.5、1、1.5，仅填数值", hint="本地与网盘共用，小于此值不生成、不转发；默认保留源文件，本地可单独开启低于阈值自动删源。固定单位GB（1GB=1024³字节），留空或0不限制。", persistent_hint=True),
             {"component": "VCardTitle", "text": "本地监控"},
-            field("VTextField", "folder", "本地监控目录", placeholder="/downloads/complete", hint="MoviePilot 容器内可见的本地路径；留空可仅处理网盘。", persistent_hint=True),
+            field("VTextarea", "folder", "本地监控目录", rows=3, placeholder="/downloads/complete\n/media/movies", hint="容器内绝对路径，一行一个，最多32个；留空可仅处理网盘。", persistent_hint=True),
             field("VSwitch", "monitor_enabled", "本地实时监控文件"),
             field("VSwitch", "delete_small_files", "低于阈值文件自动删源", hint="默认关闭；仅删除通过扩展名过滤、稳定等待后的非空本地文件，不生成、不发送链接，删除不依赖TXT或TG成功。阈值留空或0不生效；本开关不处理网盘文件。请仅用于完成目录，删除不可恢复。", persistent_hint=True),
             field("VSwitch", "scan_enabled", "本地定时增量补扫"),
@@ -1342,7 +1395,7 @@ class Ed2kFolderWatcher(_PluginBase):
             {"component": "VCardTitle", "text": "网盘监控"},
             field("VSwitch", "cloud_enabled", "启用网盘增量生成"),
             field("VSelect", "cloud_storage", "网盘存储", items=[{"title": "115网盘Plus", "value": "115网盘Plus"}, {"title": "CloudDrive储存", "value": "CloudDrive储存"}]),
-            field("VTextField", "cloud_folder", "网盘监控目录", hint="网盘内绝对路径，不能使用根目录；可在新版插件设置页面浏览选择。", persistent_hint=True),
+            field("VTextarea", "cloud_folder", "网盘监控目录", rows=3, hint="同一存储内绝对路径，一行一个，最多32个，不能使用根目录；新版设置页可浏览追加。", persistent_hint=True),
             field("VSwitch", "cloud_monitor_enabled", "115生活事件监控（近实时）", hint="仅处理开启后新增事件对应的单个文件，不扫描已有文件；每分钟检查一次。", persistent_hint=True),
             field("VTextField", "cloud_cron", "网盘补扫计划", hint="仅开启网盘定时增量补扫时生效，默认每10分钟。", persistent_hint=True),
             field("VTextField", "cloud_read_timeout", "网盘读取超时（秒）", type="number", hint="30至1800秒，默认300；临时断线最多重连两次，满足强校验条件才续读。", persistent_hint=True),

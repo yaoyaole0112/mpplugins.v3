@@ -59,7 +59,13 @@ async function refreshCloud() {
   if (!result.ok) throw new Error(result.message || '网盘状态读取失败')
   Object.assign(cloud, result)
 }
-async function browseCloud(path = settings.cloud_folder || '/') {
+function cloudRoots() {
+  return [...new Set(String(settings.cloud_folder || '').split(/\r?\n/).map(path => path.trim()).filter(Boolean))]
+}
+function addCloudRoot() {
+  settings.cloud_folder = [...new Set([...cloudRoots(), cloud.browsing])].join('\n')
+}
+async function browseCloud(path = cloudRoots()[0] || '/') {
   await work(async () => {
     const result = await request('cloud/browse', { storage: settings.cloud_storage, path })
     if (!result.ok) throw new Error(result.message || '目录读取失败')
@@ -68,7 +74,7 @@ async function browseCloud(path = settings.cloud_folder || '/') {
   })
 }
 async function runCloud() {
-  if (!window.confirm('将按已保存的网盘目录增量读取完整文件内容。不会删除云端文件，但会消耗下载流量，确定继续？')) return
+  if (!window.confirm('将按已保存的全部网盘目录增量读取完整文件内容，会消耗下载流量。启用并授权完成后删源时，符合条件的新记录可能删除源文件，确定继续？')) return
   await work(async () => {
     const result = await request('cloud/run', {})
     if (!result.ok) throw new Error(result.message || '网盘扫描失败')
@@ -166,14 +172,14 @@ onUnmounted(() => {
       <div class="switches"><label class="switch"><input v-model="settings.enabled" type="checkbox" :disabled="disabled">启用插件</label><label class="switch"><input v-model="settings.output_enabled" type="checkbox" :disabled="disabled">生成本地 TXT</label><label class="switch"><input v-model="settings.include_subdirectories" :indeterminate="settings.include_subdirectories === null" type="checkbox" :disabled="disabled">包含子目录</label></div>
       <p v-if="settings.include_subdirectories === null" class="warning">原本地与网盘子目录设置不一致，目前仍分别按原配置运行。请明确选择“包含子目录”后保存，两种来源将统一使用此设置。</p>
       <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :step="field.step" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label></div>
-      <div class="fields"><label>TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；有本地目录时默认写入该目录，仅网盘时写入插件数据目录。关闭 TXT 不删除已有文件。</small></label></div>
+      <div class="fields"><label>TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；有本地目录时默认写入第一个目录，仅网盘时写入插件数据目录。关闭 TXT 不删除已有文件。</small></label></div>
       <p>Telegram 发送与个人账号授权也适用于两种来源，统一在下方配置；两种来源共用一个计算线程。</p>
     </article>
 
     <article class="card" data-testid="local-source">
       <h3>本地监控</h3>
       <div class="switches"><label class="switch"><input v-model="settings.monitor_enabled" type="checkbox" :disabled="disabled">实时监控文件</label><label class="switch"><input v-model="settings.scan_enabled" type="checkbox" :disabled="disabled">本地定时增量补扫</label></div>
-      <div class="fields"><label>本地监控目录<input v-model="settings.folder" :disabled="disabled" placeholder="/media/movies"><small>MoviePilot 容器内路径；留空可仅处理网盘来源。</small></label><label>本地补扫计划<input v-model="settings.cron" :disabled="disabled || !settings.scan_enabled" placeholder="*/10 * * * *"><small>默认关闭，网络挂载漏事件时可启用兜底。</small></label></div>
+      <div class="fields"><label>本地监控目录<textarea v-model="settings.folder" class="monitor-roots" rows="3" :disabled="disabled" placeholder="/media/movies&#10;/media/tv"></textarea><small>MoviePilot 容器内绝对路径，一行一个，最多32个；留空可仅处理网盘来源。重叠目录按包含子目录开关去重。</small></label><label>本地补扫计划<input v-model="settings.cron" :disabled="disabled || !settings.scan_enabled" placeholder="*/10 * * * *"><small>默认关闭，网络挂载漏事件时可启用兜底。</small></label></div>
       <label class="switch"><input v-model="settings.delete_small_files" type="checkbox" :disabled="disabled">低于阈值文件自动删源</label>
       <p class="warning" v-if="settings.delete_small_files">小于通用最小文件大小的非空本地文件，稳定等待后直接删除，不生成、不转发链接，不依赖TXT或TG成功，删除不可恢复。仅作用于符合扩展名过滤的文件；阈值留空或0不生效，空文件保留等待写入，本开关不处理网盘文件。请仅监控下载完成目录，稳定等待不能保证下载已完成。</p>
     </article>
@@ -182,10 +188,10 @@ onUnmounted(() => {
       <h3>网盘监控</h3>
       <p>无需将网盘挂载为本地目录；复用已登录的存储插件，完整数据经网络分块读取计算，不保存完整临时文件。本地和网盘共用一个工作线程，不会并发计算多个文件。默认保留云端文件；115完成后删源必须在通用设置单独授权，CloudDrive仍只读。</p>
       <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_monitor_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">115生活事件监控（近实时）</label><label class="switch"><input v-model="settings.cloud_scan_enabled" type="checkbox" :disabled="disabled">网盘定时增量补扫</label></div>
-      <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''; if (settings.cloud_storage !== '115网盘Plus') { settings.cloud_monitor_enabled = false; settings.cloud_delete_enabled = false }"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>当前已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储，请先启用并登录对应插件' }}</small></label><label>网盘监控目录<input v-model.trim="settings.cloud_folder" :disabled="disabled" placeholder="/待生成链接"><small>网盘内的绝对路径，不是容器本地路径。首次扫描处理目录内现有文件，建议先选小目录测试。</small></label><label>网盘补扫计划<input v-model.trim="settings.cloud_cron" :disabled="disabled || !settings.cloud_scan_enabled" placeholder="*/10 * * * *"><small>仅开启“网盘定时增量补扫”后生效；关闭不影响手动补扫和生活事件触发。默认计划每 10 分钟。</small></label><label>网盘读取超时（秒）<input v-model="settings.cloud_read_timeout" type="number" min="30" max="1800" :disabled="disabled"><small>单次网络读取等待上限，默认 300 秒，不是整个文件计算时限。临时断线最多重连两次；服务提供强校验标识或SHA1时尝试安全续读。</small></label><label v-if="settings.cloud_monitor_enabled">115生活事件来源<select v-model="settings.cloud_life_source" :disabled="disabled"><option value="shared">复用115插件监听（不额外请求生活接口）</option><option value="direct">独立轮询（每分钟一次生活接口）</option></select><small>复用模式要求115插件生活事件监听正在运行，且与当前存储登录同一账号；不会擅自切换为独立请求。</small></label></div>
+      <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''; if (settings.cloud_storage !== '115网盘Plus') { settings.cloud_monitor_enabled = false; settings.cloud_delete_enabled = false }"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>当前已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储，请先启用并登录对应插件' }}</small></label><label>网盘监控目录<textarea v-model="settings.cloud_folder" class="monitor-roots" rows="3" :disabled="disabled" placeholder="/电影&#10;/电视剧"></textarea><small>所选同一存储内的绝对路径，一行一个，最多32个；不是容器本地路径。手动或定时补扫处理已有文件；生活事件仅处理新事件。</small></label><label>网盘补扫计划<input v-model.trim="settings.cloud_cron" :disabled="disabled || !settings.cloud_scan_enabled" placeholder="*/10 * * * *"><small>仅开启“网盘定时增量补扫”后生效；关闭不影响手动补扫和生活事件触发。默认计划每 10 分钟。</small></label><label>网盘读取超时（秒）<input v-model="settings.cloud_read_timeout" type="number" min="30" max="1800" :disabled="disabled"><small>单次网络读取等待上限，默认 300 秒，不是整个文件计算时限。临时断线最多重连两次；服务提供强校验标识或SHA1时尝试安全续读。</small></label><label v-if="settings.cloud_monitor_enabled">115生活事件来源<select v-model="settings.cloud_life_source" :disabled="disabled"><option value="shared">复用115插件监听（不额外请求生活接口）</option><option value="direct">独立轮询（每分钟一次生活接口）</option></select><small>复用模式要求115插件生活事件监听正在运行，且与当前存储登录同一账号；不会擅自切换为独立请求。</small></label></div>
       <p v-if="settings.cloud_monitor_enabled">每分钟检查一次开启后产生的新生活事件，只将事件对应且位于监控目录内的单个文件加入队列，不扫描或补算目录中的已有文件。新增事件文件尚未整理到监控目录时，按文件ID保留最多15分钟、最多10次复查；后续改名事件仅唤醒已有候选，不处理单独改名的历史文件。每轮最多检查8个文件；保存配置或重启清空候选，漏报文件可手动或定时补扫。</p>
       <div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud()">浏览网盘目录</button><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.cloud_enabled" @click="runCloud">立即网盘增量扫描／补发</button><button type="button" class="secondary" :disabled="disabled" @click="work(refreshCloud)">刷新网盘进度</button></div>
-      <div v-if="cloud.browsing" class="cloud-browser"><p>当前浏览：{{ cloud.browsing }}</p><div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud(cloud.browsing.split('/').slice(0, -1).join('/') || '/')">上一级</button><button type="button" :disabled="disabled" @click="settings.cloud_folder = cloud.browsing">选择此目录</button></div><div class="cloud-folders"><button v-for="folder in cloud.folders" :key="folder.path" type="button" class="secondary" :disabled="disabled" @click="browseCloud(folder.path)">{{ folder.name }}</button><small v-if="!cloud.folders.length">此目录下没有子目录。</small></div></div>
+      <div v-if="cloud.browsing" class="cloud-browser"><p>当前浏览：{{ cloud.browsing }}</p><div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud(cloud.browsing.split('/').slice(0, -1).join('/') || '/')">上一级</button><button type="button" :disabled="disabled" @click="addCloudRoot">添加此目录</button></div><div class="cloud-folders"><button v-for="folder in cloud.folders" :key="folder.path" type="button" class="secondary" :disabled="disabled" @click="browseCloud(folder.path)">{{ folder.name }}</button><small v-if="!cloud.folders.length">此目录下没有子目录。</small></div></div>
       <p role="status">{{ cloud.scanning ? '正在发现文件' : '等待下一次扫描' }} · 待处理 {{ cloud.pending }} 个<span v-if="cloud.file"> · {{ cloud.reconnecting ? '断线重连／续读中' : '正在计算' }}：{{ cloud.file }}（{{ cloud.size ? Math.floor(cloud.bytes_read / cloud.size * 100) : 0 }}%）<span v-if="cloud.stream_retries"> · 已重连 {{ cloud.stream_retries }} 次</span></span></p>
       <p v-if="cloud.error" class="warning">{{ cloud.error }}</p>
       <p v-if="cloud.retry_at" class="warning">失败任务下次允许重试：{{ new Date(cloud.retry_at * 1000).toLocaleString() }}；连续失败按 5、10、20…分钟退避，最长一小时。</p>

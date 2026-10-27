@@ -48,6 +48,111 @@ class Ed2kTests(unittest.TestCase):
         path.write_bytes(data)
         return path
 
+    def test_multiple_local_roots_scan_missing_overlap_and_combined_output(self):
+        second = self.root / "second"
+        second.mkdir()
+        first_file = self.create()
+        second_file = second / "second.bin"
+        second_file.write_bytes(b"world")
+        self.plugin._folder = f"{self.folder}\n{self.folder / 'sub'}\n{second}\n{self.root / 'missing'}"
+        self.plugin.scan()
+        self.assertEqual(set(self.plugin._pending), {str(first_file), str(second_file)})
+        self.assertEqual(self.plugin._paths()[1], self.folder / "ed2k.txt")
+        for path in (first_file, second_file):
+            self.plugin._process_file(path)
+            self.plugin._process_file(path)
+        self.assertEqual(len(self.records()), 2)
+        self.assertEqual(len((self.folder / "ed2k.txt").read_text().splitlines()), 2)
+
+    def test_multiple_local_roots_nonrecursive_and_symlink_alias_dedup(self):
+        child = self.folder / "child"
+        child.mkdir()
+        path = child / "file.bin"
+        path.write_bytes(b"hello")
+        alias = self.root / "alias"
+        alias.symlink_to(self.folder, target_is_directory=True)
+        self.plugin._recursive = False
+        self.plugin._folder = f"{self.folder}\n{alias}"
+        self.assertEqual(len(self.plugin._local_roots()), 1)
+        self.assertFalse(self.plugin._eligible(path))
+        self.plugin._folder += f"\n{child}"
+        self.assertTrue(self.plugin._eligible(path))
+        self.plugin._recursive = True
+        self.assertEqual(self.plugin._local_roots(), [self.folder])
+
+    def test_multiple_local_root_delete_rejects_outside_and_symlink(self):
+        second = self.root / "second"
+        second.mkdir()
+        path = second / "file.bin"
+        path.write_bytes(b"world")
+        self.plugin._folder = f"{self.folder}\n{second}"
+        self.plugin._delete_source = True
+        self.plugin._process_file(path)
+        self.assertFalse(path.exists())
+        outside = self.root / "outside.bin"
+        outside.write_bytes(b"hello")
+        with self.assertRaises(ValueError):
+            self.plugin._unlink_source(outside, outside.stat())
+        link = second / "link.bin"
+        link.symlink_to(outside)
+        self.assertFalse(self.plugin._eligible(link))
+        self.assertTrue(outside.exists())
+
+    def test_multiple_local_watch_schedules_one_observer(self):
+        second = self.root / "second"
+        second.mkdir()
+        self.plugin._folder = f"{self.folder}\n{second}\n{self.folder / 'child'}\n{self.root / 'missing'}"
+        observer = Mock()
+        with patch.object(self.module, "Observer", return_value=observer):
+            self.plugin._start_monitor()
+        self.assertEqual(observer.schedule.call_count, 2)
+        self.assertEqual([call.args[1] for call in observer.schedule.call_args_list], [str(self.folder), str(second)])
+        observer.start.assert_called_once()
+        handler = observer.schedule.call_args_list[1].args[0]
+        path = second / "event.bin"
+        path.write_bytes(b"hello")
+        handler.on_created(types.SimpleNamespace(is_directory=False, src_path=str(path)))
+        self.assertIn(str(path), self.plugin._pending)
+
+    def test_multiple_cloud_roots_scan_serially_and_filter_events(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._cloud_folder = "/cloud-test/sub\n/cloud-test\n/second"
+        second = {**item, "fileid": "456", "path": "/second/云端.mkv"}
+        storage.walk.side_effect = lambda root, recursive, stopping: iter([item if root == "/cloud-test" else second, None])
+        with patch.object(self.cloud_module, "CloudStorage", return_value=storage):
+            for unused in range(3):
+                self.plugin._cloud_scan_step()
+        self.assertEqual([call.args[0] for call in storage.walk.call_args_list], ["/cloud-test", "/second"])
+        self.assertEqual(sum(key.startswith("cloud:") for key in self.plugin._pending), 2)
+        self.assertTrue(self.plugin._cloud_item_is_eligible(second))
+        self.assertFalse(self.plugin._cloud_item_is_eligible({**item, "path": "/outside/a.mkv"}))
+        nested = {**second, "path": "/second/child/a.mkv"}
+        self.plugin._cloud_recursive = False
+        self.assertFalse(self.plugin._cloud_item_is_eligible(nested))
+        self.plugin._cloud_folder += "\n/second/child"
+        self.assertTrue(self.plugin._cloud_item_is_eligible(nested))
+
+    def test_multiple_cloud_roots_continue_after_directory_error(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._cloud_folder = "/missing\n/cloud-test"
+        storage.walk.side_effect = [self.cloud_module.CloudError("目录读取失败"), iter([item, None])]
+        with patch.object(self.cloud_module, "CloudStorage", return_value=storage):
+            for unused in range(3):
+                self.plugin._cloud_scan_step()
+        self.assertEqual(storage.walk.call_count, 2)
+        self.assertIn("/missing", self.plugin._cloud_status["error"])
+        self.assertEqual(sum(key.startswith("cloud:") for key in self.plugin._pending), 1)
+
+    def test_multiple_cloud_roots_keep_existing_file_identity_and_incremental_hash(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._cloud_folder = "/other\n/cloud-test"
+        with patch.object(self.cloud_module, "hash_remote", return_value=self.module._md4(b"hello").hex()) as hashing:
+            self.plugin._process_cloud_file(item)
+            self.plugin._cloud_folder = "/cloud-test\n/other"
+            self.plugin._process_cloud_file(item)
+        hashing.assert_called_once()
+        self.assertEqual(len(self.records()), 1)
+
     def test_cloud_generation_is_incremental_and_never_deletes(self):
         self.plugin._cloud_enabled = True
         self.plugin._cloud_storage = "115网盘Plus"

@@ -48,6 +48,29 @@ class WebApiTests(unittest.TestCase):
     def authorize(self):
         self.app.dependency_overrides[web_api.get_current_active_superuser] = lambda: types.SimpleNamespace(is_superuser=True)
 
+    def test_multiple_monitor_directories_validate_and_round_trip(self):
+        result = web_api.validate_settings(self.plugin, {"folder": " /media/a \r\n/media/b\n/media/a\n", "cloud_folder": "/电影/\n/电视剧\n/电影"})
+        self.assertEqual(result["folder"], "/media/a\n/media/b")
+        self.assertEqual(result["cloud_folder"], "/电影\n/电视剧")
+        self.plugin._folder = result["folder"]
+        self.plugin._cloud_folder = result["cloud_folder"]
+        self.assertEqual(web_api.settings_snapshot(self.plugin)["cloud_folder"], result["cloud_folder"])
+        for values in ({"folder": "/media/a\nrelative"}, {"cloud_folder": "/电影\n/"}, {"folder": "\n".join(f"/r{number}" for number in range(33))}):
+            with self.subTest(values=values), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, values)
+
+    def test_multiple_long_unicode_directories_fit_settings_request_limit(self):
+        import asyncio
+        import json
+        roots = "\n".join(f"/影视/{'目录' * 180}/{number}" for number in range(32))
+        payload = {"folder": roots, "cloud_folder": roots}
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        self.assertGreater(len(body), 16384)
+        request = Mock(body=AsyncMock(return_value=body))
+        self.assertEqual(asyncio.run(web_api.read_body(request, limit=262144)), payload)
+        with self.assertRaises(HTTPException):
+            asyncio.run(web_api.read_body(request))
+
     def test_shared_recursive_validation_and_legacy_snapshot(self):
         for value in (True, False):
             result = web_api.validate_settings(self.plugin, {"include_subdirectories": value})

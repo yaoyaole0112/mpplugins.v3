@@ -60,11 +60,17 @@ def validate_settings(plugin, values):
                 raise UserAccountError(f"{'文件稳定时间' if name == 'min_age' else '网盘读取超时'}必须为 {lower} 到 {upper} 的整数秒")
             value = int(value)
         else:
-            if not isinstance(value, str) or len(value) > 4096:
+            if not isinstance(value, str) or len(value) > (32768 if name in {"folder", "cloud_folder"} else 4096):
                 raise UserAccountError("配置文本格式不正确或过长")
             value = value.strip()
         result[name] = value
     result["telegram_mode"] = "user"
+    from .cloud_storage import monitor_roots
+    try:
+        result["folder"] = "\n".join(monitor_roots(result["folder"]))
+        result["cloud_folder"] = "\n".join(monitor_roots(result["cloud_folder"], cloud=True))
+    except ValueError as failure:
+        raise UserAccountError(str(failure)) from None
     try:
         minimum_file_bytes(result["min_file_size"])
     except ValueError as failure:
@@ -81,13 +87,12 @@ def validate_settings(plugin, values):
         raise UserAccountError("话题线程 ID 必须为正整数或留空")
     result["telegram_token"] = plugin._telegram_token
     if result["cloud_enabled"]:
-        from .cloud_storage import SUPPORTED_STORAGES, available_storages, cloud_path, CloudError
+        from .cloud_storage import SUPPORTED_STORAGES, available_storages, CloudError
         try:
             if result["cloud_storage"] not in SUPPORTED_STORAGES:
                 raise CloudError("请选择 115网盘Plus 或 CloudDrive储存")
-            result["cloud_folder"] = cloud_path(result["cloud_folder"])
-            if result["cloud_folder"] == "/":
-                raise CloudError("请指定具体的网盘子目录，不允许扫描整个网盘根目录")
+            if not result["cloud_folder"]:
+                raise CloudError("请至少指定一个网盘监控目录")
             if result["cloud_storage"] not in {item["type"] for item in available_storages()}:
                 raise CloudError("所选网盘存储未配置，请先启用并登录对应插件")
             CronTrigger.from_crontab(result["cloud_cron"])
@@ -117,9 +122,9 @@ def validate_settings(plugin, values):
     return result
 
 
-async def read_body(request):
+async def read_body(request, limit=16384):
     body = await request.body()
-    if len(body) > 16384:
+    if len(body) > limit:
         raise HTTPException(status_code=400, detail="请求内容过长")
     try:
         result = json.loads(body)
@@ -170,7 +175,7 @@ def build_routes(plugin):
 
     async def save(request: Request, principal=Depends(get_current_active_superuser)):
         try:
-            values = await read_body(request)
+            values = await read_body(request, limit=262144)
             config = validate_settings(plugin, values)
             plugin.update_config(config)
             await asyncio.to_thread(plugin.init_plugin, config)
