@@ -1,4 +1,20 @@
 {
+  "SubscribeGroup": {
+    "name": "订阅规则自动填充",
+    "description": "电视剧下载后自动填充订阅资源属性，添加订阅后按二级分类填充自定义规则。修复含表情符号的历史页面加载失败。",
+    "labels": "订阅,工具",
+    "version": "3.0.1",
+    "icon": "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/teamwork.png",
+    "author": "thsrite",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 2,
+    "history": {
+      "v3.0.1": "修复历史规则含表情符号时UTF-8响应序列化失败，正确保留中文及正则反斜杠；兼容普通文本和结构化历史，不清除已有配置与记录。",
+      "v3.0.0": "保留MoviePilot v3媒体身份匹配、订阅及下载事件的自动填充逻辑。"
+    }
+  },
   "P115Transfer": {
     "name": "115转存/离线",
     "description": "通过Telegram Bot接收115分享及离线链接，支持Telegraph资源页面和消息URL按钮，保存到指定115目录。",
