@@ -1,8 +1,12 @@
 import json
 import re
 import time
+from threading import Event as ThreadEvent, Lock
 from typing import Any, List, Dict, Tuple
 
+from fastapi import BackgroundTasks, Depends
+
+from app.api.dependencies.auth import get_current_active_superuser
 from app.db.oper.downloadhistory import DownloadHistoryOper
 from app.db.oper.site import SiteOper
 from app.db.oper.subscribe import SubscribeOper
@@ -19,11 +23,11 @@ class SubscribeGroup(_PluginBase):
     # 插件名称
     plugin_name = "订阅规则自动填充"
     # 插件描述
-    plugin_desc = "电视剧下载后自动添加官组等信息到订阅；添加订阅后根据二级分类名称自定义订阅规则。"
+    plugin_desc = "下载后自动填充订阅属性；按二级分类配置规则，支持预览并补填已有电影和电视剧订阅。"
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.0.1"
+    plugin_version = "3.1.0"
     # 插件作者
     plugin_author = "thsrite"
     # 作者主页
@@ -46,10 +50,17 @@ class SubscribeGroup(_PluginBase):
     _subscribeoper = None
     _downloadhistoryoper = None
     _siteoper = None
+    _overwrite_existing = False
+    _fill_lock = None
+    _fill_stop = None
+    _history_lock = None
 
     def init_plugin(self, config: dict = None):
         """读取配置并重建站点、订阅和下载历史访问句柄。"""
         config = config or {}
+        if self._fill_lock is None:
+            self._fill_lock = Lock()
+            self._history_lock = Lock()
         self._downloadhistoryoper = DownloadHistoryOper()
         self._subscribeoper = SubscribeOper()
         self._siteoper = SiteOper()
@@ -59,6 +70,7 @@ class SubscribeGroup(_PluginBase):
         self._clear_handle = bool(config.get("clear_handle"))
         self._update_details = config.get("update_details") or []
         self._update_confs = config.get("update_confs") or ""
+        self._overwrite_existing = bool(config.get("overwrite_existing", False))
         self._subscribe_confs = {}
 
         if self._update_confs:
@@ -136,7 +148,198 @@ class SubscribeGroup(_PluginBase):
             "clear_handle": self._clear_handle,
             "update_details": self._update_details,
             "update_confs": self._update_confs,
+            "overwrite_existing": self._overwrite_existing,
         })
+
+    def __category_update(self, subscribe, category_conf: dict) -> dict:
+        """
+        为新增订阅和已有订阅共用二级分类规则及保存路径变量展开。
+        """
+        update_dict = {
+            field: category_conf[field]
+            for field in ("include", "exclude", "sites", "filter_groups")
+            if category_conf.get(field)
+        }
+        for field, parser in (
+            ("resolution", self.__parse_pix),
+            ("quality", self.__parse_type),
+            ("effect", self.__parse_effect),
+        ):
+            if category_conf.get(field):
+                update_dict[field] = parser(category_conf[field])
+        if category_conf.get("savepath"):
+            update_dict["save_path"] = category_conf["savepath"].replace(
+                "{name}", f"{subscribe.name} ({subscribe.year})"
+            )
+        return update_dict
+
+    def __record_update(self, subscribe, update_dict: dict, update_type: str):
+        """
+        串行追加填充历史，避免批量任务和订阅、下载事件互相覆盖记录。
+        """
+        with self._history_lock:
+            history = self.get_data("history") or []
+            if not isinstance(history, list):
+                history = [history]
+            history.append({
+                "name": subscribe.name,
+                "type": update_type,
+                "content": json.dumps(update_dict, ensure_ascii=False),
+                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            })
+            self.save_data(key="history", value=history)
+
+    def start_existing_fill(self, background_tasks: BackgroundTasks, dry_run: bool = False) -> dict:
+        """
+        启动串行后台补填，预览模式只识别分类并统计，不写入订阅。
+        """
+        if not self._subscribe_confs:
+            return {"success": False, "message": "请先在设置中保存二级分类自定义填充规则"}
+        if not self._fill_lock.acquire(blocking=False):
+            return {"success": False, "message": "已有订阅补填或预览正在执行，请勿重复提交"}
+        try:
+            self._fill_stop = ThreadEvent()
+            result = self.__new_fill_result(dry_run)
+            self.__save_fill_result(result)
+            background_tasks.add_task(
+                self.__fill_existing, self._fill_stop,
+                {category: dict(rule) for category, rule in self._subscribe_confs.items()},
+                self._overwrite_existing, dry_run,
+            )
+        except Exception:
+            self._fill_lock.release()
+            raise
+        return {"success": True, "message": "任务已启动，请稍后点击刷新执行结果"}
+
+    def preview_existing_fill(self, background_tasks: BackgroundTasks) -> dict:
+        """
+        预览当前规则对已有电影和电视剧订阅的补填数量。
+        """
+        return self.start_existing_fill(background_tasks, dry_run=True)
+
+    def get_existing_fill_status(self) -> dict:
+        """
+        返回最近一次补填或预览的进度和统计。
+        """
+        result = self.get_data("last_fill_result")
+        if not isinstance(result, dict) or not result.get("message"):
+            result = {"status": "idle", "message": "尚未执行已有订阅补填"}
+        return {**result, "success": True}
+
+    @staticmethod
+    def __new_fill_result(dry_run: bool) -> dict:
+        """
+        创建不含订阅私有数据的执行统计。
+        """
+        return {
+            "status": "running", "preview": dry_run,
+            "total": 0, "scanned": 0, "updated": 0, "skipped": 0, "failed": 0,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        }
+
+    def __save_fill_result(self, result: dict):
+        """
+        保存可在页面查看的执行进度和结果摘要。
+        """
+        action = "预览" if result["preview"] else "补填"
+        state = {"running": "进行中", "completed": "完成", "cancelled": "已停止", "failed": "失败"}
+        updated_label = "可补填" if result["preview"] else "已补填"
+        result["message"] = (
+            f"已有订阅{action}{state[result['status']]}：检查 {result['scanned']}/{result['total']} 条，"
+            f"{updated_label} {result['updated']} 条，跳过 {result['skipped']} 条，失败 {result['failed']} 条"
+        )
+        self.save_data("last_fill_result", dict(result))
+
+    def __fill_existing(self, stop_event: ThreadEvent, rules: dict, overwrite: bool, dry_run: bool):
+        """
+        按媒体身份识别现有电影、电视剧的分类，仅更新配置中有值的规则字段。
+        """
+        result = self.__new_fill_result(dry_run)
+        categories = {}
+        try:
+            subscriptions = [
+                subscribe for subscribe in self._subscribeoper.list() or []
+                if getattr(subscribe.type, "value", subscribe.type) in (MediaType.TV.value, MediaType.MOVIE.value)
+            ]
+            result["total"] = len(subscriptions)
+            self.__save_fill_result(result)
+            for subscribe in subscriptions:
+                if stop_event.is_set():
+                    break
+                try:
+                    current = self._subscribeoper.get(subscribe.id)
+                    if not current or getattr(current.type, "value", current.type) not in (MediaType.TV.value, MediaType.MOVIE.value):
+                        result["skipped"] += 1
+                        continue
+                    identity_fields = ("type", "media_source", "media_id", "episode_group", "media_category")
+                    original_identity = tuple(getattr(current, field, None) for field in identity_fields)
+                    category = getattr(current, "media_category", None)
+                    if not category:
+                        media_source, media_id = resolve_media_identity(current)
+                        if not media_source or not media_id:
+                            result["skipped"] += 1
+                            logger.warning(f"已有订阅ID:{current.id} 缺少有效媒体身份，跳过补填")
+                            continue
+                        media_type = MediaType(current.type)
+                        episode_group = getattr(current, "episode_group", None)
+                        cache_key = (media_type.value, media_source, media_id, episode_group)
+                        if cache_key not in categories:
+                            media_info = self.chain.recognize_media(
+                                mtype=media_type, media_source=media_source,
+                                media_id=media_id, episode_group=episode_group,
+                            )
+                            categories[cache_key] = getattr(media_info, "category", None)
+                        category = categories[cache_key]
+                    if stop_event.is_set():
+                        break
+                    category_conf = rules.get(str(category or "").strip().casefold())
+                    if not category_conf:
+                        result["skipped"] += 1
+                        logger.info(f"已有订阅ID:{current.id} 二级分类:{category or '未识别'} 无匹配规则，跳过补填")
+                        continue
+                    current = self._subscribeoper.get(subscribe.id)
+                    if not current or original_identity != tuple(getattr(current, field, None) for field in identity_fields):
+                        result["skipped"] += 1
+                        continue
+                    update_dict = {
+                        field: value for field, value in self.__category_update(current, category_conf).items()
+                        if getattr(current, field, None) != value
+                        and (overwrite or getattr(current, field, None) in (None, "", []))
+                    }
+                    if not update_dict:
+                        result["skipped"] += 1
+                        continue
+                    if stop_event.is_set():
+                        break
+                    if not dry_run:
+                        if self._subscribeoper.update(current.id, update_dict) is None:
+                            result["skipped"] += 1
+                            continue
+                        result["updated"] += 1
+                        try:
+                            self.__record_update(current, update_dict, f"已有订阅二级分类补填 {category}")
+                        except Exception as error:
+                            logger.warning(f"已有订阅ID:{current.id} 补填成功，但保存历史失败：{error}")
+                    else:
+                        result["updated"] += 1
+                    logger.info(f"已有订阅ID:{current.id} {'预览可补填' if dry_run else '补填成功'}：{list(update_dict)}")
+                except Exception as error:
+                    result["failed"] += 1
+                    logger.error(f"已有订阅ID:{subscribe.id} 补填失败：{error}")
+                finally:
+                    result["scanned"] += 1
+                    self.__save_fill_result(result)
+            result["status"] = "cancelled" if stop_event.is_set() else "completed"
+        except Exception as error:
+            result["status"] = "failed"
+            result["failed"] += 1
+            logger.error(f"已有订阅补填任务失败：{error}")
+        finally:
+            try:
+                self.__save_fill_result(result)
+                logger.info(result["message"])
+            finally:
+                self._fill_lock.release()
 
     @eventmanager.register(EventType.SubscribeAdded)
     def subscribe_notice(self, event: Event = None):
@@ -204,44 +407,13 @@ class SubscribeGroup(_PluginBase):
             logger.info(
                 f"订阅记录:{subscribe.name} 二级分类:{category} 自定义配置:{category_conf}")
 
-            update_dict = {}
-            if category_conf.get('include'):
-                update_dict['include'] = category_conf.get('include')
-            if category_conf.get('exclude'):
-                update_dict['exclude'] = category_conf.get('exclude')
-            if category_conf.get('sites'):
-                update_dict['sites'] = category_conf.get('sites')
-            if category_conf.get('filter_groups'):
-                update_dict['filter_groups'] = category_conf.get('filter_groups')
-            if category_conf.get('resolution'):
-                update_dict['resolution'] = self.__parse_pix(category_conf.get('resolution'))
-            if category_conf.get('quality'):
-                update_dict['quality'] = self.__parse_type(category_conf.get('quality'))
-            if category_conf.get('effect'):
-                update_dict['effect'] = self.__parse_effect(category_conf.get('effect'))
-            if category_conf.get('savepath'):
-                # 判断是否有变量{name}
-                if '{name}' in category_conf.get('savepath'):
-                    savepath = category_conf.get('savepath').replace('{name}', f"{subscribe.name} ({subscribe.year})")
-                    update_dict['save_path'] = savepath
-                else:
-                    update_dict['save_path'] = category_conf.get('savepath')
+            update_dict = self.__category_update(subscribe, category_conf)
 
             # 更新订阅自定义配置
             self._subscribeoper.update(sid, update_dict)
             logger.info(f"订阅记录:{subscribe.name} 填充成功\n{update_dict}")
 
-            # 读取历史记录
-            history = self.get_data('history') or []
-
-            history.append({
-                'name': subscribe.name,
-                'type': f'二级分类自定义配置 {category}',
-                'content': json.dumps(update_dict),
-                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
-            })
-            # 保存历史
-            self.save_data(key="history", value=history)
+            self.__record_update(subscribe, update_dict, f"二级分类自定义配置 {category}")
 
     @eventmanager.register(EventType.DownloadAdded)
     def download_notice(self, event: Event = None):
@@ -374,16 +546,7 @@ class SubscribeGroup(_PluginBase):
                 updated = True
                 logger.info(f"订阅记录:{subscribe.name} 填充成功\n {update_dict}")
 
-                # 读取历史记录
-                history = self.get_data('history') or []
-                history.append({
-                    'name': subscribe.name,
-                    'type': '种子下载自定义配置',
-                    'content': json.dumps(update_dict),
-                    "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
-                })
-                # 保存历史
-                self.save_data(key="history", value=history)
+                self.__record_update(subscribe, update_dict, "种子下载自定义配置")
 
             if updated:
                 # 同一下载事件可能命中多个订阅，媒体身份只记录一次以保持幂等。
@@ -441,7 +604,18 @@ class SubscribeGroup(_PluginBase):
         return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        return []
+        return [
+            {
+                "path": path, "endpoint": endpoint, "methods": [method],
+                "auth": "bear", "dependencies": [Depends(get_current_active_superuser)],
+                "summary": summary,
+            }
+            for path, endpoint, method, summary in (
+                ("/fill-existing", self.start_existing_fill, "POST", "补填已有电影和电视剧订阅规则"),
+                ("/preview-existing", self.preview_existing_fill, "POST", "预览已有订阅规则补填"),
+                ("/fill-existing/status", self.get_existing_fill_status, "GET", "查询已有订阅补填进度"),
+            )
+        ]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """
@@ -451,6 +625,23 @@ class SubscribeGroup(_PluginBase):
             {
                 'component': 'VForm',
                 'content': [
+                    {
+                        'component': 'VAlert',
+                        'props': {
+                            'type': 'info', 'variant': 'tonal', 'class': 'mb-4',
+                            'text': '已有电影和电视剧订阅可在“查看数据”页面预览并一键补填。'
+                                    '默认仅补空缺，保留已有字段；手动补填不依赖自动填充开关。',
+                        },
+                    },
+                    {
+                        'component': 'VSwitch',
+                        'props': {
+                            'model': 'overwrite_existing',
+                            'label': '补填已有订阅时覆盖已填写的规则字段',
+                            'hint': '默认关闭。开启后仅同步分类规则中已配置的字段，不清空其他字段。请先保存设置再预览或补填。',
+                            'persistent-hint': True, 'class': 'mb-4',
+                        },
+                    },
                     {
                         'component': 'VRow',
                         'content': [
@@ -685,6 +876,7 @@ class SubscribeGroup(_PluginBase):
             "clear_handle": False,
             "update_details": [],
             "update_confs": "",
+            "overwrite_existing": False,
         }
 
     @staticmethod
@@ -703,10 +895,43 @@ class SubscribeGroup(_PluginBase):
             return content
         return json.dumps(content, ensure_ascii=False)
 
+    def __existing_fill_controls(self) -> List[dict]:
+        """
+        展示管理员手动补填入口、只读预览和最近执行进度。
+        """
+        result = self.get_existing_fill_status()
+        mode = "覆盖已填写字段" if self._overwrite_existing else "仅补空缺、保留已有字段"
+        return [{
+            "component": "VCard",
+            "props": {"variant": "outlined", "class": "mb-4"},
+            "content": [{
+                "component": "VCardText",
+                "content": [
+                    {"component": "div", "props": {"class": "text-h6 mb-2"}, "text": "已有订阅规则补填"},
+                    {
+                        "component": "div", "props": {"class": "text-body-2 mb-4"},
+                        "text": f"范围：当前已有电影和电视剧订阅；模式：{mode}。按保存的二级分类规则执行，未配置分类跳过。预览不修改订阅。",
+                    },
+                    *[{
+                        "component": "VBtn",
+                        "props": {"color": "primary", "variant": "tonal", "class": "me-2 mb-2"},
+                        "text": text,
+                        "events": {"click": {"api": f"plugin/SubscribeGroup/{path}", "method": method}},
+                    } for text, path, method in (
+                        ("预览补填", "preview-existing", "post"),
+                        ("补填已有订阅", "fill-existing", "post"),
+                        ("刷新执行结果", "fill-existing/status", "get"),
+                    )],
+                    {"component": "div", "props": {"class": "text-body-2 mt-2"}, "text": result["message"]},
+                ],
+            }],
+        }]
+
     def get_page(self) -> List[dict]:
+        controls = self.__existing_fill_controls()
         historys = self.get_data('history')
         if not historys:
-            return [
+            return controls + [
                 {
                     'component': 'div',
                     'text': '暂无数据',
@@ -753,7 +978,7 @@ class SubscribeGroup(_PluginBase):
         ]
 
         # 拼装页面
-        return [
+        return controls + [
             {
                 'component': 'VRow',
                 'content': [
@@ -818,4 +1043,5 @@ class SubscribeGroup(_PluginBase):
         """
         退出插件
         """
-        return None
+        if self._fill_stop is not None:
+            self._fill_stop.set()
