@@ -49,9 +49,9 @@ class WebApiTests(unittest.TestCase):
         self.app.dependency_overrides[web_api.get_current_active_superuser] = lambda: types.SimpleNamespace(is_superuser=True)
 
     def test_multiple_monitor_directories_validate_and_round_trip(self):
-        result = web_api.validate_settings(self.plugin, {"folder": " /media/a \r\n/media/b\n/media/a\n", "cloud_folder": "/电影/\n/电视剧\n/电影"})
-        self.assertEqual(result["folder"], "/media/a\n/media/b")
-        self.assertEqual(result["cloud_folder"], "/电影\n/电视剧")
+        result = web_api.validate_settings(self.plugin, {"folder": " /media/a , /media/b\n/media/a\n", "cloud_folder": "/电影/,/电视剧\n/电影"})
+        self.assertEqual(result["folder"], "/media/a,/media/b")
+        self.assertEqual(result["cloud_folder"], "/电影,/电视剧")
         self.plugin._folder = result["folder"]
         self.plugin._cloud_folder = result["cloud_folder"]
         self.assertEqual(web_api.settings_snapshot(self.plugin)["cloud_folder"], result["cloud_folder"])

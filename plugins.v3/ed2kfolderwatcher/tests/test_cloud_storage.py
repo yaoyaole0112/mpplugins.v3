@@ -21,8 +21,8 @@ def md4(data):
 
 class CloudStorageTests(unittest.TestCase):
     def test_monitor_roots_normalize_deduplicate_and_limit(self):
-        self.assertEqual(cloud.monitor_roots(" /电影/ \r\n/电视剧\n/电影\n", cloud=True), ["/电影", "/电视剧"])
-        self.assertEqual(cloud.monitor_roots("/media/a,b\n/media/tv"), ["/media/a,b", "/media/tv"])
+        self.assertEqual(cloud.monitor_roots(" /电影/ , /电视剧\n/电影\n", cloud=True), ["/电影", "/电视剧"])
+        self.assertEqual(cloud.monitor_roots("/media/a,/media/tv"), ["/media/a", "/media/tv"])
         for value in ("relative", "/a/../b", "/a\x00b", "\n".join(f"/r{number}" for number in range(33))):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 cloud.monitor_roots(value)

@@ -161,7 +161,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.13.0"
+    plugin_version = "1.13.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -237,7 +237,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._folder = str(config.get("folder") or "").strip()
         try:
             from .cloud_storage import monitor_roots
-            self._folder = "\n".join(monitor_roots(self._folder))
+            self._folder = ",".join(monitor_roots(self._folder))
         except ValueError as failure:
             self._enabled = False
             self._folder = ""
@@ -302,7 +302,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 roots = monitor_roots(self._cloud_folder, cloud=True)
                 if not roots:
                     raise CloudError("请至少指定一个网盘监控目录")
-                self._cloud_folder = "\n".join(roots)
+                self._cloud_folder = ",".join(roots)
             except ValueError as failure:
                 self._cloud_enabled = False
                 self._cloud_status["error"] = str(failure)

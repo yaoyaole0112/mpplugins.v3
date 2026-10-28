@@ -309,20 +309,20 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100))
     document.querySelectorAll('#app .cloud-browser .actions button')[1].click()
     await vue.nextTick()
-    const cloudRoots = cloudPanel.querySelector('textarea.monitor-roots')
-    const localRoots = document.querySelector('#app [data-testid="local-source"] textarea.monitor-roots')
-    if (!cloudRoots || !localRoots || cloudRoots.rows !== 3 || localRoots.rows !== 3) throw Error(`${name}: multiple directory inputs missing`)
+    const cloudRoots = cloudPanel.querySelector('input.monitor-roots')
+    const localRoots = document.querySelector('#app [data-testid="local-source"] input.monitor-roots')
+    if (!cloudRoots || !localRoots || cloudRoots.getBoundingClientRect().height !== 48 || localRoots.getBoundingClientRect().height !== 48) throw Error(`${name}: compact multiple directory inputs missing`)
     if (cloudRoots.value !== '/测试网盘目录/') throw Error(`${name}: choosing cloud folder failed`)
-    cloudRoots.value = '/保留目录\n/测试网盘目录/'
+    cloudRoots.value = '/保留目录,/测试网盘目录/'
     cloudRoots.dispatchEvent(new Event('input', { bubbles: true }))
     await vue.nextTick()
     document.querySelectorAll('#app .cloud-browser .actions button')[1].click()
     await vue.nextTick()
-    if (cloudRoots.value !== '/保留目录\n/测试网盘目录/') throw Error(`${name}: browsing replaced roots or duplicated selection`)
-    localRoots.value = '/media/movies\n/media/tv'
+    if (cloudRoots.value !== '/保留目录,/测试网盘目录/') throw Error(`${name}: browsing replaced roots or duplicated selection`)
+    localRoots.value = '/media/movies,/media/tv'
     localRoots.dispatchEvent(new Event('input', { bubbles: true }))
     await vue.nextTick()
-    if (!localRoots.value.includes('\n/media/tv')) throw Error(`${name}: local multiple roots lost`)
+    if (!localRoots.value.includes(',/media/tv')) throw Error(`${name}: local multiple roots lost`)
     const targets = document.querySelector('#app .telegram-targets textarea')
     if (!targets || targets.rows !== 1 || !document.querySelector('#app').innerText.includes('接收目标（支持多个）')) throw Error(`${name}: compact multiple target textarea missing`)
     const threadInput = document.querySelector('#app .telegram-targets input')

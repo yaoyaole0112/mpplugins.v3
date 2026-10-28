@@ -67,8 +67,8 @@ def validate_settings(plugin, values):
     result["telegram_mode"] = "user"
     from .cloud_storage import monitor_roots
     try:
-        result["folder"] = "\n".join(monitor_roots(result["folder"]))
-        result["cloud_folder"] = "\n".join(monitor_roots(result["cloud_folder"], cloud=True))
+        result["folder"] = ",".join(monitor_roots(result["folder"]))
+        result["cloud_folder"] = ",".join(monitor_roots(result["cloud_folder"], cloud=True))
     except ValueError as failure:
         raise UserAccountError(str(failure)) from None
     try:

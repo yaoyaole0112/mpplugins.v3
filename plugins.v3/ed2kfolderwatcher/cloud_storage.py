@@ -54,7 +54,7 @@ def cloud_path(value):
 
 
 def monitor_roots(value, *, cloud=False, recursive=False):
-    lines = str(value or "").splitlines()
+    lines = re.split(r"[\r\n,]+", str(value or ""))
     roots = []
     if len(str(value or "")) > 32768:
         raise ValueError("监控目录配置过长")
