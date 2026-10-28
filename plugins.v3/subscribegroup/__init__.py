@@ -27,7 +27,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.1.0"
+    plugin_version = "3.1.1"
     # 插件作者
     plugin_author = "thsrite"
     # 作者主页
@@ -194,9 +194,9 @@ class SubscribeGroup(_PluginBase):
         启动串行后台补填，预览模式只识别分类并统计，不写入订阅。
         """
         if not self._subscribe_confs:
-            return {"success": False, "message": "请先在设置中保存二级分类自定义填充规则"}
+            return {"success": False, "message": "请先在设置中保存二级分类自定义填充规则", "data": None}
         if not self._fill_lock.acquire(blocking=False):
-            return {"success": False, "message": "已有订阅补填或预览正在执行，请勿重复提交"}
+            return {"success": False, "message": "已有订阅补填或预览正在执行，请勿重复提交", "data": None}
         try:
             self._fill_stop = ThreadEvent()
             result = self.__new_fill_result(dry_run)
@@ -209,7 +209,7 @@ class SubscribeGroup(_PluginBase):
         except Exception:
             self._fill_lock.release()
             raise
-        return {"success": True, "message": "任务已启动，请稍后点击刷新执行结果"}
+        return {"success": True, "message": "任务已启动，请稍后点击刷新执行结果", "data": None}
 
     def preview_existing_fill(self, background_tasks: BackgroundTasks) -> dict:
         """
@@ -224,7 +224,7 @@ class SubscribeGroup(_PluginBase):
         result = self.get_data("last_fill_result")
         if not isinstance(result, dict) or not result.get("message"):
             result = {"status": "idle", "message": "尚未执行已有订阅补填"}
-        return {**result, "success": True}
+        return {"success": True, "message": result["message"], "data": dict(result)}
 
     @staticmethod
     def __new_fill_result(dry_run: bool) -> dict:
@@ -899,7 +899,7 @@ class SubscribeGroup(_PluginBase):
         """
         展示管理员手动补填入口、只读预览和最近执行进度。
         """
-        result = self.get_existing_fill_status()
+        result = self.get_existing_fill_status()["data"]
         mode = "覆盖已填写字段" if self._overwrite_existing else "仅补空缺、保留已有字段"
         return [{
             "component": "VCard",

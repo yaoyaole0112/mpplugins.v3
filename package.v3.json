@@ -3,7 +3,7 @@
     "name": "订阅规则自动填充",
     "description": "下载后自动填充订阅属性，按二级分类配置规则；支持预览并一键补填已有电影和电视剧订阅，默认保留已有字段。",
     "labels": "订阅,工具",
-    "version": "3.1.0",
+    "version": "3.1.1",
     "icon": "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/teamwork.png",
     "author": "thsrite",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -11,6 +11,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v3.1.1": "修复预览补填、执行补填及刷新结果按钮提示服务器返回了无效响应：所有分支统一返回严格的success、message、data响应，执行统计移入data，兼容宿主前端校验及页面自动刷新。",
       "v3.1.0": "新增已有电影、电视剧订阅规则的一键后台补填、只读预览及进度查询；默认只补空缺，可选覆盖已配置字段。复用二级分类和媒体身份识别，跳过无匹配分类，保留配置与历史。",
       "v3.0.1": "修复历史规则含表情符号时UTF-8响应序列化失败，正确保留中文及正则反斜杠；兼容普通文本和结构化历史，不清除已有配置与记录。",
       "v3.0.0": "保留MoviePilot v3媒体身份匹配、订阅及下载事件的自动填充逻辑。"

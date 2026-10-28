@@ -200,7 +200,39 @@ class ExistingSubscriptionFillTests(unittest.TestCase):
         response = self.plugin.preview_existing_fill(self.queue) if preview else self.plugin.start_existing_fill(self.queue)
         self.assertTrue(response["success"])
         self.queue.run()
-        return self.plugin.get_existing_fill_status()
+        return self.plugin.get_existing_fill_status()["data"]
+
+    def assert_response_envelope(self, response):
+        self.assertEqual(set(response), {"success", "message", "data"})
+        self.assertIsInstance(response["success"], bool)
+        self.assertIsInstance(response["message"], str)
+
+    def test_all_button_responses_match_strict_frontend_envelope(self):
+        self.subscription()
+        self.assert_response_envelope(self.plugin.get_existing_fill_status())
+        self.assert_response_envelope(self.plugin.preview_existing_fill(self.queue))
+        self.assert_response_envelope(self.plugin.start_existing_fill(self.queue))
+        self.queue.run()
+        response = self.plugin.get_existing_fill_status()
+        self.assert_response_envelope(response)
+        self.assertEqual(response["data"]["status"], "completed")
+        self.assertEqual(response["message"], response["data"]["message"])
+        self.assert_response_envelope(self.plugin.start_existing_fill(self.queue))
+        self.queue.run()
+        self.plugin._subscribe_confs = {}
+        response = self.plugin.start_existing_fill(self.queue)
+        self.assert_response_envelope(response)
+        self.assertFalse(response["success"])
+
+    def test_status_payload_is_nested_and_not_aliased(self):
+        self.subscription()
+        self.run_fill(preview=True)
+        response = self.plugin.get_existing_fill_status()
+        self.assert_response_envelope(response)
+        self.assertNotIn("status", response)
+        self.assertNotIn("updated", response)
+        response["data"]["status"] = "changed-by-caller"
+        self.assertEqual(self.data["last_fill_result"]["status"], "completed")
 
     def test_fills_tv_and_movie_but_not_music(self):
         television = self.subscription()
