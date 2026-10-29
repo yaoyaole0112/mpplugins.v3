@@ -21,8 +21,8 @@ let savedDeleteSmall = false
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || !loaded.value)
 const configFields = ['enabled', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'delete_source', 'delete_small_files', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
-const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '本地与网盘共用；留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size_gb', label: '生成链接最小文件大小（GB）', type: 'number', step: 'any', placeholder: '例如0.5、1、1.5（GB）', hint: '本地与网盘共用；小于此值不生成、不转发TG；默认保留源文件，可在本地监控开启低于阈值自动删源。留空或0不限制；固定单位GB（1GB=1024³字节），仅输入数值，支持小数；等于阈值可生成。' }]
-const timingFields = [{ key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '本地与网盘共用；稳定等待不能保证上传已经完成，请选择完成目录' }]
+const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size_gb', label: '生成链接最小文件大小（GB）', type: 'number', step: 'any', placeholder: '例如0.5、1、1.5（GB）', hint: '小于此值不生成、不转发；留空或0不限，单位GB。' }]
+const timingFields = [{ key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '文件停止变化后等待时间，请监控完成目录。' }]
 
 function unpack(response) {
   const result = response?.success === undefined && response?.data?.success !== undefined ? response.data : response
@@ -168,29 +168,29 @@ onUnmounted(() => {
     <article class="card" data-testid="common-settings">
       <h3>通用设置</h3>
       <div class="switches"><label class="switch"><input v-model="settings.delete_source" type="checkbox" :disabled="disabled" @change="settings.delete_source || (settings.cloud_delete_enabled = false)">完成后删除源文件</label><label class="switch"><input v-model="settings.cloud_delete_enabled" type="checkbox" :disabled="disabled">单独授权115网盘删源（默认关闭）</label></div>
-      <p v-if="settings.delete_source" class="warning">本地：所选输出全部成功且文件未变化才删除。115：还须单独授权当前账号和目录，仅处理授权下新生成、具备已验证SHA1的记录；CloudDrive仍只读。两种输出都关闭时不删除。TG已发送不等于接收机器人已转存完成，请先确认备份策略。</p>
-      <p v-if="settings.cloud_delete_enabled" class="warning">每次保存均需确认115授权。账号、目录或子目录范围变化后需要重新授权；历史链接不补删，删除结果未确认会暂停并显示在记录中。低于阈值自动删源仍仅限本地。</p>
+      <p v-if="settings.delete_source" class="warning">仅在输出全部成功且文件未变化后删除；115还需单独授权，CloudDrive只读。TG发送不代表接收方已备份。</p>
+      <p v-if="settings.cloud_delete_enabled" class="warning">每次保存需确认115授权；账号、目录或子目录变化后需重新授权。历史记录不追删，结果不明会暂停。</p>
       <div class="switches"><label class="switch"><input v-model="settings.enabled" type="checkbox" :disabled="disabled">启用插件</label><label class="switch"><input v-model="settings.output_enabled" type="checkbox" :disabled="disabled">生成本地 TXT</label><label class="switch"><input v-model="settings.include_subdirectories" :indeterminate="settings.include_subdirectories === null" type="checkbox" :disabled="disabled">包含子目录</label></div>
-      <p v-if="settings.include_subdirectories === null" class="warning">原本地与网盘子目录设置不一致，目前仍分别按原配置运行。请明确选择“包含子目录”后保存，两种来源将统一使用此设置。</p>
+      <p v-if="settings.include_subdirectories === null" class="warning">本地与网盘的子目录设置不一致，请选择后保存。</p>
       <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :step="field.step" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label></div>
-      <div class="fields timing-fields"><label v-for="field in timingFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :step="field.step" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label><label>TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；有本地目录时默认写入第一个目录，仅网盘时写入插件数据目录。关闭 TXT 不删除已有文件。</small></label></div>
-      <p>Telegram 发送与个人账号授权也适用于两种来源，统一在下方配置；两种来源共用一个计算线程。</p>
+      <div class="fields timing-fields"><label v-for="field in timingFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :step="field.step" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label><label>TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；留空自动选择路径。关闭后不删除已有文件。</small></label></div>
+      <p>Telegram和个人账号授权在下方配置；本地与网盘共用一个计算线程。</p>
     </article>
 
     <article class="card" data-testid="local-source">
       <h3>本地监控</h3>
       <div class="switches"><label class="switch"><input v-model="settings.monitor_enabled" type="checkbox" :disabled="disabled">实时监控文件</label><label class="switch"><input v-model="settings.scan_enabled" type="checkbox" :disabled="disabled">本地定时增量补扫</label></div>
-      <div class="fields"><label>本地监控目录<input v-model="settings.folder" class="monitor-roots" :disabled="disabled" placeholder="/media/movies,/media/tv"><small>MoviePilot 容器内绝对路径，多个目录用英文逗号分隔，最多32个；留空可仅处理网盘来源。重叠目录按包含子目录开关去重。</small></label><label>本地补扫计划<input v-model="settings.cron" :disabled="disabled || !settings.scan_enabled" placeholder="*/10 * * * *"><small>默认关闭，网络挂载漏事件时可启用兜底。</small></label></div>
+      <div class="fields"><label>本地监控目录<input v-model="settings.folder" class="monitor-roots" :disabled="disabled" placeholder="/media/movies,/media/tv"><small>容器内绝对路径，多个用英文逗号分隔，最多32个。</small></label><label>本地补扫计划<input v-model="settings.cron" :disabled="disabled || !settings.scan_enabled" placeholder="*/10 * * * *"><small>默认关闭，用于补漏。</small></label></div>
       <label class="switch"><input v-model="settings.delete_small_files" type="checkbox" :disabled="disabled">低于阈值文件自动删源</label>
-      <p class="warning" v-if="settings.delete_small_files">小于通用最小文件大小的非空本地文件，稳定等待后直接删除，不生成、不转发链接，不依赖TXT或TG成功，删除不可恢复。仅作用于符合扩展名过滤的文件；阈值留空或0不生效，空文件保留等待写入，本开关不处理网盘文件。请仅监控下载完成目录，稳定等待不能保证下载已完成。</p>
+      <p class="warning" v-if="settings.delete_small_files">低于阈值的非空本地文件会在稳定等待后直接删除，不生成、不转发，且不可恢复；空文件和网盘文件不处理。</p>
     </article>
 
     <article class="card" data-testid="cloud-source">
       <h3>网盘监控</h3>
-      <p>无需将网盘挂载为本地目录；复用已登录的存储插件，完整数据经网络分块读取计算，不保存完整临时文件。本地和网盘共用一个工作线程，不会并发计算多个文件。默认保留云端文件；115完成后删源必须在通用设置单独授权，CloudDrive仍只读。</p>
+      <p>无需挂载网盘；通过已登录的存储插件分块读取，不保存完整临时文件。与本地共用一个计算线程，默认保留云端文件。115删源需单独授权，CloudDrive只读。</p>
       <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_monitor_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">115生活事件监控（近实时）</label><label class="switch"><input v-model="settings.cloud_scan_enabled" type="checkbox" :disabled="disabled">网盘定时增量补扫</label></div>
-      <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''; if (settings.cloud_storage !== '115网盘Plus') { settings.cloud_monitor_enabled = false; settings.cloud_delete_enabled = false }"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>当前已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储，请先启用并登录对应插件' }}</small></label><label>网盘监控目录<input v-model="settings.cloud_folder" class="monitor-roots" :disabled="disabled" placeholder="/电影,/电视剧"><small>所选同一存储内的绝对路径，多个目录用英文逗号分隔，最多32个；不是容器本地路径。手动或定时补扫处理已有文件；生活事件仅处理新事件。</small></label><label>网盘补扫计划<input v-model.trim="settings.cloud_cron" :disabled="disabled || !settings.cloud_scan_enabled" placeholder="*/10 * * * *"><small>仅开启“网盘定时增量补扫”后生效；关闭不影响手动补扫和生活事件触发。默认计划每 10 分钟。</small></label><label>网盘读取超时（秒）<input v-model="settings.cloud_read_timeout" type="number" min="30" max="1800" :disabled="disabled"><small>单次网络读取等待上限，默认 300 秒，不是整个文件计算时限。临时断线最多重连两次；服务提供强校验标识或SHA1时尝试安全续读。</small></label><label v-if="settings.cloud_monitor_enabled">115生活事件来源<select v-model="settings.cloud_life_source" :disabled="disabled"><option value="shared">复用115插件监听（不额外请求生活接口）</option><option value="direct">独立轮询（每分钟一次生活接口）</option></select><small>复用模式要求115插件生活事件监听正在运行，且与当前存储登录同一账号；不会擅自切换为独立请求。</small></label></div>
-      <p v-if="settings.cloud_monitor_enabled">每分钟检查一次开启后产生的新生活事件，只将事件对应且位于监控目录内的单个文件加入队列，不扫描或补算目录中的已有文件。新增事件文件尚未整理到监控目录时，按文件ID保留最多15分钟、最多10次复查；后续改名事件仅唤醒已有候选，不处理单独改名的历史文件。每轮最多检查8个文件；保存配置或重启清空候选，漏报文件可手动或定时补扫。</p>
+      <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''; if (settings.cloud_storage !== '115网盘Plus') { settings.cloud_monitor_enabled = false; settings.cloud_delete_enabled = false }"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储' }}</small></label><label>网盘监控目录<input v-model="settings.cloud_folder" class="monitor-roots" :disabled="disabled" placeholder="/电影,/电视剧"><small>同一存储内的绝对路径，多个用英文逗号分隔，最多32个。</small></label><label>网盘补扫计划<input v-model.trim="settings.cloud_cron" :disabled="disabled || !settings.cloud_scan_enabled" placeholder="*/10 * * * *"><small>开启定时补扫后生效，默认每10分钟。</small></label><label>网盘读取超时（秒）<input v-model="settings.cloud_read_timeout" type="number" min="30" max="1800" :disabled="disabled"><small>单次网络读取等待上限，默认300秒。</small></label><label v-if="settings.cloud_monitor_enabled">115生活事件来源<select v-model="settings.cloud_life_source" :disabled="disabled"><option value="shared">复用115插件监听（不额外请求生活接口）</option><option value="direct">独立轮询（每分钟一次生活接口）</option></select><small>复用模式需115插件监听和账号一致。</small></label></div>
+      <p v-if="settings.cloud_monitor_enabled">只将事件对应且位于监控目录内的单个文件加入队列，不扫描或补算目录中的已有文件；每个事件最多复查10次。</p>
       <div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud()">浏览网盘目录</button><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.cloud_enabled" @click="runCloud">立即网盘增量扫描／补发</button><button type="button" class="secondary" :disabled="disabled" @click="work(refreshCloud)">刷新网盘进度</button></div>
       <div v-if="cloud.browsing" class="cloud-browser"><p>当前浏览：{{ cloud.browsing }}</p><div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud(cloud.browsing.split('/').slice(0, -1).join('/') || '/')">上一级</button><button type="button" :disabled="disabled" @click="addCloudRoot">添加此目录</button></div><div class="cloud-folders"><button v-for="folder in cloud.folders" :key="folder.path" type="button" class="secondary" :disabled="disabled" @click="browseCloud(folder.path)">{{ folder.name }}</button><small v-if="!cloud.folders.length">此目录下没有子目录。</small></div></div>
       <p role="status">{{ cloud.scanning ? '正在发现文件' : '等待下一次扫描' }} · 待处理 {{ cloud.pending }} 个<span v-if="cloud.file"> · {{ cloud.reconnecting ? '断线重连／续读中' : '正在计算' }}：{{ cloud.file }}（{{ cloud.size ? Math.floor(cloud.bytes_read / cloud.size * 100) : 0 }}%）<span v-if="cloud.stream_retries"> · 已重连 {{ cloud.stream_retries }} 次</span></span></p>
@@ -202,7 +202,7 @@ onUnmounted(() => {
       <p v-if="cloud.life_source_notice" class="warning">{{ cloud.life_source_notice }}</p>
       <p v-if="cloud.life_retry_at" class="warning">生活事件下次允许检查：{{ new Date(cloud.life_retry_at * 1000).toLocaleString() }}；失败时自动退避，不持续请求。</p>
       <p v-if="cloud.life_truncated" class="warning">{{ cloud.life_source === 'shared' ? '本批读取64条新增事件，下轮按游标继续读取；不额外请求115。批量事件可能延迟，请保留定时兜底。' : '本次生活事件达到64条上限，可能遗漏更早事件；请保留定时兜底，必要时手动补扫。' }}</p>
-      <small>网盘复用“通用设置”及“ED2K链接自动转发”设置。修改后先点右上角“保存插件设置”。关闭定时补扫不会取消已排队任务或失败重试。续读只保留内存中的哈希状态，不保存完整临时文件；服务不支持安全续读、重连耗尽或插件重启后，下次任务仍需从头读取，不生成不完整链接。</small>
+      <small>网盘共用通用设置和转发设置。修改后点击右上角保存；关闭定时补扫不影响已排队任务。</small>
     </article>
 
     <article class="card">
@@ -210,19 +210,19 @@ onUnmounted(() => {
       <div class="switches"><label class="switch"><input v-model="settings.telegram_enabled" type="checkbox" :disabled="disabled">发送 ED2K 链接到 Telegram</label></div>
       <!-- <select v-model="settings.telegram_mode"><option value="bot">Bot Token（机器人）</option></select> -->
       <!-- <label>发送机器人 Token<input v-model="settings.telegram_token" type="password" autocomplete="new-password"></label> -->
-      <div class="fields telegram-targets"><label>接收目标（支持多个）<textarea v-model="settings.telegram_chat_id" :disabled="disabled" rows="1" placeholder="@接收机器人, @频道用户名, -1001234567890" /><small>每行一个，或用逗号、分号分隔；支持 @用户名、数字 Chat ID、公开 t.me 链接，最多 50 个。重复目标自动合并。</small><small>单独指定群组话题：@群组用户名|123；末尾加 | 可不使用默认话题。</small></label><label>默认话题线程 ID（可选）<input v-model="settings.telegram_thread_id" :disabled="disabled" placeholder="普通私聊、频道留空"><small>作用于未单独指定话题的目标；混合发送频道、机器人、群组时建议留空。</small></label></div>
-      <p>逐个发送，每次间隔至少 3 秒；仅补发失败或新增目标。启用删源时，所有目标发送成功后才删除源文件。</p>
-      <p>发送方式：个人账号。只发送链接，不加标题；请在下方完成账号授权。修改接收目标后请点击“保存插件设置”。</p>
+      <div class="fields telegram-targets"><label>接收目标（支持多个）<textarea v-model="settings.telegram_chat_id" :disabled="disabled" rows="1" placeholder="@接收机器人, @频道用户名, -1001234567890" /><small>支持用户名、Chat ID或 t.me 链接，最多50个；逗号、分号或换行分隔。</small><small>指定话题：@群组用户名|123。</small></label><label>默认话题线程 ID（可选）<input v-model="settings.telegram_thread_id" :disabled="disabled" placeholder="普通私聊、频道留空"><small>用于未单独指定话题的目标。</small></label></div>
+      <p>逐个发送，间隔至少3秒；全部目标成功后才删源。</p>
+      <p>使用个人账号发送，仅发送链接。修改目标后请保存设置。</p>
     </article>
 
     <article class="card" data-testid="telegram-account">
       <div class="card-header"><h3>Telegram 账号</h3><button type="button" :disabled="disabled || auth.pending" @click="accountAction('save', { api_id: account.api_id, api_hash: account.api_hash })">保存账号设置</button></div>
-      <p>使用你自己的 Telegram 账号发送。请从 my.telegram.org 的 API development tools 获取 API ID 和 API Hash。无需终端命令。</p>
+      <p>使用个人账号发送；API ID和API Hash可从 my.telegram.org 获取，无需终端命令。</p>
       <div class="fields"><label>API ID<input v-model.trim="account.api_id" inputmode="numeric" :disabled="disabled || auth.pending" autocomplete="off"></label><label>API Hash<input v-model.trim="account.api_hash" type="password" :disabled="disabled || auth.pending" autocomplete="new-password" :placeholder="auth.api_hash_configured ? '已配置；留空保持不变' : '32 位字符串'"></label></div>
       <p class="account-status" role="status">{{ auth.logged_in ? 'Telegram 已登录 · 可以发送链接' : auth.pending ? (auth.password_required ? '等待两步验证密码' : '等待登录验证码') : 'Telegram 尚未登录' }}<span v-if="auth.pending"> · 剩余 {{ auth.expires_in }} 秒</span></p>
       <div v-if="!auth.logged_in" class="fields"><label v-if="!auth.password_required">手机号（国际格式）<input v-model.trim="account.phone" type="tel" :disabled="disabled || auth.pending" placeholder="+8613800000000" autocomplete="off"></label><label v-if="auth.pending && !auth.password_required">验证码<input v-model="account.code" inputmode="numeric" type="password" autocomplete="off" :disabled="disabled" placeholder="查看 Telegram 官方服务消息"></label><label v-if="auth.password_required">两步验证密码<input v-model="account.password" type="password" autocomplete="off" :disabled="disabled" placeholder="仅本次登录使用，不保存"></label></div>
       <div class="actions"><button v-if="!auth.logged_in && !auth.pending" type="button" :disabled="disabled || !auth.api_hash_configured || auth.retry_in > 0 || !account.phone" @click="accountAction('send_code', { phone: account.phone })">{{ auth.retry_in > 0 ? `请等待 ${auth.retry_in} 秒` : '发送验证码' }}</button><button v-if="auth.pending" type="button" :disabled="disabled || (auth.password_required ? !account.password : !account.code)" @click="accountAction('sign_in', { code: account.code, password: account.password })">{{ auth.password_required ? '验证密码并登录' : '验证并登录' }}</button><button v-if="auth.pending" type="button" class="secondary" :disabled="disabled" @click="accountAction('cancel')">取消本次登录</button><button v-if="auth.logged_in || auth.session_present" type="button" class="danger" :disabled="disabled" @click="logout">退出登录</button><button type="button" class="secondary" :disabled="disabled" @click="work(refreshAuth)">刷新登录状态</button></div>
-      <small>API Hash 保存后不回显；验证码和密码仅用于本次登录，不写入普通插件配置或日志。Session 只保存在本地，请通过可信网络或 HTTPS 使用本页面。</small>
+      <small>API Hash不回显；验证码和密码仅用于本次登录，Session只保存在本地。</small>
     </article>
   </section>
 </template>

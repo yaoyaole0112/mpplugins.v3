@@ -161,7 +161,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.13.1"
+    plugin_version = "1.13.2"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -1379,26 +1379,26 @@ class Ed2kFolderWatcher(_PluginBase):
         return [{"component": "VForm", "content": [
             {"component": "VCardTitle", "text": "通用设置"},
             field("VSwitch", "enabled", "启用插件"),
-            field("VSwitch", "delete_source", "完成后删除源文件", hint="本地沿用原设置；115另需在新版设置页面单独授权，CloudDrive仍只读。全部输出成功后才删除，TG已发送不代表接收机器人已转存。", persistent_hint=True),
-            field("VSwitch", "include_subdirectories", "包含子目录", hint="本地与网盘共用；旧配置两者不一致时，请先明确选择再保存，升级不会自动改变监控范围。", persistent_hint=True),
+            field("VSwitch", "delete_source", "完成后删除源文件", hint="输出全部成功且文件未变化后删除；115需另行授权，CloudDrive只读。", persistent_hint=True),
+            field("VSwitch", "include_subdirectories", "包含子目录", hint="本地与网盘共用；旧配置不一致时请先选择再保存。", persistent_hint=True),
             field("VSwitch", "output_enabled", "生成本地 TXT 文件", hint="本地与网盘链接合并输出；关闭仍保留内部记录。", persistent_hint=True),
             field("VTextField", "output", "TXT 输出路径", placeholder="留空自动选择 ed2k.txt 路径"),
             field("VTextField", "extensions", "公共扩展名过滤", placeholder="留空处理全部文件，例如 mkv,mp4,flac"),
             field("VTextField", "min_age", "公共稳定等待秒数", type="number", hint="本地和网盘共用，请选择上传完成目录。", persistent_hint=True),
-            field("VTextField", "min_file_size_gb", "生成链接最小文件大小（GB）", type="number", step="any", min=0, placeholder="例如0.5、1、1.5，仅填数值", hint="本地与网盘共用，小于此值不生成、不转发；默认保留源文件，本地可单独开启低于阈值自动删源。固定单位GB（1GB=1024³字节），留空或0不限制。", persistent_hint=True),
+            field("VTextField", "min_file_size_gb", "生成链接最小文件大小（GB）", type="number", step="any", min=0, placeholder="例如0.5、1、1.5，仅填数值", hint="小于此值不生成、不转发；留空或0不限，单位GB。", persistent_hint=True),
             {"component": "VCardTitle", "text": "本地监控"},
-            field("VTextarea", "folder", "本地监控目录", rows=3, placeholder="/downloads/complete\n/media/movies", hint="容器内绝对路径，一行一个，最多32个；留空可仅处理网盘。", persistent_hint=True),
+            field("VTextField", "folder", "本地监控目录", placeholder="/downloads/complete,/media/movies", hint="容器内绝对路径，多个用英文逗号分隔，最多32个。", persistent_hint=True),
             field("VSwitch", "monitor_enabled", "本地实时监控文件"),
-            field("VSwitch", "delete_small_files", "低于阈值文件自动删源", hint="默认关闭；仅删除通过扩展名过滤、稳定等待后的非空本地文件，不生成、不发送链接，删除不依赖TXT或TG成功。阈值留空或0不生效；本开关不处理网盘文件。请仅用于完成目录，删除不可恢复。", persistent_hint=True),
+            field("VSwitch", "delete_small_files", "低于阈值文件自动删源", hint="稳定等待后直接删除低于阈值的非空本地文件，不生成、不发送；不可恢复。", persistent_hint=True),
             field("VSwitch", "scan_enabled", "本地定时增量补扫"),
             field("VTextField", "cron", "本地补扫计划", hint="默认每 10 分钟：*/10 * * * *", persistent_hint=True),
             {"component": "VCardTitle", "text": "网盘监控"},
             field("VSwitch", "cloud_enabled", "启用网盘增量生成"),
             field("VSelect", "cloud_storage", "网盘存储", items=[{"title": "115网盘Plus", "value": "115网盘Plus"}, {"title": "CloudDrive储存", "value": "CloudDrive储存"}]),
-            field("VTextarea", "cloud_folder", "网盘监控目录", rows=3, hint="同一存储内绝对路径，一行一个，最多32个，不能使用根目录；新版设置页可浏览追加。", persistent_hint=True),
-            field("VSwitch", "cloud_monitor_enabled", "115生活事件监控（近实时）", hint="仅处理开启后新增事件对应的单个文件，不扫描已有文件；每分钟检查一次。", persistent_hint=True),
+            field("VTextField", "cloud_folder", "网盘监控目录", placeholder="/电影,/电视剧", hint="同一存储内的绝对路径，多个用英文逗号分隔，最多32个。", persistent_hint=True),
+            field("VSwitch", "cloud_monitor_enabled", "115生活事件监控（近实时）", hint="仅处理开启后的新增事件，不扫描已有文件；每分钟检查。", persistent_hint=True),
             field("VTextField", "cloud_cron", "网盘补扫计划", hint="仅开启网盘定时增量补扫时生效，默认每10分钟。", persistent_hint=True),
-            field("VTextField", "cloud_read_timeout", "网盘读取超时（秒）", type="number", hint="30至1800秒，默认300；临时断线最多重连两次，满足强校验条件才续读。", persistent_hint=True),
+            field("VTextField", "cloud_read_timeout", "网盘读取超时（秒）", type="number", hint="30至1800秒，默认300。", persistent_hint=True),
             field("VSwitch", "cloud_scan_enabled", "网盘定时增量补扫", hint="开启后才按网盘补扫计划执行；关闭不影响手动补扫或生活事件触发。", persistent_hint=True),
             field("VSelect", "cloud_life_source", "生活事件来源", items=[{"title": "复用115插件监听（不额外请求生活接口）", "value": "shared"}, {"title": "独立轮询（每分钟一次生活接口）", "value": "direct"}]),
             {"component": "VCardTitle", "text": "ED2K链接自动转发"},
@@ -1407,6 +1407,6 @@ class Ed2kFolderWatcher(_PluginBase):
             # field("VTextField", "telegram_token", "Telegram Bot Token", type="password"),
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-5"}, "text": "仅使用个人账号发送，可在插件页面完成授权；请使用可信网络或 HTTPS。"},
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
-            field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅带话题的超级群组使用，表示将消息发到哪个话题，不是 Chat ID。", persistent_hint=True),
+            field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅用于带话题的超级群组。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
         ]}], {"enabled": False, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
