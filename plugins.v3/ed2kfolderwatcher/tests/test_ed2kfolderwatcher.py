@@ -85,6 +85,79 @@ class Ed2kTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in grouped], [first["name"], second["name"]])
         self.assertIs(grouped[0], first)
 
+    def test_batch_waits_until_all_registered_items_finish(self):
+        first_key = "local-a"
+        second_key = "local-b"
+        batch_id = self.plugin._new_batch("local-scan")
+        self.plugin._register_batch_item(batch_id, first_key)
+        self.plugin._register_batch_item(batch_id, second_key)
+        batch = self.plugin._batches[batch_id]
+        batch["sealed"] = True
+        batch["results"].add(first_key)
+        with patch.object(self.plugin, "_flush_batch") as flush:
+            self.plugin._maybe_flush_batch(batch_id)
+            flush.assert_not_called()
+            batch["results"].add(second_key)
+            self.plugin._maybe_flush_batch(batch_id)
+            flush.assert_called_once_with(batch_id)
+
+    def test_batch_timeout_moves_unfinished_items_to_retry_batch(self):
+        first_key = "cloud:item-1"
+        batch_id = self.plugin._new_batch("cloud-scan")
+        self.plugin._register_batch_item(batch_id, first_key)
+        self.plugin._pending[first_key] = (time.monotonic() + 60, {"name": "尚公主.S01E02.mkv"})
+        self.plugin._pending_batches[first_key] = batch_id
+        with patch.object(self.plugin, "_maybe_flush_batch") as flush:
+            self.plugin._expire_batch(batch_id)
+        retry_id = self.plugin._pending_batches[first_key]
+        self.assertNotEqual(retry_id, batch_id)
+        self.assertIn(first_key, self.plugin._batches[retry_id]["expected"])
+        self.assertIn(first_key, self.plugin._batches[batch_id]["results"])
+        flush.assert_any_call(batch_id)
+
+    def test_batch_registration_captures_show_season_before_processing(self):
+        batch_id = self.plugin._new_batch("local-scan")
+        first = "美国谍梦(2013)(tmdbid=46533).S06E07.mkv"
+        second = "美国谍梦(2013)(tmdbid=46533).S06E08.mkv"
+        self.plugin._telegram_aggregate = True
+        self.plugin._register_batch_item(batch_id, "one", first)
+        self.plugin._register_batch_item(batch_id, "two", second)
+        groups = self.plugin._batches[batch_id]["groups"]
+        self.assertEqual(groups["one"], groups["two"])
+        self.assertEqual(groups["one"], self.module.telegram_aggregate_key(first))
+
+    def test_new_cloud_batch_is_registered_before_sealing(self):
+        item, _ = self.cloud_fixture()
+        self.assertTrue(self.plugin._queue_cloud_file(item))
+        batch_id = self.plugin._pending_batches[self.cloud_module.record_key(item)]
+        self.assertIn(self.cloud_module.record_key(item), self.plugin._batches[batch_id]["expected"])
+        self.assertTrue(self.plugin._batches[batch_id]["sealed"])
+
+    def test_batch_flush_sends_registered_show_season_as_single_group(self):
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_enabled = True
+        batch_id = self.plugin._new_batch("local-scan")
+        cache = self.root / "records.json"
+        first_name = "剧名.S01E01.mkv"
+        second_name = "剧名.S01E02.mkv"
+        first_key, second_key = "one", "two"
+        records = {
+            first_key: {"name": first_name, "link": "ed2k://one", "telegram_sent": False},
+            second_key: {"name": second_name, "link": "ed2k://two", "telegram_sent": False},
+        }
+        cache.write_text(json.dumps(records), encoding="utf-8")
+        for key, name in ((first_key, first_name), (second_key, second_name)):
+            self.plugin._register_batch_item(batch_id, key, name)
+            self.plugin._batches[batch_id]["contexts"][key] = {
+                "kind": "local", "path": self.folder / name, "signature": (0, 0, 0, 0),
+                "output": None, "cache_path": cache,
+            }
+            self.plugin._batches[batch_id]["results"].add(key)
+        with patch.object(self.plugin, "_notify_records") as notify:
+            self.plugin._seal_batch(batch_id)
+        notify.assert_called_once()
+        self.assertEqual([record["name"] for record in notify.call_args.args[0]], [first_name, second_name])
+
     def test_multiple_local_roots_scan_missing_overlap_and_combined_output(self):
         second = self.root / "second"
         second.mkdir()

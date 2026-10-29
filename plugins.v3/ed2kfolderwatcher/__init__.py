@@ -190,7 +190,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.14.2"
+    plugin_version = "1.15.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -210,7 +210,7 @@ class Ed2kFolderWatcher(_PluginBase):
     _delete_small_files = False
     _telegram_enabled = False
     _telegram_aggregate = False
-    _telegram_aggregate_window = 600.0
+    _telegram_aggregate_window = 30.0
     _telegram_mode = "user"
     _telegram_token = ""
     _telegram_chat_id = ""
@@ -223,6 +223,12 @@ class Ed2kFolderWatcher(_PluginBase):
     _worker = None
     _stopping = None
     _pending = None
+    _pending_batches = None
+    _batches = None
+    _batch_sequence = 0
+    _active_batch_id = None
+    _live_batch_id = None
+    _live_batch_until = 0
     _condition = None
     _scan_enabled = False
     _cloud_enabled = False
@@ -245,6 +251,12 @@ class Ed2kFolderWatcher(_PluginBase):
         self._stopping = threading.Event()
         self._condition = threading.Condition()
         self._pending = {}
+        self._pending_batches = {}
+        self._batches = {}
+        self._batch_sequence = 0
+        self._active_batch_id = None
+        self._live_batch_id = None
+        self._live_batch_until = 0
         self._cloud_iterator = None
         self._cloud_adapter = None
         self._cloud_status = {"scanning": False, "file": "", "bytes_read": 0, "size": 0, "error": "", "completed": 0, "last_scan": None}
@@ -256,6 +268,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._cloud_life_failures = 0
         self._cloud_life_retry_after = 0
         self._cloud_life_candidates = {}
+        self._cloud_scan_batch_id = None
         self._cloud_status.update(reconnecting=False, stream_retries=0, retry_at=None, error_key="", life_last_poll=None, life_error="", life_events=0, life_retry_at=None, life_truncated=False)
         self._lock = threading.RLock()
         self._web_login_lock = threading.Lock()
@@ -503,7 +516,145 @@ class Ed2kFolderWatcher(_PluginBase):
         extensions = self._extension_set()
         return not extensions or path.suffix.lower().lstrip(".") in extensions
 
-    def _queue_event(self, path: Path, delay=None) -> None:
+    def _new_batch(self, source: str) -> str:
+        with self._condition:
+            self._batch_sequence += 1
+            batch_id = f"{source}-{self._batch_sequence}"
+            self._batches[batch_id] = {"source": source, "created": time.time(), "deadline": time.monotonic() + 1800,
+                                       "expected": set(), "results": set(), "sealed": False, "flushing": False,
+                                       "contexts": {}, "groups": {}}
+        return batch_id
+
+    def _seal_batch(self, batch_id: str) -> None:
+        if not batch_id:
+            return
+        with self._condition:
+            batch = self._batches.get(batch_id)
+            if batch:
+                batch["sealed"] = True
+        self._maybe_flush_batch(batch_id)
+
+    def _maybe_flush_batch(self, batch_id: str) -> None:
+        with self._condition:
+            batch = self._batches.get(batch_id)
+            if not batch or batch["flushing"] or not batch["sealed"] or not batch["expected"].issubset(batch["results"]):
+                return
+            batch["flushing"] = True
+        self._flush_batch(batch_id)
+
+    def _expire_batch(self, batch_id: str) -> None:
+        with self._condition:
+            batch = self._batches.get(batch_id)
+        if not batch:
+            return
+        with self._condition:
+            pending = [key for key in batch["expected"] - batch["results"]
+                       if self._pending_batches.get(key) == batch_id]
+        if pending:
+            retry_batch = self._new_batch(f"{batch['source']}-timeout")
+            for key in pending:
+                with self._condition:
+                    self._pending_batches[key] = retry_batch
+                    name = self._batch_item_name(key)
+                    self._register_batch_item(retry_batch, key, name)
+                    batch["results"].add(key)
+            self._seal_batch(retry_batch)
+            logger.warning(f"自动生成ED2K链接：批次等待超过30分钟，{len(pending)}个未完成文件转入后续批次：{batch_id}")
+        with self._condition:
+            batch = self._batches.get(batch_id)
+            if batch:
+                batch["sealed"] = True
+        self._maybe_flush_batch(batch_id)
+
+    def _flush_batch(self, batch_id: str) -> None:
+        with self._condition:
+            batch = self._batches.pop(batch_id, None)
+        if not batch or not batch["contexts"]:
+            return
+        entries = list(batch["contexts"].items())
+        cache_path = entries[0][1]["cache_path"]
+        output = entries[0][1]["output"]
+        try:
+            records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+        except (OSError, ValueError):
+            records = {}
+        eligible = [(key, context, records.get(key)) for key, context in entries]
+        eligible = [(key, context, record) for key, context, record in eligible if record]
+        grouped = {}
+        for key, context, record in eligible:
+            if record.get("telegram_sent"):
+                continue
+            group_key = batch["groups"].get(key) or context.get("batch_group") or telegram_aggregate_key(record.get("name", "")) or ("__single__", key)
+            grouped.setdefault(group_key, []).append(record)
+        if self._telegram_enabled:
+            for unsent in grouped.values():
+                self._notify_records(unsent, checkpoint=lambda: self._write_results(output, cache_path, records))
+            self._write_results(output, cache_path, records)
+        failed = []
+        for key, context, unused in eligible:
+            record = records.get(key)
+            if not record:
+                continue
+            if self._telegram_enabled and not record.get("telegram_sent"):
+                failed.append(context)
+                continue
+            if context["kind"] == "cloud":
+                self._maybe_delete_cloud_source(context["storage"], context["item"], record, output, cache_path, records, self._stopping)
+            elif self._delete_source and (output is not None or self._telegram_enabled):
+                path = context["path"]
+                try:
+                    final = path.stat()
+                    if context["signature"] == (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) and not self._stopping.is_set():
+                        self._unlink_source(path, final)
+                        record["source_deleted"] = True
+                        record["deleted_at"] = time.time()
+                        record.pop("delete_failed", None)
+                        self._write_results(output, cache_path, records)
+                except OSError:
+                    record["delete_failed"] = True
+                    self._write_results(output, cache_path, records)
+        if failed:
+            retry_batch = self._new_batch(f"{batch['source']}-retry")
+            for context in failed:
+                if context["kind"] == "cloud":
+                    self._queue_cloud_file(context["item"], delay=300, batch_id=retry_batch)
+                else:
+                    self._queue_event(context["path"], delay=60, batch_id=retry_batch)
+            self._seal_batch(retry_batch)
+
+    def _live_batch(self) -> str:
+        with self._condition:
+            now = time.monotonic()
+            expired = self._live_batch_id and now >= self._live_batch_until
+            missing = self._live_batch_id and self._live_batch_id not in self._batches
+            old_batch = self._live_batch_id if expired or missing else None
+            if old_batch:
+                self._live_batch_id = None
+        if old_batch:
+            self._seal_batch(old_batch)
+        with self._condition:
+            if not self._live_batch_id or self._live_batch_id not in self._batches:
+                self._live_batch_id = self._new_batch("local-live")
+            self._live_batch_until = time.monotonic() + 10
+            return self._live_batch_id
+
+    def _batch_item_name(self, key: str, item=None) -> str:
+        if item is not None:
+            return str(item.get("name") or item.get("path") or key) if isinstance(item, dict) else str(item)
+        pending = self._pending.get(key)
+        if isinstance(pending, tuple) and len(pending) > 1 and isinstance(pending[1], dict):
+            return str(pending[1].get("name") or pending[1].get("path") or key)
+        return Path(key).name if not key.startswith("cloud:") else key
+
+    def _register_batch_item(self, batch_id: str, key: str, name: str = None) -> None:
+        with self._condition:
+            batch = self._batches.get(batch_id)
+            if batch:
+                batch["expected"].add(key)
+                item_name = name or self._batch_item_name(key)
+                batch["groups"][key] = telegram_aggregate_key(item_name) if self._telegram_aggregate else ("__single__", key)
+
+    def _queue_event(self, path: Path, delay=None, batch_id=None) -> None:
         if self._stopping.is_set():
             return
         try:
@@ -511,9 +662,21 @@ class Ed2kFolderWatcher(_PluginBase):
                 return
             stat = path.stat()
             signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+            batch_id = batch_id or self._active_batch_id or self._live_batch()
+            completed_old = None
             with self._condition:
+                old_batch = self._pending_batches.get(str(path))
+                if old_batch and old_batch != batch_id:
+                    old_state = self._batches.get(old_batch)
+                    if old_state:
+                        old_state["results"].add(str(path))
+                        completed_old = old_batch
                 self._pending[str(path)] = (time.monotonic() + (max(1, self._min_age) if delay is None else delay), signature)
+                self._pending_batches[str(path)] = batch_id
+                self._register_batch_item(batch_id, str(path), path.name)
                 self._condition.notify()
+            if completed_old:
+                self._maybe_flush_batch(completed_old)
         except OSError:
             return
 
@@ -528,18 +691,41 @@ class Ed2kFolderWatcher(_PluginBase):
 
     def _work(self) -> None:
         while not self._stopping.is_set():
+            flush = []
+            expired = []
             with self._condition:
-                if not self._pending:
+                now = time.monotonic()
+                if self._live_batch_id and now >= self._live_batch_until:
+                    flush.append(self._live_batch_id)
+                    self._live_batch_id = None
+                expired = [batch_id for batch_id, batch in self._batches.items()
+                           if not batch["sealed"] and batch["source"] != "cloud-scan"
+                           and time.monotonic() >= batch["deadline"]]
+                flush.extend(expired)
+                if flush:
+                    key = None
+                    signature = None
+                elif not self._pending:
                     self._condition.wait(timeout=1)
                     continue
-                key = self._next_pending_key()
-                due, signature = self._pending[key]
-                remaining = due - time.monotonic()
-                if remaining > 0:
-                    self._condition.wait(timeout=min(remaining, 1))
-                    continue
-                del self._pending[key]
+                else:
+                    key = self._next_pending_key()
+                    due, signature = self._pending[key]
+                    remaining = due - time.monotonic()
+                    if remaining > 0:
+                        self._condition.wait(timeout=min(remaining, 1))
+                        continue
+                    del self._pending[key]
+                    batch_id = self._pending_batches.pop(key, None)
+            for batch_id in flush:
+                if batch_id in expired:
+                    self._expire_batch(batch_id)
+                else:
+                    self._maybe_flush_batch(batch_id)
+            if key is None:
+                continue
             batch = [(key, signature)]
+            batch_ids = {key: batch_id}
             if self._telegram_aggregate:
                 with self._condition:
                     now = time.monotonic()
@@ -550,9 +736,20 @@ class Ed2kFolderWatcher(_PluginBase):
                     )
                     for extra_key, extra_signature in extras:
                         del self._pending[extra_key]
+                        batch_ids[extra_key] = self._pending_batches.pop(extra_key, None)
                         batch.append((extra_key, extra_signature))
             for batch_key, batch_signature in batch:
+                item_batch_id = batch_ids.get(batch_key)
+                self._active_batch_id = item_batch_id
                 self._work_item(batch_key, batch_signature)
+                self._active_batch_id = None
+                with self._condition:
+                    still_pending = batch_key in self._pending
+                    state = self._batches.get(item_batch_id) if item_batch_id and not still_pending else None
+                    if state:
+                        state["results"].add(batch_key)
+                if state:
+                    self._maybe_flush_batch(item_batch_id)
 
     def _work_item(self, key, signature):
             path = Path(key)
@@ -577,17 +774,19 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._cloud_status.update(error=detail, file="")
                     filename = signature.get("name", "未知文件") if isinstance(signature, dict) else "目录补扫"
                     logger.warning(f"自动生成ED2K链接：{filename}：{detail}")
-                    if key == "__cloud_scan__":
-                        self._cloud_iterator = None
-                        self._cloud_adapter = None
-                        self._cloud_status["scanning"] = False
-                    else:
-                        failures = min(5, self._cloud_failures.get(key, 0) + 1)
-                        self._cloud_failures[key] = failures
-                        delay = min(3600, 300 * 2 ** (failures - 1))
-                        self._cloud_status.update(reconnecting=False, error_key=key, retry_at=time.time() + delay)
-                        self._queue_cloud_file(signature, delay=delay)
-                    return
+                if key == "__cloud_scan__":
+                    self._cloud_iterator = None
+                    self._cloud_adapter = None
+                    self._cloud_status["scanning"] = False
+                    self._seal_batch(self._cloud_scan_batch_id)
+                    self._cloud_scan_batch_id = None
+                else:
+                    failures = min(5, self._cloud_failures.get(key, 0) + 1)
+                    self._cloud_failures[key] = failures
+                    delay = min(3600, 300 * 2 ** (failures - 1))
+                    self._cloud_status.update(reconnecting=False, error_key=key, retry_at=time.time() + delay)
+                    self._queue_cloud_file(signature, delay=delay)
+                return
                 if isinstance(err, FileNotFoundError):
                     return
                 logger.warning(f"自动生成ED2K链接：处理失败，60秒后重试：{path}：{type(err).__name__}")
@@ -688,10 +887,13 @@ class Ed2kFolderWatcher(_PluginBase):
                     logger.info(f"自动生成ED2K链接：生活事件文件复查10次未加入队列：{label}（文件ID {file_id}）；原因：{reason}；如确认符合条件可手动补扫")
                 elif candidate["attempts"] == 1:
                     logger.info(f"自动生成ED2K链接：新增事件暂未加入队列，保留限次复查：{label}（文件ID {file_id}）；原因：{reason}")
+            life_batch_id = self._new_batch("cloud-life") if ready_items else None
             with self._condition:
                 for item in sorted(ready_items, key=lambda item: filename_order(item["path"])):
-                    if self._queue_cloud_file(item):
+                    if self._queue_cloud_file(item, batch_id=life_batch_id):
                         queued += 1
+            if life_batch_id:
+                self._seal_batch(life_batch_id)
             self._cloud_status["life_events"] += queued
             self._cloud_life_failures = 0
             self._cloud_life_retry_after = 0
@@ -720,18 +922,30 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._condition.notify_all()
         return {"ok": True, "message": "网盘增量扫描已加入后台队列；不会删除网盘文件，首次读取会消耗完整文件流量"}
 
-    def _queue_cloud_file(self, item: dict, delay=0) -> bool:
+    def _queue_cloud_file(self, item: dict, delay=0, batch_id=None) -> bool:
         from .cloud_storage import record_key
         if self._stopping.is_set():
             return False
         key = record_key(item)
+        batch_id = batch_id or self._active_batch_id
+        created_batch = False
+        if batch_id is None:
+            with self._condition:
+                batch_id = self._pending_batches.get(key)
+            if batch_id is None:
+                batch_id = self._new_batch("cloud-retry")
+                created_batch = True
         with self._condition:
             if key not in self._pending:
                 self._pending[key] = (time.monotonic() + delay, item)
+                self._pending_batches[key] = batch_id
+                self._register_batch_item(batch_id, key, self._batch_item_name(key, item))
                 queued = True
             else:
                 queued = False
             self._condition.notify_all()
+        if created_batch:
+            self._seal_batch(batch_id)
         return queued
 
     def _cloud_item_is_eligible(self, item: dict) -> bool:
@@ -764,6 +978,7 @@ class Ed2kFolderWatcher(_PluginBase):
         if self._stopping.is_set() or not self._cloud_enabled:
             return
         if self._cloud_iterator is None:
+            self._cloud_scan_batch_id = self._new_batch("cloud-scan")
             self._cloud_adapter = CloudStorage(self._cloud_storage)
             adapter = self._cloud_adapter
             roots = monitor_roots(self._cloud_folder, cloud=True, recursive=self._cloud_recursive)
@@ -790,11 +1005,13 @@ class Ed2kFolderWatcher(_PluginBase):
                 except StopIteration:
                     self._cloud_iterator = None
                     self._cloud_status.update(scanning=False, last_scan=time.time())
+                    self._seal_batch(self._cloud_scan_batch_id)
+                    self._cloud_scan_batch_id = None
                     return
                 if item is None:
                     break
                 if self._cloud_item_is_eligible(item):
-                    self._queue_cloud_file(item)
+                    self._queue_cloud_file(item, batch_id=self._cloud_scan_batch_id)
         with self._condition:
             self._pending["__cloud_scan__"] = (time.monotonic() + 1, None)
 
@@ -902,6 +1119,18 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._cloud_status["completed"] += 1
                 logger.info(f"自动生成ED2K链接：网盘文件生成完成：{item['storage']}：{item['name']}")
             self._write_results(output, cache_path, records)
+            if self._telegram_aggregate and self._active_batch_id in self._batches:
+                with self._condition:
+                    batch = self._batches.get(self._active_batch_id)
+                    if batch:
+                        batch["contexts"][key] = {"kind": "cloud", "item": item, "storage": storage,
+                            "output": output, "cache_path": cache_path,
+                            "batch_group": batch["groups"].get(key)}
+                self._cloud_observed.pop(record_key(item), None)
+                self._cloud_succeeded(key)
+                self._cloud_status["reconnecting"] = False
+                self._cloud_status["file"] = ""
+                return
             if self._telegram_aggregate:
                 candidates = self._aggregate_candidates(record, cache_path, records)
                 if candidates:
@@ -1296,6 +1525,14 @@ class Ed2kFolderWatcher(_PluginBase):
                 records[key] = record
                 logger.info(f"自动生成ED2K链接：生成完成：{path}")
             self._write_results(output, cache_path, records)
+            if self._telegram_aggregate and self._active_batch_id in self._batches:
+                with self._condition:
+                    batch = self._batches.get(self._active_batch_id)
+                    if batch:
+                        batch["contexts"][key] = {"kind": "local", "path": path, "signature": signature,
+                            "output": output, "cache_path": cache_path,
+                            "batch_group": batch["groups"].get(key)}
+                return
             if self._telegram_aggregate:
                 candidates = self._aggregate_candidates(record, cache_path, records)
                 if candidates:
@@ -1333,6 +1570,7 @@ class Ed2kFolderWatcher(_PluginBase):
             records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
             if self._output_enabled:
                 self._write_results(output, cache_path, records)
+        batch_id = self._new_batch("local-scan")
         for folder in self._local_roots():
             if not folder.is_dir():
                 logger.warning(f"自动生成ED2K链接：目录不存在：{folder}")
@@ -1340,7 +1578,8 @@ class Ed2kFolderWatcher(_PluginBase):
             for path in self._iter_files(folder):
                 if self._stopping.is_set():
                     return
-                self._queue_event(path)
+                self._queue_event(path, batch_id=batch_id)
+        self._seal_batch(batch_id)
         logger.info("自动生成ED2K链接：增量补扫已入队，已有链接不会重复计算")
 
     def get_service(self) -> List[Dict[str, Any]]:
