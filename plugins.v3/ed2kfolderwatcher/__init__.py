@@ -190,7 +190,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.14.1"
+    plugin_version = "1.14.2"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -903,7 +903,12 @@ class Ed2kFolderWatcher(_PluginBase):
                 logger.info(f"自动生成ED2K链接：网盘文件生成完成：{item['storage']}：{item['name']}")
             self._write_results(output, cache_path, records)
             if self._telegram_aggregate:
-                self._notify_records(self._aggregate_candidates(record, cache_path), checkpoint=lambda: self._write_results(output, cache_path, records))
+                candidates = self._aggregate_candidates(record, cache_path, records)
+                if candidates:
+                    self._notify_records(candidates, checkpoint=lambda: self._write_results(output, cache_path, records))
+                else:
+                    record.setdefault("telegram_aggregate_waiting_since", time.time())
+                    self._write_results(output, cache_path, records)
             else:
                 self._notify_record(Path(item["name"]), record, checkpoint=lambda: self._write_results(output, cache_path, records))
             self._write_results(output, cache_path, records)
@@ -912,7 +917,8 @@ class Ed2kFolderWatcher(_PluginBase):
             self._cloud_status["reconnecting"] = False
             self._cloud_status["file"] = ""
             if self._telegram_enabled and not record.get("telegram_sent"):
-                self._queue_cloud_file(item, delay=300)
+                delay = self._telegram_aggregate_window if self._telegram_aggregate else 300
+                self._queue_cloud_file(item, delay=delay)
             else:
                 self._maybe_delete_cloud_source(storage, item, record, output, cache_path, records, stopping)
 
@@ -1159,30 +1165,33 @@ class Ed2kFolderWatcher(_PluginBase):
             deliveries = record["telegram_deliveries"]
             record["telegram_sent"] = all(deliveries.get(self._telegram_delivery_key(*target)) for target in targets)
             record["telegram_target"] = target_key if record["telegram_sent"] else ""
+            if record["telegram_sent"]:
+                record.pop("telegram_aggregate_waiting_since", None)
 
-    def _aggregate_candidates(self, record, cache_path):
+    def _aggregate_candidates(self, record, cache_path, records=None):
         if not self._telegram_aggregate:
             return [record]
-        try:
-            records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
-        except (OSError, ValueError):
-            return [record]
+        if records is None:
+            try:
+                records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+            except (OSError, ValueError):
+                return [record]
         key = telegram_aggregate_key(record.get("name", ""))
         if key is None:
             return [record]
-        now = time.time()
-        candidates = []
-        for item in records.values():
-            if item is record or item.get("telegram_sent"):
-                continue
-            if telegram_aggregate_key(item.get("name", "")) != key:
-                continue
-            if now - float(item.get("generated_at", now)) > self._telegram_aggregate_window:
-                continue
-            if record_problem(item):
-                continue
-            candidates.append(item)
-        return candidates + [record]
+        candidates = [item for item in records.values()
+                      if not item.get("telegram_sent")
+                      and telegram_aggregate_key(item.get("name", "")) == key
+                      and not record_problem(item)
+                      and time.time() - float(item.get("generated_at", time.time())) <= self._telegram_aggregate_window]
+        candidates = [item for item in candidates if item.get("link") != record.get("link")]
+        candidates.append(record)
+        if len(candidates) == 1:
+            waiting_since = float(record.get("telegram_aggregate_waiting_since", record.get("generated_at", time.time())))
+            if time.time() - waiting_since < self._telegram_aggregate_window:
+                return []
+        candidates.sort(key=lambda item: filename_order(item.get("name", "")))
+        return candidates
 
     def _iter_files(self, folder: Path):
         if self._recursive:
@@ -1288,13 +1297,19 @@ class Ed2kFolderWatcher(_PluginBase):
                 logger.info(f"自动生成ED2K链接：生成完成：{path}")
             self._write_results(output, cache_path, records)
             if self._telegram_aggregate:
-                self._notify_records(self._aggregate_candidates(record, cache_path), checkpoint=lambda: self._write_results(output, cache_path, records))
+                candidates = self._aggregate_candidates(record, cache_path, records)
+                if candidates:
+                    self._notify_records(candidates, checkpoint=lambda: self._write_results(output, cache_path, records))
+                else:
+                    record.setdefault("telegram_aggregate_waiting_since", time.time())
+                    self._write_results(output, cache_path, records)
             else:
                 self._notify_record(path, record, checkpoint=lambda: self._write_results(output, cache_path, records))
             self._write_results(output, cache_path, records)
             delivered = not self._telegram_enabled or record.get("telegram_sent")
             if not delivered:
-                self._queue_event(path, delay=60)
+                delay = self._telegram_aggregate_window if self._telegram_aggregate else 60
+                self._queue_event(path, delay=delay)
             if self._delete_source and delivered and (output is not None or self._telegram_enabled):
                 final = path.stat()
                 if signature == (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) and stat.st_ctime_ns == final.st_ctime_ns and not self._stopping.is_set():
