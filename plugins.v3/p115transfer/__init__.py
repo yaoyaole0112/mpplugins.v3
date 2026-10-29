@@ -194,7 +194,7 @@ class P115Transfer(_PluginBase):
     plugin_name = "115转存/离线"
     plugin_desc = "通过Telegram Bot接收115分享及离线链接，支持Telegraph资源页面和消息URL按钮，保存到指定115目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "p115transfer_"
@@ -619,6 +619,7 @@ class P115Transfer(_PluginBase):
             limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
             webhook_checked = False
             failures = 0
+            failed_paths = 0
             outage_reported = False
             while not stop.is_set():
                 if client is None:
@@ -641,9 +642,10 @@ class P115Transfer(_PluginBase):
                         "getUpdates",
                         {"offset": offset, "timeout": 25, "allowed_updates": ["message"]},
                     )
-                    if outage_reported:
+                    if self._bot_error:
                         logger.info("115转存/离线：Bot连接已恢复，当前连接方式：%s，继续监听", proxy_source)
                     failures = 0
+                    failed_paths = 0
                     outage_reported = False
                     self._bot_error = ""
                     for update in updates:
@@ -657,46 +659,40 @@ class P115Transfer(_PluginBase):
                     logger.warning("115转存/离线：%s", self._bot_error)
                     return
                 except Exception as exc:
-                    if self._is_proxy_failover_error(exc, httpx) and proxy_index + 1 < len(proxies):
-                        failed_source = proxy_source
+                    network_error = self._is_proxy_failover_error(exc, httpx)
+                    failed_source = proxy_source
+                    if network_error:
+                        failed_paths += 1
                         if client is not None:
                             client.close()
                             client = None
-                        proxy_index += 1
+                        proxy_index = (proxy_index + 1) % len(proxies)
                         proxy_source, proxy = proxies[proxy_index]
-                        self._bot_proxy_source = proxy_source
-                        webhook_checked = False
+                        if len(proxies) > 1:
+                            webhook_checked = False
+                    if network_error and failed_paths < len(proxies):
                         reason = self._bot_error_reason(exc, httpx)
                         self._bot_error = f"{type(exc).__name__}：{reason}；正在切换连接方式"
-                        if not outage_reported:
-                            logger.warning(
-                                "115转存/离线：%s（%s），正在切换到%s；不重放转存",
-                                self._bot_error,
-                                failed_source,
-                                proxy_source,
-                            )
-                            outage_reported = True
-                        else:
-                            logger.info(
-                                "115转存/离线：Bot连接方式%s失败，切换到%s",
-                                failed_source,
-                                proxy_source,
-                            )
+                        logger.info(
+                            "115转存/离线：Bot连接暂时异常（%s，%s），自动切换到%s；不重放转存",
+                            type(exc).__name__, failed_source, proxy_source,
+                        )
+                        self._bot_proxy_source = proxy_source
                         continue
                     failures += 1
                     delay = min(300, 30 * 2 ** min(failures - 1, 4))
                     reason = self._bot_error_reason(exc, httpx)
                     self._bot_error = f"{type(exc).__name__}：{reason}；{delay}秒后重试"
                     if not outage_reported:
-                        logger.warning("115转存/离线：%s（%s）；不重放转存", self._bot_error, self._bot_proxy_source)
+                        scope = "本轮全部连接方式均失败" if network_error else "请求异常"
+                        logger.warning("115转存/离线：%s；%s（%s）；不重放转存", scope, self._bot_error, failed_source)
                         outage_reported = True
                     else:
                         logger.info("115转存/离线：Bot仍在重连（第%d次，%d秒后重试）", failures, delay)
                     if client is not None:
                         client.close()
                         client = None
-                    proxy_index = 0
-                    proxy_source, proxy = proxies[proxy_index]
+                    failed_paths = 0
                     self._bot_proxy_source = proxy_source
                     stop.wait(delay)
         except Exception as exc:

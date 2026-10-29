@@ -380,7 +380,8 @@ class TransferPluginTest(unittest.TestCase):
         self.assertEqual(httpx.Client.call_args_list[0].kwargs["proxy"], "socks5://plugin-proxy:6153")
         self.assertEqual(httpx.Client.call_args_list[1].kwargs["proxy"], "http://mp-proxy:6152")
         self.assertEqual(plugin._bot_proxy_source, "MoviePilot配置")
-        self.assertEqual(log.warning.call_count, 1)
+        log.warning.assert_not_called()
+        self.assertTrue(any("Bot连接已恢复" in entry.args[0] for entry in log.info.call_args_list))
         self.assertNotIn("secret-token", plugin._bot_error)
         self.assertEqual(plugin._bot_error, "")
 
@@ -437,6 +438,90 @@ class TransferPluginTest(unittest.TestCase):
         stop.wait.assert_called_once_with(30)
         self.assertEqual([call.args[1] for call in plugin._bot_call.call_args_list], ["getWebhookInfo", "getWebhookInfo", "getUpdates"])
         self.assertEqual(plugin._bot_error, "")
+
+    def test_proxy_failover_wraps_after_recovery_without_warning_or_delay(self):
+        plugin = self.module.P115Transfer()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxies = Mock(return_value=[
+            ("插件配置", "http://first-proxy"),
+            ("MoviePilot配置", "http://second-proxy"),
+            ("运行环境网络", None),
+        ])
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.ReadTimeout = type("ReadTimeout", (Exception,), {})
+        httpx.Timeout = Mock()
+        httpx.Limits = Mock()
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=[
+            httpx.ConnectError(), {}, [],
+            httpx.ReadTimeout(), httpx.ConnectError(), {}, [],
+        ])
+        stop = Mock()
+        stop.is_set.side_effect = [False] * 5 + [True]
+        with patch.dict(sys.modules, {"httpx": httpx}), patch.object(self.module, "logger") as log:
+            plugin._poll_bot(stop)
+        self.assertEqual([entry.kwargs["proxy"] for entry in httpx.Client.call_args_list], [
+            "http://first-proxy", "http://second-proxy", None, "http://first-proxy",
+        ])
+        stop.wait.assert_not_called()
+        log.warning.assert_not_called()
+        self.assertEqual(plugin._bot_proxy_source, "插件配置")
+        self.assertEqual(plugin._bot_error, "")
+        self.assertEqual(sum("Bot连接已恢复" in entry.args[0] for entry in log.info.call_args_list), 2)
+
+    def test_repeated_failed_cycles_warn_once_only_after_all_paths_fail(self):
+        plugin = self.module.P115Transfer()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxies = Mock(return_value=[
+            ("插件配置", "http://private-first"),
+            ("MoviePilot配置", "http://private-second"),
+            ("运行环境网络", None),
+        ])
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Timeout = Mock()
+        httpx.Limits = Mock()
+        httpx.Client = MagicMock()
+        stop = Mock()
+        stop.is_set.side_effect = [False] * 7 + [True]
+        warnings_before_calls = []
+        with patch.dict(sys.modules, {"httpx": httpx}), patch.object(self.module, "logger") as log:
+            def bot_call(client, method, payload):
+                warnings_before_calls.append(log.warning.call_count)
+                if len(warnings_before_calls) <= 6:
+                    raise httpx.ConnectError("private-token-in-url")
+                return {} if method == "getWebhookInfo" else []
+            plugin._bot_call = Mock(side_effect=bot_call)
+            plugin._poll_bot(stop)
+        self.assertEqual(warnings_before_calls[:4], [0, 0, 0, 1])
+        self.assertEqual(log.warning.call_count, 1)
+        self.assertIn("本轮全部连接方式均失败", str(log.warning.call_args))
+        self.assertNotIn("private-", str(log.mock_calls))
+        self.assertEqual(stop.wait.call_args_list, [call(30), call(60)])
+        self.assertEqual(plugin._bot_error, "")
+
+    def test_proxy_switch_preserves_update_offset_and_does_not_replay(self):
+        plugin = self.module.P115Transfer()
+        plugin.get_data = Mock(return_value=10)
+        plugin.save_data = Mock()
+        plugin._bot_message = Mock()
+        plugin._resolve_bot_proxies = Mock(return_value=[("插件配置", "http://proxy"), ("运行环境网络", None)])
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Timeout = Mock()
+        httpx.Limits = Mock()
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=[{}, [{"update_id": 10, "message": {}}], httpx.ConnectError(), {}, []])
+        stop = Mock()
+        stop.is_set.side_effect = [False] * 4 + [True]
+        with patch.dict(sys.modules, {"httpx": httpx}), patch.object(self.module, "logger") as log:
+            plugin._poll_bot(stop)
+        plugin._bot_message.assert_called_once()
+        self.assertEqual(plugin.save_data.call_count, 1)
+        self.assertEqual(plugin.save_data.call_args.args[1], 11)
+        self.assertEqual([entry.args[2]["offset"] for entry in plugin._bot_call.call_args_list if entry.args[1] == "getUpdates"], [10, 11, 11])
+        log.warning.assert_not_called()
 
     def test_startup_backoff_is_bounded_and_stoppable(self):
         plugin = self.module.P115Transfer()
