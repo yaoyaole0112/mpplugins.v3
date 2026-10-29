@@ -62,6 +62,16 @@ class Ed2kTests(unittest.TestCase):
         self.assertEqual(sum(len(chunk) for chunk in chunks), len(records))
         self.assertTrue(all(len("\n".join(item["link"] for item in chunk)) <= self.module.TELEGRAM_MESSAGE_LIMIT for chunk in chunks))
 
+    def test_telegram_aggregate_candidates_use_recent_unsent_same_season_records(self):
+        cache = self.root / "records.json"
+        now = time.time()
+        first = {"name": "尚公主(2026).S01E01.mkv", "link": "ed2k://|file|a|1|" + "a" * 32 + "|/", "generated_at": now - 2, "telegram_sent": False}
+        second = {"name": "尚公主(2026).S01E02.mkv", "link": "ed2k://|file|b|1|" + "b" * 32 + "|/", "generated_at": now, "telegram_sent": False}
+        old = {"name": "尚公主(2026).S01E03.mkv", "link": "ed2k://|file|c|1|" + "c" * 32 + "|/", "generated_at": now - 20, "telegram_sent": False}
+        cache.write_text(json.dumps({"first": first, "old": old}), encoding="utf-8")
+        self.plugin._telegram_aggregate = True
+        self.assertEqual(self.plugin._aggregate_candidates(second, cache), [first, second])
+
     def test_multiple_local_roots_scan_missing_overlap_and_combined_output(self):
         second = self.root / "second"
         second.mkdir()

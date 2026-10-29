@@ -190,7 +190,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.14.0"
+    plugin_version = "1.14.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -210,6 +210,7 @@ class Ed2kFolderWatcher(_PluginBase):
     _delete_small_files = False
     _telegram_enabled = False
     _telegram_aggregate = False
+    _telegram_aggregate_window = 600.0
     _telegram_mode = "user"
     _telegram_token = ""
     _telegram_chat_id = ""
@@ -902,7 +903,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 logger.info(f"自动生成ED2K链接：网盘文件生成完成：{item['storage']}：{item['name']}")
             self._write_results(output, cache_path, records)
             if self._telegram_aggregate:
-                self._notify_records([record], checkpoint=lambda: self._write_results(output, cache_path, records))
+                self._notify_records(self._aggregate_candidates(record, cache_path), checkpoint=lambda: self._write_results(output, cache_path, records))
             else:
                 self._notify_record(Path(item["name"]), record, checkpoint=lambda: self._write_results(output, cache_path, records))
             self._write_results(output, cache_path, records)
@@ -1159,6 +1160,30 @@ class Ed2kFolderWatcher(_PluginBase):
             record["telegram_sent"] = all(deliveries.get(self._telegram_delivery_key(*target)) for target in targets)
             record["telegram_target"] = target_key if record["telegram_sent"] else ""
 
+    def _aggregate_candidates(self, record, cache_path):
+        if not self._telegram_aggregate:
+            return [record]
+        try:
+            records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+        except (OSError, ValueError):
+            return [record]
+        key = telegram_aggregate_key(record.get("name", ""))
+        if key is None:
+            return [record]
+        now = time.time()
+        candidates = []
+        for item in records.values():
+            if item is record or item.get("telegram_sent"):
+                continue
+            if telegram_aggregate_key(item.get("name", "")) != key:
+                continue
+            if now - float(item.get("generated_at", now)) > self._telegram_aggregate_window:
+                continue
+            if record_problem(item):
+                continue
+            candidates.append(item)
+        return candidates + [record]
+
     def _iter_files(self, folder: Path):
         if self._recursive:
             iterator = os.walk(folder)
@@ -1263,7 +1288,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 logger.info(f"自动生成ED2K链接：生成完成：{path}")
             self._write_results(output, cache_path, records)
             if self._telegram_aggregate:
-                self._notify_records([record], checkpoint=lambda: self._write_results(output, cache_path, records))
+                self._notify_records(self._aggregate_candidates(record, cache_path), checkpoint=lambda: self._write_results(output, cache_path, records))
             else:
                 self._notify_record(path, record, checkpoint=lambda: self._write_results(output, cache_path, records))
             self._write_results(output, cache_path, records)
