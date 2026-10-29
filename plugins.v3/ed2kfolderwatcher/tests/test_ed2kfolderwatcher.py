@@ -48,6 +48,20 @@ class Ed2kTests(unittest.TestCase):
         path.write_bytes(data)
         return path
 
+    def test_telegram_aggregate_key_groups_same_show_and_season_only(self):
+        key = self.module.telegram_aggregate_key
+        self.assertEqual(key("美国谍梦(2013)(tmdbid=46533).S06E07.mkv"), key("美国谍梦(2013)(tmdbid=46533).S06E08.mkv"))
+        self.assertNotEqual(key("美国谍梦(2013)(tmdbid=46533).S06E07.mkv"), key("美国谍梦(2013)(tmdbid=46533).S05E07.mkv"))
+        self.assertNotEqual(key("美国谍梦.S06E07.mkv"), key("继承之战.S06E07.mkv"))
+        self.assertIsNone(key("电影.mkv"))
+
+    def test_telegram_message_chunks_keep_complete_links(self):
+        records = [{"link": "ed2k://|file|" + "a" * 100 + "|1|" + "b" * 32 + "|/"} for _ in range(50)]
+        chunks = self.module.telegram_message_chunks(records)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(sum(len(chunk) for chunk in chunks), len(records))
+        self.assertTrue(all(len("\n".join(item["link"] for item in chunk)) <= self.module.TELEGRAM_MESSAGE_LIMIT for chunk in chunks))
+
     def test_multiple_local_roots_scan_missing_overlap_and_combined_output(self):
         second = self.root / "second"
         second.mkdir()

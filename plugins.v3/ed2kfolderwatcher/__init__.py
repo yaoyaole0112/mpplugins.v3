@@ -38,6 +38,7 @@ ED2K_PART_SIZE = 9_728_000
 DEFAULT_CRON = "*/10 * * * *"
 DEFAULT_EXTENSIONS = ""
 EMPTY_MD4 = "31d6cfe0d16ae931b73c59d7e0c089c0"
+TELEGRAM_MESSAGE_LIMIT = 3800
 
 
 def record_problem(record: dict) -> str:
@@ -157,11 +158,39 @@ def telegram_error_hint(error: Exception) -> str:
     return "请检查目标、权限与网络；源文件及链接记录已保留"
 
 
+def telegram_aggregate_key(name: str):
+    match = re.search(r"(?:^|[. _-])S(\d{1,3})(?:E\d{1,4})?(?:[. _-]|$)", name, re.IGNORECASE)
+    if not match:
+        return None
+    title = re.sub(r"[. _-]+$", "", name[:match.start()]).strip()
+    if not title:
+        return None
+    return title.casefold(), int(match.group(1))
+
+
+def telegram_message_chunks(records: list) -> list:
+    chunks = []
+    current = []
+    length = 0
+    for record in records:
+        link = record["link"]
+        extra = len(link) + (1 if current else 0)
+        if current and length + extra > TELEGRAM_MESSAGE_LIMIT:
+            chunks.append(current)
+            current = []
+            length = 0
+        current.append(record)
+        length += len(link) + (1 if len(current) > 1 else 0)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.13.2"
+    plugin_version = "1.14.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -180,6 +209,7 @@ class Ed2kFolderWatcher(_PluginBase):
     _cloud_delete_scope = ""
     _delete_small_files = False
     _telegram_enabled = False
+    _telegram_aggregate = False
     _telegram_mode = "user"
     _telegram_token = ""
     _telegram_chat_id = ""
@@ -259,6 +289,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._cloud_delete_scope = str(config.get("cloud_delete_scope") or "")
         self._delete_small_files = bool(config.get("delete_small_files", False))
         self._telegram_enabled = bool(config.get("telegram_enabled", False))
+        self._telegram_aggregate = bool(config.get("telegram_aggregate", False))
         self._telegram_mode = "user"
         self._telegram_token = str(config.get("telegram_token") or "").strip()
         self._telegram_chat_id = str(config.get("telegram_chat_id") or "").strip()
@@ -507,18 +538,34 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._condition.wait(timeout=min(remaining, 1))
                     continue
                 del self._pending[key]
+            batch = [(key, signature)]
+            if self._telegram_aggregate:
+                with self._condition:
+                    now = time.monotonic()
+                    extras = sorted(
+                        ((extra_key, extra_signature) for extra_key, (extra_due, extra_signature) in self._pending.items()
+                         if not extra_key.startswith("__") and extra_due <= now),
+                        key=lambda item: filename_order(item[1].get("name", item[0]) if isinstance(item[1], dict) else item[0]),
+                    )
+                    for extra_key, extra_signature in extras:
+                        del self._pending[extra_key]
+                        batch.append((extra_key, extra_signature))
+            for batch_key, batch_signature in batch:
+                self._work_item(batch_key, batch_signature)
+
+    def _work_item(self, key, signature):
             path = Path(key)
             try:
                 if key == "__cloud_scan__":
                     self._cloud_scan_step()
-                    continue
+                    return
                 if key.startswith("cloud:"):
                     self._process_cloud_file(signature)
-                    continue
+                    return
                 stat = path.stat()
                 if signature != (stat.st_size, stat.st_mtime_ns, stat.st_ino):
                     self._queue_event(path)
-                    continue
+                    return
                 self._process_file(path)
             except InterruptedError:
                 return
@@ -539,9 +586,9 @@ class Ed2kFolderWatcher(_PluginBase):
                         delay = min(3600, 300 * 2 ** (failures - 1))
                         self._cloud_status.update(reconnecting=False, error_key=key, retry_at=time.time() + delay)
                         self._queue_cloud_file(signature, delay=delay)
-                    continue
+                    return
                 if isinstance(err, FileNotFoundError):
-                    continue
+                    return
                 logger.warning(f"自动生成ED2K链接：处理失败，60秒后重试：{path}：{type(err).__name__}")
                 self._queue_event(path, delay=60)
 
@@ -854,7 +901,10 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._cloud_status["completed"] += 1
                 logger.info(f"自动生成ED2K链接：网盘文件生成完成：{item['storage']}：{item['name']}")
             self._write_results(output, cache_path, records)
-            self._notify_record(Path(item["name"]), record, checkpoint=lambda: self._write_results(output, cache_path, records))
+            if self._telegram_aggregate:
+                self._notify_records([record], checkpoint=lambda: self._write_results(output, cache_path, records))
+            else:
+                self._notify_record(Path(item["name"]), record, checkpoint=lambda: self._write_results(output, cache_path, records))
             self._write_results(output, cache_path, records)
             self._cloud_observed.pop(record_key(item), None)
             self._cloud_succeeded(key)
@@ -1031,6 +1081,9 @@ class Ed2kFolderWatcher(_PluginBase):
             logger.warning(f"自动生成ED2K链接：Telegram 个人账号发送失败（目标 {retry_key[0]}）：{detail}；保留源文件，{cooldown}秒后允许重试，不会退回 Bot 模式")
             return False
 
+    def _send_telegram_text(self, text: str, target=None, path_name="聚合链接") -> bool:
+        return self._send_telegram(Path(path_name), text, target=target)
+
     def _notify_record(self, path: Path, record: dict, checkpoint=None) -> None:
         if not self._telegram_enabled:
             return
@@ -1068,6 +1121,43 @@ class Ed2kFolderWatcher(_PluginBase):
                     checkpoint()
         record["telegram_sent"] = all(deliveries.get(self._telegram_delivery_key(*target)) for target in targets)
         record["telegram_target"] = target_key if record["telegram_sent"] else ""
+
+    def _notify_records(self, records: list, checkpoint=None) -> None:
+        if not records:
+            return
+        if not self._telegram_enabled:
+            return
+        targets = self._telegram_targets()
+        if not targets:
+            return
+        for record in records:
+            record.setdefault("telegram_deliveries", {})
+        grouped = {}
+        for record in records:
+            key = telegram_aggregate_key(record.get("name", "")) if self._telegram_aggregate else None
+            grouped.setdefault(key or ("__single__", id(record)), []).append(record)
+        target_key = self._telegram_target_key()
+        for group in grouped.values():
+            group.sort(key=lambda item: filename_order(item.get("name", "")))
+            chunks = telegram_message_chunks(group)
+            for target in targets:
+                delivery_key = self._telegram_delivery_key(*target)
+                pending = [item for item in group if not item["telegram_deliveries"].get(delivery_key)]
+                if not pending:
+                    continue
+                for chunk in telegram_message_chunks(pending):
+                    text = "\n".join(item["link"] for item in chunk)
+                    sent = self._send_telegram_text(text, target=target)
+                    if not sent:
+                        break
+                    for item in chunk:
+                        item["telegram_deliveries"][delivery_key] = True
+                        if checkpoint:
+                            checkpoint()
+        for record in records:
+            deliveries = record["telegram_deliveries"]
+            record["telegram_sent"] = all(deliveries.get(self._telegram_delivery_key(*target)) for target in targets)
+            record["telegram_target"] = target_key if record["telegram_sent"] else ""
 
     def _iter_files(self, folder: Path):
         if self._recursive:
@@ -1172,7 +1262,10 @@ class Ed2kFolderWatcher(_PluginBase):
                 records[key] = record
                 logger.info(f"自动生成ED2K链接：生成完成：{path}")
             self._write_results(output, cache_path, records)
-            self._notify_record(path, record, checkpoint=lambda: self._write_results(output, cache_path, records))
+            if self._telegram_aggregate:
+                self._notify_records([record], checkpoint=lambda: self._write_results(output, cache_path, records))
+            else:
+                self._notify_record(path, record, checkpoint=lambda: self._write_results(output, cache_path, records))
             self._write_results(output, cache_path, records)
             delivered = not self._telegram_enabled or record.get("telegram_sent")
             if not delivered:
@@ -1364,7 +1457,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._web_login = None
 
     def _save_config(self) -> None:
-        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
+        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_aggregate", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
         config = {name: getattr(self, f"_{name}") for name in fields}
         config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce, cloud_delete_scope=self._cloud_delete_scope)
         self.update_config(config)
@@ -1403,10 +1496,11 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VSelect", "cloud_life_source", "生活事件来源", items=[{"title": "复用115插件监听（不额外请求生活接口）", "value": "shared"}, {"title": "独立轮询（每分钟一次生活接口）", "value": "direct"}]),
             {"component": "VCardTitle", "text": "ED2K链接自动转发"},
             field("VSwitch", "telegram_enabled", "发送 ED2K 链接到 Telegram"),
+            field("VSwitch", "telegram_aggregate", "聚合转发", hint="同剧名同季数链接合并为一条换行消息。", persistent_hint=True),
             # field("VSelect", "telegram_mode", "Telegram 发送方式", items=[{"title": "Bot Token（机器人）", "value": "bot"}, {"title": "个人账号（Telethon）", "value": "user"}]),
             # field("VTextField", "telegram_token", "Telegram Bot Token", type="password"),
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-5"}, "text": "仅使用个人账号发送，可在插件页面完成授权；请使用可信网络或 HTTPS。"},
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅用于带话题的超级群组。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
