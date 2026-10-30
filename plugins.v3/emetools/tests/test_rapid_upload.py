@@ -9,9 +9,16 @@ from emetools.rapid_upload import RapidUpload, normalize_config, validate_config
 class FakeOwner:
     def __init__(self, cookie="cookie"):
         self.cookie = cookie
+        self.data = {}
 
     def _source_cookie(self):
         return self.cookie
+
+    def get_data(self, key):
+        return self.data.get(key)
+
+    def save_data(self, key, value):
+        self.data[key] = value
 
 
 class FakeClient:
@@ -29,6 +36,7 @@ class RapidUploadTests(unittest.TestCase):
         config = normalize_config({"name": "电视剧", "media_extensions": ".MP4, mkv,mp4"})
         self.assertEqual(config["media_extensions"], "mp4,mkv")
         self.assertEqual(config["retry_limit"], 2)
+        self.assertFalse(config["realtime_enabled"])
         self.assertEqual(validate_configs([config])[0]["id"], config["id"])
 
     def test_run_hashes_only_matching_files_and_reports_success(self):
@@ -68,6 +76,23 @@ class RapidUploadTests(unittest.TestCase):
             self.assertFalse(media.exists())
             self.assertTrue((failure / "movie.mp4").exists())
             self.assertEqual(rapid.status()["logs"][0]["status"], "failed")
+
+    def test_successful_files_are_not_uploaded_again_by_later_scans(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "movie.mp4"
+            media.write_bytes(b"already uploaded")
+            config = normalize_config({"id": "rapid_1", "name": "电影", "source_path": str(root),
+                                       "target_folder_id": "123", "media_extensions": "mp4"})
+            owner = FakeOwner()
+            client = FakeClient({"status": 2, "reuse": True})
+            rapid = RapidUpload(owner, {"configs": [config]})
+            with patch.object(rapid, "_p115_client", return_value=client):
+                first = rapid.run("rapid_1")
+                second = rapid.run("rapid_1")
+            self.assertEqual(len(first["succeeded"]), 1)
+            self.assertEqual(second["skipped"][0]["path"], str(media))
+            self.assertEqual(len(client.calls), 1)
 
 
 if __name__ == "__main__":

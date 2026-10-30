@@ -89,10 +89,20 @@ const folder = reactive({ open: false, type: '', index: 0, cid: '0', path: '/', 
 const rapid = reactive({ configs: [], logs: [], running: '', loaded: false })
 const savedRapidConfigs = ref('')
 const rapidConfigDirty = computed(() => rapid.loaded && JSON.stringify(rapid.configs) !== savedRapidConfigs.value)
+function rapidConfigDirtyFor(config) {
+  if (!rapid.loaded) return true
+  try {
+    const saved = JSON.parse(savedRapidConfigs.value || '[]')
+    const previous = saved.find(item => item.id === config.id)
+    return !previous || JSON.stringify(config) !== JSON.stringify(previous)
+  } catch {
+    return true
+  }
+}
 function newRapidConfig() {
   return { id: `rapid_${Date.now()}`, name: `配置 ${rapid.configs.length + 1}`, source_path: '', target_folder_id: '', target_folder_path: '',
     media_extensions: 'mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v', failure_directory: '',
-    delete_source_on_success: false, retry_limit: 2, cron_enabled: false, cron_expression: '*/10 * * * *' }
+    delete_source_on_success: false, retry_limit: 2, realtime_enabled: false, cron_enabled: false, cron_expression: '*/10 * * * *' }
 }
 const base = computed(() => `plugin/${props.pluginId}`)
 const current = computed(() => sections.find(section => section.key === active.value))
@@ -448,7 +458,10 @@ async function saveRapid() {
   })
 }
 async function rapidCommand(operation, configId) {
-  if (rapidConfigDirty.value) { error.value = '本地秒传配置有未保存的修改，请先保存配置'; return }
+  if (operation === 'run') {
+    const config = rapid.configs.find(item => item.id === configId)
+    if (!config || rapidConfigDirtyFor(config)) { error.value = '当前本地秒传配置有未保存的修改，请先保存配置'; return }
+  }
   await work(async () => {
     const result = await waitP115Task(await post('rapid/action', { operation, config_id: configId }))
     if (result?.ok === false) throw new Error(result.message || '本地秒传未完成')
@@ -1475,12 +1488,13 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
         <section class="eme-card">
           <div class="eme-card-heading"><div><h3>本地秒传</h3><p>监控本地文件，计算 SHA1 后调用 115 秒传接口；只在 115 命中时写入网盘，不会把未命中的文件当作普通上传。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !rapid.loaded" @click="addRapidConfig">添加配置</button><button class="eme-button primary" :disabled="busy || !rapid.loaded" @click="saveRapid">保存配置</button></div></div>
           <p v-if="rapidConfigDirty" class="eme-message eme-warning">本地秒传有未保存的修改；请点击“保存配置”后再扫描。</p>
-          <p class="eme-hint">账号沿用“115 网盘 STRM 助手”中的 Cookie；本地源目录必须是 MoviePilot 容器内可访问的路径，目标目录请选择非根目录。秒传任务与清理、转存共用 115 串行队列。</p>
+          <p class="eme-hint">账号沿用“115 网盘 STRM 助手”中的 Cookie；本地源目录必须是 MoviePilot 容器内可访问的路径，目标目录请选择非根目录。实时监控使用目录事件触发，Cron 适合容器重启或事件丢失后的兜底扫描；两者可同时启用。秒传任务与清理、转存共用 115 串行队列。</p>
+          <p v-if="rapid.configs.some(config => config.realtime_enabled && !rapid.realtime_watched_configs?.includes(config.id))" class="eme-message eme-warning">{{ rapid.realtime_error || '实时监控未启动：请确认本地源目录存在且当前文件系统支持目录事件；可同时启用 Cron 自动扫描兜底。' }}</p>
           <div v-for="(config, index) in rapid.configs" :key="config.id" class="eme-rapid-config">
-            <div class="eme-card-heading"><div><h4>{{ rapidConfigLabel(config) }}</h4><p>ID：{{ config.id }}</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || rapidConfigDirty || rapid.running" @click="rapidCommand('run', config.id)">{{ rapid.running === config.name ? '⌛️秒传中' : '立即扫描' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`删除本地秒传配置 ${index + 1}`" @click="rapid.configs.splice(index, 1)">✕</button></div></div>
+            <div class="eme-card-heading"><div><h4>{{ rapidConfigLabel(config) }}</h4><p>ID：{{ config.id }}</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || rapidConfigDirtyFor(config) || rapid.running" @click="rapidCommand('run', config.id)">{{ rapid.running === config.name ? '⌛️秒传中' : '立即扫描' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`删除本地秒传配置 ${index + 1}`" @click="rapid.configs.splice(index, 1)">✕</button></div></div>
             <div class="eme-rapid-group"><h4>基础配置</h4><div class="eme-fields"><label>配置名称<input v-model.trim="config.name" placeholder="例如：电视剧" /></label><label>重试次数<input v-model.number="config.retry_limit" type="number" min="0" max="100" /></label></div></div>
             <div class="eme-rapid-group"><h4>目录设置</h4><label>本地源目录<div class="eme-folder-input"><input v-model.trim="config.source_path" placeholder="/media/资源/电视剧" /><button class="eme-button secondary" type="button" @click="browse('rapid_source', index)">浏览</button></div></label><label>115 目标目录<div class="eme-folder-input"><input :value="config.target_folder_path || '未选择目标目录'" readonly /><button class="eme-button secondary" type="button" @click="browse('rapid_target', index)">选择目录</button></div></label><p class="eme-hint">CID：{{ config.target_folder_id || '未选择' }}</p><label>失败目录（可选）<div class="eme-folder-input"><input v-model.trim="config.failure_directory" placeholder="/media/资源/秒传失败/电视剧" /><button class="eme-button secondary" type="button" @click="browse('rapid_failure', index)">浏览</button></div></label></div>
-            <div class="eme-rapid-group"><h4>扫描与文件</h4><label>媒体后缀<input v-model.trim="config.media_extensions" placeholder="mp4,mkv,ts" /></label><label class="eme-switch-label"><input v-model="config.delete_source_on_success" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>秒传成功后删除本地源文件</span></label><label class="eme-switch-label"><input v-model="config.cron_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 Cron 自动扫描</span></label><label v-if="config.cron_enabled">执行周期（cron 表达式）<input v-model.trim="config.cron_expression" placeholder="*/10 * * * *" /></label></div>
+            <div class="eme-rapid-group"><h4>扫描与文件</h4><label>媒体后缀<input v-model.trim="config.media_extensions" placeholder="mp4,mkv,ts" /></label><div class="eme-rapid-switches"><label class="eme-switch-label"><input v-model="config.delete_source_on_success" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>秒传成功后删除本地源文件</span></label><label class="eme-switch-label"><input v-model="config.realtime_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label class="eme-switch-label"><input v-model="config.cron_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 Cron 自动扫描</span></label></div><label v-if="config.cron_enabled">执行周期（cron 表达式）<input v-model.trim="config.cron_expression" placeholder="*/10 * * * *" /></label></div>
           </div>
           <p v-if="!rapid.configs.length" class="eme-hint">还没有配置。点击“添加配置”后填写本地源目录与 115 目标目录。</p>
         </section>
@@ -1795,6 +1809,6 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
 .eme-rapid-config> .eme-card-heading p{margin:4px 0 0}
 .eme-rapid-group{margin-top:14px;padding:14px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:11px;background:rgba(var(--v-theme-surface),.12)}
 .eme-folder-input{display:flex;align-items:center;gap:8px}.eme-folder-input input{flex:1;min-width:0}.eme-folder-input .eme-button{flex:none}
-.eme-rapid-logs{max-height:420px}.eme-rapid-logs .eme-result{align-items:flex-start}
-@media(max-width:760px){.eme-rapid-config .eme-card-heading{gap:10px}.eme-folder-input{align-items:stretch;flex-direction:column}.eme-folder-input .eme-button{width:100%}}
+.eme-rapid-logs{max-height:420px}.eme-rapid-logs .eme-result{align-items:flex-start}.eme-rapid-switches{display:flex;flex-wrap:wrap;align-items:center;gap:14px 28px;margin-top:16px}.eme-rapid-switches .eme-switch-label{margin:0;min-height:32px}
+@media(max-width:760px){.eme-rapid-config .eme-card-heading{gap:10px}.eme-folder-input{align-items:stretch;flex-direction:column}.eme-folder-input .eme-button{width:100%}.eme-rapid-switches{align-items:flex-start;flex-direction:column;gap:12px}}
 </style>

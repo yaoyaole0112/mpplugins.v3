@@ -129,13 +129,16 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.51"
+    plugin_version = "2.10.52"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
     auth_level = 2
 
     def init_plugin(self, config: dict = None) -> None:
+        previous_rapid = getattr(self, "_rapid", None)
+        if previous_rapid:
+            previous_rapid.close()
         config = config or {}
         self._enabled = bool(config.get("enabled", True))
         self._show_sidebar_nav = bool(config.get("show_sidebar_nav", True))
@@ -215,6 +218,8 @@ class EmeTools(_PluginBase):
         if not hasattr(self, "_p115_tasks"):
             self._p115_tasks = P115TaskCoordinator()
         self._p115_tasks.reopen()
+        if self._enabled:
+            self._rapid.set_realtime_callback(self._run_rapid_realtime)
         self._pending_lock = threading.Lock()
         self._pending = {}
         self._cleanup_telegram_sources = {}
@@ -495,6 +500,9 @@ class EmeTools(_PluginBase):
         logger.info("媒体增强：停止插件服务和 Telegram 监控")
         if hasattr(self, "_p115_stop"):
             self._p115_stop.set()
+        rapid = getattr(self, "_rapid", None)
+        if rapid:
+            rapid.close()
         if hasattr(self, "_p115_tasks"):
             self._p115_tasks.close()
         enrichment = getattr(self, "_enrichment", None)
@@ -1072,6 +1080,8 @@ class EmeTools(_PluginBase):
             configs = validate_rapid_configs(values.get("configs") if isinstance(values, dict) else None)
             self._rapid.save(configs)
             self._persist()
+            if self._enabled:
+                self._rapid.set_realtime_callback(self._run_rapid_realtime)
             Scheduler().update_plugin_job(self.__class__.__name__)
             return {"configs": copy.deepcopy(configs)}
         except ValueError as error:
@@ -2094,6 +2104,21 @@ class EmeTools(_PluginBase):
                         _log_label(config["name"]), _log_label(result.get("message") if isinstance(result, dict) else result))
         except (RuntimeError, ValueError, OSError) as error:
             logger.warning("媒体增强 本地秒传：定时任务失败，配置=%s，原因=%s",
+                           _log_label(config["name"]), type(error).__name__)
+
+    def _run_rapid_realtime(self, config_id: str, paths: list[str]) -> None:
+        config = next((item for item in self._rapid.configs if item["id"] == config_id), None)
+        if not self._enabled or not config or not config.get("realtime_enabled"):
+            return
+        try:
+            result = self._p115_tasks.run(
+                f"rapid_upload:{config_id}", f"实时本地秒传：{config['name']}",
+                lambda: self._rapid.run(config_id, paths),
+            )
+            logger.info("媒体增强 本地秒传：实时任务结束，配置=%s，结果=%s",
+                        _log_label(config["name"]), _log_label(result.get("message") if isinstance(result, dict) else result))
+        except (RuntimeError, ValueError, OSError) as error:
+            logger.warning("媒体增强 本地秒传：实时任务失败，配置=%s，原因=%s",
                            _log_label(config["name"]), type(error).__name__)
 
     def _run_scheduled_serial(self, section: str) -> None:

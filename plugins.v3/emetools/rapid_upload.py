@@ -6,11 +6,19 @@ import hashlib
 import os
 import re
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from app.sdk.logging import logger
+
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except ImportError:
+    FileSystemEventHandler = None
+    Observer = None
 
 
 DEFAULT_RAPID_CONFIG = {
@@ -27,6 +35,7 @@ DEFAULT_CONFIG = {
     "failure_directory": "",
     "delete_source_on_success": False,
     "retry_limit": 2,
+    "realtime_enabled": False,
     "cron_enabled": False,
     "cron_expression": "*/10 * * * *",
 }
@@ -54,6 +63,7 @@ def normalize_config(value: Any, index: int = 0) -> dict:
     result["media_extensions"] = _normalize_extensions(result.get("media_extensions"))
     result["failure_directory"] = str(result.get("failure_directory") or "").strip()
     result["delete_source_on_success"] = bool(result.get("delete_source_on_success"))
+    result["realtime_enabled"] = bool(result.get("realtime_enabled"))
     result["cron_enabled"] = bool(result.get("cron_enabled"))
     result["cron_expression"] = str(result.get("cron_expression") or "*/10 * * * *").strip()
     try:
@@ -93,11 +103,22 @@ def validate_configs(values: Any) -> list[dict]:
 
 
 class RapidUpload:
+    _DATA_KEY = "rapid_upload_completed"
+
     def __init__(self, owner, saved: Any = None):
         self._owner = owner
         self._configs = validate_configs((saved or {}).get("configs", []) if isinstance(saved, dict) else [])
         self._logs: list[dict] = []
         self._running: str | None = None
+        self._observer = None
+        self._watch_timers: dict[str, Any] = {}
+        self._pending_paths: dict[str, dict[str, dict[str, Any]]] = {}
+        self._watch_lock = threading.RLock()
+        self._realtime_callback = None
+        self._realtime_watched: list[str] = []
+        self._realtime_error = ""
+        saved_completed = owner.get_data(self._DATA_KEY) if hasattr(owner, "get_data") else {}
+        self._completed = dict(saved_completed) if isinstance(saved_completed, dict) else {}
 
     @property
     def configs(self) -> list[dict]:
@@ -110,7 +131,142 @@ class RapidUpload:
     def status(self) -> dict:
         return {"configs": [dict(item) for item in self._configs],
                 "logs": [dict(item) for item in self._logs[-200:]],
-                "running": self._running or ""}
+                "running": self._running or "",
+                "realtime_available": Observer is not None and FileSystemEventHandler is not None,
+                "realtime_watched_configs": list(self._realtime_watched),
+                "realtime_error": self._realtime_error}
+
+    def set_realtime_callback(self, callback) -> None:
+        self._realtime_callback = callback
+        self.refresh_realtime_watchers()
+
+    def _stop_realtime_watchers(self) -> None:
+        with self._watch_lock:
+            for timer in self._watch_timers.values():
+                timer.cancel()
+            self._watch_timers.clear()
+            self._pending_paths.clear()
+            observer = self._observer
+            self._observer = None
+        if observer is not None:
+            observer.stop()
+            observer.join(timeout=5)
+
+    def close(self) -> None:
+        self._stop_realtime_watchers()
+
+    def _queue_realtime_event(self, config_id: str, path: str) -> None:
+        config = next((item for item in self._configs if item["id"] == config_id), None)
+        if not config or not config.get("realtime_enabled"):
+            return
+        candidate = Path(path)
+        if candidate.is_symlink() or not candidate.is_file():
+            return
+        allowed = {f".{item}" for item in config["media_extensions"].split(",") if item}
+        if candidate.suffix.lower() not in allowed:
+            return
+        with self._watch_lock:
+            previous = self._watch_timers.pop(config_id, None)
+            if previous:
+                previous.cancel()
+            try:
+                stat = candidate.stat()
+                signature = (stat.st_size, stat.st_mtime_ns)
+            except OSError:
+                return
+            pending = self._pending_paths.setdefault(config_id, {})
+            pending[str(candidate)] = {"signature": signature, "stable_checks": 0}
+            timer = threading.Timer(3.0, self._dispatch_realtime, args=(config_id,))
+            timer.daemon = True
+            self._watch_timers[config_id] = timer
+            timer.start()
+
+    def _dispatch_realtime(self, config_id: str) -> None:
+        with self._watch_lock:
+            self._watch_timers.pop(config_id, None)
+            pending = self._pending_paths.get(config_id, {})
+            stable_paths = []
+            for path_text, state in list(pending.items()):
+                path = Path(path_text)
+                try:
+                    stat = path.stat()
+                    signature = (stat.st_size, stat.st_mtime_ns)
+                except OSError:
+                    pending.pop(path_text, None)
+                    continue
+                if signature != state["signature"]:
+                    state.update(signature=signature, stable_checks=0)
+                else:
+                    state["stable_checks"] += 1
+                    if state["stable_checks"] >= 2:
+                        stable_paths.append(path_text)
+                        pending.pop(path_text, None)
+            if pending:
+                timer = threading.Timer(3.0, self._dispatch_realtime, args=(config_id,))
+                timer.daemon = True
+                self._watch_timers[config_id] = timer
+                timer.start()
+            if not pending:
+                self._pending_paths.pop(config_id, None)
+        callback = self._realtime_callback
+        if callback and stable_paths:
+            callback(config_id, stable_paths)
+
+    def refresh_realtime_watchers(self) -> None:
+        self._stop_realtime_watchers()
+        self._realtime_watched = []
+        self._realtime_error = ""
+        if Observer is None or FileSystemEventHandler is None:
+            if any(item.get("realtime_enabled") for item in self._configs):
+                self._realtime_error = "watchdog 不可用，请确认插件依赖已安装"
+                logger.warning("媒体增强 本地秒传：%s", self._realtime_error)
+            return
+        folders = [(item, Path(item["source_path"])) for item in self._configs
+                   if item.get("realtime_enabled") and item.get("source_path")]
+        folders = [(item, path) for item, path in folders if path.is_dir() and not path.is_symlink()]
+        if not folders:
+            return
+        plugin = self
+
+        class Handler(FileSystemEventHandler):
+            def __init__(self, config_id: str):
+                super().__init__()
+                self.config_id = config_id
+
+            def _queue(self, path: str) -> None:
+                plugin._queue_realtime_event(self.config_id, path)
+
+            def on_created(self, event):
+                if not event.is_directory:
+                    self._queue(event.src_path)
+
+            def on_modified(self, event):
+                if not event.is_directory:
+                    self._queue(event.src_path)
+
+            def on_closed(self, event):
+                if not event.is_directory:
+                    self._queue(event.src_path)
+
+            def on_moved(self, event):
+                if not event.is_directory:
+                    self._queue(event.dest_path)
+
+        observer = None
+        try:
+            observer = Observer()
+            for config, path in folders:
+                observer.schedule(Handler(config["id"]), str(path), recursive=True)
+            observer.start()
+            self._observer = observer
+            self._realtime_watched = [config["id"] for config, _ in folders]
+            logger.info("媒体增强 本地秒传：已启动实时监控，共 %d 个目录", len(folders))
+        except Exception as error:
+            self._realtime_error = f"目录事件监控启动失败（{type(error).__name__}），请使用 Cron 兜底"
+            logger.warning("媒体增强 本地秒传：启动实时监控失败：%s", type(error).__name__)
+            if observer is not None:
+                observer.stop()
+                observer.join(timeout=5)
 
     def _config(self, config_id: str) -> dict:
         config = next((item for item in self._configs if item["id"] == str(config_id)), None)
@@ -188,6 +344,14 @@ class RapidUpload:
                            "sha1": sha1, "status": status, "message": message})
         del self._logs[:-200]
 
+    def _remember_completed(self, config: dict, path: Path, sha1: str, size: int) -> None:
+        key = f"{config['id']}:{path.resolve()}"
+        self._completed[key] = {"sha1": sha1, "size": size, "target": config["target_folder_id"]}
+        if len(self._completed) > 20000:
+            self._completed = dict(list(self._completed.items())[-20000:])
+        if hasattr(self._owner, "save_data"):
+            self._owner.save_data(self._DATA_KEY, dict(self._completed))
+
     def run(self, config_id: str, paths: list[str] | None = None) -> dict:
         config = self._config(config_id)
         if self._running:
@@ -207,6 +371,7 @@ class RapidUpload:
             return {"ok": True, "message": "未发现符合后缀的本地文件", "total": 0, "succeeded": [], "failed": []}
         self._running = config["name"]
         succeeded: list[dict] = []
+        skipped: list[dict] = []
         failed: list[dict] = []
         client = None
         try:
@@ -219,6 +384,11 @@ class RapidUpload:
                     after = path.stat()
                     if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
                         raise RuntimeError("文件在计算 SHA1 期间发生变化，已跳过")
+                    completed = self._completed.get(f"{config['id']}:{path.resolve()}")
+                    if (completed and completed.get("sha1") == sha1 and completed.get("size") == size
+                            and completed.get("target") == config["target_folder_id"]):
+                        skipped.append({"path": str(path), "name": path.name, "size": size, "sha1": sha1})
+                        continue
                     response = None
                     attempts = min(config["retry_limit"] + 1, 4)
                     for attempt in range(attempts):
@@ -233,6 +403,7 @@ class RapidUpload:
                         raise RuntimeError("115 未命中秒传，未上传原文件")
                     item = {"path": str(path), "name": path.name, "size": size, "sha1": sha1}
                     succeeded.append(item)
+                    self._remember_completed(config, path, sha1, size)
                     self._append_log(config, path, "succeeded", "115 秒传成功", size, sha1)
                     if config["delete_source_on_success"]:
                         path.unlink()
@@ -250,8 +421,8 @@ class RapidUpload:
                     failed.append(item)
                     self._append_log(config, path, "failed", message)
                     logger.warning("媒体增强 本地秒传失败：配置=%s 文件=%s 原因=%s", config["name"], path.name, type(error).__name__)
-            return {"ok": not failed, "message": f"本轮处理 {len(source_files)} 个文件，成功 {len(succeeded)} 个，失败 {len(failed)} 个",
-                    "total": len(source_files), "succeeded": succeeded, "failed": failed}
+            return {"ok": not failed, "message": f"本轮检查 {len(source_files)} 个文件，成功 {len(succeeded)} 个，已处理跳过 {len(skipped)} 个，失败 {len(failed)} 个",
+                    "total": len(source_files), "succeeded": succeeded, "skipped": skipped, "failed": failed}
         finally:
             close = getattr(client, "close", None)
             if callable(close):
