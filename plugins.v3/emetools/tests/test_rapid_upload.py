@@ -104,6 +104,36 @@ class RapidUploadTests(unittest.TestCase):
         self.assertEqual(state["realtime_watched_configs"], [])
         self.assertEqual(state["realtime_unwatched"][0]["reason"], "未设置本地源目录")
 
+    def test_realtime_snapshot_detects_new_and_changed_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.mkv"
+            first.write_bytes(b"one")
+            before = RapidUpload._directory_snapshot(root, "mkv")
+            second = root / "second.mkv"
+            second.write_bytes(b"two")
+            first.write_bytes(b"changed")
+            after = RapidUpload._directory_snapshot(root, "mkv")
+            changed = {path for path, signature in after.items() if before.get(path) != signature}
+            self.assertEqual(changed, {str(first), str(second)})
+
+    def test_realtime_poll_queues_only_new_or_changed_media(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            existing = root / "existing.mkv"
+            existing.write_bytes(b"old")
+            config = normalize_config({"id": "rapid_1", "name": "电视剧", "source_path": str(root),
+                                       "media_extensions": "mkv", "realtime_enabled": True})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            rapid._poll_snapshots["rapid_1"] = rapid._directory_snapshot(root, "mkv")
+            new_file = root / "new.mkv"
+            new_file.write_bytes(b"new")
+            ignored = root / "notes.txt"
+            ignored.write_text("ignore", encoding="utf-8")
+            with patch.object(rapid, "_queue_realtime_event") as queue:
+                rapid._poll_realtime_once()
+            queue.assert_called_once_with("rapid_1", str(new_file))
+
 
 if __name__ == "__main__":
     unittest.main()

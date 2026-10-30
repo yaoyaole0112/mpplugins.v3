@@ -446,6 +446,7 @@ async function loadRapid() {
   rapid.realtime_watched_configs = result.realtime_watched_configs || []
   rapid.realtime_unwatched = result.realtime_unwatched || []
   rapid.realtime_error = result.realtime_error || ''
+  rapid.realtime_poll_seconds = result.realtime_poll_seconds || 30
   rapid.loaded = true
   savedRapidConfigs.value = JSON.stringify(rapid.configs)
 }
@@ -464,6 +465,7 @@ async function saveRapid() {
     rapid.realtime_watched_configs = status.realtime_watched_configs || []
     rapid.realtime_unwatched = status.realtime_unwatched || []
     rapid.realtime_error = status.realtime_error || ''
+    rapid.realtime_poll_seconds = status.realtime_poll_seconds || 30
     notice.value = '本地秒传配置已保存'
   })
 }
@@ -1498,7 +1500,8 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
         <section class="eme-card">
           <div class="eme-card-heading"><div><h3>本地秒传</h3><p>监控本地文件，计算 SHA1 后调用 115 秒传接口；只在 115 命中时写入网盘，不会把未命中的文件当作普通上传。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !rapid.loaded" @click="addRapidConfig">添加配置</button><button class="eme-button primary" :disabled="busy || !rapid.loaded" @click="saveRapid">保存配置</button></div></div>
           <p v-if="rapidConfigDirty" class="eme-message eme-warning">本地秒传有未保存的修改；请点击“保存配置”后再扫描。</p>
-          <p class="eme-hint">账号沿用“115 网盘 STRM 助手”中的 Cookie；本地源目录必须是 MoviePilot 容器内可访问的路径，目标目录请选择非根目录。实时监控使用目录事件触发，Cron 适合容器重启或事件丢失后的兜底扫描；两者可同时启用。秒传任务与清理、转存共用 115 串行队列。</p>
+          <p class="eme-hint">账号沿用“115 网盘 STRM 助手”中的 Cookie；本地源目录必须是 MoviePilot 容器内可访问的路径，目标目录请选择非根目录。实时监控由目录事件触发，并每 {{ rapid.realtime_poll_seconds || 30 }} 秒轻量比对新增/变更文件作为漏事件兜底；Cron 适合容器重启期间的扫描，三者可同时启用。秒传任务与清理、转存共用 115 串行队列。</p>
+          <p v-if="rapid.realtime_error && rapid.realtime_watched_configs?.length" class="eme-message eme-warning">{{ rapid.realtime_error }}；轮询监控仍在运行。</p>
           <p v-if="rapid.realtime_unwatched?.length" class="eme-message eme-warning">实时监控未启动：{{ rapid.realtime_unwatched.map(item => `${item.name}：${item.reason}`).join('；') }}。可检查目录挂载/权限，或启用 Cron 自动扫描兜底。</p>
           <div v-for="(config, index) in rapid.configs" :key="config.id" class="eme-rapid-config">
             <div class="eme-card-heading"><div><h4>{{ rapidConfigLabel(config) }}</h4><p>ID：{{ config.id }}</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || rapidConfigDirtyFor(config) || rapid.running" @click="rapidCommand('run', config.id)">{{ rapid.running === config.name ? '⌛️秒传中' : '立即扫描' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`删除本地秒传配置 ${index + 1}`" @click="rapid.configs.splice(index, 1)">✕</button></div></div>

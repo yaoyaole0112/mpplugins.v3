@@ -104,6 +104,7 @@ def validate_configs(values: Any) -> list[dict]:
 
 class RapidUpload:
     _DATA_KEY = "rapid_upload_completed"
+    _REALTIME_POLL_SECONDS = 30
 
     def __init__(self, owner, saved: Any = None):
         self._owner = owner
@@ -111,6 +112,9 @@ class RapidUpload:
         self._logs: list[dict] = []
         self._running: str | None = None
         self._observer = None
+        self._poll_thread = None
+        self._poll_stop = threading.Event()
+        self._poll_snapshots: dict[str, dict[str, tuple[int, int]]] = {}
         self._watch_timers: dict[str, Any] = {}
         self._pending_paths: dict[str, dict[str, dict[str, Any]]] = {}
         self._watch_lock = threading.RLock()
@@ -136,7 +140,8 @@ class RapidUpload:
                 "realtime_available": Observer is not None and FileSystemEventHandler is not None,
                 "realtime_watched_configs": list(self._realtime_watched),
                 "realtime_error": self._realtime_error,
-                "realtime_unwatched": [dict(item) for item in self._realtime_unwatched]}
+                "realtime_unwatched": [dict(item) for item in self._realtime_unwatched],
+                "realtime_poll_seconds": self._REALTIME_POLL_SECONDS}
 
     def set_realtime_callback(self, callback) -> None:
         self._realtime_callback = callback
@@ -150,9 +155,14 @@ class RapidUpload:
             self._pending_paths.clear()
             observer = self._observer
             self._observer = None
+            poll_thread = self._poll_thread
+            self._poll_thread = None
+            self._poll_stop.set()
         if observer is not None:
             observer.stop()
             observer.join(timeout=5)
+        if poll_thread and poll_thread.is_alive() and poll_thread is not threading.current_thread():
+            poll_thread.join(timeout=5)
 
     def close(self) -> None:
         self._stop_realtime_watchers()
@@ -219,15 +229,8 @@ class RapidUpload:
         self._realtime_watched = []
         self._realtime_error = ""
         self._realtime_unwatched = []
-        if Observer is None or FileSystemEventHandler is None:
-            self._realtime_error = "watchdog 不可用，请确认插件依赖已安装"
-            self._realtime_unwatched = [
-                {"id": item["id"], "name": item["name"], "reason": self._realtime_error}
-                for item in self._configs if item.get("realtime_enabled")
-            ]
-            if self._realtime_unwatched:
-                logger.warning("媒体增强 本地秒传：%s", self._realtime_error)
-            return
+        self._poll_stop = threading.Event()
+        self._poll_snapshots = {}
         folders = []
         for item in self._configs:
             if not item.get("realtime_enabled"):
@@ -250,51 +253,97 @@ class RapidUpload:
             return
         plugin = self
 
-        class Handler(FileSystemEventHandler):
-            def __init__(self, config_id: str):
-                super().__init__()
-                self.config_id = config_id
-
-            def _queue(self, path: str) -> None:
-                plugin._queue_realtime_event(self.config_id, path)
-
-            def on_created(self, event):
-                if not event.is_directory:
-                    self._queue(event.src_path)
-
-            def on_modified(self, event):
-                if not event.is_directory:
-                    self._queue(event.src_path)
-
-            def on_closed(self, event):
-                if not event.is_directory:
-                    self._queue(event.src_path)
-
-            def on_moved(self, event):
-                if not event.is_directory:
-                    self._queue(event.dest_path)
-
+        for config, path in folders:
+            self._poll_snapshots[config["id"]] = self._directory_snapshot(path, config["media_extensions"])
+            self._realtime_watched.append(config["id"])
         observer = None
-        try:
-            observer = Observer()
-            for config, path in folders:
-                observer.schedule(Handler(config["id"]), str(path), recursive=True)
-            observer.start()
-            if not observer.is_alive():
-                raise RuntimeError("目录事件监控线程未能运行")
-            self._observer = observer
-            self._realtime_watched = [config["id"] for config, _ in folders]
-            logger.info("媒体增强 本地秒传：已启动实时监控，共 %d 个目录", len(folders))
-        except Exception as error:
-            self._realtime_error = f"目录事件监控启动失败（{type(error).__name__}），请使用 Cron 兜底"
-            self._realtime_unwatched.extend(
-                {"id": config["id"], "name": config["name"], "reason": self._realtime_error}
-                for config, _ in folders
-            )
-            logger.warning("媒体增强 本地秒传：启动实时监控失败：%s", type(error).__name__)
-            if observer is not None:
-                observer.stop()
-                observer.join(timeout=5)
+        if Observer is not None and FileSystemEventHandler is not None:
+            class Handler(FileSystemEventHandler):
+                def __init__(self, config_id: str):
+                    super().__init__()
+                    self.config_id = config_id
+
+                def _queue(self, path: str) -> None:
+                    plugin._queue_realtime_event(self.config_id, path)
+
+                def on_created(self, event):
+                    if not event.is_directory:
+                        self._queue(event.src_path)
+
+                def on_modified(self, event):
+                    if not event.is_directory:
+                        self._queue(event.src_path)
+
+                def on_closed(self, event):
+                    if not event.is_directory:
+                        self._queue(event.src_path)
+
+                def on_moved(self, event):
+                    if not event.is_directory:
+                        self._queue(event.dest_path)
+
+            try:
+                observer = Observer()
+                for config, path in folders:
+                    observer.schedule(Handler(config["id"]), str(path), recursive=True)
+                observer.start()
+                if not observer.is_alive():
+                    raise RuntimeError("目录事件监控线程未能运行")
+                self._observer = observer
+                logger.info("媒体增强 本地秒传：目录事件监控已启动，共 %d 个目录", len(folders))
+            except Exception as error:
+                self._realtime_error = f"目录事件不可用（{type(error).__name__}），由 {self._REALTIME_POLL_SECONDS} 秒轮询兜底"
+                logger.warning("媒体增强 本地秒传：%s", self._realtime_error)
+                if observer is not None:
+                    observer.stop()
+                    observer.join(timeout=5)
+        else:
+            self._realtime_error = f"watchdog 不可用，由 {self._REALTIME_POLL_SECONDS} 秒轮询兜底"
+            logger.warning("媒体增强 本地秒传：%s", self._realtime_error)
+
+        self._poll_thread = threading.Thread(target=self._poll_realtime_directories,
+                                             name="emetools-rapid-poll", daemon=True)
+        self._poll_thread.start()
+        logger.info("媒体增强 本地秒传：监控已就绪，目录=%d，差异轮询间隔=%d秒",
+                    len(folders), self._REALTIME_POLL_SECONDS)
+
+    @staticmethod
+    def _directory_snapshot(root: Path, extensions: str) -> dict[str, tuple[int, int]]:
+        allowed = {f".{item}" for item in extensions.split(",") if item}
+        snapshot = {}
+        for directory, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames[:] = [name for name in dirnames if not (Path(directory) / name).is_symlink()]
+            for name in filenames:
+                path = Path(directory) / name
+                if path.is_symlink() or path.suffix.lower() not in allowed:
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                snapshot[str(path)] = (stat.st_size, stat.st_mtime_ns)
+        return snapshot
+
+    def _poll_realtime_directories(self) -> None:
+        while not self._poll_stop.wait(self._REALTIME_POLL_SECONDS):
+            self._poll_realtime_once()
+
+    def _poll_realtime_once(self) -> None:
+        for config in self._configs:
+            config_id = config["id"]
+            if not config.get("realtime_enabled") or config_id not in self._poll_snapshots:
+                continue
+            try:
+                current = self._directory_snapshot(Path(config["source_path"]), config["media_extensions"])
+            except OSError as error:
+                logger.warning("媒体增强 本地秒传：实时轮询目录失败，配置=%s，原因=%s",
+                               config["name"], type(error).__name__)
+                continue
+            previous = self._poll_snapshots.get(config_id, {})
+            changed = [path for path, signature in current.items() if previous.get(path) != signature]
+            self._poll_snapshots[config_id] = current
+            for path in changed:
+                self._queue_realtime_event(config_id, path)
 
     def _config(self, config_id: str) -> dict:
         config = next((item for item in self._configs if item["id"] == str(config_id)), None)
