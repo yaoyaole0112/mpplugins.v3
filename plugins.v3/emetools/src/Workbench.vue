@@ -87,18 +87,9 @@ const trash = ref(null)
 const moveInfo = ref(null)
 const folder = reactive({ open: false, type: '', index: 0, cid: '0', path: '/', name: '根目录', trail: [], dirs: [], ready: false, error: '' })
 const rapid = reactive({ configs: [], logs: [], running: '', loaded: false })
+const rapidActionBusy = ref(false)
 const savedRapidConfigs = ref('')
 const rapidConfigDirty = computed(() => rapid.loaded && JSON.stringify(rapid.configs) !== savedRapidConfigs.value)
-function rapidConfigDirtyFor(config) {
-  if (!rapid.loaded) return true
-  try {
-    const saved = JSON.parse(savedRapidConfigs.value || '[]')
-    const previous = saved.find(item => item.id === config.id)
-    return !previous || JSON.stringify(config) !== JSON.stringify(previous)
-  } catch {
-    return true
-  }
-}
 function newRapidConfig() {
   return { id: `rapid_${Date.now()}`, name: `配置 ${rapid.configs.length + 1}`, source_path: '', target_folder_id: '', target_folder_path: '',
     media_extensions: 'mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v', failure_directory: '',
@@ -456,30 +447,41 @@ function addRapidConfig() {
 async function saveRapid() {
   if (!settingsLoaded.value || !rapid.loaded) { error.value = '本地秒传配置尚未加载，请刷新后重试'; return }
   await work(async () => {
-    const result = await post('rapid/config', { configs: JSON.parse(JSON.stringify(rapid.configs)) })
-    rapid.configs.splice(0, rapid.configs.length, ...(result.configs || []).map(item => ({ ...item })))
-    savedRapidConfigs.value = JSON.stringify(rapid.configs)
-    const status = await get('rapid/status')
-    rapid.running = status.running || ''
-    rapid.realtime_available = status.realtime_available === true
-    rapid.realtime_watched_configs = status.realtime_watched_configs || []
-    rapid.realtime_unwatched = status.realtime_unwatched || []
-    rapid.realtime_error = status.realtime_error || ''
-    rapid.realtime_poll_seconds = status.realtime_poll_seconds || 30
+    await persistRapidDraft()
     notice.value = '本地秒传配置已保存'
   })
 }
+async function persistRapidDraft() {
+  const result = await post('rapid/config', { configs: JSON.parse(JSON.stringify(rapid.configs)) })
+  rapid.configs.splice(0, rapid.configs.length, ...(result.configs || []).map(item => ({ ...item })))
+  savedRapidConfigs.value = JSON.stringify(rapid.configs)
+  const status = await get('rapid/status')
+  rapid.running = status.running || ''
+  rapid.realtime_available = status.realtime_available === true
+  rapid.realtime_watched_configs = status.realtime_watched_configs || []
+  rapid.realtime_unwatched = status.realtime_unwatched || []
+  rapid.realtime_error = status.realtime_error || ''
+  rapid.realtime_poll_seconds = status.realtime_poll_seconds || 30
+}
 async function rapidCommand(operation, configId) {
-  if (operation === 'run') {
-    const config = rapid.configs.find(item => item.id === configId)
-    if (!config || rapidConfigDirtyFor(config)) { error.value = '当前本地秒传配置有未保存的修改，请先保存配置'; return }
-  }
-  await work(async () => {
+  if (rapidActionBusy.value) return
+  rapidActionBusy.value = true
+  error.value = ''
+  notice.value = ''
+  try {
+    if (operation === 'run') {
+      if (!rapid.loaded) throw new Error('本地秒传配置尚未加载，请刷新后重试')
+      if (rapidConfigDirty.value) await persistRapidDraft()
+    }
     const result = await waitP115Task(await post('rapid/action', { operation, config_id: configId }))
     if (result?.ok === false) throw new Error(result.message || '本地秒传未完成')
     notice.value = result.message || '本地秒传任务已完成'
     await loadRapid()
-  })
+  } catch (err) {
+    error.value = err?.message || '本地秒传请求失败'
+  } finally {
+    rapidActionBusy.value = false
+  }
 }
 function rapidConfigLabel(config) {
   return `${config.name || '未命名'} · ${config.source_path || '未设置源目录'}`
@@ -1499,12 +1501,12 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
       <template v-if="active === 'rapid'">
         <section class="eme-card">
           <div class="eme-card-heading"><div><h3>本地秒传</h3><p>监控本地文件，计算 SHA1 后调用 115 秒传接口；只在 115 命中时写入网盘，不会把未命中的文件当作普通上传。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !rapid.loaded" @click="addRapidConfig">添加配置</button><button class="eme-button primary" :disabled="busy || !rapid.loaded" @click="saveRapid">保存配置</button></div></div>
-          <p v-if="rapidConfigDirty" class="eme-message eme-warning">本地秒传有未保存的修改；请点击“保存配置”后再扫描。</p>
+          <p v-if="rapidConfigDirty" class="eme-message eme-warning">本地秒传有未保存的修改；点击“立即扫描”时会先自动保存配置。</p>
           <p class="eme-hint">账号沿用“115 网盘 STRM 助手”中的 Cookie；本地源目录必须是 MoviePilot 容器内可访问的路径，目标目录请选择非根目录。实时监控由目录事件触发，并每 {{ rapid.realtime_poll_seconds || 30 }} 秒轻量比对新增/变更文件作为漏事件兜底；Cron 适合容器重启期间的扫描，三者可同时启用。秒传任务与清理、转存共用 115 串行队列。</p>
           <p v-if="rapid.realtime_error && rapid.realtime_watched_configs?.length" class="eme-message eme-warning">{{ rapid.realtime_error }}；轮询监控仍在运行。</p>
           <p v-if="rapid.realtime_unwatched?.length" class="eme-message eme-warning">实时监控未启动：{{ rapid.realtime_unwatched.map(item => `${item.name}：${item.reason}`).join('；') }}。可检查目录挂载/权限，或启用 Cron 自动扫描兜底。</p>
           <div v-for="(config, index) in rapid.configs" :key="config.id" class="eme-rapid-config">
-            <div class="eme-card-heading"><div><h4>{{ rapidConfigLabel(config) }}</h4><p>ID：{{ config.id }}</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || rapidConfigDirtyFor(config) || rapid.running" @click="rapidCommand('run', config.id)">{{ rapid.running === config.name ? '⌛️秒传中' : '立即扫描' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`删除本地秒传配置 ${index + 1}`" @click="rapid.configs.splice(index, 1)">✕</button></div></div>
+            <div class="eme-card-heading"><div><h4>{{ rapidConfigLabel(config) }}</h4><p>ID：{{ config.id }}</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="!rapid.loaded || rapidActionBusy" @click="rapidCommand('run', config.id)">{{ rapid.running === config.name || rapidActionBusy ? '⌛️秒传中' : '立即扫描' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`删除本地秒传配置 ${index + 1}`" @click="rapid.configs.splice(index, 1)">✕</button></div></div>
             <div class="eme-rapid-group"><h4>基础配置</h4><div class="eme-fields"><label>配置名称<input v-model.trim="config.name" placeholder="例如：电视剧" /></label><label>重试次数<input v-model.number="config.retry_limit" type="number" min="0" max="100" /></label></div></div>
             <div class="eme-rapid-group"><h4>目录设置</h4><label>本地源目录<div class="eme-folder-input"><input v-model.trim="config.source_path" placeholder="/media/资源/电视剧" /><button class="eme-button secondary" type="button" @click="browse('rapid_source', index)">浏览</button></div></label><label>115 目标目录<div class="eme-folder-input"><input :value="config.target_folder_path || '未选择目标目录'" readonly /><button class="eme-button secondary" type="button" @click="browse('rapid_target', index)">选择目录</button></div></label><p class="eme-hint">CID：{{ config.target_folder_id || '未选择' }}</p><label>失败目录（可选）<div class="eme-folder-input"><input v-model.trim="config.failure_directory" placeholder="/media/资源/秒传失败/电视剧" /><button class="eme-button secondary" type="button" @click="browse('rapid_failure', index)">浏览</button></div></label></div>
             <div class="eme-rapid-group"><h4>扫描与文件</h4><label>媒体后缀<input v-model.trim="config.media_extensions" placeholder="mp4,mkv,ts" /></label><div class="eme-rapid-switches"><label class="eme-switch-label"><input v-model="config.delete_source_on_success" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>秒传成功后删除本地源文件</span></label><label class="eme-switch-label"><input v-model="config.realtime_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label class="eme-switch-label"><input v-model="config.cron_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 Cron 自动扫描</span></label></div><label v-if="config.cron_enabled">执行周期（cron 表达式）<input v-model.trim="config.cron_expression" placeholder="*/10 * * * *" /></label></div>
