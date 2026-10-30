@@ -18,6 +18,8 @@ test('local rapid upload is available from the shared sidebar and page', () => {
   assert.match(source, /rapidConfigDirtyFor\(config\)/)
   assert.match(source, /eme-rapid-switches/)
   assert.match(source, /rapid\.realtime_watched_configs/)
+  assert.match(source, /const status = await get\('rapid\/status'\)/)
+  assert.match(source, /实时监控未启动：/)
 })
 
 test('rapid upload uses the shared 115 API and task coordinator', () => {

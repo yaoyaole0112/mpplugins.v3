@@ -117,6 +117,7 @@ class RapidUpload:
         self._realtime_callback = None
         self._realtime_watched: list[str] = []
         self._realtime_error = ""
+        self._realtime_unwatched: list[dict] = []
         saved_completed = owner.get_data(self._DATA_KEY) if hasattr(owner, "get_data") else {}
         self._completed = dict(saved_completed) if isinstance(saved_completed, dict) else {}
 
@@ -134,7 +135,8 @@ class RapidUpload:
                 "running": self._running or "",
                 "realtime_available": Observer is not None and FileSystemEventHandler is not None,
                 "realtime_watched_configs": list(self._realtime_watched),
-                "realtime_error": self._realtime_error}
+                "realtime_error": self._realtime_error,
+                "realtime_unwatched": [dict(item) for item in self._realtime_unwatched]}
 
     def set_realtime_callback(self, callback) -> None:
         self._realtime_callback = callback
@@ -216,14 +218,34 @@ class RapidUpload:
         self._stop_realtime_watchers()
         self._realtime_watched = []
         self._realtime_error = ""
+        self._realtime_unwatched = []
         if Observer is None or FileSystemEventHandler is None:
-            if any(item.get("realtime_enabled") for item in self._configs):
-                self._realtime_error = "watchdog 不可用，请确认插件依赖已安装"
+            self._realtime_error = "watchdog 不可用，请确认插件依赖已安装"
+            self._realtime_unwatched = [
+                {"id": item["id"], "name": item["name"], "reason": self._realtime_error}
+                for item in self._configs if item.get("realtime_enabled")
+            ]
+            if self._realtime_unwatched:
                 logger.warning("媒体增强 本地秒传：%s", self._realtime_error)
             return
-        folders = [(item, Path(item["source_path"])) for item in self._configs
-                   if item.get("realtime_enabled") and item.get("source_path")]
-        folders = [(item, path) for item, path in folders if path.is_dir() and not path.is_symlink()]
+        folders = []
+        for item in self._configs:
+            if not item.get("realtime_enabled"):
+                continue
+            path = Path(item["source_path"]) if item.get("source_path") else None
+            reason = "未设置本地源目录"
+            if path and path.is_symlink():
+                reason = "源目录是符号链接，为避免监控到意外路径已跳过"
+            elif path and not path.exists():
+                reason = "源目录在 MoviePilot 容器内不存在或当前不可见"
+            elif path and not path.is_dir():
+                reason = "源路径不是目录"
+            elif path and not os.access(path, os.R_OK | os.X_OK):
+                reason = "MoviePilot 进程没有源目录的读取/遍历权限"
+            elif path:
+                folders.append((item, path))
+                continue
+            self._realtime_unwatched.append({"id": item["id"], "name": item["name"], "reason": reason})
         if not folders:
             return
         plugin = self
@@ -258,11 +280,17 @@ class RapidUpload:
             for config, path in folders:
                 observer.schedule(Handler(config["id"]), str(path), recursive=True)
             observer.start()
+            if not observer.is_alive():
+                raise RuntimeError("目录事件监控线程未能运行")
             self._observer = observer
             self._realtime_watched = [config["id"] for config, _ in folders]
             logger.info("媒体增强 本地秒传：已启动实时监控，共 %d 个目录", len(folders))
         except Exception as error:
             self._realtime_error = f"目录事件监控启动失败（{type(error).__name__}），请使用 Cron 兜底"
+            self._realtime_unwatched.extend(
+                {"id": config["id"], "name": config["name"], "reason": self._realtime_error}
+                for config, _ in folders
+            )
             logger.warning("媒体增强 本地秒传：启动实时监控失败：%s", type(error).__name__)
             if observer is not None:
                 observer.stop()

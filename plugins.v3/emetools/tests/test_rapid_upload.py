@@ -94,6 +94,16 @@ class RapidUploadTests(unittest.TestCase):
             self.assertEqual(second["skipped"][0]["path"], str(media))
             self.assertEqual(len(client.calls), 1)
 
+    def test_realtime_status_explains_missing_source_directory(self):
+        config = normalize_config({"id": "rapid_1", "name": "电视剧", "realtime_enabled": True})
+        rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+        with patch("emetools.rapid_upload.Observer", object()), patch(
+                "emetools.rapid_upload.FileSystemEventHandler", object()):
+            rapid.refresh_realtime_watchers()
+        state = rapid.status()
+        self.assertEqual(state["realtime_watched_configs"], [])
+        self.assertEqual(state["realtime_unwatched"][0]["reason"], "未设置本地源目录")
+
 
 if __name__ == "__main__":
     unittest.main()
