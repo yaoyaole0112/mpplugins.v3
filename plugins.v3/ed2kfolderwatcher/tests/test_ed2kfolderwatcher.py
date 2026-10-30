@@ -88,16 +88,23 @@ class Ed2kTests(unittest.TestCase):
     def test_batch_waits_until_all_registered_items_finish(self):
         first_key = "local-a"
         second_key = "local-b"
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 0
         batch_id = self.plugin._new_batch("local-scan")
-        self.plugin._register_batch_item(batch_id, first_key)
-        self.plugin._register_batch_item(batch_id, second_key)
+        self.plugin._register_batch_item(batch_id, first_key, "剧名.S01E01.mkv")
+        self.plugin._register_batch_item(batch_id, second_key, "剧名.S01E02.mkv")
         batch = self.plugin._batches[batch_id]
         batch["sealed"] = True
+        group_key = self.module.telegram_aggregate_key("剧名.S01E01.mkv")
+        batch["group_flush_at"][group_key] = time.monotonic()
         batch["results"].add(first_key)
+        batch["group_results"][group_key].add(first_key)
         with patch.object(self.plugin, "_flush_batch") as flush:
             self.plugin._maybe_flush_batch(batch_id)
             flush.assert_not_called()
             batch["results"].add(second_key)
+            batch["group_results"][group_key].add(second_key)
             self.plugin._maybe_flush_batch(batch_id)
             flush.assert_called_once_with(batch_id)
 
@@ -154,6 +161,8 @@ class Ed2kTests(unittest.TestCase):
                 "output": None, "cache_path": cache,
             }
             self.plugin._batches[batch_id]["results"].add(key)
+            group_key = self.plugin._batches[batch_id]["groups"][key]
+            self.plugin._batches[batch_id]["group_results"][group_key].add(key)
         with patch.object(self.plugin, "_notify_records") as notify:
             self.plugin._seal_batch(batch_id)
         notify.assert_called_once()
@@ -166,12 +175,37 @@ class Ed2kTests(unittest.TestCase):
         batch_id = self.plugin._new_batch("cloud-scan")
         self.plugin._register_batch_item(batch_id, "one", "胆大党(2024).S01E01.mkv")
         self.plugin._batches[batch_id]["results"].add("one")
+        group_key = self.module.telegram_aggregate_key("胆大党(2024).S01E01.mkv")
+        self.plugin._batches[batch_id]["group_results"][group_key].add("one")
         with patch.object(self.plugin, "_flush_batch") as flush:
             self.plugin._seal_batch(batch_id)
             flush.assert_not_called()
-            self.plugin._batches[batch_id]["flush_at"] = time.monotonic() - 1
+            self.plugin._batches[batch_id]["group_flush_at"][group_key] = time.monotonic() - 1
             self.plugin._maybe_flush_batch(batch_id)
             flush.assert_called_once_with(batch_id)
+
+    def test_different_show_season_groups_have_independent_flush_times(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        batch_id = self.plugin._new_batch("local-scan")
+        first_name = "第一部.S01E01.mkv"
+        second_name = "第二部.S01E01.mkv"
+        first_key, second_key = "first", "second"
+        self.plugin._register_batch_item(batch_id, first_key, first_name)
+        self.plugin._register_batch_item(batch_id, second_key, second_name)
+        batch = self.plugin._batches[batch_id]
+        first_group = batch["groups"][first_key]
+        second_group = batch["groups"][second_key]
+        batch["sealed"] = True
+        batch["group_results"][first_group].add(first_key)
+        batch["group_results"][second_group].add(second_key)
+        batch["group_flush_at"][first_group] = time.monotonic() - 1
+        batch["group_flush_at"][second_group] = time.monotonic() + 600
+        with patch.object(self.plugin, "_flush_group") as flush_group:
+            self.plugin._maybe_flush_batch(batch_id)
+        flush_group.assert_called_once_with(batch_id, first_group)
+        self.assertIn(second_group, batch["group_expected"])
+        self.assertNotIn(second_group, batch["group_flushing"])
 
     def test_late_same_season_item_joins_sealed_batch_during_wait(self):
         self.plugin._telegram_enabled = True

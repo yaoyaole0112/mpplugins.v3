@@ -190,7 +190,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.16.2"
+    plugin_version = "1.17.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -526,7 +526,8 @@ class Ed2kFolderWatcher(_PluginBase):
             batch_id = f"{source}-{self._batch_sequence}"
             self._batches[batch_id] = {"source": source, "created": time.time(), "deadline": time.monotonic() + 1800,
                                        "expected": set(), "results": set(), "sealed": False, "flushing": False,
-                                       "contexts": {}, "groups": {}}
+                                       "contexts": {}, "groups": {}, "group_expected": {}, "group_results": {},
+                                       "group_flush_at": {}, "group_flushing": set(), "group_flushed": set()}
         return batch_id
 
     def _merge_batch_for_group(self, batch_id: str, group_key):
@@ -537,30 +538,46 @@ class Ed2kFolderWatcher(_PluginBase):
             for candidate_id, candidate in reversed(list(self._batches.items())):
                 if candidate_id == batch_id or not candidate["sealed"] or candidate["flushing"]:
                     continue
-                if candidate.get("flush_at", 0) <= now or group_key not in candidate["groups"].values():
+                if group_key not in candidate.get("group_expected", {}) or group_key in candidate.get("group_flushing", set()):
                     continue
-                candidate["flush_at"] = max(candidate["flush_at"], now + self._telegram_aggregate_window)
+                if group_key in candidate.get("group_flushed", set()) or candidate.get("group_flush_at", {}).get(group_key, 0) <= now:
+                    continue
+                candidate["group_flush_at"][group_key] = now + self._telegram_aggregate_window
                 return candidate_id
         return batch_id
 
     def _seal_batch(self, batch_id: str) -> None:
         if not batch_id:
             return
+        empty = False
         with self._condition:
             batch = self._batches.get(batch_id)
             if batch:
                 batch["sealed"] = True
-                batch["flush_at"] = time.monotonic() + self._telegram_aggregate_window if self._telegram_enabled and self._telegram_aggregate else time.monotonic()
-        self._maybe_flush_batch(batch_id)
+                flush_at = time.monotonic() + self._telegram_aggregate_window if self._telegram_enabled and self._telegram_aggregate else time.monotonic()
+                for group_key in batch.get("group_expected", {}):
+                    if group_key not in batch["group_flushed"] and group_key not in batch["group_flushing"]:
+                        batch["group_flush_at"][group_key] = flush_at
+                empty = not batch.get("group_expected")
+                if empty:
+                    self._batches.pop(batch_id, None)
+        if not empty:
+            self._maybe_flush_batch(batch_id)
 
     def _maybe_flush_batch(self, batch_id: str) -> None:
         with self._condition:
             batch = self._batches.get(batch_id)
-            if not batch or batch["flushing"] or not batch["sealed"] or not batch["expected"].issubset(batch["results"]):
+            if not batch or batch["flushing"] or not batch["sealed"]:
                 return
-            if batch.get("flush_at", 0) > time.monotonic():
+            now = time.monotonic()
+            ready = [group_key for group_key, expected in batch.get("group_expected", {}).items()
+                     if group_key not in batch["group_flushing"]
+                     and group_key not in batch["group_flushed"]
+                     and expected.issubset(batch["group_results"].get(group_key, set()))
+                     and batch["group_flush_at"].get(group_key, 0) <= now]
+            if not ready:
                 return
-            batch["flushing"] = True
+            batch["group_flushing"].update(ready)
         self._flush_batch(batch_id)
 
     def _expire_batch(self, batch_id: str) -> None:
@@ -579,20 +596,36 @@ class Ed2kFolderWatcher(_PluginBase):
                     name = self._batch_item_name(key)
                     self._register_batch_item(retry_batch, key, name)
                     batch["results"].add(key)
+                    group_key = batch["groups"].get(key)
+                    if group_key is not None:
+                        batch["group_results"].setdefault(group_key, set()).add(key)
             self._seal_batch(retry_batch)
             logger.warning(f"自动生成ED2K链接：批次等待超过30分钟，{len(pending)}个未完成文件转入后续批次：{batch_id}")
-        with self._condition:
-            batch = self._batches.get(batch_id)
-            if batch:
-                batch["sealed"] = True
-        self._maybe_flush_batch(batch_id)
+        self._seal_batch(batch_id)
 
     def _flush_batch(self, batch_id: str) -> None:
         with self._condition:
-            batch = self._batches.pop(batch_id, None)
-        if not batch or not batch["contexts"]:
+            batch = self._batches.get(batch_id)
+            group_keys = list(batch.get("group_flushing", set())) if batch else []
+        for group_key in group_keys:
+            self._flush_group(batch_id, group_key)
+
+    def _flush_group(self, batch_id: str, group_key) -> None:
+        with self._condition:
+            batch = self._batches.get(batch_id)
+            if not batch:
+                return
+            entries = [(key, context) for key, context in batch["contexts"].items()
+                       if batch["groups"].get(key) == group_key]
+        if not entries:
+            with self._condition:
+                batch = self._batches.get(batch_id)
+                if batch:
+                    batch["group_flushing"].discard(group_key)
+                    batch["group_flushed"].add(group_key)
+                    if batch["group_flushed"] >= set(batch["group_expected"]):
+                        self._batches.pop(batch_id, None)
             return
-        entries = list(batch["contexts"].items())
         cache_path = entries[0][1]["cache_path"]
         output = entries[0][1]["output"]
         try:
@@ -605,7 +638,6 @@ class Ed2kFolderWatcher(_PluginBase):
         for key, context, record in eligible:
             if record.get("telegram_sent"):
                 continue
-            group_key = batch["groups"].get(key) or context.get("batch_group") or telegram_aggregate_key(record.get("name", "")) or ("__single__", key)
             grouped.setdefault(group_key, []).append(record)
         if self._telegram_enabled:
             for unsent in grouped.values():
@@ -643,6 +675,14 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._queue_event(context["path"], delay=60, batch_id=retry_batch)
             self._seal_batch(retry_batch)
 
+        with self._condition:
+            batch = self._batches.get(batch_id)
+            if batch:
+                batch["group_flushing"].discard(group_key)
+                batch["group_flushed"].add(group_key)
+                if batch["group_flushed"] >= set(batch["group_expected"]):
+                    self._batches.pop(batch_id, None)
+
     def _live_batch(self) -> str:
         with self._condition:
             now = time.monotonic()
@@ -679,6 +719,8 @@ class Ed2kFolderWatcher(_PluginBase):
                 if batch:
                     batch["expected"].add(key)
                     batch["groups"][key] = group_key
+                    batch["group_expected"].setdefault(group_key, set()).add(key)
+                    batch["group_results"].setdefault(group_key, set())
                     return target_batch_id
         return batch_id
 
@@ -728,8 +770,11 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._live_batch_id = None
                 ready = [batch_id for batch_id, batch in self._batches.items()
                          if batch["sealed"] and not batch["flushing"]
-                         and batch["expected"].issubset(batch["results"])
-                         and batch.get("flush_at", 0) <= now]
+                         and any(group_key not in batch["group_flushing"]
+                                 and group_key not in batch["group_flushed"]
+                                 and expected.issubset(batch["group_results"].get(group_key, set()))
+                                 and batch["group_flush_at"].get(group_key, 0) <= now
+                                 for group_key, expected in batch["group_expected"].items())]
                 expired = [batch_id for batch_id, batch in self._batches.items()
                            if not batch["sealed"] and batch["source"] != "cloud-scan"
                            and time.monotonic() >= batch["deadline"]]
@@ -783,6 +828,9 @@ class Ed2kFolderWatcher(_PluginBase):
                     state = self._batches.get(item_batch_id) if item_batch_id and not still_pending else None
                     if state:
                         state["results"].add(batch_key)
+                        group_key = state["groups"].get(batch_key)
+                        if group_key is not None:
+                            state["group_results"].setdefault(group_key, set()).add(batch_key)
                 if state:
                     self._maybe_flush_batch(item_batch_id)
 
