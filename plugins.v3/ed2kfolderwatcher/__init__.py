@@ -190,7 +190,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.15.0"
+    plugin_version = "1.16.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -210,7 +210,7 @@ class Ed2kFolderWatcher(_PluginBase):
     _delete_small_files = False
     _telegram_enabled = False
     _telegram_aggregate = False
-    _telegram_aggregate_window = 30.0
+    _telegram_aggregate_window = 600.0
     _telegram_mode = "user"
     _telegram_token = ""
     _telegram_chat_id = ""
@@ -304,6 +304,10 @@ class Ed2kFolderWatcher(_PluginBase):
         self._delete_small_files = bool(config.get("delete_small_files", False))
         self._telegram_enabled = bool(config.get("telegram_enabled", False))
         self._telegram_aggregate = bool(config.get("telegram_aggregate", False))
+        try:
+            self._telegram_aggregate_window = max(0, min(3600, int(config.get("telegram_aggregate_window", 600))))
+        except (TypeError, ValueError):
+            self._telegram_aggregate_window = 600
         self._telegram_mode = "user"
         self._telegram_token = str(config.get("telegram_token") or "").strip()
         self._telegram_chat_id = str(config.get("telegram_chat_id") or "").strip()
@@ -525,6 +529,20 @@ class Ed2kFolderWatcher(_PluginBase):
                                        "contexts": {}, "groups": {}}
         return batch_id
 
+    def _merge_batch_for_group(self, batch_id: str, group_key):
+        if not self._telegram_aggregate or group_key is None:
+            return batch_id
+        now = time.monotonic()
+        with self._condition:
+            for candidate_id, candidate in reversed(list(self._batches.items())):
+                if candidate_id == batch_id or not candidate["sealed"] or candidate["flushing"]:
+                    continue
+                if candidate.get("flush_at", 0) <= now or group_key not in candidate["groups"].values():
+                    continue
+                candidate["flush_at"] = max(candidate["flush_at"], now + self._telegram_aggregate_window)
+                return candidate_id
+        return batch_id
+
     def _seal_batch(self, batch_id: str) -> None:
         if not batch_id:
             return
@@ -532,12 +550,15 @@ class Ed2kFolderWatcher(_PluginBase):
             batch = self._batches.get(batch_id)
             if batch:
                 batch["sealed"] = True
+                batch["flush_at"] = time.monotonic() + self._telegram_aggregate_window if self._telegram_enabled and self._telegram_aggregate else time.monotonic()
         self._maybe_flush_batch(batch_id)
 
     def _maybe_flush_batch(self, batch_id: str) -> None:
         with self._condition:
             batch = self._batches.get(batch_id)
             if not batch or batch["flushing"] or not batch["sealed"] or not batch["expected"].issubset(batch["results"]):
+                return
+            if batch.get("flush_at", 0) > time.monotonic():
                 return
             batch["flushing"] = True
         self._flush_batch(batch_id)
@@ -650,9 +671,16 @@ class Ed2kFolderWatcher(_PluginBase):
         with self._condition:
             batch = self._batches.get(batch_id)
             if batch:
-                batch["expected"].add(key)
                 item_name = name or self._batch_item_name(key)
-                batch["groups"][key] = telegram_aggregate_key(item_name) if self._telegram_aggregate else ("__single__", key)
+                group_key = telegram_aggregate_key(item_name) if self._telegram_aggregate else ("__single__", key)
+                target_batch_id = self._merge_batch_for_group(batch_id, group_key)
+                if target_batch_id != batch_id:
+                    batch = self._batches.get(target_batch_id)
+                if batch:
+                    batch["expected"].add(key)
+                    batch["groups"][key] = group_key
+                    return target_batch_id
+        return batch_id
 
     def _queue_event(self, path: Path, delay=None, batch_id=None) -> None:
         if self._stopping.is_set():
@@ -672,8 +700,8 @@ class Ed2kFolderWatcher(_PluginBase):
                         old_state["results"].add(str(path))
                         completed_old = old_batch
                 self._pending[str(path)] = (time.monotonic() + (max(1, self._min_age) if delay is None else delay), signature)
+                batch_id = self._register_batch_item(batch_id, str(path), path.name)
                 self._pending_batches[str(path)] = batch_id
-                self._register_batch_item(batch_id, str(path), path.name)
                 self._condition.notify()
             if completed_old:
                 self._maybe_flush_batch(completed_old)
@@ -698,9 +726,14 @@ class Ed2kFolderWatcher(_PluginBase):
                 if self._live_batch_id and now >= self._live_batch_until:
                     flush.append(self._live_batch_id)
                     self._live_batch_id = None
+                ready = [batch_id for batch_id, batch in self._batches.items()
+                         if batch["sealed"] and not batch["flushing"]
+                         and batch["expected"].issubset(batch["results"])
+                         and batch.get("flush_at", 0) <= now]
                 expired = [batch_id for batch_id, batch in self._batches.items()
                            if not batch["sealed"] and batch["source"] != "cloud-scan"
                            and time.monotonic() >= batch["deadline"]]
+                flush.extend(ready)
                 flush.extend(expired)
                 if flush:
                     key = None
@@ -720,6 +753,8 @@ class Ed2kFolderWatcher(_PluginBase):
             for batch_id in flush:
                 if batch_id in expired:
                     self._expire_batch(batch_id)
+                elif batch_id in self._batches and not self._batches[batch_id]["sealed"]:
+                    self._seal_batch(batch_id)
                 else:
                     self._maybe_flush_batch(batch_id)
             if key is None:
@@ -938,8 +973,8 @@ class Ed2kFolderWatcher(_PluginBase):
         with self._condition:
             if key not in self._pending:
                 self._pending[key] = (time.monotonic() + delay, item)
+                batch_id = self._register_batch_item(batch_id, key, self._batch_item_name(key, item))
                 self._pending_batches[key] = batch_id
-                self._register_batch_item(batch_id, key, self._batch_item_name(key, item))
                 queued = True
             else:
                 queued = False
@@ -1736,7 +1771,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._web_login = None
 
     def _save_config(self) -> None:
-        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_aggregate", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
+        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_aggregate", "telegram_aggregate_window", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
         config = {name: getattr(self, f"_{name}") for name in fields}
         config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce, cloud_delete_scope=self._cloud_delete_scope)
         self.update_config(config)
@@ -1776,10 +1811,11 @@ class Ed2kFolderWatcher(_PluginBase):
             {"component": "VCardTitle", "text": "ED2K链接自动转发"},
             field("VSwitch", "telegram_enabled", "发送 ED2K 链接到 Telegram"),
             field("VSwitch", "telegram_aggregate", "聚合转发", hint="同剧名同季数链接合并为一条换行消息。", persistent_hint=True),
+            field("VTextField", "telegram_aggregate_window", "聚合转发延迟等待秒数", type="number", min=0, max=3600, hint="批次完成后继续等待；等待期间发现的同剧同季文件会合并，默认600秒。", persistent_hint=True),
             # field("VSelect", "telegram_mode", "Telegram 发送方式", items=[{"title": "Bot Token（机器人）", "value": "bot"}, {"title": "个人账号（Telethon）", "value": "user"}]),
             # field("VTextField", "telegram_token", "Telegram Bot Token", type="password"),
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-5"}, "text": "仅使用个人账号发送，可在插件页面完成授权；请使用可信网络或 HTTPS。"},
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅用于带话题的超级群组。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}

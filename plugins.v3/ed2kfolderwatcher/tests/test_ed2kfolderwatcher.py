@@ -136,6 +136,7 @@ class Ed2kTests(unittest.TestCase):
     def test_batch_flush_sends_registered_show_season_as_single_group(self):
         self.plugin._telegram_aggregate = True
         self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate_window = 0
         batch_id = self.plugin._new_batch("local-scan")
         cache = self.root / "records.json"
         first_name = "剧名.S01E01.mkv"
@@ -157,6 +158,34 @@ class Ed2kTests(unittest.TestCase):
             self.plugin._seal_batch(batch_id)
         notify.assert_called_once()
         self.assertEqual([record["name"] for record in notify.call_args.args[0]], [first_name, second_name])
+
+    def test_aggregate_batch_waits_before_flush(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 600
+        batch_id = self.plugin._new_batch("cloud-scan")
+        self.plugin._register_batch_item(batch_id, "one", "胆大党(2024).S01E01.mkv")
+        self.plugin._batches[batch_id]["results"].add("one")
+        with patch.object(self.plugin, "_flush_batch") as flush:
+            self.plugin._seal_batch(batch_id)
+            flush.assert_not_called()
+            self.plugin._batches[batch_id]["flush_at"] = time.monotonic() - 1
+            self.plugin._maybe_flush_batch(batch_id)
+            flush.assert_called_once_with(batch_id)
+
+    def test_late_same_season_item_joins_sealed_batch_during_wait(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 600
+        original = self.plugin._new_batch("cloud-scan")
+        self.plugin._register_batch_item(original, "one", "胆大党(2024).S01E01.mkv")
+        self.plugin._batches[original]["results"].add("one")
+        self.plugin._seal_batch(original)
+        later = self.plugin._new_batch("cloud-life")
+        registered = self.plugin._register_batch_item(later, "two", "胆大党(2024).S01E12.mkv")
+        self.assertEqual(registered, original)
+        self.assertIn("two", self.plugin._batches[original]["expected"])
+        self.assertNotIn("two", self.plugin._batches[later]["expected"])
 
     def test_multiple_local_roots_scan_missing_overlap_and_combined_output(self):
         second = self.root / "second"

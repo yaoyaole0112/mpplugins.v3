@@ -11,7 +11,7 @@ const busy = ref(false)
 const loaded = ref(false)
 const error = ref('')
 const notice = ref('')
-const settings = reactive({ telegram_mode: 'user', cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
+const settings = reactive({ telegram_mode: 'user', telegram_aggregate_window: 600, cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
 const cloud = reactive({ storages: [], folders: [], browsing: '', scanning: false, pending: 0, file: '', bytes_read: 0, size: 0, error: '' })
 const account = reactive({ api_id: '', api_hash: '', phone: '', code: '', password: '' })
 const auth = reactive({ logged_in: false, pending: false, password_required: false, api_hash_configured: false, expires_in: 0, retry_in: 0 })
@@ -20,7 +20,7 @@ let savedDelete = false
 let savedDeleteSmall = false
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || !loaded.value)
-const configFields = ['enabled', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'delete_source', 'delete_small_files', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
+const configFields = ['enabled', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'delete_source', 'delete_small_files', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
 const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size_gb', label: '生成链接最小文件大小（GB）', type: 'number', step: 'any', placeholder: '例如0.5、1、1.5（GB）', hint: '小于此值不生成、不转发；留空或0不限，单位GB。' }]
 const timingFields = [{ key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '文件停止变化后等待时间，请监控完成目录。' }]
 
@@ -209,6 +209,7 @@ onUnmounted(() => {
       <h3>ED2K链接自动转发</h3>
       <div class="switches"><label class="switch"><input v-model="settings.telegram_enabled" type="checkbox" :disabled="disabled">发送 ED2K 链接到 Telegram</label></div>
       <div class="switches"><label class="switch"><input v-model="settings.telegram_aggregate" type="checkbox" :disabled="disabled || !settings.telegram_enabled">聚合转发</label><small>同剧名同季数合并为一条消息。</small></div>
+      <label v-if="settings.telegram_aggregate">聚合转发延迟等待秒数<input v-model.number="settings.telegram_aggregate_window" type="number" min="0" max="3600" :disabled="disabled"><small>批次完成后继续等待；期间发现的同剧同季文件会合并，默认600秒。</small></label>
       <!-- <select v-model="settings.telegram_mode"><option value="bot">Bot Token（机器人）</option></select> -->
       <!-- <label>发送机器人 Token<input v-model="settings.telegram_token" type="password" autocomplete="new-password"></label> -->
       <div class="fields telegram-targets"><label>接收目标（支持多个）<textarea v-model="settings.telegram_chat_id" :disabled="disabled" rows="1" placeholder="@接收机器人, @频道用户名, -1001234567890" /><small>支持用户名、Chat ID或 t.me 链接，最多50个；逗号、分号或换行分隔。</small><small>指定话题：@群组用户名|123。</small></label><label>默认话题线程 ID（可选）<input v-model="settings.telegram_thread_id" :disabled="disabled" placeholder="普通私聊、频道留空"><small>用于未单独指定话题的目标。</small></label></div>

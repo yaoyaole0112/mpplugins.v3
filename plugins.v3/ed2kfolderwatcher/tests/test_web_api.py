@@ -99,6 +99,15 @@ class WebApiTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, {"telegram_enabled": True, "telegram_chat_id": value})
 
+    def test_aggregate_window_validation_and_snapshot(self):
+        result = web_api.validate_settings(self.plugin, {"telegram_aggregate_window": "900"})
+        self.assertEqual(result["telegram_aggregate_window"], 900)
+        self.plugin._telegram_aggregate_window = 900
+        self.assertEqual(web_api.settings_snapshot(self.plugin)["telegram_aggregate_window"], 900)
+        for value in (-1, 3601, "bad", True):
+            with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"telegram_aggregate_window": value})
+
     def test_small_file_delete_boolean_validation_and_snapshot(self):
         self.assertFalse(web_api.settings_snapshot(self.plugin)["delete_small_files"])
         for value in (True, False):

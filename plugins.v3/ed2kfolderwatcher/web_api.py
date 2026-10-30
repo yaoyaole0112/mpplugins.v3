@@ -15,7 +15,7 @@ from .file_size import minimum_file_bytes, minimum_gb_value, minimum_gb_setting
 
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
                  "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
-                 "telegram_chat_id", "telegram_thread_id", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
+                 "telegram_chat_id", "telegram_thread_id", "telegram_aggregate", "telegram_aggregate_window", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
                  "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
 BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled"}
 
@@ -54,8 +54,8 @@ def validate_settings(plugin, values):
         if name in BOOLEAN_FIELDS:
             if not isinstance(value, bool):
                 raise UserAccountError("开关配置格式不正确")
-        elif name in {"min_age", "cloud_read_timeout"}:
-            lower, upper = (0, 86400) if name == "min_age" else (30, 1800)
+        elif name in {"min_age", "cloud_read_timeout", "telegram_aggregate_window"}:
+            lower, upper = (0, 86400) if name == "min_age" else ((30, 1800) if name == "cloud_read_timeout" else (0, 3600))
             if isinstance(value, bool) or not str(value).isdigit() or not lower <= int(value) <= upper:
                 raise UserAccountError(f"{'文件稳定时间' if name == 'min_age' else '网盘读取超时'}必须为 {lower} 到 {upper} 的整数秒")
             value = int(value)
