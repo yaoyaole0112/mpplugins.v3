@@ -1,3 +1,4 @@
 telethon>=1.36,<2
 pypinyin==0.55.0
 beautifulsoup4>=4.12,<5
+p115client>=0.0.9.7,<1

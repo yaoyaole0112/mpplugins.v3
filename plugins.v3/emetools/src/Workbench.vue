@@ -17,6 +17,7 @@ const sections = [
   { key: 'invalid', title: '清理数据', icon: 'mdi-folder-search-outline', detail: '扫描与清理 STRM 独立资料' },
   { key: 'cleanup', title: '清理文件', icon: 'mdi-folder-remove-outline', detail: '115 文件夹清理' },
   { key: 'move', title: '文件转存', icon: 'mdi-folder-swap-outline', detail: '按规则定时或手动移动/增量复制' },
+  { key: 'rapid', title: '本地秒传', icon: 'mdi-cloud-upload-outline', detail: '本地文件 SHA1 秒传到 115' },
   { key: 'trash', title: '清空回收站', icon: 'mdi-delete-alert-outline', detail: '不可恢复的彻底删除' },
   { key: 'settings', title: '通用设置', icon: 'mdi-cog-outline', detail: '基础选项、通知与 Telegram 账号' },
 ]
@@ -85,6 +86,14 @@ const pendingJobs = ref([])
 const trash = ref(null)
 const moveInfo = ref(null)
 const folder = reactive({ open: false, type: '', index: 0, cid: '0', path: '/', name: '根目录', trail: [], dirs: [], ready: false, error: '' })
+const rapid = reactive({ configs: [], logs: [], running: '', loaded: false })
+const savedRapidConfigs = ref('')
+const rapidConfigDirty = computed(() => rapid.loaded && JSON.stringify(rapid.configs) !== savedRapidConfigs.value)
+function newRapidConfig() {
+  return { id: `rapid_${Date.now()}`, name: `配置 ${rapid.configs.length + 1}`, source_path: '', target_folder_id: '', target_folder_path: '',
+    media_extensions: 'mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v', failure_directory: '',
+    delete_source_on_success: false, retry_limit: 2, cron_enabled: false, cron_expression: '*/10 * * * *' }
+}
 const base = computed(() => `plugin/${props.pluginId}`)
 const current = computed(() => sections.find(section => section.key === active.value))
 const rules = computed(() => schedule.p115_move.rules || [])
@@ -417,6 +426,38 @@ async function loadMedia() {
   applyMediaStatus(await get('media-cleanup/status'))
   const options = await get('media-cleanup/libraries')
   media.libraries = options.libraries || []
+}
+async function loadRapid() {
+  const result = await get('rapid/status')
+  rapid.configs.splice(0, rapid.configs.length, ...(result.configs || []).map(item => ({ ...item })))
+  rapid.logs.splice(0, rapid.logs.length, ...(result.logs || []))
+  rapid.running = result.running || ''
+  rapid.loaded = true
+  savedRapidConfigs.value = JSON.stringify(rapid.configs)
+}
+function addRapidConfig() {
+  rapid.configs.push(newRapidConfig())
+}
+async function saveRapid() {
+  if (!settingsLoaded.value || !rapid.loaded) { error.value = '本地秒传配置尚未加载，请刷新后重试'; return }
+  await work(async () => {
+    const result = await post('rapid/config', { configs: JSON.parse(JSON.stringify(rapid.configs)) })
+    rapid.configs.splice(0, rapid.configs.length, ...(result.configs || []).map(item => ({ ...item })))
+    savedRapidConfigs.value = JSON.stringify(rapid.configs)
+    notice.value = '本地秒传配置已保存'
+  })
+}
+async function rapidCommand(operation, configId) {
+  if (rapidConfigDirty.value) { error.value = '本地秒传配置有未保存的修改，请先保存配置'; return }
+  await work(async () => {
+    const result = await waitP115Task(await post('rapid/action', { operation, config_id: configId }))
+    if (result?.ok === false) throw new Error(result.message || '本地秒传未完成')
+    notice.value = result.message || '本地秒传任务已完成'
+    await loadRapid()
+  })
+}
+function rapidConfigLabel(config) {
+  return `${config.name || '未命名'} · ${config.source_path || '未设置源目录'}`
 }
 async function startMediaScan() {
   media.progress = `正在扫描 STRM 目录（${mediaScanScopeLabel()}）`
@@ -1100,10 +1141,11 @@ async function browse(type, index = 0) {
   folder.type = type
   folder.index = index
   folder.cid = '0'
-  folder.path = type === 'root' ? (settings.strm_root || '/strm') : '/'
+  const local = ['root', 'rapid_source', 'rapid_failure'].includes(type)
+  folder.path = type === 'root' ? (settings.strm_root || '/strm') : local ? (rapid.configs[index]?.[type === 'rapid_source' ? 'source_path' : 'failure_directory'] || '/') : '/'
   folder.name = '根目录'
   folder.trail = []
-  if (type === 'root') {
+  if (local) {
     let parent = folder.path.replace(/\/+$/, '') || '/'
     while (parent !== '/') {
       parent = parent.slice(0, parent.lastIndexOf('/')) || '/'
@@ -1116,7 +1158,7 @@ async function loadFolder() {
   folder.ready = false
   folder.error = ''
   try {
-    const local = folder.type === 'root'
+    const local = ['root', 'rapid_source', 'rapid_failure'].includes(folder.type)
     const result = await execute(local ? 'root_dirs' : 'p115_dirs', local ? { path: folder.path } : { cid: folder.cid })
     folder.dirs = local ? (result.dirs || []).map(name => ({ name, path: `${result.path.replace(/\/$/, '')}/${name}` })) : (result.dirs || [])
     if (local) folder.path = result.path
@@ -1125,7 +1167,7 @@ async function loadFolder() {
 }
 async function enterFolder(item) {
   folder.trail.push({ cid: folder.cid, path: folder.path, name: folder.name })
-  if (folder.type === 'root') folder.path = item.path
+  if (['root', 'rapid_source', 'rapid_failure'].includes(folder.type)) folder.path = item.path
   else folder.cid = String(item.cid)
   folder.name = item.name
   await loadFolder()
@@ -1146,6 +1188,13 @@ function selectFolder() {
   else if (type === 'src' || type === 'dst') {
     rules.value[index][`${type}_id`] = cid
     rules.value[index][`${type}_name`] = folder.name
+  } else if (type === 'rapid_source') {
+    rapid.configs[index].source_path = path
+  } else if (type === 'rapid_failure') {
+    rapid.configs[index].failure_directory = path
+  } else if (type === 'rapid_target') {
+    rapid.configs[index].target_folder_id = cid
+    rapid.configs[index].target_folder_path = `/${folder.trail.concat({ name: folder.name }).map(item => item.name).filter(name => name && name !== '根目录').join('/')}`
   }
   folder.open = false
 }
@@ -1160,6 +1209,7 @@ function chooseSection(key) {
   if (key === 'missing') { loadMissing().catch(err => { error.value = err?.message || '读取缺集结果失败' }); loadMissingOptions(); loadFill() }
   if (key === 'media') loadMedia().catch(err => { error.value = err?.message || '读取媒体清理配置失败' })
   if (key === 'enrichment') { refreshEnrichment().catch(err => { error.value = err?.message || '读取数据补全状态失败' }); loadEnrichLibraries() }
+  if (key === 'rapid') loadRapid().catch(err => { error.value = err?.message || '读取本地秒传配置失败' })
 }
 onMounted(() => { load(); loadMissing().catch(() => {}); pollP115Tasks() })
 onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer); clearTimeout(fillPollTimer); clearTimeout(enrichmentPollTimer); clearTimeout(toastTimer) })
@@ -1188,7 +1238,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
     </aside>
     <main class="eme-main">
       <div v-if="loading" class="eme-message">正在加载插件配置…</div>
-      <p v-if="p115Tasks.length && ['cleanup', 'move', 'trash', 'media'].includes(active)" class="eme-message" role="status">115任务：{{ p115Tasks.map(task => `${task.label}（${task.state === 'running' ? '执行中' : '排队中'}）`).join(' → ') }}。手动任务优先于等待中的定时任务，当前操作不会被中断。</p>
+      <p v-if="p115Tasks.length && ['cleanup', 'move', 'rapid', 'trash', 'media'].includes(active)" class="eme-message" role="status">115任务：{{ p115Tasks.map(task => `${task.label}（${task.state === 'running' ? '执行中' : '排队中'}）`).join(' → ') }}。手动任务优先于等待中的定时任务，当前操作不会被中断。</p>
       <p v-if="busy" class="eme-message" role="status">正在处理页面请求，完成后即可继续保存；当前修改会保留。</p>
       <template v-if="active === 'missing'">
         <section class="eme-card">
@@ -1421,6 +1471,21 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
         </section>
         <section class="eme-card"><div class="eme-card-heading"><h3>实时监控</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存监控</button></div><label class="eme-switch-label"><input v-model="schedule.p115_move.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label>检查间隔（秒，最少 60）<input v-model.number="schedule.p115_move.check_interval" type="number" min="60" step="60" /></label></section>
       </template>
+      <template v-if="active === 'rapid'">
+        <section class="eme-card">
+          <div class="eme-card-heading"><div><h3>本地秒传</h3><p>监控本地文件，计算 SHA1 后调用 115 秒传接口；只在 115 命中时写入网盘，不会把未命中的文件当作普通上传。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !rapid.loaded" @click="addRapidConfig">添加配置</button><button class="eme-button primary" :disabled="busy || !rapid.loaded" @click="saveRapid">保存配置</button></div></div>
+          <p v-if="rapidConfigDirty" class="eme-message eme-warning">本地秒传有未保存的修改；请点击“保存配置”后再扫描。</p>
+          <p class="eme-hint">账号沿用“115 网盘 STRM 助手”中的 Cookie；本地源目录必须是 MoviePilot 容器内可访问的路径，目标目录请选择非根目录。秒传任务与清理、转存共用 115 串行队列。</p>
+          <div v-for="(config, index) in rapid.configs" :key="config.id" class="eme-rapid-config">
+            <div class="eme-card-heading"><div><h4>{{ rapidConfigLabel(config) }}</h4><p>ID：{{ config.id }}</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || rapidConfigDirty || rapid.running" @click="rapidCommand('run', config.id)">{{ rapid.running === config.name ? '⌛️秒传中' : '立即扫描' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`删除本地秒传配置 ${index + 1}`" @click="rapid.configs.splice(index, 1)">✕</button></div></div>
+            <div class="eme-rapid-group"><h4>基础配置</h4><div class="eme-fields"><label>配置名称<input v-model.trim="config.name" placeholder="例如：电视剧" /></label><label>重试次数<input v-model.number="config.retry_limit" type="number" min="0" max="100" /></label></div></div>
+            <div class="eme-rapid-group"><h4>目录设置</h4><label>本地源目录<div class="eme-folder-input"><input v-model.trim="config.source_path" placeholder="/media/资源/电视剧" /><button class="eme-button secondary" type="button" @click="browse('rapid_source', index)">浏览</button></div></label><label>115 目标目录<div class="eme-folder-input"><input :value="config.target_folder_path || '未选择目标目录'" readonly /><button class="eme-button secondary" type="button" @click="browse('rapid_target', index)">选择目录</button></div></label><p class="eme-hint">CID：{{ config.target_folder_id || '未选择' }}</p><label>失败目录（可选）<div class="eme-folder-input"><input v-model.trim="config.failure_directory" placeholder="/media/资源/秒传失败/电视剧" /><button class="eme-button secondary" type="button" @click="browse('rapid_failure', index)">浏览</button></div></label></div>
+            <div class="eme-rapid-group"><h4>扫描与文件</h4><label>媒体后缀<input v-model.trim="config.media_extensions" placeholder="mp4,mkv,ts" /></label><label class="eme-switch-label"><input v-model="config.delete_source_on_success" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>秒传成功后删除本地源文件</span></label><label class="eme-switch-label"><input v-model="config.cron_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 Cron 自动扫描</span></label><label v-if="config.cron_enabled">执行周期（cron 表达式）<input v-model.trim="config.cron_expression" placeholder="*/10 * * * *" /></label></div>
+          </div>
+          <p v-if="!rapid.configs.length" class="eme-hint">还没有配置。点击“添加配置”后填写本地源目录与 115 目标目录。</p>
+        </section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>运行日志</h3><p>记录最近 200 条秒传结果；失败时会显示未命中、文件变化或网络错误原因。</p></div><button class="eme-button text" :disabled="busy || !rapid.logs.length" @click="rapidCommand('clear_logs')">清空日志</button></div><div v-if="rapid.logs.length" class="eme-results eme-rapid-logs"><div v-for="(item, index) in [...rapid.logs].reverse()" :key="`${item.time}-${item.path}-${index}`" class="eme-result"><span>{{ item.status === 'succeeded' ? '✅' : '⚠️' }}</span><div><strong>{{ item.name }}</strong><small>{{ item.time }} · {{ item.config }} · {{ item.message }}</small><small>{{ item.path }}</small></div></div></div><p v-else class="eme-hint">暂无运行日志。</p></section>
+      </template>
     </main>
       <div v-if="enrichSettings.open" class="eme-overlay" @click.self="enrichSettings.open = false">
         <div class="eme-dialog eme-enrich-settings-dialog" role="dialog" aria-modal="true" aria-label="补全设置">
@@ -1458,10 +1523,10 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
       </div>
       <div v-if="folder.open" class="eme-overlay" @click.self="folder.open = false">
         <div class="eme-dialog" role="dialog" aria-modal="true" aria-label="选择目录">
-          <div class="eme-card-heading"><h3>选择{{ folder.type === 'root' ? 'STRM 根目录' : '115 文件夹' }}</h3><button class="eme-button text" @click="folder.open = false">关闭</button></div>
+          <div class="eme-card-heading"><h3>选择{{ ['root', 'rapid_source', 'rapid_failure'].includes(folder.type) ? '本地目录' : '115 文件夹' }}</h3><button class="eme-button text" @click="folder.open = false">关闭</button></div>
           <p class="eme-hint">{{ folder.type === 'root' ? folder.path : `CID: ${folder.cid}` }}</p>
           <p v-if="folder.error" class="eme-message eme-error">{{ folder.error }}</p>
-          <div class="eme-actions"><button class="eme-button secondary" :disabled="!folder.trail.length" @click="parentFolder">上一级</button><button class="eme-button primary" :disabled="!folder.ready || (folder.type === 'root' ? folder.path === '/' : folder.type !== 'local' && folder.cid === '0')" @click="selectFolder">选择当前目录</button></div>
+          <div class="eme-actions"><button class="eme-button secondary" :disabled="!folder.trail.length" @click="parentFolder">上一级</button><button class="eme-button primary" :disabled="!folder.ready || (['root', 'rapid_source', 'rapid_failure'].includes(folder.type) ? folder.path === '/' : folder.type !== 'local' && folder.cid === '0')" @click="selectFolder">选择当前目录</button></div>
           <div class="eme-folder-list"><button v-for="item in folder.dirs" :key="item.path || item.cid" class="eme-folder" @click="enterFolder(item)">📁 {{ item.name }}</button><p v-if="folder.ready && !folder.dirs.length" class="eme-hint">没有子目录</p></div>
         </div>
       </div>
@@ -1724,4 +1789,12 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
 .eme-precheck-field{display:flex;flex-direction:column;gap:4px;min-width:0;padding:8px 10px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:8px;overflow-wrap:anywhere}
 .eme-precheck-field.warning>strong{color:#d14646}
 .eme-precheck-field.unknown>strong{color:#b07012}
+.eme-rapid-config{margin-top:16px;padding:16px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:14px;background:rgba(var(--v-theme-surface),.22)}
+.eme-rapid-config h4{margin:0 0 8px}
+.eme-rapid-config> .eme-card-heading h4{margin:0}
+.eme-rapid-config> .eme-card-heading p{margin:4px 0 0}
+.eme-rapid-group{margin-top:14px;padding:14px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:11px;background:rgba(var(--v-theme-surface),.12)}
+.eme-folder-input{display:flex;align-items:center;gap:8px}.eme-folder-input input{flex:1;min-width:0}.eme-folder-input .eme-button{flex:none}
+.eme-rapid-logs{max-height:420px}.eme-rapid-logs .eme-result{align-items:flex-start}
+@media(max-width:760px){.eme-rapid-config .eme-card-heading{gap:10px}.eme-folder-input{align-items:stretch;flex-direction:column}.eme-folder-input .eme-button{width:100%}}
 </style>

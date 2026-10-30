@@ -37,6 +37,7 @@ from .missing_fill import MissingFill
 from .media_cleanup import MediaCleanup, DEFAULT_CONFIG as DEFAULT_MEDIA_CLEANUP, DEFAULT_RULES, validate_rules
 from .data_enrichment import DataEnrichment, DEFAULT_ENRICH_CONFIG, validate_enrich_config
 from .enrichment_llm import llm_available, llm_setting
+from .rapid_upload import RapidUpload, validate_configs as validate_rapid_configs
 from . import tool_notifications as notices
 
 ICON_URL = "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg"
@@ -118,11 +119,17 @@ class EnrichmentAction(BaseModel):
     allow_mediainfo: bool = False
 
 
+class RapidAction(BaseModel):
+    operation: str
+    config_id: str = ""
+    paths: List[str] = Field(default_factory=list)
+
+
 class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.50"
+    plugin_version = "2.10.51"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -191,6 +198,11 @@ class EmeTools(_PluginBase):
         except ValueError:
             self._enrichment_config = dict(DEFAULT_ENRICH_CONFIG)
         self._enrichment = DataEnrichment(self)
+        try:
+            self._rapid = RapidUpload(self, config.get("rapid_upload") or {})
+        except ValueError:
+            logger.warning("媒体增强：本地秒传配置无效，已恢复为空配置")
+            self._rapid = RapidUpload(self, {})
         self._schedule = copy.deepcopy(DEFAULT_SCHEDULE)
         for name, defaults in self._schedule.items():
             saved = (config.get("schedule") or {}).get(name) or {}
@@ -554,6 +566,17 @@ class EmeTools(_PluginBase):
                                  "trigger": trigger, "func": self._run_media_scheduled, "kwargs": {}})
             except ValueError as error:
                 logger.error("媒体增强 媒体清理周期无效：%s", error)
+        for config in self._rapid.configs:
+            if not config.get("cron_enabled"):
+                continue
+            try:
+                trigger = CronTrigger.from_crontab(config["cron_expression"])
+                services.append({"id": f"EmeTools_rapid_{config['id']}",
+                                 "name": f"媒体增强 本地秒传：{config['name']}",
+                                 "trigger": trigger, "func": self._run_rapid_scheduled,
+                                 "kwargs": {}, "func_kwargs": {"config_id": config["id"]}})
+            except ValueError as error:
+                logger.error("媒体增强 本地秒传配置 %s 定时表达式无效：%s", _log_label(config["name"]), error)
         if self._enrichment_config["auto_on_import"]:
             services.append({"id": "EmeTools_enrichment_import_poll",
                              "name": "媒体增强 入库补全兜底检查",
@@ -619,7 +642,8 @@ class EmeTools(_PluginBase):
                             "media_cleanup": copy.deepcopy(self._media_config),
                             "enrichment": copy.deepcopy(self._enrichment_config),
                             "notifications": copy.deepcopy(self._notifications),
-                            "media_scan_library_ids": list(self._media_scan_library_ids)})
+                            "media_scan_library_ids": list(self._media_scan_library_ids),
+                            "rapid_upload": {"configs": copy.deepcopy(self._rapid.configs)}})
 
     async def media_status(self) -> dict:
         return {"config": copy.deepcopy(self._media_config),
@@ -1037,7 +1061,41 @@ class EmeTools(_PluginBase):
 
     async def status(self) -> dict:
         return {"settings": self._settings(), "schedule": copy.deepcopy(self._schedule),
-                "last_run": dict(self._last_run), "p115_tasks": self._p115_tasks.status()}
+                "last_run": dict(self._last_run), "p115_tasks": self._p115_tasks.status(),
+                "rapid_upload": self._rapid.status()}
+
+    async def rapid_status(self) -> dict:
+        return self._rapid.status()
+
+    async def save_rapid_config(self, values: dict) -> dict:
+        try:
+            configs = validate_rapid_configs(values.get("configs") if isinstance(values, dict) else None)
+            self._rapid.save(configs)
+            self._persist()
+            Scheduler().update_plugin_job(self.__class__.__name__)
+            return {"configs": copy.deepcopy(configs)}
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    async def rapid_action(self, action: RapidAction) -> dict:
+        if action.operation == "clear_logs":
+            self._rapid._logs.clear()
+            return {"ok": True, "message": "本地秒传日志已清空"}
+        if action.operation not in {"run", "enqueue"}:
+            raise HTTPException(status_code=400, detail="未知的本地秒传操作")
+        config_id = str(action.config_id or "").strip()
+        if not config_id:
+            raise HTTPException(status_code=400, detail="请选择本地秒传配置")
+        try:
+            job = self._p115_tasks.submit(
+                f"rapid_upload:{config_id}", "本地秒传",
+                lambda: self._rapid.run(config_id, action.paths or None),
+                manual=True,
+            )
+            return await self._p115_submission(job)
+        except (RuntimeError, ValueError, OSError) as error:
+            logger.warning("媒体增强 本地秒传失败：%s", type(error).__name__)
+            return {"ok": False, "message": str(error)}
 
     async def missing_status(self) -> dict:
         if not self._missing._is_scanning:
@@ -2023,6 +2081,21 @@ class EmeTools(_PluginBase):
         return self._p115_tasks.run(section, f"定时{SECTION_NAMES.get(section, section)}",
                                     lambda: self._run_scheduled_serial(section))
 
+    def _run_rapid_scheduled(self, config_id: str) -> None:
+        config = next((item for item in self._rapid.configs if item["id"] == config_id), None)
+        if not self._enabled or not config or not config.get("cron_enabled"):
+            return
+        try:
+            result = self._p115_tasks.run(
+                f"rapid_upload:{config_id}", f"定时本地秒传：{config['name']}",
+                lambda: self._rapid.run(config_id),
+            )
+            logger.info("媒体增强 本地秒传：定时任务结束，配置=%s，结果=%s",
+                        _log_label(config["name"]), _log_label(result.get("message") if isinstance(result, dict) else result))
+        except (RuntimeError, ValueError, OSError) as error:
+            logger.warning("媒体增强 本地秒传：定时任务失败，配置=%s，原因=%s",
+                           _log_label(config["name"]), type(error).__name__)
+
     def _run_scheduled_serial(self, section: str) -> None:
         if not self._enabled or not self._schedule.get(section, {}).get("enabled"):
             return
@@ -2395,6 +2468,9 @@ class EmeTools(_PluginBase):
             {"path": "/media-cleanup/status", "endpoint": self.media_status, "methods": ["GET"], "auth": "bear", "summary": "媒体清理状态"},
             {"path": "/media-cleanup/libraries", "endpoint": self.media_libraries, "methods": ["GET"], "auth": "bear", "summary": "媒体清理媒体库"},
             {"path": "/media-cleanup/action", "endpoint": self.media_action, "methods": ["POST"], "auth": "bear", "summary": "媒体清理操作"},
+            {"path": "/rapid/status", "endpoint": self.rapid_status, "methods": ["GET"], "auth": "bear", "summary": "本地秒传状态"},
+            {"path": "/rapid/config", "endpoint": self.save_rapid_config, "methods": ["POST"], "auth": "bear", "summary": "保存本地秒传配置"},
+            {"path": "/rapid/action", "endpoint": self.rapid_action, "methods": ["POST"], "auth": "bear", "summary": "执行本地秒传"},
             {"path": "/enrichment/status", "endpoint": self.enrichment_status, "methods": ["GET"], "auth": "bear", "summary": "数据补全任务状态"},
             {"path": "/enrichment/config", "endpoint": self.enrichment_config, "methods": ["GET"], "auth": "bear", "summary": "补全设置"},
             {"path": "/enrichment/config", "endpoint": self.save_enrichment_config, "methods": ["POST"], "auth": "bear", "summary": "保存补全设置"},
