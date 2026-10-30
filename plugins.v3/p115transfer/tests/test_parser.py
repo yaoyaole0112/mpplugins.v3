@@ -1,8 +1,9 @@
 import importlib.util
+import json
 import sys
 import types
 import unittest
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 from pathlib import Path
 
 
@@ -113,6 +114,188 @@ class TransferPluginTest(unittest.TestCase):
         plugin.handle_message(types.SimpleNamespace(event_data={"text": "https://115.com/s/abc"}))
         plugin._handle.assert_not_called()
 
+    def test_telegraph_paths_are_allowlisted_and_deduplicated(self):
+        text = " ".join([
+            "https://telegra.ph/Movie-10-27?x=1",
+            "https://graph.org/Movie-10-27#section",
+            "https://www.telegra.ph/Other-10-27",
+            "https://telegra.ph.evil.test/Nope",
+            "https://telegra.ph@127.0.0.1/Nope",
+            "https://user:password@telegra.ph/Nope",
+            "https://telegra.ph:8080/Nope",
+            "https://telegra.ph/encoded%2fpath",
+            "https://telegra.ph/..",
+            "http://127.0.0.1/Nope",
+        ])
+        self.assertEqual(self.module.telegraph_paths(text), ["Movie-10-27", "Other-10-27"])
+
+    def test_forwarded_photo_caption_url_buttons_are_received(self):
+        plugin = self.module.P115Transfer()
+        plugin._allowed_users = {"123"}
+        plugin._handle = Mock()
+        message = {
+            "from": {"id": 123}, "chat": {"id": 123, "type": "private"},
+            "forward_origin": {"type": "channel", "chat": {"id": -100}},
+            "photo": [{"file_id": "poster"}], "caption": "电影介绍",
+            "caption_entities": [{"type": "text_link", "url": "https://telegra.ph/Caption-10-27"}],
+            "reply_markup": {"inline_keyboard": [[
+                {"text": "查看资源", "url": "https://telegra.ph/Movie-10-27"},
+                {"text": "广告", "url": "https://advert.example/"},
+                {"text": "回调按钮", "callback_data": "secret"},
+            ]]},
+        }
+        plugin._bot_message(Mock(), message)
+        received = plugin._handle.call_args.args[1]
+        self.assertEqual(self.module.telegraph_paths(received), ["Caption-10-27", "Movie-10-27"])
+        self.assertNotIn("secret", received)
+        message["from"]["id"] = 999
+        plugin._handle.reset_mock()
+        plugin._bot_message(Mock(), message)
+        plugin._handle.assert_not_called()
+
+    def test_mp_user_message_accepts_telegraph_links(self):
+        plugin = self.module.P115Transfer()
+        plugin._enabled = True
+        plugin._handle = Mock()
+        plugin.handle_message(types.SimpleNamespace(event_data={"text": "https://telegra.ph/Movie-10-27"}))
+        plugin._handle.assert_called_once()
+
+    def test_telegraph_code_and_anchor_resources_keep_filename_spaces(self):
+        link = "ed2k://|file|哆啦A梦 movie.mkv|123|0123456789abcdef0123456789abcdef|/"
+        content = [
+            {"tag": "pre", "children": [{"tag": "code", "children": [link[:30], link[30:]]}]},
+            {"tag": "p", "children": [
+                {"tag": "a", "attrs": {"href": "https://115.com/s/Ab12?password=abcd"}, "children": ["网盘链接"]},
+            ]},
+        ]
+        text = self.module.telegraph_text(content)
+        self.assertEqual(self.module.parse_input(text)[0], [link])
+        self.assertEqual(self.module.parse_share_links(text), [("Ab12", "abcd")])
+
+    def test_multiple_share_links_keep_independent_passwords(self):
+        self.assertEqual(self.module.parse_share_links(
+            "https://115.com/s/First 提取码：abcd\n"
+            "https://115cdn.com/s/Second?password=1234\n"
+            "https://115share.com/s/Third 密码:efgh"
+        ), [("First", "abcd"), ("Second", "1234"), ("Third", "efgh")])
+
+    def test_telegraph_and_direct_resources_deduplicate_before_submit(self):
+        plugin = self.module.P115Transfer()
+        link = "ed2k://|file|movie.mkv|123|0123456789abcdef0123456789abcdef|/"
+        plugin._fetch_telegraph = Mock(return_value=link + "\nhttps://115.com/s/First?password=abcd\nhttps://115.com/s/Second 密码1234")
+        plugin._refresh_cookie = Mock()
+        plugin._client = Mock()
+        plugin._offline = Mock(return_value="离线已提交")
+        plugin._receive_share = Mock(return_value="分享已转存")
+        plugin._reply = Mock()
+        plugin._handle({}, link + "\nhttps://telegra.ph/Movie-10-27\nhttps://graph.org/Movie-10-27")
+        plugin._fetch_telegraph.assert_called_once_with("Movie-10-27")
+        plugin._offline.assert_called_once_with(plugin._client, [link])
+        self.assertEqual(plugin._receive_share.call_args_list, [
+            call(plugin._client, "First", "abcd"), call(plugin._client, "Second", "1234"),
+        ])
+
+    def test_telegraph_failure_prevents_even_direct_resource_submission(self):
+        plugin = self.module.P115Transfer()
+        plugin._fetch_telegraph = Mock(side_effect=self.module.P115OperationError("Telegraph读取失败，未提交任务"))
+        plugin._refresh_cookie = Mock()
+        plugin._offline = Mock()
+        plugin._reply = Mock()
+        plugin._handle({}, "magnet:?xt=urn:btih:ABC\nhttps://telegra.ph/Movie-10-27")
+        plugin._refresh_cookie.assert_not_called()
+        plugin._offline.assert_not_called()
+        self.assertIn("未提交任务", plugin._reply.call_args.args[1])
+
+    def test_telegraph_page_limit_checked_before_fetch(self):
+        plugin = self.module.P115Transfer()
+        plugin._fetch_telegraph = Mock()
+        with self.assertRaises(self.module.P115OperationError):
+            plugin._resolve_resources("\n".join(f"https://telegra.ph/Page-{index}" for index in range(4)))
+        plugin._fetch_telegraph.assert_not_called()
+
+    def test_stop_during_telegraph_fetch_does_not_submit(self):
+        plugin = self.module.P115Transfer()
+        plugin._reply = Mock()
+        plugin._refresh_cookie = Mock()
+        def fetch_page(path):
+            plugin._stop.set()
+            return "magnet:?xt=urn:btih:ABC"
+        plugin._fetch_telegraph = fetch_page
+        plugin._handle({"bot_client": Mock()}, "https://telegra.ph/Movie-10-27")
+        plugin._refresh_cookie.assert_not_called()
+        plugin._reply.assert_not_called()
+
+    def test_unavailable_forwarded_buttons_have_actionable_reply(self):
+        plugin = self.module.P115Transfer()
+        plugin._reply = Mock()
+        plugin._refresh_cookie = Mock()
+        plugin._handle({}, "只保留海报及影片介绍")
+        self.assertIn("页面链接", plugin._reply.call_args.args[1])
+        plugin._refresh_cookie.assert_not_called()
+
+    def _telegraph_httpx(self, payload):
+        httpx = types.ModuleType("httpx")
+        httpx.Timeout = Mock(return_value=object())
+        httpx.Client = MagicMock()
+        response = httpx.Client.return_value.__enter__.return_value.stream.return_value.__enter__.return_value
+        response.iter_bytes.return_value = [json.dumps(payload).encode()]
+        return httpx, response
+
+    def test_fetch_telegraph_uses_fixed_api_without_redirects_or_credentials(self):
+        plugin = self.module.P115Transfer()
+        plugin._bot_token = "private-bot-token"
+        plugin._cookie = "private-cookie"
+        plugin._resolve_bot_proxies = Mock(return_value=[("运行环境网络", None)])
+        httpx, _ = self._telegraph_httpx({"ok": True, "result": {"content": [{"tag": "p", "children": ["magnet:?xt=urn:btih:ABC"]}]}})
+        with patch.dict(sys.modules, {"httpx": httpx}):
+            self.assertIn("magnet:", plugin._fetch_telegraph("Movie-10-27"))
+        httpx.Client.assert_called_once_with(timeout=httpx.Timeout.return_value, proxy=None, trust_env=False, follow_redirects=False)
+        httpx.Client.return_value.__enter__.return_value.stream.assert_called_once_with(
+            "GET", "https://api.telegra.ph/getPage/Movie-10-27", params={"return_content": "true"},
+        )
+        self.assertNotIn("private-", str(httpx.Client.mock_calls))
+
+    def test_fetch_telegraph_network_failure_tries_other_proxies(self):
+        plugin = self.module.P115Transfer()
+        plugin._resolve_bot_proxies = Mock(return_value=[("插件配置", "http://first-proxy"), ("运行环境网络", None)])
+        httpx, response = self._telegraph_httpx({"ok": True, "result": {"content": ["页面正文"]}})
+        response.raise_for_status.side_effect = [ConnectionError("private-url"), None]
+        with patch.dict(sys.modules, {"httpx": httpx}):
+            self.assertEqual(plugin._fetch_telegraph("Movie-10-27"), "页面正文")
+        self.assertEqual([entry.kwargs["proxy"] for entry in httpx.Client.call_args_list], ["http://first-proxy", None])
+
+    def test_telegraph_response_size_and_nested_structure_are_bounded(self):
+        plugin = self.module.P115Transfer()
+        plugin._resolve_bot_proxies = Mock(return_value=[("运行环境网络", None)])
+        httpx, response = self._telegraph_httpx({})
+        response.iter_bytes.return_value = [b"x" * (self.module.MAX_TELEGRAPH_BYTES + 1)]
+        with patch.dict(sys.modules, {"httpx": httpx}), self.assertRaises(self.module.P115OperationError):
+            plugin._fetch_telegraph("Movie-10-27")
+        content = "content"
+        for _ in range(66):
+            content = {"tag": "p", "children": [content]}
+        with self.assertRaises(self.module.P115OperationError):
+            self.module.telegraph_text([content])
+
+    def test_telegraph_errors_do_not_leak_server_responses(self):
+        plugin = self.module.P115Transfer()
+        plugin._resolve_bot_proxies = Mock(return_value=[("运行环境网络", None)])
+        httpx, _ = self._telegraph_httpx({"ok": False, "error": "private-response-content"})
+        with patch.dict(sys.modules, {"httpx": httpx}), self.assertRaises(self.module.P115OperationError) as error:
+            plugin._fetch_telegraph("Movie-10-27")
+        self.assertNotIn("private-", str(error.exception))
+
+    def test_telegraph_all_network_failures_are_safe_and_not_replayed(self):
+        plugin = self.module.P115Transfer()
+        plugin._resolve_bot_proxies = Mock(return_value=[("插件配置", "http://private-proxy"), ("运行环境网络", None)])
+        httpx, response = self._telegraph_httpx({})
+        response.raise_for_status.side_effect = TimeoutError("private-url-with-token")
+        with patch.dict(sys.modules, {"httpx": httpx}), self.assertRaises(self.module.P115OperationError) as error:
+            plugin._fetch_telegraph("Movie-10-27")
+        self.assertEqual(httpx.Client.call_count, 2)
+        self.assertNotIn("private-", str(error.exception))
+        self.assertIn("未提交任务", str(error.exception))
+
     def test_settings_spacing_descriptions_and_stable_models(self):
         plugin = self.module.P115Transfer()
         form, defaults = plugin.get_form()
@@ -148,6 +331,94 @@ class TransferPluginTest(unittest.TestCase):
             runtime.get_runtime_setting.return_value = None
             self.assertIsNone(plugin._resolve_bot_proxy())
 
+    def test_bot_proxy_candidates_fail_over_and_deduplicate(self):
+        plugin = self.module.P115Transfer()
+        plugin._bot_proxy = "socks5://plugin-proxy:6153"
+        runtime = types.ModuleType("app.runtime.settings")
+        runtime.get_runtime_setting = Mock(return_value={"https": "http://mp-proxy:6152"})
+        with patch.dict(sys.modules, {"app.runtime.settings": runtime}):
+            self.assertEqual(
+                plugin._resolve_bot_proxies(),
+                [
+                    ("插件配置", "socks5://plugin-proxy:6153"),
+                    ("MoviePilot配置", "http://mp-proxy:6152"),
+                    ("运行环境网络", None),
+                ],
+            )
+            runtime.get_runtime_setting.return_value = {
+                "https": "socks5://plugin-proxy:6153"
+            }
+            self.assertEqual(
+                plugin._resolve_bot_proxies(),
+                [
+                    ("插件配置", "socks5://plugin-proxy:6153"),
+                    ("运行环境网络", None),
+                ],
+            )
+            plugin._bot_proxy = ""
+            runtime.get_runtime_setting.return_value = None
+            self.assertEqual(plugin._resolve_bot_proxies(), [("运行环境网络", None)])
+
+    def test_bot_network_failure_switches_proxy_without_replaying_updates(self):
+        plugin = self.module.P115Transfer()
+        plugin._bot_proxy = "socks5://plugin-proxy:6153"
+        plugin.get_data = Mock(return_value=0)
+        runtime = types.ModuleType("app.runtime.settings")
+        runtime.get_runtime_setting = Mock(return_value={"https": "http://mp-proxy:6152"})
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Timeout = Mock(return_value=object())
+        httpx.Limits = Mock(return_value=object())
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=[httpx.ConnectError("secret-token"), {}, []])
+        stop = Mock()
+        stop.is_set.side_effect = [False, False, True]
+        with patch.dict(sys.modules, {"app.runtime.settings": runtime, "httpx": httpx}), \
+             patch.object(self.module, "logger") as log:
+            plugin._poll_bot(stop)
+        self.assertEqual(httpx.Client.call_count, 2)
+        self.assertEqual(httpx.Client.call_args_list[0].kwargs["proxy"], "socks5://plugin-proxy:6153")
+        self.assertEqual(httpx.Client.call_args_list[1].kwargs["proxy"], "http://mp-proxy:6152")
+        self.assertEqual(plugin._bot_proxy_source, "MoviePilot配置")
+        log.warning.assert_not_called()
+        self.assertTrue(any("Bot连接已恢复" in entry.args[0] for entry in log.info.call_args_list))
+        self.assertNotIn("secret-token", plugin._bot_error)
+        self.assertEqual(plugin._bot_error, "")
+
+    def test_all_bot_paths_fail_then_backoff_before_retry(self):
+        plugin = self.module.P115Transfer()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxies = Mock(return_value=[
+            ("插件配置", "socks5://plugin-proxy:6153"),
+            ("MoviePilot配置", "http://mp-proxy:6152"),
+            ("运行环境网络", None),
+        ])
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Timeout = Mock(return_value=object())
+        httpx.Limits = Mock(return_value=object())
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=[
+            httpx.ConnectError("secret-token"),
+            httpx.ConnectError("secret-token"),
+            httpx.ConnectError("secret-token"),
+            {}, [],
+        ])
+        stop = Mock()
+        stop.is_set.side_effect = [False] * 4 + [True]
+        with patch.dict(sys.modules, {"httpx": httpx}), patch.object(self.module, "logger") as log:
+            plugin._poll_bot(stop)
+        self.assertEqual(
+            [call.kwargs["proxy"] for call in httpx.Client.call_args_list],
+            ["socks5://plugin-proxy:6153", "http://mp-proxy:6152", None, "socks5://plugin-proxy:6153"],
+        )
+        stop.wait.assert_called_once_with(30)
+        self.assertEqual(log.warning.call_count, 1)
+        self.assertNotIn("secret-token", str(log.mock_calls))
+        self.assertNotIn("plugin-proxy", str(log.mock_calls))
+        self.assertNotIn("mp-proxy", str(log.mock_calls))
+        self.assertEqual(plugin._bot_error, "")
+
     def test_startup_connect_error_retries_and_recovers(self):
         plugin = self.module.P115Transfer()
         plugin.get_data = Mock(return_value=0)
@@ -167,6 +438,90 @@ class TransferPluginTest(unittest.TestCase):
         stop.wait.assert_called_once_with(30)
         self.assertEqual([call.args[1] for call in plugin._bot_call.call_args_list], ["getWebhookInfo", "getWebhookInfo", "getUpdates"])
         self.assertEqual(plugin._bot_error, "")
+
+    def test_proxy_failover_wraps_after_recovery_without_warning_or_delay(self):
+        plugin = self.module.P115Transfer()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxies = Mock(return_value=[
+            ("插件配置", "http://first-proxy"),
+            ("MoviePilot配置", "http://second-proxy"),
+            ("运行环境网络", None),
+        ])
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.ReadTimeout = type("ReadTimeout", (Exception,), {})
+        httpx.Timeout = Mock()
+        httpx.Limits = Mock()
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=[
+            httpx.ConnectError(), {}, [],
+            httpx.ReadTimeout(), httpx.ConnectError(), {}, [],
+        ])
+        stop = Mock()
+        stop.is_set.side_effect = [False] * 5 + [True]
+        with patch.dict(sys.modules, {"httpx": httpx}), patch.object(self.module, "logger") as log:
+            plugin._poll_bot(stop)
+        self.assertEqual([entry.kwargs["proxy"] for entry in httpx.Client.call_args_list], [
+            "http://first-proxy", "http://second-proxy", None, "http://first-proxy",
+        ])
+        stop.wait.assert_not_called()
+        log.warning.assert_not_called()
+        self.assertEqual(plugin._bot_proxy_source, "插件配置")
+        self.assertEqual(plugin._bot_error, "")
+        self.assertEqual(sum("Bot连接已恢复" in entry.args[0] for entry in log.info.call_args_list), 2)
+
+    def test_repeated_failed_cycles_warn_once_only_after_all_paths_fail(self):
+        plugin = self.module.P115Transfer()
+        plugin.get_data = Mock(return_value=0)
+        plugin._resolve_bot_proxies = Mock(return_value=[
+            ("插件配置", "http://private-first"),
+            ("MoviePilot配置", "http://private-second"),
+            ("运行环境网络", None),
+        ])
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Timeout = Mock()
+        httpx.Limits = Mock()
+        httpx.Client = MagicMock()
+        stop = Mock()
+        stop.is_set.side_effect = [False] * 7 + [True]
+        warnings_before_calls = []
+        with patch.dict(sys.modules, {"httpx": httpx}), patch.object(self.module, "logger") as log:
+            def bot_call(client, method, payload):
+                warnings_before_calls.append(log.warning.call_count)
+                if len(warnings_before_calls) <= 6:
+                    raise httpx.ConnectError("private-token-in-url")
+                return {} if method == "getWebhookInfo" else []
+            plugin._bot_call = Mock(side_effect=bot_call)
+            plugin._poll_bot(stop)
+        self.assertEqual(warnings_before_calls[:4], [0, 0, 0, 1])
+        self.assertEqual(log.warning.call_count, 1)
+        self.assertIn("本轮全部连接方式均失败", str(log.warning.call_args))
+        self.assertNotIn("private-", str(log.mock_calls))
+        self.assertEqual(stop.wait.call_args_list, [call(30), call(60)])
+        self.assertEqual(plugin._bot_error, "")
+
+    def test_proxy_switch_preserves_update_offset_and_does_not_replay(self):
+        plugin = self.module.P115Transfer()
+        plugin.get_data = Mock(return_value=10)
+        plugin.save_data = Mock()
+        plugin._bot_message = Mock()
+        plugin._resolve_bot_proxies = Mock(return_value=[("插件配置", "http://proxy"), ("运行环境网络", None)])
+        httpx = types.ModuleType("httpx")
+        httpx.ConnectError = type("ConnectError", (Exception,), {})
+        httpx.Timeout = Mock()
+        httpx.Limits = Mock()
+        httpx.Client = MagicMock()
+        plugin._bot_call = Mock(side_effect=[{}, [{"update_id": 10, "message": {}}], httpx.ConnectError(), {}, []])
+        stop = Mock()
+        stop.is_set.side_effect = [False] * 4 + [True]
+        with patch.dict(sys.modules, {"httpx": httpx}), patch.object(self.module, "logger") as log:
+            plugin._poll_bot(stop)
+        plugin._bot_message.assert_called_once()
+        self.assertEqual(plugin.save_data.call_count, 1)
+        self.assertEqual(plugin.save_data.call_args.args[1], 11)
+        self.assertEqual([entry.args[2]["offset"] for entry in plugin._bot_call.call_args_list if entry.args[1] == "getUpdates"], [10, 11, 11])
+        log.warning.assert_not_called()
 
     def test_startup_backoff_is_bounded_and_stoppable(self):
         plugin = self.module.P115Transfer()
@@ -216,8 +571,8 @@ class TransferPluginTest(unittest.TestCase):
         with patch.dict(sys.modules, {"httpx": httpx}):
             plugin._poll_bot(stop)
         self.assertEqual(httpx.Client.call_count, 2)
-        self.assertEqual(httpx.Client.call_args.kwargs["timeout"], httpx.Timeout.return_value)
-        self.assertEqual(httpx.Client.call_args.kwargs["proxy"], "http://proxy:7890")
+        self.assertEqual(httpx.Client.call_args_list[0].kwargs["timeout"], httpx.Timeout.return_value)
+        self.assertEqual(httpx.Client.call_args_list[0].kwargs["proxy"], "http://proxy:7890")
         self.assertTrue(httpx.Client.return_value.close.called)
 
     def test_read_timeout_warning_is_coalesced_and_recovery_clears_error(self):

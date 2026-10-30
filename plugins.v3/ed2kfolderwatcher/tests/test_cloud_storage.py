@@ -20,6 +20,48 @@ def md4(data):
 
 
 class CloudStorageTests(unittest.TestCase):
+    def test_monitor_roots_normalize_deduplicate_and_limit(self):
+        self.assertEqual(cloud.monitor_roots(" /电影/ , /电视剧\n/电影\n", cloud=True), ["/电影", "/电视剧"])
+        self.assertEqual(cloud.monitor_roots("/media/a,/media/tv"), ["/media/a", "/media/tv"])
+        for value in ("relative", "/a/../b", "/a\x00b", "\n".join(f"/r{number}" for number in range(33))):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                cloud.monitor_roots(value)
+        for value in ("/a\n/", "/a\nrelative", "/a\\b"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                cloud.monitor_roots(value, cloud=True)
+
+    def test_monitor_roots_only_collapse_nested_when_recursive(self):
+        roots = "/a/sub\n/a\n/ab"
+        self.assertEqual(cloud.monitor_roots(roots, cloud=True), ["/a/sub", "/a", "/ab"])
+        self.assertEqual(cloud.monitor_roots(roots, cloud=True, recursive=True), ["/a", "/ab"])
+
+    def test_multiple_root_scope_preserves_single_root_and_binds_whole_set(self):
+        import hashlib
+        import json
+        storage, item, scope = self.deletion_fixture()
+        expected = hashlib.sha256(json.dumps(["115网盘Plus", "321", "/test", True], ensure_ascii=False).encode()).hexdigest()
+        self.assertEqual(scope, expected)
+        self.assertEqual(scope, storage.delete_scope("/test\n/test/", True))
+        multiple = storage.delete_scope("/test\n/other", True)
+        self.assertEqual(multiple, storage.delete_scope("/other\n/test", True))
+        for roots, recursive in (("/test", True), ("/test\n/third", True), ("/test\n/other", False)):
+            self.assertNotEqual(multiple, storage.delete_scope(roots, recursive))
+        with self.assertRaises(cloud.CloudError):
+            storage.prepare_delete(item, "a" * 40, "/test\n/other", True, scope)
+        storage.oper.client.fs_delete.assert_not_called()
+
+    def test_multiple_root_delete_checks_second_root_and_direct_parent(self):
+        storage, item, scope = self.deletion_fixture()
+        roots = "/other\n/test"
+        scope = storage.delete_scope(roots, False)
+        self.assertEqual(storage.prepare_delete(item, "a" * 40, roots, False, scope), item)
+        storage.oper.client.fs_delete.return_value = {"state": True}
+        self.assertTrue(storage.delete_prepared(item, roots, False, scope, threading.Event()))
+        nested = {**item, "path": "/test/sub/a.mkv"}
+        self.assertFalse(cloud.allowed_roots(nested, storage.storage, roots, False))
+        self.assertTrue(cloud.allowed_roots(nested, storage.storage, roots, True))
+        self.assertFalse(cloud.allowed_roots({**item, "path": "/testing/a.mkv"}, storage.storage, roots))
+
     def test_transient_read_errors_are_not_identity_failures(self):
         from urllib3_future.exceptions import ReadTimeoutError, MaxRetryError
         timeout = ReadTimeoutError(None, "https://private.invalid", "timeout")
@@ -286,6 +328,15 @@ class CloudStorageTests(unittest.TestCase):
         modules = {"app.plugins.p115strmhelper.service": types.SimpleNamespace(servicer=worker), "app.plugins.p115strmhelper.db_manager": database, "app.plugins.p115strmhelper.db_manager.models.life_event": types.SimpleNamespace(LifeEvent=LifeEvent)}
         with patch.dict(sys.modules, modules):
             self.assertEqual(storage.life_events("shared"), [self.life_event(id=7, type=1, update_time=123)])
+            with Session(engine) as session:
+                session.add_all([LifeEvent(id=index, type=1, update_time=200) for index in range(8, 138)])
+                session.commit()
+            first = storage.life_events("shared", after_id=7, since_time=150)
+            second = storage.life_events("shared", after_id=first[-1]["id"], since_time=150)
+            third = storage.life_events("shared", after_id=second[-1]["id"], since_time=150)
+            self.assertEqual([row["id"] for row in first+second+third], list(range(8, 138)))
+            self.assertEqual(storage.life_source_latest, 200)
+            self.assertEqual(storage.life_events("shared", after_id=0, since_time=201), [])
             worker.client.user_id = 99
             with self.assertRaises(cloud.CloudError):
                 storage.life_events("shared")

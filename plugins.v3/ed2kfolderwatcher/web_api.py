@@ -15,9 +15,9 @@ from .file_size import minimum_file_bytes, minimum_gb_value, minimum_gb_setting
 
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
                  "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
-                 "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
+                 "telegram_chat_id", "telegram_thread_id", "telegram_aggregate", "telegram_aggregate_window", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
                  "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
-BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled"}
+BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled"}
 
 
 def settings_snapshot(plugin):
@@ -44,7 +44,7 @@ def validate_settings(plugin, values):
         if "min_file_size" in values:
             raise UserAccountError("大小阈值配置重复，请刷新页面重试")
         try:
-            values["min_file_size"] = minimum_gb_setting(values.pop("min_file_size_gb"))
+            values["min_file_size"] = minimum_gb_setting(values.pop("min_file_size_gb"), previous=plugin._min_file_size)
         except ValueError as failure:
             raise UserAccountError(str(failure)) from None
     if set(values) - set(CONFIG_FIELDS) - {"telegram_token"}:
@@ -54,17 +54,23 @@ def validate_settings(plugin, values):
         if name in BOOLEAN_FIELDS:
             if not isinstance(value, bool):
                 raise UserAccountError("开关配置格式不正确")
-        elif name in {"min_age", "cloud_read_timeout"}:
-            lower, upper = (0, 86400) if name == "min_age" else (30, 1800)
+        elif name in {"min_age", "cloud_read_timeout", "telegram_aggregate_window"}:
+            lower, upper = (0, 86400) if name == "min_age" else ((30, 1800) if name == "cloud_read_timeout" else (0, 3600))
             if isinstance(value, bool) or not str(value).isdigit() or not lower <= int(value) <= upper:
                 raise UserAccountError(f"{'文件稳定时间' if name == 'min_age' else '网盘读取超时'}必须为 {lower} 到 {upper} 的整数秒")
             value = int(value)
         else:
-            if not isinstance(value, str) or len(value) > 4096:
+            if not isinstance(value, str) or len(value) > (32768 if name in {"folder", "cloud_folder"} else 4096):
                 raise UserAccountError("配置文本格式不正确或过长")
             value = value.strip()
         result[name] = value
     result["telegram_mode"] = "user"
+    from .cloud_storage import monitor_roots
+    try:
+        result["folder"] = ",".join(monitor_roots(result["folder"]))
+        result["cloud_folder"] = ",".join(monitor_roots(result["cloud_folder"], cloud=True))
+    except ValueError as failure:
+        raise UserAccountError(str(failure)) from None
     try:
         minimum_file_bytes(result["min_file_size"])
     except ValueError as failure:
@@ -81,13 +87,12 @@ def validate_settings(plugin, values):
         raise UserAccountError("话题线程 ID 必须为正整数或留空")
     result["telegram_token"] = plugin._telegram_token
     if result["cloud_enabled"]:
-        from .cloud_storage import SUPPORTED_STORAGES, available_storages, cloud_path, CloudError
+        from .cloud_storage import SUPPORTED_STORAGES, available_storages, CloudError
         try:
             if result["cloud_storage"] not in SUPPORTED_STORAGES:
                 raise CloudError("请选择 115网盘Plus 或 CloudDrive储存")
-            result["cloud_folder"] = cloud_path(result["cloud_folder"])
-            if result["cloud_folder"] == "/":
-                raise CloudError("请指定具体的网盘子目录，不允许扫描整个网盘根目录")
+            if not result["cloud_folder"]:
+                raise CloudError("请至少指定一个网盘监控目录")
             if result["cloud_storage"] not in {item["type"] for item in available_storages()}:
                 raise CloudError("所选网盘存储未配置，请先启用并登录对应插件")
             CronTrigger.from_crontab(result["cloud_cron"])
@@ -117,9 +122,9 @@ def validate_settings(plugin, values):
     return result
 
 
-async def read_body(request):
+async def read_body(request, limit=16384):
     body = await request.body()
-    if len(body) > 16384:
+    if len(body) > limit:
         raise HTTPException(status_code=400, detail="请求内容过长")
     try:
         result = json.loads(body)
@@ -170,7 +175,7 @@ def build_routes(plugin):
 
     async def save(request: Request, principal=Depends(get_current_active_superuser)):
         try:
-            values = await read_body(request)
+            values = await read_body(request, limit=262144)
             config = validate_settings(plugin, values)
             plugin.update_config(config)
             await asyncio.to_thread(plugin.init_plugin, config)

@@ -48,6 +48,29 @@ class WebApiTests(unittest.TestCase):
     def authorize(self):
         self.app.dependency_overrides[web_api.get_current_active_superuser] = lambda: types.SimpleNamespace(is_superuser=True)
 
+    def test_multiple_monitor_directories_validate_and_round_trip(self):
+        result = web_api.validate_settings(self.plugin, {"folder": " /media/a , /media/b\n/media/a\n", "cloud_folder": "/电影/,/电视剧\n/电影"})
+        self.assertEqual(result["folder"], "/media/a,/media/b")
+        self.assertEqual(result["cloud_folder"], "/电影,/电视剧")
+        self.plugin._folder = result["folder"]
+        self.plugin._cloud_folder = result["cloud_folder"]
+        self.assertEqual(web_api.settings_snapshot(self.plugin)["cloud_folder"], result["cloud_folder"])
+        for values in ({"folder": "/media/a\nrelative"}, {"cloud_folder": "/电影\n/"}, {"folder": "\n".join(f"/r{number}" for number in range(33))}):
+            with self.subTest(values=values), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, values)
+
+    def test_multiple_long_unicode_directories_fit_settings_request_limit(self):
+        import asyncio
+        import json
+        roots = "\n".join(f"/影视/{'目录' * 180}/{number}" for number in range(32))
+        payload = {"folder": roots, "cloud_folder": roots}
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        self.assertGreater(len(body), 16384)
+        request = Mock(body=AsyncMock(return_value=body))
+        self.assertEqual(asyncio.run(web_api.read_body(request, limit=262144)), payload)
+        with self.assertRaises(HTTPException):
+            asyncio.run(web_api.read_body(request))
+
     def test_shared_recursive_validation_and_legacy_snapshot(self):
         for value in (True, False):
             result = web_api.validate_settings(self.plugin, {"include_subdirectories": value})
@@ -76,6 +99,15 @@ class WebApiTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, {"telegram_enabled": True, "telegram_chat_id": value})
 
+    def test_aggregate_window_validation_and_snapshot(self):
+        result = web_api.validate_settings(self.plugin, {"telegram_aggregate_window": "900"})
+        self.assertEqual(result["telegram_aggregate_window"], 900)
+        self.plugin._telegram_aggregate_window = 900
+        self.assertEqual(web_api.settings_snapshot(self.plugin)["telegram_aggregate_window"], 900)
+        for value in (-1, 3601, "bad", True):
+            with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"telegram_aggregate_window": value})
+
     def test_small_file_delete_boolean_validation_and_snapshot(self):
         self.assertFalse(web_api.settings_snapshot(self.plugin)["delete_small_files"])
         for value in (True, False):
@@ -87,13 +119,24 @@ class WebApiTests(unittest.TestCase):
 
     def test_gb_minimum_input_and_legacy_snapshot(self):
         self.plugin._min_file_size = "500M"
-        self.assertEqual(web_api.settings_snapshot(self.plugin)["min_file_size_gb"], "0.48828125")
+        self.assertEqual(web_api.settings_snapshot(self.plugin)["min_file_size_gb"], "0.49")
         for value in ("0.5", 0.5, "", "0"):
             result = web_api.validate_settings(self.plugin, {"min_file_size_gb": value})
             self.assertEqual(web_api.minimum_file_bytes(result["min_file_size"]), 512 * 1024 ** 2 if str(value) == "0.5" else 0)
         for values in ({"min_file_size_gb": "500M"}, {"min_file_size_gb": True}, {"min_file_size_gb": "0.5", "min_file_size": "100M"}):
             with self.subTest(values=values), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, values)
+
+    def test_rounded_display_save_does_not_change_exact_byte_threshold(self):
+        for original in ("500M", "100M", "1B", "322122548B", ""):
+            self.plugin._min_file_size = original
+            displayed = web_api.settings_snapshot(self.plugin)["min_file_size_gb"]
+            self.assertRegex(displayed, r"^\d+\.\d{2}$")
+            result = web_api.validate_settings(self.plugin, {"min_file_size_gb": displayed})
+            self.assertEqual(result["min_file_size"], original)
+        self.plugin._min_file_size = "500M"
+        changed = web_api.validate_settings(self.plugin, {"min_file_size_gb": "0.50"})
+        self.assertEqual(web_api.minimum_file_bytes(changed["min_file_size"]), 512 * 1024 ** 2)
 
     def test_minimum_file_size_validation_and_snapshot(self):
         for value in ("", "0", "100M", "1.5G", " 20 mb ", "1024"):

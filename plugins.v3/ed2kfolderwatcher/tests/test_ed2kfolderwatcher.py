@@ -48,6 +48,284 @@ class Ed2kTests(unittest.TestCase):
         path.write_bytes(data)
         return path
 
+    def test_telegram_aggregate_key_groups_same_show_and_season_only(self):
+        key = self.module.telegram_aggregate_key
+        self.assertEqual(key("美国谍梦(2013)(tmdbid=46533).S06E07.mkv"), key("美国谍梦(2013)(tmdbid=46533).S06E08.mkv"))
+        self.assertNotEqual(key("美国谍梦(2013)(tmdbid=46533).S06E07.mkv"), key("美国谍梦(2013)(tmdbid=46533).S05E07.mkv"))
+        self.assertNotEqual(key("美国谍梦.S06E07.mkv"), key("继承之战.S06E07.mkv"))
+        self.assertIsNone(key("电影.mkv"))
+
+    def test_telegram_message_chunks_keep_complete_links(self):
+        records = [{"link": "ed2k://|file|" + "a" * 100 + "|1|" + "b" * 32 + "|/"} for _ in range(50)]
+        chunks = self.module.telegram_message_chunks(records)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(sum(len(chunk) for chunk in chunks), len(records))
+        self.assertTrue(all(len("\n".join(item["link"] for item in chunk)) <= self.module.TELEGRAM_MESSAGE_LIMIT for chunk in chunks))
+
+    def test_telegram_aggregate_candidates_use_recent_unsent_same_season_records(self):
+        cache = self.root / "records.json"
+        now = time.time()
+        first = {"name": "尚公主(2026).S01E01.mkv", "link": "ed2k://|file|a|1|" + "a" * 32 + "|/", "generated_at": now - 2, "telegram_sent": False}
+        second = {"name": "尚公主(2026).S01E02.mkv", "link": "ed2k://|file|b|1|" + "b" * 32 + "|/", "generated_at": now, "telegram_sent": False}
+        old = {"name": "尚公主(2026).S01E03.mkv", "link": "ed2k://|file|c|1|" + "c" * 32 + "|/", "generated_at": now - 1200, "telegram_sent": False}
+        cache.write_text(json.dumps({"first": first, "old": old}), encoding="utf-8")
+        self.plugin._telegram_aggregate = True
+        self.assertEqual([item["name"] for item in self.plugin._aggregate_candidates(second, cache)], [first["name"], second["name"]])
+
+    def test_telegram_aggregate_waits_for_partner_then_groups_shared_records(self):
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 600
+        first = {"name": "剧名.S01E01.mkv", "size": 1, "link": "ed2k://|file|a|1|" + "a" * 32 + "|/", "generated_at": time.time(), "telegram_sent": False}
+        second = {"name": "剧名.S01E02.mkv", "size": 1, "link": "ed2k://|file|b|1|" + "b" * 32 + "|/", "generated_at": time.time(), "telegram_sent": False}
+        records = {"first": first}
+        cache = self.root / "records.json"
+        self.assertEqual(self.plugin._aggregate_candidates(first, cache, records), [])
+        records["second"] = second
+        grouped = self.plugin._aggregate_candidates(second, cache, records)
+        self.assertEqual([item["name"] for item in grouped], [first["name"], second["name"]])
+        self.assertIs(grouped[0], first)
+
+    def test_batch_waits_until_all_registered_items_finish(self):
+        first_key = "local-a"
+        second_key = "local-b"
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 0
+        batch_id = self.plugin._new_batch("local-scan")
+        self.plugin._register_batch_item(batch_id, first_key, "剧名.S01E01.mkv")
+        self.plugin._register_batch_item(batch_id, second_key, "剧名.S01E02.mkv")
+        batch = self.plugin._batches[batch_id]
+        batch["sealed"] = True
+        group_key = self.module.telegram_aggregate_key("剧名.S01E01.mkv")
+        batch["group_flush_at"][group_key] = time.monotonic()
+        batch["results"].add(first_key)
+        batch["group_results"][group_key].add(first_key)
+        with patch.object(self.plugin, "_flush_batch") as flush:
+            self.plugin._maybe_flush_batch(batch_id)
+            flush.assert_not_called()
+            batch["results"].add(second_key)
+            batch["group_results"][group_key].add(second_key)
+            self.plugin._maybe_flush_batch(batch_id)
+            flush.assert_called_once_with(batch_id)
+
+    def test_batch_timeout_moves_unfinished_items_to_retry_batch(self):
+        first_key = "cloud:item-1"
+        batch_id = self.plugin._new_batch("cloud-scan")
+        self.plugin._register_batch_item(batch_id, first_key)
+        self.plugin._pending[first_key] = (time.monotonic() + 60, {"name": "尚公主.S01E02.mkv"})
+        self.plugin._pending_batches[first_key] = batch_id
+        with patch.object(self.plugin, "_maybe_flush_batch") as flush:
+            self.plugin._expire_batch(batch_id)
+        retry_id = self.plugin._pending_batches[first_key]
+        self.assertNotEqual(retry_id, batch_id)
+        self.assertIn(first_key, self.plugin._batches[retry_id]["expected"])
+        self.assertIn(first_key, self.plugin._batches[batch_id]["results"])
+        flush.assert_any_call(batch_id)
+
+    def test_batch_registration_captures_show_season_before_processing(self):
+        batch_id = self.plugin._new_batch("local-scan")
+        first = "美国谍梦(2013)(tmdbid=46533).S06E07.mkv"
+        second = "美国谍梦(2013)(tmdbid=46533).S06E08.mkv"
+        self.plugin._telegram_aggregate = True
+        self.plugin._register_batch_item(batch_id, "one", first)
+        self.plugin._register_batch_item(batch_id, "two", second)
+        groups = self.plugin._batches[batch_id]["groups"]
+        self.assertEqual(groups["one"], groups["two"])
+        self.assertEqual(groups["one"], self.module.telegram_aggregate_key(first))
+
+    def test_new_cloud_batch_is_registered_before_sealing(self):
+        item, _ = self.cloud_fixture()
+        self.assertTrue(self.plugin._queue_cloud_file(item))
+        batch_id = self.plugin._pending_batches[self.cloud_module.record_key(item)]
+        self.assertIn(self.cloud_module.record_key(item), self.plugin._batches[batch_id]["expected"])
+        self.assertTrue(self.plugin._batches[batch_id]["sealed"])
+
+    def test_batch_flush_sends_registered_show_season_as_single_group(self):
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate_window = 0
+        batch_id = self.plugin._new_batch("local-scan")
+        cache = self.root / "records.json"
+        first_name = "剧名.S01E01.mkv"
+        second_name = "剧名.S01E02.mkv"
+        first_key, second_key = "one", "two"
+        records = {
+            first_key: {"name": first_name, "link": "ed2k://one", "telegram_sent": False},
+            second_key: {"name": second_name, "link": "ed2k://two", "telegram_sent": False},
+        }
+        cache.write_text(json.dumps(records), encoding="utf-8")
+        for key, name in ((first_key, first_name), (second_key, second_name)):
+            self.plugin._register_batch_item(batch_id, key, name)
+            self.plugin._batches[batch_id]["contexts"][key] = {
+                "kind": "local", "path": self.folder / name, "signature": (0, 0, 0, 0),
+                "output": None, "cache_path": cache,
+            }
+            self.plugin._batches[batch_id]["results"].add(key)
+            group_key = self.plugin._batches[batch_id]["groups"][key]
+            self.plugin._batches[batch_id]["group_results"][group_key].add(key)
+        with patch.object(self.plugin, "_notify_records") as notify:
+            self.plugin._seal_batch(batch_id)
+        notify.assert_called_once()
+        self.assertEqual([record["name"] for record in notify.call_args.args[0]], [first_name, second_name])
+
+    def test_aggregate_batch_waits_before_flush(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 600
+        batch_id = self.plugin._new_batch("cloud-scan")
+        self.plugin._register_batch_item(batch_id, "one", "胆大党(2024).S01E01.mkv")
+        self.plugin._batches[batch_id]["results"].add("one")
+        group_key = self.module.telegram_aggregate_key("胆大党(2024).S01E01.mkv")
+        self.plugin._batches[batch_id]["group_results"][group_key].add("one")
+        with patch.object(self.plugin, "_flush_batch") as flush:
+            self.plugin._seal_batch(batch_id)
+            flush.assert_not_called()
+            self.plugin._batches[batch_id]["group_flush_at"][group_key] = time.monotonic() - 1
+            self.plugin._maybe_flush_batch(batch_id)
+            flush.assert_called_once_with(batch_id)
+
+    def test_different_show_season_groups_have_independent_flush_times(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        batch_id = self.plugin._new_batch("local-scan")
+        first_name = "第一部.S01E01.mkv"
+        second_name = "第二部.S01E01.mkv"
+        first_key, second_key = "first", "second"
+        self.plugin._register_batch_item(batch_id, first_key, first_name)
+        self.plugin._register_batch_item(batch_id, second_key, second_name)
+        batch = self.plugin._batches[batch_id]
+        first_group = batch["groups"][first_key]
+        second_group = batch["groups"][second_key]
+        batch["sealed"] = True
+        batch["group_results"][first_group].add(first_key)
+        batch["group_results"][second_group].add(second_key)
+        batch["group_flush_at"][first_group] = time.monotonic() - 1
+        batch["group_flush_at"][second_group] = time.monotonic() + 600
+        with patch.object(self.plugin, "_flush_group") as flush_group:
+            self.plugin._maybe_flush_batch(batch_id)
+        flush_group.assert_called_once_with(batch_id, first_group)
+        self.assertIn(second_group, batch["group_expected"])
+        self.assertNotIn(second_group, batch["group_flushing"])
+
+    def test_late_same_season_item_joins_sealed_batch_during_wait(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 600
+        original = self.plugin._new_batch("cloud-scan")
+        self.plugin._register_batch_item(original, "one", "胆大党(2024).S01E01.mkv")
+        self.plugin._batches[original]["results"].add("one")
+        self.plugin._seal_batch(original)
+        later = self.plugin._new_batch("cloud-life")
+        registered = self.plugin._register_batch_item(later, "two", "胆大党(2024).S01E12.mkv")
+        self.assertEqual(registered, original)
+        self.assertIn("two", self.plugin._batches[original]["expected"])
+        self.assertNotIn("two", self.plugin._batches[later]["expected"])
+
+    def test_multiple_local_roots_scan_missing_overlap_and_combined_output(self):
+        second = self.root / "second"
+        second.mkdir()
+        first_file = self.create()
+        second_file = second / "second.bin"
+        second_file.write_bytes(b"world")
+        self.plugin._folder = f"{self.folder}\n{self.folder / 'sub'}\n{second}\n{self.root / 'missing'}"
+        self.plugin.scan()
+        self.assertEqual(set(self.plugin._pending), {str(first_file), str(second_file)})
+        self.assertEqual(self.plugin._paths()[1], self.folder / "ed2k.txt")
+        for path in (first_file, second_file):
+            self.plugin._process_file(path)
+            self.plugin._process_file(path)
+        self.assertEqual(len(self.records()), 2)
+        self.assertEqual(len((self.folder / "ed2k.txt").read_text().splitlines()), 2)
+
+    def test_multiple_local_roots_nonrecursive_and_symlink_alias_dedup(self):
+        child = self.folder / "child"
+        child.mkdir()
+        path = child / "file.bin"
+        path.write_bytes(b"hello")
+        alias = self.root / "alias"
+        alias.symlink_to(self.folder, target_is_directory=True)
+        self.plugin._recursive = False
+        self.plugin._folder = f"{self.folder}\n{alias}"
+        self.assertEqual(len(self.plugin._local_roots()), 1)
+        self.assertFalse(self.plugin._eligible(path))
+        self.plugin._folder += f"\n{child}"
+        self.assertTrue(self.plugin._eligible(path))
+        self.plugin._recursive = True
+        self.assertEqual(self.plugin._local_roots(), [self.folder])
+
+    def test_multiple_local_root_delete_rejects_outside_and_symlink(self):
+        second = self.root / "second"
+        second.mkdir()
+        path = second / "file.bin"
+        path.write_bytes(b"world")
+        self.plugin._folder = f"{self.folder}\n{second}"
+        self.plugin._delete_source = True
+        self.plugin._process_file(path)
+        self.assertFalse(path.exists())
+        outside = self.root / "outside.bin"
+        outside.write_bytes(b"hello")
+        with self.assertRaises(ValueError):
+            self.plugin._unlink_source(outside, outside.stat())
+        link = second / "link.bin"
+        link.symlink_to(outside)
+        self.assertFalse(self.plugin._eligible(link))
+        self.assertTrue(outside.exists())
+
+    def test_multiple_local_watch_schedules_one_observer(self):
+        second = self.root / "second"
+        second.mkdir()
+        self.plugin._folder = f"{self.folder}\n{second}\n{self.folder / 'child'}\n{self.root / 'missing'}"
+        observer = Mock()
+        with patch.object(self.module, "Observer", return_value=observer):
+            self.plugin._start_monitor()
+        self.assertEqual(observer.schedule.call_count, 2)
+        self.assertEqual([call.args[1] for call in observer.schedule.call_args_list], [str(self.folder), str(second)])
+        observer.start.assert_called_once()
+        handler = observer.schedule.call_args_list[1].args[0]
+        path = second / "event.bin"
+        path.write_bytes(b"hello")
+        handler.on_created(types.SimpleNamespace(is_directory=False, src_path=str(path)))
+        self.assertIn(str(path), self.plugin._pending)
+
+    def test_multiple_cloud_roots_scan_serially_and_filter_events(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._cloud_folder = "/cloud-test/sub\n/cloud-test\n/second"
+        second = {**item, "fileid": "456", "path": "/second/云端.mkv"}
+        storage.walk.side_effect = lambda root, recursive, stopping: iter([item if root == "/cloud-test" else second, None])
+        with patch.object(self.cloud_module, "CloudStorage", return_value=storage):
+            for unused in range(3):
+                self.plugin._cloud_scan_step()
+        self.assertEqual([call.args[0] for call in storage.walk.call_args_list], ["/cloud-test", "/second"])
+        self.assertEqual(sum(key.startswith("cloud:") for key in self.plugin._pending), 2)
+        self.assertTrue(self.plugin._cloud_item_is_eligible(second))
+        self.assertFalse(self.plugin._cloud_item_is_eligible({**item, "path": "/outside/a.mkv"}))
+        nested = {**second, "path": "/second/child/a.mkv"}
+        self.plugin._cloud_recursive = False
+        self.assertFalse(self.plugin._cloud_item_is_eligible(nested))
+        self.plugin._cloud_folder += "\n/second/child"
+        self.assertTrue(self.plugin._cloud_item_is_eligible(nested))
+
+    def test_multiple_cloud_roots_continue_after_directory_error(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._cloud_folder = "/missing\n/cloud-test"
+        storage.walk.side_effect = [self.cloud_module.CloudError("目录读取失败"), iter([item, None])]
+        with patch.object(self.cloud_module, "CloudStorage", return_value=storage):
+            for unused in range(3):
+                self.plugin._cloud_scan_step()
+        self.assertEqual(storage.walk.call_count, 2)
+        self.assertIn("/missing", self.plugin._cloud_status["error"])
+        self.assertEqual(sum(key.startswith("cloud:") for key in self.plugin._pending), 1)
+
+    def test_multiple_cloud_roots_keep_existing_file_identity_and_incremental_hash(self):
+        item, storage = self.cloud_fixture()
+        self.plugin._cloud_folder = "/other\n/cloud-test"
+        with patch.object(self.cloud_module, "hash_remote", return_value=self.module._md4(b"hello").hex()) as hashing:
+            self.plugin._process_cloud_file(item)
+            self.plugin._cloud_folder = "/cloud-test\n/other"
+            self.plugin._process_cloud_file(item)
+        hashing.assert_called_once()
+        self.assertEqual(len(self.records()), 1)
+
     def test_cloud_generation_is_incremental_and_never_deletes(self):
         self.plugin._cloud_enabled = True
         self.plugin._cloud_storage = "115网盘Plus"
@@ -415,7 +693,7 @@ class Ed2kTests(unittest.TestCase):
         saved = self.plugin.update_config.call_args.args[0]
         self.assertEqual(self.module.minimum_file_bytes(saved["min_file_size"]), 512 * 1024 ** 2)
         self.assertNotIn("min_file_size_gb", saved)
-        self.assertEqual(self.plugin.get_form()[1]["min_file_size_gb"], "0.5")
+        self.assertEqual(self.plugin.get_form()[1]["min_file_size_gb"], "0.50")
 
     def test_small_file_delete_without_hash_notification_or_output(self):
         path = self.create("small.mkv", b"hello")
@@ -526,6 +804,35 @@ class Ed2kTests(unittest.TestCase):
         storage.item_from_life_event.assert_called_once_with(storage.life_events.return_value[0])
         self.assertEqual(self.plugin.get_service()[-1]["id"], "Ed2kFolderWatcherLife")
 
+    def test_recursive_cloud_monitor_accepts_subdirectory_events(self):
+        item, storage, event = self.life_fixture()
+        self.plugin._cloud_folder = "/cloud-test"
+        self.plugin._cloud_recursive = True
+        nested = {**item, "path": "/cloud-test/电视剧/a.mkv"}
+        storage.item_from_life_event.return_value = nested
+        self.plugin.poll_cloud_events()
+        self.assertIn(self.cloud_module.record_key(nested), self.plugin._pending)
+
+    def test_shared_events_report_upstream_timestamp_and_use_cursor(self):
+        item, storage, event = self.life_fixture()
+        storage.life_source_latest = time.time() - 3600
+        self.plugin.poll_cloud_events()
+        storage.life_events.assert_called_once_with(self.plugin._cloud_life_source, after_id=0, since_time=self.plugin._cloud_life_started)
+        self.assertEqual(self.plugin._cloud_status["life_source_latest"], storage.life_source_latest)
+        self.assertIn("15分钟", self.plugin._cloud_status["life_source_notice"])
+        storage.life_source_latest = time.time()
+        self.plugin.poll_cloud_events()
+        self.assertEqual(self.plugin._cloud_status["life_source_notice"], "")
+
+    def test_shared_backlog_does_not_advance_cursor_when_candidates_are_full(self):
+        item, storage, event = self.life_fixture()
+        now = time.monotonic()
+        self.plugin._cloud_life_candidates = {str(index): {"event": event, "expires": now+900, "attempts": 0, "due": now+60} for index in range(449)}
+        self.plugin.poll_cloud_events()
+        storage.life_events.assert_not_called()
+        self.assertEqual(self.plugin._cloud_life_cursor, 0)
+        self.assertTrue(self.plugin._cloud_status["life_truncated"])
+
     def test_life_events_skip_directories_outside_files_and_filters(self):
         item, storage = self.cloud_fixture()
         self.plugin._enabled = True
@@ -575,10 +882,12 @@ class Ed2kTests(unittest.TestCase):
     def test_life_file_outside_then_renamed_inside_is_not_lost(self):
         item, storage, event = self.life_fixture()
         storage.item_from_life_event.side_effect = [{**item, "path": "/资源池/a.mkv"}, item]
+        self.module.logger.reset_mock()
         with patch.object(self.plugin, "queue_cloud_scan", side_effect=AssertionError("must not scan")), patch.object(self.module.time, "monotonic", return_value=100):
             self.plugin.poll_cloud_events()
             self.assertFalse(self.plugin._pending)
             self.assertIn("123", self.plugin._cloud_life_candidates)
+            self.assertFalse(any("不在所选网盘存储或监控目录" in str(call) for call in self.module.logger.info.call_args_list))
             storage.life_events.return_value = [{**event, "id": 2, "type": 24}]
             self.plugin.poll_cloud_events()
         self.assertIn(self.cloud_module.record_key(item), self.plugin._pending)

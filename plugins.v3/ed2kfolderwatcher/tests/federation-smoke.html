@@ -31,7 +31,7 @@ if (dialogFixture) {
 }
 
 const settings = { enabled: false, folder: '/media/test', recursive: true, include_subdirectories: true, monitor_enabled: true,
-  output_enabled: true, output: '', extensions: '', min_age: 60, min_file_size: '500M', min_file_size_gb: '0.48828125', delete_source: false, delete_small_files: false, cloud_delete_enabled: false,
+  output_enabled: true, output: '', extensions: '', min_age: 60, min_file_size: '500M', min_file_size_gb: '0.49', delete_source: false, delete_small_files: false, cloud_delete_enabled: false,
   scan_enabled: false, cron: '*/10 * * * *', telegram_enabled: false, telegram_mode: 'user',
   telegram_chat_id: '', telegram_thread_id: '', telegram_token: '' }
 Object.assign(settings, { cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
@@ -269,7 +269,7 @@ try {
     if (cloudSwitchLabels.join('|') !== '启用网盘增量生成|115生活事件监控（近实时）|网盘定时增量补扫') throw Error(`${name}: cloud switch order incorrect`)
     const minimumInput = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.startsWith('生成链接最小文件大小'))?.querySelector('input')
     if (!minimumInput || !minimumInput.placeholder.includes('GB')) throw Error(`${name}: minimum size input missing`)
-    if (minimumInput.value !== '0.48828125') throw Error(`${name}: legacy 500M conversion changed threshold`)
+    if (minimumInput.value !== '0.49') throw Error(`${name}: minimum size display must use two decimals`)
     minimumInput.value = '0.5'
     minimumInput.dispatchEvent(new Event('input', { bubbles: true }))
     await vue.nextTick()
@@ -309,8 +309,21 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100))
     document.querySelectorAll('#app .cloud-browser .actions button')[1].click()
     await vue.nextTick()
-    if (cloudPanel.querySelector('.fields input').value !== '/测试网盘目录/') throw Error(`${name}: choosing cloud folder failed`)
-    const targets = document.querySelector('#app textarea')
+    const cloudRoots = cloudPanel.querySelector('input.monitor-roots')
+    const localRoots = document.querySelector('#app [data-testid="local-source"] input.monitor-roots')
+    if (!cloudRoots || !localRoots || cloudRoots.getBoundingClientRect().height !== 48 || localRoots.getBoundingClientRect().height !== 48) throw Error(`${name}: compact multiple directory inputs missing`)
+    if (cloudRoots.value !== '/测试网盘目录/') throw Error(`${name}: choosing cloud folder failed`)
+    cloudRoots.value = '/保留目录,/测试网盘目录/'
+    cloudRoots.dispatchEvent(new Event('input', { bubbles: true }))
+    await vue.nextTick()
+    document.querySelectorAll('#app .cloud-browser .actions button')[1].click()
+    await vue.nextTick()
+    if (cloudRoots.value !== '/保留目录,/测试网盘目录/') throw Error(`${name}: browsing replaced roots or duplicated selection`)
+    localRoots.value = '/media/movies,/media/tv'
+    localRoots.dispatchEvent(new Event('input', { bubbles: true }))
+    await vue.nextTick()
+    if (!localRoots.value.includes(',/media/tv')) throw Error(`${name}: local multiple roots lost`)
+    const targets = document.querySelector('#app .telegram-targets textarea')
     if (!targets || targets.rows !== 1 || !document.querySelector('#app').innerText.includes('接收目标（支持多个）')) throw Error(`${name}: compact multiple target textarea missing`)
     const threadInput = document.querySelector('#app .telegram-targets input')
     if (!threadInput || Math.abs(targets.getBoundingClientRect().height - threadInput.getBoundingClientRect().height) > 1) throw Error(`${name}: target and thread input heights differ`)

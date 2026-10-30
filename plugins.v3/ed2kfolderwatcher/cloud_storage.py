@@ -53,6 +53,41 @@ def cloud_path(value):
     return posixpath.normpath("/" + value.lstrip("/"))
 
 
+def monitor_roots(value, *, cloud=False, recursive=False):
+    lines = re.split(r"[\r\n,]+", str(value or ""))
+    roots = []
+    if len(str(value or "")) > 32768:
+        raise ValueError("监控目录配置过长")
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if cloud:
+            root = cloud_path(line)
+            if root == "/":
+                raise CloudError("请指定网盘子目录，不允许监控整个网盘根目录")
+        else:
+            path = Path(line).expanduser()
+            if not path.is_absolute() or "\x00" in line or ".." in path.parts:
+                raise ValueError("本地监控目录必须是绝对路径，不能包含 .. 或空字符")
+            root = str(path)
+        if root not in roots:
+            roots.append(root)
+    if len(roots) > 32:
+        raise ValueError("本地和网盘分别最多支持32个监控目录")
+    if recursive:
+        roots = [root for root in roots if not any(
+            root != parent and PurePosixPath(root).is_relative_to(PurePosixPath(parent))
+            for parent in roots)]
+    return roots
+
+
+def allowed_roots(item, storage, roots, recursive=True):
+    return any(allowed_item(item, storage, root) and (
+        recursive or PurePosixPath(cloud_path(item.get("path"))).parent.as_posix() == root
+    ) for root in monitor_roots(roots, cloud=True))
+
+
 def fingerprint(item):
     result = [item.get(field) for field in ("storage", "fileid", "path", "name", "size", "modify_time")]
     if result[1] is not None:
@@ -111,13 +146,13 @@ class CloudStorage:
             raise CloudError("对应存储插件未就绪，请先启用并登录存储插件")
 
     def delete_scope(self, root, recursive):
-        root = cloud_path(root)
-        if self.storage != "115网盘Plus" or root == "/":
+        roots = sorted(monitor_roots(root, cloud=True))
+        if self.storage != "115网盘Plus" or not roots:
             raise CloudError("自动删源仅支持115网盘Plus的指定子目录，CloudDrive仍只读")
         account = getattr(self.oper.client, "user_id", None)
         if not isinstance(account, (str, int)) or isinstance(account, bool) or not re.fullmatch(r"[1-9][0-9]*", str(account)):
             raise CloudError("无法确认115存储账号，拒绝授权或删除")
-        payload = [self.storage, str(account), root, bool(recursive)]
+        payload = [self.storage, str(account), roots[0] if len(roots) == 1 else roots, bool(recursive)]
         return hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
 
     def prepare_delete(self, item, sha1, root, recursive, scope):
@@ -128,9 +163,9 @@ class CloudStorage:
         if not isinstance(sha1, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha1):
             raise CloudError("缺少已验证SHA1，保留网盘源文件")
         current = self.fresh(item)
-        if not allowed_item(current, self.storage, root) or current.get("type") != "file" or not fingerprint_matches(fingerprint(item), current):
+        if not allowed_roots(current, self.storage, root) or current.get("type") != "file" or not fingerprint_matches(fingerprint(item), current):
             raise CloudError("网盘文件身份、大小或路径变化，拒绝删除")
-        if not recursive and PurePosixPath(cloud_path(current["path"])).parent.as_posix() != cloud_path(root):
+        if not allowed_roots(current, self.storage, root, recursive):
             raise CloudError("网盘文件位于未授权的子目录，拒绝删除")
         if self.file_sha1(current) != sha1.lower():
             raise CloudError("网盘文件SHA1变化或缺失，拒绝删除")
@@ -160,9 +195,9 @@ class CloudStorage:
     def delete_prepared(self, item, root, recursive, scope, stopping):
         if stopping.is_set() or self.delete_scope(root, recursive) != scope:
             raise CloudError("插件停止或授权变化，取消网盘删除")
-        if item.get("type") != "file" or not allowed_item(item, self.storage, root) or not re.fullmatch(r"[1-9][0-9]{0,63}", str(item.get("fileid") or "")):
+        if item.get("type") != "file" or not allowed_roots(item, self.storage, root) or not re.fullmatch(r"[1-9][0-9]{0,63}", str(item.get("fileid") or "")):
             raise CloudError("删除对象不是已授权的单个文件")
-        if not recursive and PurePosixPath(cloud_path(item["path"])).parent.as_posix() != cloud_path(root):
+        if not allowed_roots(item, self.storage, root, recursive):
             raise CloudError("删除对象位于未授权的子目录")
         from app.plugins.p115disk.tools import get_ios_ua_app
         limiter = getattr(self.oper, "_delete_rate_limiter", None)
@@ -235,7 +270,7 @@ class CloudStorage:
             if stopping.wait(.1):
                 raise InterruptedError("任务已停止")
 
-    def life_events(self, source):
+    def life_events(self, source, after_id=None, since_time=None):
         if self.storage != "115网盘Plus":
             raise CloudError("115生活事件仅支持115网盘Plus；CloudDrive请使用定时补扫")
         if source == "shared":
@@ -253,8 +288,16 @@ class CloudStorage:
             from sqlalchemy import select
             model = models.LifeEvent
             with database.ct_db_manager.get_database().session() as session:
+                latest = session.scalar(select(model.update_time).order_by(model.id.desc()).limit(1))
+                self.life_source_latest = float(latest) if latest else None
+                query = select(model)
+                if after_id is not None:
+                    query = query.where(model.id > after_id)
+                if since_time is not None:
+                    query = query.where(model.update_time >= since_time)
+                query = query.order_by(model.id.asc() if after_id is not None else model.id.desc()).limit(64)
                 return [{field: getattr(row, field, None) for field in LIFE_EVENT_FIELDS}
-                        for row in session.scalars(select(model).order_by(model.id.desc()).limit(64))]
+                        for row in session.scalars(query)]
         if source != "direct":
             raise CloudError("生活事件来源无效")
         result = self.oper.client.life_behavior_detail({"limit": 64, "offset": 0})
