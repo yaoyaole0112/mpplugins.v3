@@ -882,10 +882,12 @@ class Ed2kTests(unittest.TestCase):
     def test_life_file_outside_then_renamed_inside_is_not_lost(self):
         item, storage, event = self.life_fixture()
         storage.item_from_life_event.side_effect = [{**item, "path": "/资源池/a.mkv"}, item]
+        self.module.logger.reset_mock()
         with patch.object(self.plugin, "queue_cloud_scan", side_effect=AssertionError("must not scan")), patch.object(self.module.time, "monotonic", return_value=100):
             self.plugin.poll_cloud_events()
             self.assertFalse(self.plugin._pending)
             self.assertIn("123", self.plugin._cloud_life_candidates)
+            self.assertFalse(any("不在所选网盘存储或监控目录" in str(call) for call in self.module.logger.info.call_args_list))
             storage.life_events.return_value = [{**event, "id": 2, "type": 24}]
             self.plugin.poll_cloud_events()
         self.assertIn(self.cloud_module.record_key(item), self.plugin._pending)

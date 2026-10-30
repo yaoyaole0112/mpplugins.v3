@@ -39,6 +39,7 @@ DEFAULT_CRON = "*/10 * * * *"
 DEFAULT_EXTENSIONS = ""
 EMPTY_MD4 = "31d6cfe0d16ae931b73c59d7e0c089c0"
 TELEGRAM_MESSAGE_LIMIT = 3800
+CLOUD_LIFE_SILENT_SKIP_REASONS = {"不在所选网盘存储或监控目录", "子目录未开启监控"}
 
 
 def record_problem(record: dict) -> str:
@@ -190,7 +191,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.17.0"
+    plugin_version = "1.17.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -921,7 +922,9 @@ class Ed2kFolderWatcher(_PluginBase):
             for file_id, candidate in list(self._cloud_life_candidates.items()):
                 if candidate["expires"] <= now or candidate["attempts"] >= 10:
                     self._cloud_life_candidates.pop(file_id, None)
-                    logger.info(f"自动生成ED2K链接：生活事件文件复查到期，未加入计算队列：文件ID {file_id}；最后原因：{candidate.get('reason') or '文件详情尚未就绪'}；如确认符合条件可手动补扫")
+                    reason = candidate.get("reason") or "文件详情尚未就绪"
+                    if reason not in CLOUD_LIFE_SILENT_SKIP_REASONS:
+                        logger.info(f"自动生成ED2K链接：生活事件文件复查到期，未加入计算队列：文件ID {file_id}；最后原因：{reason}；如确认符合条件可手动补扫")
             for _, event_type, _, event in sorted(new, key=lambda entry: entry[0]):
                 try:
                     file_id = str(int(event["file_id"]))
@@ -967,8 +970,9 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._cloud_life_candidates.pop(file_id, None)
                 elif candidate["attempts"] >= 10:
                     self._cloud_life_candidates.pop(file_id, None)
-                    logger.info(f"自动生成ED2K链接：生活事件文件复查10次未加入队列：{label}（文件ID {file_id}）；原因：{reason}；如确认符合条件可手动补扫")
-                elif candidate["attempts"] == 1:
+                    if reason not in CLOUD_LIFE_SILENT_SKIP_REASONS:
+                        logger.info(f"自动生成ED2K链接：生活事件文件复查10次未加入队列：{label}（文件ID {file_id}）；原因：{reason}；如确认符合条件可手动补扫")
+                elif candidate["attempts"] == 1 and reason not in CLOUD_LIFE_SILENT_SKIP_REASONS:
                     logger.info(f"自动生成ED2K链接：新增事件暂未加入队列，保留限次复查：{label}（文件ID {file_id}）；原因：{reason}")
             life_batch_id = self._new_batch("cloud-life") if ready_items else None
             with self._condition:
