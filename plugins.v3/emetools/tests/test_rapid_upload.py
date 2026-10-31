@@ -102,6 +102,22 @@ class RapidUploadTests(unittest.TestCase):
             self.assertFalse(media.exists())
             self.assertTrue((failure / "movie.mp4").exists())
             self.assertEqual(rapid.status()["logs"][0]["status"], "failed")
+            self.assertIn("未命中", rapid.status()["logs"][0]["message"])
+
+    def test_failed_file_stays_in_source_when_failure_directory_is_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "movie.mp4"
+            media.write_bytes(b"not-found")
+            config = normalize_config({"id": "rapid_1", "name": "电影", "source_path": str(root),
+                                       "target_folder_id": "123", "media_extensions": "mp4"})
+            client = FakeClient({"status": 1, "reuse": False})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            with patch.object(rapid, "_p115_client", return_value=client):
+                result = rapid.run("rapid_1")
+            self.assertFalse(result["ok"])
+            self.assertTrue(media.exists())
+            self.assertNotIn("failure_path", result["failed"][0])
 
     def test_successful_files_are_not_uploaded_again_by_later_scans(self):
         with tempfile.TemporaryDirectory() as directory:

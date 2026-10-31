@@ -89,7 +89,15 @@ const folder = reactive({ open: false, type: '', index: 0, cid: '0', path: '/', 
 const rapid = reactive({ configs: [], logs: [], running: '', loaded: false })
 const rapidActionBusy = ref(false)
 const savedRapidConfigs = ref('')
+const rapidLogsPage = ref(1)
+const rapidLogsPageSize = 6
+const rapidLogsPageCount = computed(() => Math.max(1, Math.ceil(rapid.logs.length / rapidLogsPageSize)))
+const rapidLogItems = computed(() => [...rapid.logs].reverse().slice(
+  (rapidLogsPage.value - 1) * rapidLogsPageSize,
+  rapidLogsPage.value * rapidLogsPageSize,
+))
 const rapidConfigDirty = computed(() => rapid.loaded && JSON.stringify(rapid.configs) !== savedRapidConfigs.value)
+watch(rapidLogsPageCount, count => { rapidLogsPage.value = Math.min(rapidLogsPage.value, count) })
 function newRapidConfig() {
   return { id: `rapid_${Date.now()}`, name: `配置 ${rapid.configs.length + 1}`, source_path: '', target_folder_id: '', target_folder_path: '',
     media_extensions: 'mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v', failure_directory: '',
@@ -1513,7 +1521,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           </div>
           <p v-if="!rapid.configs.length" class="eme-hint">还没有配置。点击“添加配置”后填写本地源目录与 115 目标目录。</p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>运行日志</h3><p>记录最近 200 条秒传结果；失败时会显示未命中、文件变化或网络错误原因。</p></div><button class="eme-button text" :disabled="busy || !rapid.logs.length" @click="rapidCommand('clear_logs')">清空日志</button></div><div v-if="rapid.logs.length" class="eme-results eme-rapid-logs"><div v-for="(item, index) in [...rapid.logs].reverse()" :key="`${item.time}-${item.path}-${index}`" class="eme-result"><span>{{ item.status === 'succeeded' ? '✅' : '⚠️' }}</span><div><strong>{{ item.name }}</strong><small>{{ item.time }} · {{ item.config }} · {{ item.message }}</small><small>{{ item.path }}</small></div></div></div><p v-else class="eme-hint">暂无运行日志。</p></section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>秒传记录</h3><p>记录最近 200 条成功与失败结果；失败时会显示未命中、文件变化或网络错误原因。</p></div><button class="eme-button text" :disabled="busy || !rapid.logs.length" @click="rapidCommand('clear_logs')">清空记录</button></div><div v-if="rapid.logs.length" class="eme-results eme-rapid-logs"><div v-for="(item, index) in rapidLogItems" :key="`${item.time}-${item.path}-${index}`" class="eme-result"><span>{{ item.status === 'succeeded' ? '✅' : '⚠️' }}</span><div><strong>{{ item.name }}</strong><small>{{ item.time }} · {{ item.config }} · {{ item.message }}</small><small>{{ item.path }}</small></div></div></div><nav v-if="rapidLogsPageCount > 1" class="eme-pagination" aria-label="秒传记录分页"><button class="eme-button secondary" :disabled="rapidLogsPage <= 1" @click="rapidLogsPage--"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ rapidLogsPage }} / {{ rapidLogsPageCount }} 页 · 共 {{ rapid.logs.length }} 条</span><button class="eme-button secondary" :disabled="rapidLogsPage >= rapidLogsPageCount" @click="rapidLogsPage++">下一页<i class="mdi mdi-chevron-right" /></button></nav><p v-if="rapid.logs.length" class="eme-hint">失败目录未填写时，失败文件会继续保留在本地源目录；填写失败目录后，失败文件会按原相对路径移动到该目录。</p><p v-else class="eme-hint">暂无秒传记录。</p></section>
       </template>
     </main>
       <div v-if="enrichSettings.open" class="eme-overlay" @click.self="enrichSettings.open = false">
@@ -1824,6 +1832,6 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
 .eme-rapid-config> .eme-card-heading p{margin:4px 0 0}
 .eme-rapid-group{margin-top:14px;padding:14px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:11px;background:rgba(var(--v-theme-surface),.12)}
 .eme-folder-input{display:flex;align-items:center;gap:8px}.eme-folder-input input{flex:1;min-width:0}.eme-folder-input .eme-button{flex:none}
-.eme-rapid-logs{max-height:420px}.eme-rapid-logs .eme-result{align-items:flex-start}.eme-rapid-switches{display:flex;flex-wrap:wrap;align-items:center;gap:14px 28px;margin-top:16px}.eme-rapid-switches .eme-switch-label{margin:0;min-height:32px}
+.eme-rapid-logs .eme-result{align-items:flex-start}.eme-rapid-switches{display:flex;flex-wrap:wrap;align-items:center;gap:14px 28px;margin-top:16px}.eme-rapid-switches .eme-switch-label{margin:0;min-height:32px}
 @media(max-width:760px){.eme-rapid-config .eme-card-heading{gap:10px}.eme-folder-input{align-items:stretch;flex-direction:column}.eme-folder-input .eme-button{width:100%}.eme-rapid-switches{align-items:flex-start;flex-direction:column;gap:12px}}
 </style>
