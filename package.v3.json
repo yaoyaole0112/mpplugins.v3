@@ -66,7 +66,7 @@
     "name": "媒体增强",
     "description": "MoviePilot 内置订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理",
     "labels": "工具,115网盘,订阅",
-    "version": "2.10.61",
+    "version": "2.10.62",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -74,6 +74,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.10.62": "修正顶部 115 任务提示条水平错位；根据侧栏宽度和内容区留白定位，使提示条与下方卡片左右边缘对齐，侧栏入口与插件弹窗同步。",
       "v2.10.61": "将 115 任务状态提示移至页面标题所在顶栏，桌面端不再占用主内容和卡片空间；手机端保留正常文档流，避免遮挡导航与内容。侧栏入口和插件弹窗同步。",
       "v2.10.60": "优化本地秒传页面：运行日志改名为秒传记录，成功与失败记录统一保留并分页显示，移除记录卡片内部滚动条；补充失败目录为空时文件保留在本地源目录的说明。",
       "v2.10.59": "进一步修复本地秒传与不同 p115client 版本的参数签名兼容问题：upload_file_init 的文件名、SHA1、大小、目录、二次校验回调和目标目录统一使用位置参数，避免立即扫描继续出现 TypeError。",
