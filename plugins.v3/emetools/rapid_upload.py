@@ -399,9 +399,9 @@ class RapidUpload:
         upload_file_init = getattr(client, "upload_file_init", None)
         if callable(upload_file_init):
             response = upload_file_init(
-                filename=path.name,
-                filesize=size,
-                filesha1=sha1,
+                path.name,
+                sha1,
+                size,
                 pid=target,
                 read_range_bytes_or_hash=read_range,
             )
