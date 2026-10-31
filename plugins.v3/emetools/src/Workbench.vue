@@ -1837,6 +1837,6 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
 .eme-rapid-config> .eme-card-heading p{margin:4px 0 0}
 .eme-rapid-group{margin-top:14px;padding:14px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:11px;background:rgba(var(--v-theme-surface),.12)}
 .eme-folder-input{display:flex;align-items:center;gap:8px}.eme-folder-input input{flex:1;min-width:0}.eme-folder-input .eme-button{flex:none}
-.eme-rapid-logs .eme-result{align-items:flex-start}.eme-rapid-switches{display:flex;flex-wrap:wrap;align-items:center;gap:14px 28px;margin-top:16px}.eme-rapid-switches .eme-switch-label{margin:0;min-height:32px}
+.eme-results.eme-rapid-logs{max-height:none;overflow:visible}.eme-rapid-logs .eme-result{align-items:flex-start}.eme-rapid-switches{display:flex;flex-wrap:wrap;align-items:center;gap:14px 28px;margin-top:16px}.eme-rapid-switches .eme-switch-label{margin:0;min-height:32px}
 @media(max-width:760px){.eme-rapid-config .eme-card-heading{gap:10px}.eme-folder-input{align-items:stretch;flex-direction:column}.eme-folder-input .eme-button{width:100%}.eme-rapid-switches{align-items:flex-start;flex-direction:column;gap:12px}}
 </style>

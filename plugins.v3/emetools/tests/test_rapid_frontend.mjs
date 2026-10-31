@@ -31,6 +31,9 @@ test('local rapid upload is available from the shared sidebar and page', () => {
   assert.match(source, /const rapidLogsPageSize = 6/)
   assert.match(source, /rapidLogItems/)
   assert.match(source, /aria-label="秒传记录分页"/)
+  assert.match(source, /\.eme-results\.eme-rapid-logs\{max-height:none;overflow:visible\}/)
+  assert.match(source, /v-for="\(item, index\) in rapidLogItems"/)
+  assert.match(source, /v-if="rapidLogsPageCount > 1" class="eme-pagination" aria-label="秒传记录分页"/)
   assert.match(source, /失败目录未填写时，失败文件会继续保留在本地源目录/)
 })
 
