@@ -191,7 +191,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.17.1"
+    plugin_version = "1.17.2"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -950,6 +950,8 @@ class Ed2kFolderWatcher(_PluginBase):
             queued = 0
             checks = 0
             ready_items = []
+            lookup_failures = 0
+            lookup_retry_delays = []
             for file_id, candidate in sorted(self._cloud_life_candidates.items(), key=lambda entry: entry[1]["due"]):
                 if checks >= 8 or stopping.is_set() or stopping is not self._stopping:
                     break
@@ -958,9 +960,23 @@ class Ed2kFolderWatcher(_PluginBase):
                 checks += 1
                 candidate["attempts"] += 1
                 candidate["due"] = now + 60
-                item = storage.item_from_life_event(candidate["event"])
+                try:
+                    item = storage.item_from_life_event(candidate["event"])
+                except Exception as failure:
+                    if stopping.is_set() or stopping is not self._stopping:
+                        return
+                    lookup_failures += 1
+                    retry_delay = min(300, 60 * 2 ** min(candidate["attempts"] - 1, 3))
+                    candidate["due"] = now + retry_delay
+                    candidate["reason"] = str(failure) if isinstance(failure, CloudError) else f"生活事件文件路径查询失败（{type(failure).__name__}）"
+                    candidate["lookup_failed"] = True
+                    lookup_retry_delays.append(retry_delay)
+                    if candidate["attempts"] == 1:
+                        logger.info(f"自动生成ED2K链接：生活事件文件路径查询暂时失败，单文件退避复查：文件ID {file_id}（{type(failure).__name__}）")
+                    continue
                 if stopping.is_set() or stopping is not self._stopping:
                     return
+                candidate.pop("lookup_failed", None)
                 reason = self._cloud_item_skip_reason(item) if item else "文件路径或详情尚未就绪"
                 candidate["reason"] = reason
                 label = item.get("name") if item else None
@@ -984,7 +1000,13 @@ class Ed2kFolderWatcher(_PluginBase):
             self._cloud_status["life_events"] += queued
             self._cloud_life_failures = 0
             self._cloud_life_retry_after = 0
-            self._cloud_status.update(life_error="", life_retry_at=None)
+            if lookup_failures:
+                self._cloud_status.update(
+                    life_error=f"{lookup_failures}个新增事件的文件路径暂时查询失败，已单独退避复查；其他候选继续处理",
+                    life_retry_at=time.time() + min(lookup_retry_delays),
+                )
+            else:
+                self._cloud_status.update(life_error="", life_retry_at=None)
         except Exception as failure:
             if stopping is self._stopping and not stopping.is_set():
                 self._cloud_status["life_error"] = str(failure) if isinstance(failure, CloudError) else f"生活事件读取失败（{type(failure).__name__}），定时补扫仍可用"

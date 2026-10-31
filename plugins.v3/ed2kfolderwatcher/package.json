@@ -1,7 +1,7 @@
 {
   "name": "moviepilot-ed2k-folder-watcher",
   "private": true,
-  "version": "1.17.1",
+  "version": "1.17.2",
   "type": "module",
   "scripts": {"build": "vite build", "test:build": "node --test tests/test_federation.mjs"},
   "dependencies": {"vue": "^3.5.13", "vuetify": "3.7.3"},

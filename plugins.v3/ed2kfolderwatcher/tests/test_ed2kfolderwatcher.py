@@ -946,15 +946,25 @@ class Ed2kTests(unittest.TestCase):
         self.assertFalse(self.plugin._cloud_life_candidates)
         self.assertEqual(storage.item_from_life_event.call_count, 1)
 
-    def test_life_lookup_failure_retains_candidate_and_backs_off(self):
+    def test_life_lookup_failure_backs_off_per_candidate_and_continues(self):
         item, storage, event = self.life_fixture()
-        storage.item_from_life_event.side_effect = self.cloud_module.CloudError("safe failure")
-        for now, delay in ((100, 300), (400, 600)):
-            with patch.object(self.module.time, "monotonic", return_value=now):
-                self.plugin.poll_cloud_events()
-            self.assertEqual(self.plugin._cloud_life_retry_after, now + delay)
-            self.assertIn("123", self.plugin._cloud_life_candidates)
-        self.assertFalse(self.plugin._pending)
+        second_event = {**event, "id": 2, "file_id": "124"}
+        second_item = {**item, "fileid": "124", "path": "/cloud-test/second.mkv", "name": "second.mkv"}
+        storage.life_events.return_value = [event, second_event]
+        storage.item_from_life_event.side_effect = [
+            self.cloud_module.CloudError("生活事件文件路径查询失败（ProtocolError），保留候选等待退避复查"),
+            second_item,
+        ]
+        with patch.object(self.module.time, "monotonic", return_value=100):
+            self.plugin.poll_cloud_events()
+        self.assertEqual(storage.item_from_life_event.call_count, 2)
+        self.assertIn("123", self.plugin._cloud_life_candidates)
+        self.assertEqual(self.plugin._cloud_life_candidates["123"]["due"], 160)
+        self.assertEqual(self.plugin._cloud_life_candidates["123"]["attempts"], 1)
+        self.assertNotIn("124", self.plugin._cloud_life_candidates)
+        self.assertEqual(self.plugin._cloud_life_retry_after, 0)
+        self.assertEqual(self.plugin._cloud_status["life_events"], 1)
+        self.assertIn("其他候选继续处理", self.plugin._cloud_status["life_error"])
 
     def test_life_lookup_budget_and_candidate_capacity_are_bounded(self):
         item, storage, event = self.life_fixture()
