@@ -561,13 +561,13 @@ function unpack(response) {
 async function get(path) { return unpack(await props.api.get(`${base.value}/${path}`)) }
 async function post(path, body) { return unpack(await props.api.post(`${base.value}/${path}`, body)) }
 async function execute(operation, body = {}) {
-  const result = await waitP115Task(await post('action', { operation, ...body }))
+  const result = await waitP115Task(await post('action', { operation, ...body }), { silentNotice: operation === 'p115_dirs' })
   if (result?.ok === false) throw new Error(result.message || '操作失败')
   return result
 }
-async function waitP115Task(result) {
+async function waitP115Task(result, { silentNotice = false } = {}) {
   if (result?.queued && result.job_id) {
-    notice.value = result.message || '已加入115任务队列，等待当前操作完成'
+    if (!silentNotice) notice.value = result.message || '已加入115任务队列，等待当前操作完成'
     while (!disposed) {
       await new Promise(resolve => setTimeout(resolve, 1000))
       if (disposed) break
