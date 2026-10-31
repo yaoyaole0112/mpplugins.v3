@@ -395,12 +395,38 @@ class RapidUpload:
         return P115Client(cookie)
 
     def _rapid_init(self, client, path: Path, sha1: str, size: int, target: str):
+        read_range = lambda sign_check: self._range_hash(path, sign_check)
+        upload_file_init = getattr(client, "upload_file_init", None)
+        if callable(upload_file_init):
+            response = upload_file_init(
+                filename=path.name,
+                filesize=size,
+                filesha1=sha1,
+                pid=target,
+                read_range_bytes_or_hash=read_range,
+            )
+            if not isinstance(response, dict):
+                raise TypeError("115 秒传接口返回了无效响应")
+            data = response.get("data")
+            status = response.get("status")
+            if status is None and isinstance(data, dict):
+                status = data.get("status")
+            try:
+                status = int(status or 0)
+            except (TypeError, ValueError):
+                status = 0
+            normalized = dict(response)
+            normalized["status"] = status
+            normalized["reuse"] = bool(response.get("reuse")) or normalized["status"] == 2
+            return normalized
         return client.upload_init(
-            filename=path.name,
-            filesize=size,
-            filesha1=sha1,
-            pid=target,
-            read_range_bytes_or_hash=lambda sign_check: self._range_hash(path, sign_check),
+            {
+                "filename": path.name,
+                "filesize": size,
+                "fileid": sha1,
+                "target": target,
+            },
+            read_range_bytes_or_hash=read_range,
         )
 
     def _move_failure(self, path: Path, config: dict) -> str:
@@ -497,7 +523,8 @@ class RapidUpload:
                         item["failure_path"] = moved
                     failed.append(item)
                     self._append_log(config, path, "failed", message)
-                    logger.warning("媒体增强 本地秒传失败：配置=%s 文件=%s 原因=%s", config["name"], path.name, type(error).__name__)
+                    logger.warning("媒体增强 本地秒传失败：配置=%s 文件=%s 原因=%s：%s",
+                                   config["name"], path.name, type(error).__name__, str(error)[:160])
             return {"ok": not failed, "message": f"本轮检查 {len(source_files)} 个文件，成功 {len(succeeded)} 个，已处理跳过 {len(skipped)} 个，失败 {len(failed)} 个",
                     "total": len(source_files), "succeeded": succeeded, "skipped": skipped, "failed": failed}
         finally:

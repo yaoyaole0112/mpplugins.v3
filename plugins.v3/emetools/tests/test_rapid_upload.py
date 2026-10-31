@@ -26,7 +26,17 @@ class FakeClient:
         self.response = response
         self.calls = []
 
-    def upload_init(self, **kwargs):
+    def upload_init(self, payload=None, **kwargs):
+        self.calls.append({**(payload or {}), **kwargs})
+        return self.response
+
+
+class ModernFakeClient:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def upload_file_init(self, **kwargs):
         self.calls.append(kwargs)
         return self.response
 
@@ -55,8 +65,23 @@ class RapidUploadTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(len(result["succeeded"]), 1)
             self.assertEqual(len(client.calls), 1)
-            self.assertEqual(client.calls[0]["pid"], "U_1_123")
+            self.assertEqual(client.calls[0]["target"], "U_1_123")
             self.assertEqual(rapid.status()["logs"][0]["status"], "succeeded")
+
+    def test_modern_p115_upload_file_init_response_is_normalized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "episode.mkv"
+            media.write_bytes(b"modern-upload-api")
+            config = normalize_config({"id": "rapid_1", "name": "电视剧", "source_path": str(root),
+                                       "target_folder_id": "123", "media_extensions": "mkv"})
+            client = ModernFakeClient({"state": True, "data": {"status": 2}})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            with patch.object(rapid, "_p115_client", return_value=client):
+                result = rapid.run("rapid_1")
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(result["succeeded"]), 1)
+            self.assertEqual(client.calls[0]["pid"], "U_1_123")
 
     def test_unmatched_file_can_move_to_failure_directory_without_uploading(self):
         with tempfile.TemporaryDirectory() as directory:
