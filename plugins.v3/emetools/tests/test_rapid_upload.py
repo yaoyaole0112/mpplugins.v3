@@ -36,9 +36,9 @@ class ModernFakeClient:
         self.response = response
         self.calls = []
 
-    def upload_file_init(self, filename, filesha1, filesize, *, pid, read_range_bytes_or_hash):
+    def upload_file_init(self, filename, filesha1, filesize, dirname, read_range_bytes_or_hash, pid):
         self.calls.append({"filename": filename, "filesha1": filesha1, "filesize": filesize,
-                           "pid": pid, "read_range_bytes_or_hash": read_range_bytes_or_hash})
+                           "dirname": dirname, "pid": pid, "read_range_bytes_or_hash": read_range_bytes_or_hash})
         return self.response
 
 

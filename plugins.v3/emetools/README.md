@@ -1,5 +1,7 @@
 # 媒体增强（MoviePilot 插件）
 
+v2.10.59：进一步修复本地秒传与不同 p115client 版本的参数签名兼容问题：upload_file_init 的文件名、SHA1、大小、目录、二次校验回调和目标目录统一使用位置参数，避免立即扫描继续出现 TypeError。
+
 v2.10.58：修复本地秒传调用新版 p115client.upload_file_init 时前三个位置参数误用关键字导致 TypeError、点击立即扫描提示未知错误的问题；改为按新版接口要求传入位置参数。
 
 v2.10.57：修复本地秒传在新版 p115client 中调用旧版 upload_init 参数导致 TypeError、实时秒传失败的问题；改用 upload_file_init 兼容新版接口，保留旧接口回退，并记录更具体的失败原因。

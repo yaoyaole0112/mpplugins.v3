@@ -402,8 +402,9 @@ class RapidUpload:
                 path.name,
                 sha1,
                 size,
-                pid=target,
-                read_range_bytes_or_hash=read_range,
+                "",
+                read_range,
+                target,
             )
             if not isinstance(response, dict):
                 raise TypeError("115 秒传接口返回了无效响应")
