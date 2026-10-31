@@ -21,6 +21,15 @@ test('both entrypoints share queue visibility and stop polling on unmount', () =
   }
 })
 
+test('queue notice is lifted to the title row without taking desktop card space', () => {
+  const notice = source.indexOf('class="eme-message eme-task-status"')
+  const main = source.indexOf('<main class="eme-main">')
+  assert.ok(notice >= 0 && notice < main)
+  assert.match(source, /\.eme-task-status\{position:absolute;[^}]*top:26px/)
+  assert.match(source, /\.eme-main\{flex:1;min-width:0;overflow:auto;padding:76px/)
+  assert.match(source, /@media\(max-width:760px\)\{\s*\.eme-task-status\{position:static/)
+})
+
 test('queued request returns the original confirmation result without resubmission', async () => {
   const calls = []
   let polls = 0
