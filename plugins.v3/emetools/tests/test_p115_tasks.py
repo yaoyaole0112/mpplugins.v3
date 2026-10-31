@@ -53,6 +53,28 @@ class P115TaskTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.queue.submit("closed", "closed", lambda: None)
 
+    def test_stale_page_during_plugin_reload_gets_retryable_directory_error(self):
+        plugin = object.__new__(EmeTools)
+        plugin._p115_tasks = self.queue
+        self.queue.close()
+        result = asyncio.run(plugin.action(ToolAction(operation="p115_dirs", cid="0")))
+        self.assertFalse(result["ok"])
+        self.assertIn("插件正在更新或重载", result["message"])
+        self.assertIn("未发送115请求", result["message"])
+
+    def test_unexpected_directory_error_is_returned_as_actionable_message(self):
+        plugin = object.__new__(EmeTools)
+        plugin._p115_tasks = self.queue
+
+        def fail(_cid):
+            raise TypeError("internal detail")
+
+        plugin._p115_dirs = fail
+        result = asyncio.run(plugin.action(ToolAction(operation="p115_dirs", cid="0")))
+        self.assertFalse(result["ok"])
+        self.assertIn("读取115目录失败（TypeError）", result["message"])
+        self.assertNotIn("internal detail", result["message"])
+
     def test_failure_releases_queue_without_replaying_callback(self):
         called = []
         def fail():

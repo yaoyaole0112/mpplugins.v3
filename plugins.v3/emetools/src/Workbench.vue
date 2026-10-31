@@ -1562,7 +1562,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
         <div class="eme-dialog" role="dialog" aria-modal="true" aria-label="选择目录">
           <div class="eme-card-heading"><h3>选择{{ ['root', 'rapid_source', 'rapid_failure'].includes(folder.type) ? '本地目录' : '115 文件夹' }}</h3><button class="eme-button text" @click="folder.open = false">关闭</button></div>
           <p class="eme-hint">{{ folder.type === 'root' ? folder.path : `CID: ${folder.cid}` }}</p>
-          <p v-if="folder.error" class="eme-message eme-error">{{ folder.error }}</p>
+          <div v-if="folder.error" class="eme-folder-error"><p class="eme-message eme-error">{{ folder.error }}</p><button class="eme-button secondary" type="button" :disabled="!settingsLoaded" @click="loadFolder">重试读取</button></div>
           <div class="eme-actions"><button class="eme-button secondary" :disabled="!folder.trail.length" @click="parentFolder">上一级</button><button class="eme-button primary" :disabled="!folder.ready || (['root', 'rapid_source', 'rapid_failure'].includes(folder.type) ? folder.path === '/' : folder.type !== 'local' && folder.cid === '0')" @click="selectFolder">选择当前目录</button></div>
           <div class="eme-folder-list"><button v-for="item in folder.dirs" :key="item.path || item.cid" class="eme-folder" @click="enterFolder(item)">📁 {{ item.name }}</button><p v-if="folder.ready && !folder.dirs.length" class="eme-hint">没有子目录</p></div>
         </div>
@@ -1594,7 +1594,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
 .eme-overlay{background:transparent;backdrop-filter:none}
 :global(.v-theme--dark .eme-overlay){background:transparent}
 .eme-dialog{box-sizing:border-box;flex:none;width:min(500px,100%);height:min(480px,calc(100% - 64px));max-height:calc(100% - 32px);min-height:0;overflow:hidden;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));box-shadow:0 20px 56px rgba(28,25,45,.3)}
-.eme-folder-list{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.eme-folder-list{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}.eme-folder-error{display:flex;align-items:center;gap:10px}.eme-folder-error .eme-message{flex:1;margin:0}
 .eme-shell{height:min(840px,calc(100dvh - 88px));min-height:0;overflow:hidden}
 .eme-shell.eme-shell--app{height:calc(100dvh - 88px);min-height:0;width:100%;box-sizing:border-box;overflow:hidden;overscroll-behavior:none}
 .eme-shell--app .eme-main{min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:auto;overscroll-behavior:contain}

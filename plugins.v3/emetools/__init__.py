@@ -129,7 +129,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.63"
+    plugin_version = "2.10.64"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -2277,10 +2277,18 @@ class EmeTools(_PluginBase):
             key += ":" + action.token
         try:
             job = self._p115_tasks.submit(key, labels[action.operation], lambda: asyncio.run(self._action_serial(saved)))
-        except Exception:
+        except ValueError as error:
             if action.operation in confirmation_kinds:
                 await asyncio.to_thread(self._set_cleanup_status, action.token, "failed", "任务队列未接受本次操作，请重新预览")
-            raise
+            message = str(error)
+            if "115任务协调器已停止" in message:
+                logger.info("媒体增强：插件重载期间拒绝旧页面的115操作，operation=%s", action.operation)
+                return {"ok": False, "message": "插件正在更新或重载，当前页面连接已失效；请刷新页面后重试。未发送115请求。"}
+            return {"ok": False, "message": message}
+        except Exception as error:
+            logger.warning("媒体增强：提交页面115操作失败，operation=%s，类型=%s",
+                           action.operation, type(error).__name__)
+            return {"ok": False, "message": f"无法提交115操作（{type(error).__name__}），请刷新页面后重试；未执行本次操作。"}
         if action.operation == "cleanup_confirm":
             await asyncio.to_thread(self._set_cleanup_status, action.token, "processing",
                                     "已提交清理确认，正在排队复核目录", expected_state="pending")
@@ -2380,12 +2388,18 @@ class EmeTools(_PluginBase):
             if operation == "cleanup_confirm":
                 self._finish_confirmation(action.token, "failed", ("媒体增强 · 清理文件", "确认已过期或已处理，请重新预览"))
             raise
-        except (OSError, RuntimeError, ValueError, httpx.HTTPError) as error:
+        except Exception as error:
             if operation == "cleanup_confirm":
                 self._finish_confirmation(action.token, "failed", ("媒体增强 · 清理文件", "清理未完成，请核实结果并检查日志；未自动重发删除请求。"))
             logger.warning("媒体增强：页面操作 %s 失败：%s（敏感详情未记录）",
                            _log_label(operation), type(error).__name__)
-            return {"ok": False, "message": str(error)}
+            if isinstance(error, (OSError, RuntimeError, ValueError, httpx.HTTPError)):
+                message = str(error)
+            elif operation == "p115_dirs":
+                message = f"读取115目录失败（{type(error).__name__}），请重试；若持续失败，请检查115 Cookie与网络。"
+            else:
+                message = f"操作失败（{type(error).__name__}），请刷新页面后重试；如仍失败请查看媒体增强日志。"
+            return {"ok": False, "message": message}
 
     async def enrichment_status(self) -> dict:
         return {**self._enrichment.status(), "preview_force": self._enrichment_config.get("preview_force", False)}
