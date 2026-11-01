@@ -17,6 +17,8 @@ test('local rapid upload is available from the shared sidebar and page', () => {
   assert.match(source, /class="eme-folder-error"/)
   assert.match(source, /@click="loadFolder">重试读取/)
   assert.match(source, /silentNotice: operation === 'p115_dirs'/)
+  assert.match(source, /<\/nav>\s*<p v-if="p115Tasks\.length[\s\S]*class="eme-message eme-task-status"/)
+  assert.doesNotMatch(source, /<\/aside>\s*<p v-if="p115Tasks\.length/)
   assert.match(source, /启用实时监控/)
   assert.match(source, /:disabled="!rapid\.loaded \|\| rapidActionBusy" @click="rapidCommand\('run', config\.id\)"/)
   assert.match(source, /const rapidActionBusy = ref\(false\)/)
