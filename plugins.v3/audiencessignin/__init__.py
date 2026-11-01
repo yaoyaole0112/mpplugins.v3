@@ -139,7 +139,7 @@ class AudiencesSignIn(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = "专为观众站 audiences.me 的 Cloudflare Turnstile 每日签到。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112"
     plugin_config_prefix = "audiencessignin_"
@@ -265,6 +265,8 @@ class AudiencesSignIn(_PluginBase):
                 logger.error(f"{PLUGIN_NAME}: {err}\n{traceback.format_exc()}")
             if last.get("success"):
                 break
+            if last.get("retry") is False:
+                break
             if index < attempts - 1:
                 logger.warning(
                     f"{PLUGIN_NAME}: 第 {index + 1} 次失败，"
@@ -290,7 +292,13 @@ class AudiencesSignIn(_PluginBase):
         timeout = max(30, self._timeout)
         logger.info(f"{PLUGIN_NAME}: 开始访问 {attendance_url}")
 
-        html = self._http_get(attendance_url, cookie, ua, proxies, timeout)
+        html, page_status = self._http_get(attendance_url, cookie, ua, proxies, timeout)
+        if page_status == 404:
+            return {
+                "success": False,
+                "retry": False,
+                "message": "签到页面返回 404，观众站签到入口可能已调整；请确认站点新入口后再运行",
+            }
         if html and under_challenge(html):
             logger.warning(f"{PLUGIN_NAME}: 普通请求命中 Cloudflare 防护")
             html = ""
@@ -391,7 +399,9 @@ class AudiencesSignIn(_PluginBase):
             headers["Referer"] = referer
         return headers
 
-    def _http_get(self, url: str, cookie: str, ua: str, proxies, timeout: int) -> str:
+    def _http_get(
+        self, url: str, cookie: str, ua: str, proxies, timeout: int
+    ) -> Tuple[str, Optional[int]]:
         try:
             res = RequestUtils(
                 cookies=cookie,
@@ -401,12 +411,14 @@ class AudiencesSignIn(_PluginBase):
                 referer=url,
                 headers=self._http_headers(cookie, ua, url),
             ).get_res(url)
-            if res is not None and res.status_code == 200:
-                return res.text or ""
-            logger.warning(f"{PLUGIN_NAME}: GET 失败 status={getattr(res, 'status_code', None)}")
+            if res is not None:
+                if res.status_code == 200:
+                    return res.text or "", res.status_code
+                logger.warning(f"{PLUGIN_NAME}: GET 失败 status={res.status_code}")
+                return "", res.status_code
         except Exception as err:
             logger.warning(f"{PLUGIN_NAME}: GET 异常：{err}")
-        return ""
+        return "", None
 
     def _post_token(self, url: str, cookie: str, ua: str, proxies, timeout: int, token: str) -> Dict[str, Any]:
         data = {

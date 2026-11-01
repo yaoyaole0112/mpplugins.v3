@@ -4,9 +4,11 @@ MoviePilot 插件，专门处理观众站 https://audiences.me/attendance.php �
 
 观众站签到页会先显示 Cloudflare Turnstile（请验证您是真人），验证通过后自动 POST attendance.php 领取爆米花。官方「站点自动签到」只是打开页面，检测到已登录就报成功，并不会勾验证码，所以会假成功。
 
+若签到页返回 404，插件会停止本轮任务，不再请求打码平台或重试。该情况表示站点入口可能已变化；请先确认站点提供的新签到入口。
+
 ## 安装
 
-1. 用「插件管理 -> 本地插件安装」上传 AudiencesSignIn-1.0.1.zip
+1. 用「插件管理 -> 本地插件安装」上传最新 AudiencesSignIn 安装包
 2. 或把本目录挂到容器 /app/app/plugins/audiencessignin 后重启 MoviePilot
 3. 也可添加第三方插件仓库：https://github.com/yaoyaole0112/mpplugins.v3
 
