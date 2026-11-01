@@ -55,6 +55,12 @@ class Ed2kTests(unittest.TestCase):
         self.assertNotEqual(key("美国谍梦.S06E07.mkv"), key("继承之战.S06E07.mkv"))
         self.assertIsNone(key("电影.mkv"))
 
+    def test_ed2k_link_preserves_slashes_inside_cloud_filename(self):
+        filename = "决胜巅峰(2014).1080p(PGS 简体中文/PGS 繁体中文).mkv"
+        link = self.module.ed2k_link(filename, "a" * 32, 25204859577)
+        self.assertIn("决胜巅峰(2014).1080p(PGS%20简体中文%2FPGS%20繁体中文).mkv", link)
+        self.assertTrue(link.endswith("|25204859577|" + "a" * 32 + "|/"))
+
     def test_telegram_message_chunks_keep_complete_links(self):
         records = [{"link": "ed2k://|file|" + "a" * 100 + "|1|" + "b" * 32 + "|/"} for _ in range(50)]
         chunks = self.module.telegram_message_chunks(records)

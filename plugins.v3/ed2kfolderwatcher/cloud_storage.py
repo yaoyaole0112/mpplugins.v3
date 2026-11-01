@@ -336,12 +336,13 @@ class CloudStorage:
             modify_time = int(event.get("update_time") or event.get("create_time") or 0)
         except (TypeError, ValueError):
             size = modify_time = 0
+        event_name = str(event.get("file_name") or "").strip()
         item = {
             "storage": self.storage,
             "fileid": file_id,
             "type": "file",
             "path": path,
-            "name": PurePosixPath(path).name,
+            "name": event_name or PurePosixPath(path).name,
             "size": size,
             "modify_time": modify_time,
             "pickcode": str(event.get("pick_code") or ""),

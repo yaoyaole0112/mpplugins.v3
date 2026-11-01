@@ -256,10 +256,10 @@ class CloudStorageTests(unittest.TestCase):
             "p115client.tool": types.ModuleType("p115client.tool"),
             "p115client.tool.attr": attr,
         }
-        event = self.life_event(file_id="123", file_category=1, file_name="旧名称.mkv", file_size="5", pick_code="pick", sha1="ABC", update_time="456")
+        event = self.life_event(file_id="123", file_category=1, file_name="新名称(简体/繁体).mkv", file_size="5", pick_code="pick", sha1="ABC", update_time="456")
         with patch.dict(sys.modules, modules):
             item = storage.item_from_life_event(event)
-        self.assertEqual(item, {"storage": "115网盘Plus", "fileid": "123", "type": "file", "path": "/监控/新文件.mkv", "name": "新文件.mkv", "size": 5, "modify_time": 456, "pickcode": "pick", "sha1": "ABC"})
+        self.assertEqual(item, {"storage": "115网盘Plus", "fileid": "123", "type": "file", "path": "/监控/新文件.mkv", "name": "新名称(简体/繁体).mkv", "size": 5, "modify_time": 456, "pickcode": "pick", "sha1": "ABC"})
         resolver.assert_called_once_with(client=storage.oper.client, attr="123", root_id=None, ensure_file=True, refresh=True, app="android")
         storage.oper.get_item_strict.assert_not_called()
         self.assertIsNone(storage.item_from_life_event(self.life_event(file_id="124", file_category=0)))

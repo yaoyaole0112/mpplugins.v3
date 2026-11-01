@@ -137,8 +137,12 @@ def ed2k_filename(name: str) -> str:
     return "".join(character if character.isprintable() and character not in "|%/\\?#" else quote(character, safe="") for character in name)
 
 
-def ed2k_link(path: Path, file_hash: str, size=None) -> str:
-    return f"ed2k://|file|{ed2k_filename(path.name)}|{path.stat().st_size if size is None else size}|{file_hash}|/"
+def ed2k_link(name: str | Path, file_hash: str, size=None) -> str:
+    filename = name.name if isinstance(name, Path) else str(name)
+    file_size = name.stat().st_size if size is None and isinstance(name, Path) else size
+    if file_size is None:
+        raise ValueError("生成 ED2K 链接时必须提供文件大小")
+    return f"ed2k://|file|{ed2k_filename(filename)}|{file_size}|{file_hash}|/"
 
 
 def telegram_destination(value: str) -> str:
@@ -191,7 +195,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.17.2"
+    plugin_version = "1.17.3"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -1210,7 +1214,7 @@ class Ed2kFolderWatcher(_PluginBase):
                                         read_timeout=self._cloud_read_timeout, on_retry=on_retry)
                 if stopping is not self._stopping or stopping.is_set():
                     return
-                record = {"name": item["name"], "size": item["size"], "link": ed2k_link(Path(item["name"]), file_hash, item["size"]),
+                record = {"name": item["name"], "size": item["size"], "link": ed2k_link(item["name"], file_hash, item["size"]),
                           "source_type": "cloud", "storage": item["storage"], "source_path": item["path"],
                           "cloud_fingerprint": fingerprint(item), "generated_at": time.time(), "source_deleted": False,
                           "hash_version": 2, "telegram_sent": False, "telegram_target": ""}
