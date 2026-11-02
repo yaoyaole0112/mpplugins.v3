@@ -24,3 +24,11 @@ test('built federation entry resolves all public components and styles', async (
   assert.ok(styles.length > 0)
   for (const style of styles) await access(fileURLToPath(style))
 })
+
+test('settings confirmations use an in-page dialog rather than native browser prompts', async () => {
+  const source = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
+  assert.match(source, /role="alertdialog"/)
+  assert.match(source, /function askConfirmation\(/)
+  assert.match(source, /已取消保存，设置未更改/)
+  assert.equal(source.includes('window.confirm('), false)
+})

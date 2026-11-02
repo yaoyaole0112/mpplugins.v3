@@ -12,6 +12,8 @@ const saving = ref(false)
 const loaded = ref(false)
 const error = ref('')
 const notice = ref('')
+const confirmation = ref('')
+let confirmationResolver
 const settings = reactive({ telegram_mode: 'user', telegram_aggregate_window: 600, cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
 const cloud = reactive({ storages: [], folders: [], browsing: '', scanning: false, pending: 0, file: '', bytes_read: 0, size: 0, error: '' })
 const account = reactive({ api_id: '', api_hash: '', phone: '', code: '', password: '' })
@@ -33,6 +35,16 @@ function unpack(response) {
 async function request(path, body) {
   const result = unpack(body === undefined ? await props.api.get(`${base.value}/${path}`) : await props.api.post(`${base.value}/${path}`, body))
   return result || {}
+}
+function askConfirmation(message) {
+  confirmation.value = message
+  return new Promise(resolve => { confirmationResolver = resolve })
+}
+function settleConfirmation(accepted) {
+  const resolve = confirmationResolver
+  confirmationResolver = undefined
+  confirmation.value = ''
+  resolve?.(accepted)
 }
 async function work(callback) {
   if (busy.value) return
@@ -76,7 +88,7 @@ async function browseCloud(path = cloudRoots()[0] || '/') {
   })
 }
 async function runCloud() {
-  if (!window.confirm('将按已保存的全部网盘目录增量读取完整文件内容，会消耗下载流量。启用并授权完成后删源时，符合条件的新记录可能删除源文件，确定继续？')) return
+  if (!await askConfirmation('将按已保存的全部网盘目录增量读取完整文件内容，会消耗下载流量。启用并授权完成后删源时，符合条件的新记录可能删除源文件，确定继续？')) return
   await work(async () => {
     const result = await request('cloud/run', {})
     if (!result.ok) throw new Error(result.message || '网盘扫描失败')
@@ -86,13 +98,14 @@ async function runCloud() {
 }
 async function saveSettings() {
   if (typeof settings.include_subdirectories !== 'boolean') { error.value = '原本地与网盘子目录设置不一致，请先明确选择是否包含子目录，再保存'; return }
-  if (settings.delete_source && !savedDelete && !window.confirm('确定启用完成后删除源文件？本地按原规则处理；115网盘还需单独授权。请先使用测试目录验证。')) return
-  if (settings.delete_small_files && !savedDeleteSmall && !window.confirm('确定启用低于阈值文件自动删源？稳定等待后的非空本地文件小于阈值时将直接删除，不生成链接、不等待Telegram或TXT成功，删除不可恢复。请仅使用下载完成目录，并先用测试文件验证。')) return
+  error.value = notice.value = ''
+  if (settings.delete_source && !savedDelete && !await askConfirmation('确定启用完成后删除源文件？本地按原规则处理；115网盘还需单独授权。请先使用测试目录验证。')) { notice.value = '已取消保存，设置未更改'; return }
+  if (settings.delete_small_files && !savedDeleteSmall && !await askConfirmation('确定启用低于阈值文件自动删源？稳定等待后的非空本地文件小于阈值时将直接删除，不生成链接、不等待Telegram或TXT成功，删除不可恢复。请仅使用下载完成目录，并先用测试文件验证。')) { notice.value = '已取消保存，设置未更改'; return }
   let confirmCloudDelete = false
   if (settings.cloud_delete_enabled) {
     if (!settings.delete_source || !settings.cloud_enabled || settings.cloud_storage !== '115网盘Plus') { error.value = '网盘删源仅支持115网盘Plus，请同时开启完成后删除源文件与网盘增量生成；CloudDrive仍只读'; return }
-    confirmCloudDelete = window.confirm('确认授权当前115账号、网盘监控目录及子目录范围完成后删源？仅处理授权时新生成并完成所选输出的记录，历史链接不追溯删除。TG发送成功不代表接收机器人已转存，请自行确认备份策略；删除结果不明会暂停，不会自动重删。每次保存开启此项均需确认。')
-    if (!confirmCloudDelete) return
+    confirmCloudDelete = await askConfirmation('确认授权当前115账号、网盘监控目录及子目录范围完成后删源？仅处理授权时新生成并完成所选输出的记录，历史链接不追溯删除。TG发送成功不代表接收机器人已转存，请自行确认备份策略；删除结果不明会暂停，不会自动重删。每次保存开启此项均需确认。')
+    if (!confirmCloudDelete) { notice.value = '已取消保存，设置未更改'; return }
   }
   if (saving.value) return
   saving.value = true
@@ -124,10 +137,10 @@ async function accountAction(operation, values = {}) {
   })
 }
 async function logout() {
-  if (window.confirm('确定退出本插件的 Telegram 会话？这会撤销本插件授权，不会退出你手机上的账号。')) await accountAction('logout')
+  if (await askConfirmation('确定退出本插件的 Telegram 会话？这会撤销本插件授权，不会退出你手机上的账号。')) await accountAction('logout')
 }
 async function run() {
-  if (settings.delete_source && !window.confirm('当前启用了成功后删除源文件，确定执行增量补扫和补发？')) return
+  if (settings.delete_source && !await askConfirmation('当前启用了成功后删除源文件，确定执行增量补扫和补发？')) return
   await work(async () => {
     const result = await request('run', {})
     if (!result.ok) throw new Error(result.message || '补扫失败')
@@ -153,6 +166,7 @@ onMounted(() => {
 })
 let cloudTimer
 onUnmounted(() => {
+  settleConfirmation(false)
   clearInterval(timer)
   clearInterval(cloudTimer)
   account.api_hash = account.phone = account.code = account.password = ''
@@ -171,6 +185,13 @@ onUnmounted(() => {
     </header>
     <div v-if="error" role="alert" class="message error">{{ error }}</div>
     <div v-if="notice" role="status" class="message success">{{ notice }}</div>
+    <div v-if="confirmation" class="confirm-backdrop" role="presentation" @click.self="settleConfirmation(false)">
+      <section class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+        <h3 id="confirm-title">请确认操作</h3>
+        <p>{{ confirmation }}</p>
+        <div class="actions"><button type="button" class="secondary" @click="settleConfirmation(false)">取消</button><button type="button" @click="settleConfirmation(true)">确认继续</button></div>
+      </section>
+    </div>
     <p v-if="!loaded">正在加载设置…</p>
 
     <article class="card" data-testid="common-settings">
@@ -238,6 +259,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.confirm-backdrop{position:fixed;inset:0;z-index:10000;display:grid;place-items:center;padding:20px;background:rgba(0,0,0,.62)}.confirm-dialog{width:min(560px,100%);padding:24px;border:1px solid rgba(var(--v-theme-on-surface),.2);border-radius:14px;background:rgb(var(--v-theme-surface));box-shadow:0 16px 48px rgba(0,0,0,.35)}.confirm-dialog h3{margin-bottom:12px}.confirm-dialog .actions{justify-content:flex-end}
 .cloud-browser{border:1px solid rgba(var(--v-theme-on-surface),.16);border-radius:10px;padding:12px}.cloud-folders{display:flex;flex-wrap:wrap;gap:10px;max-height:220px;overflow:auto}.cloud-folders button{overflow-wrap:anywhere;max-width:100%}
 .fields.telegram-targets textarea{line-height:20px;overflow:hidden;scrollbar-width:none}.telegram-targets textarea::-webkit-scrollbar{display:none}.telegram-switches{align-items:center;flex-wrap:nowrap}
 .fields textarea{width:100%;border:1px solid rgba(var(--v-theme-on-surface),.25);border-radius:9px;padding:13px 15px;background:rgba(var(--v-theme-on-surface),.025);color:inherit;font:inherit;resize:vertical}.telegram-targets textarea,.telegram-targets input{height:48px;min-height:48px;box-sizing:border-box}.fields textarea:focus{outline:2px solid rgb(var(--v-theme-primary));outline-offset:2px}.monitor-roots{height:48px;min-height:48px;box-sizing:border-box}.timing-fields{align-items:start}
