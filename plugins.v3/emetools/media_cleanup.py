@@ -10,11 +10,13 @@ import json
 import os
 import re
 import threading
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
 from app.sdk.logging import logger
+from .record_history import RECORD_TTL_SECONDS
 from app.sdk.services import MediaServerHelper
 from app.sdk.media import MediaInfo, MetaInfoPath
 from app.schemas.tmdb import TmdbEpisode
@@ -174,10 +176,50 @@ class MediaCleanup:
         self.last_scan = ""
         self.last_error = ""
         self.result = None
+        self._history_timestamp = 0
         self._snapshot = {}
         self._scan_rules = None
         self._scan_root = None
         self._scan_inventory = {}
+        self._restore_history()
+
+    def _restore_history(self):
+        try:
+            saved = self.owner.get_data("media_cleanup_history")
+            timestamp = float(saved.get("timestamp") or 0) if isinstance(saved, dict) else 0
+            if not 0 <= time.time() - timestamp <= RECORD_TTL_SECONDS:
+                return
+            result = saved.get("result")
+            if isinstance(result, dict):
+                self.result = result
+                self.last_scan = str(saved.get("last_scan") or "")
+                self._history_timestamp = timestamp
+        except (AttributeError, TypeError, ValueError):
+            return
+
+    def expire_history(self):
+        if (self._history_timestamp and
+                not 0 <= time.time() - self._history_timestamp <= RECORD_TTL_SECONDS):
+            self.result = None
+            self.last_scan = ""
+            self._history_timestamp = 0
+            self._snapshot = {}
+            try:
+                self.owner.save_data("media_cleanup_history", {})
+            except (AttributeError, TypeError):
+                pass
+
+    def _save_history(self):
+        if not hasattr(self.owner, "save_data") or not self.result:
+            return
+        try:
+            self._history_timestamp = time.time()
+            self.owner.save_data("media_cleanup_history", {
+                "timestamp": self._history_timestamp, "last_scan": self.last_scan,
+                "result": self.result,
+            })
+        except Exception as error:
+            logger.warning("媒体增强 媒体清理记录持久化失败：%s", type(error).__name__)
 
     def libraries(self):
         helper = MediaServerHelper()
@@ -350,7 +392,6 @@ class MediaCleanup:
         if not self.lock.acquire(blocking=False):
             raise ValueError("媒体清理正在扫描或清理中")
         self.running = True
-        self.result = None
         self._snapshot = {}
         self._scan_rules = None
         self._scan_inventory = {}
@@ -421,6 +462,7 @@ class MediaCleanup:
                            "total_inferior": sum(item["inferior_count"] for item in results),
                            "total_space_savings": sum(item["total_space_savings"] for item in results), "results": results}
             self.last_scan = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._save_history()
             logger.info("增强工具 媒体清理：扫描 %d 个 STRM，重复组=%d，可清理版本=%d", self.result["total_scanned"], len(results), self.result["total_inferior"])
             return self.result
         finally:
@@ -538,6 +580,7 @@ class MediaCleanup:
                 self.result["duplicate_groups"] = len(self.result["results"])
                 self.result["total_inferior"] = sum(g["inferior_count"] for g in self.result["results"])
                 self.result["total_space_savings"] = sum(g["total_space_savings"] for g in self.result["results"])
+                self._save_history()
             return {"ok": not failures, "deleted": deleted, "failures": failures}
         finally:
             self.lock.release()

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.sdk.logging import logger
+from .record_history import recent_records
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -104,12 +105,16 @@ def validate_configs(values: Any) -> list[dict]:
 
 class RapidUpload:
     _DATA_KEY = "rapid_upload_completed"
+    _LOG_KEY = "rapid_upload_logs"
     _REALTIME_POLL_SECONDS = 30
 
     def __init__(self, owner, saved: Any = None):
         self._owner = owner
         self._configs = validate_configs((saved or {}).get("configs", []) if isinstance(saved, dict) else [])
-        self._logs: list[dict] = []
+        saved_logs = owner.get_data(self._LOG_KEY) if hasattr(owner, "get_data") else []
+        self._logs = recent_records(saved_logs, timestamp_key="timestamp", limit=200)
+        if hasattr(owner, "save_data") and self._logs != saved_logs:
+            owner.save_data(self._LOG_KEY, self._logs)
         self._running: str | None = None
         self._observer = None
         self._poll_thread = None
@@ -134,6 +139,11 @@ class RapidUpload:
         return [dict(item) for item in self._configs]
 
     def status(self) -> dict:
+        retained = recent_records(self._logs, timestamp_key="timestamp", limit=200)
+        if retained != self._logs:
+            self._logs = retained
+            if hasattr(self._owner, "save_data"):
+                self._owner.save_data(self._LOG_KEY, list(self._logs))
         return {"configs": [dict(item) for item in self._configs],
                 "logs": [dict(item) for item in self._logs[-200:]],
                 "running": self._running or "",
@@ -443,10 +453,13 @@ class RapidUpload:
         return str(destination)
 
     def _append_log(self, config: dict, path: Path, status: str, message: str, size: int = 0, sha1: str = ""):
-        self._logs.append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "config": config["name"],
+        self._logs.append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "timestamp": time.time(),
+                           "config": config["name"],
                            "path": str(path), "name": path.name, "size": size,
                            "sha1": sha1, "status": status, "message": message})
-        del self._logs[:-200]
+        self._logs = recent_records(self._logs, limit=200)
+        if hasattr(self._owner, "save_data"):
+            self._owner.save_data(self._LOG_KEY, list(self._logs))
 
     def _remember_completed(self, config: dict, path: Path, sha1: str, size: int) -> None:
         key = f"{config['id']}:{path.resolve()}"

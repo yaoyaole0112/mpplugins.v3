@@ -25,6 +25,7 @@ from pypinyin import lazy_pinyin
 
 from app.sdk.config import settings
 from app.sdk.logging import logger
+from .record_history import RECORD_TTL_SECONDS, recent_records
 from app.sdk.services import MediaServerHelper
 from app.schemas.types import MediaType
 from app.runtime.settings import get_runtime_setting
@@ -249,6 +250,10 @@ class DataEnrichment:
         self.state = {"running": False, "task": "", "done": False, "error": "", "log": [],
                       "mediainfo": None, "preview": [], "preview_result": None,
                       "batch_result": None, "preview_repaired": []}
+        self._history = []
+        self._history_updated_at = 0
+        self._history_persisted_at = 0
+        self._restore_history()
         self._preview_selection = {}
         self._mi_selection = []
         self._import_timers = {}
@@ -260,8 +265,45 @@ class DataEnrichment:
         self._portraits = CastPortraits(lambda client, path, params: self._tmdb_json(client, path, params),
                                        lambda item, actors: search_portraits_with_moviepilot(item, actors), self.log)
         records = owner.get_data("enrichment_records") if hasattr(owner, "get_data") else []
-        self._records = [entry for entry in records if isinstance(entry, dict)][-200:] if isinstance(records, list) else []
+        self._records = recent_records(records, limit=200)
+        if self._records != records and hasattr(owner, "save_data"):
+            owner.save_data("enrichment_records", self._records)
         self.state.update(overview_preview=None, records=list(reversed(self._records)))
+
+    def _restore_history(self):
+        try:
+            saved = self.owner.get_data("enrichment_history")
+            updated_at = float(saved.get("timestamp") or 0) if isinstance(saved, dict) else 0
+            payload = saved.get("state") if isinstance(saved, dict) else None
+            if (not 0 <= time.time() - updated_at <= RECORD_TTL_SECONDS or
+                    not isinstance(payload, dict)):
+                return
+            for key in self.state:
+                if key in payload:
+                    self.state[key] = payload[key]
+            history = saved.get("history")
+            if isinstance(history, list):
+                self._history = recent_records(history, limit=80)
+                self.state["log"] = [entry.get("text", "") for entry in self._history]
+            else:
+                self._history = [{"timestamp": updated_at, "text": str(line)}
+                                 for line in self.state["log"][-80:]]
+            self._history_updated_at = updated_at
+            self._history_persisted_at = updated_at
+            if saved.get("running") or self.state.get("running"):
+                self.state.update(running=False, done=True, error="MoviePilot 重启前任务中断")
+        except (TypeError, ValueError, AttributeError):
+            return
+
+    def _persist_history(self):
+        try:
+            self.owner.save_data("enrichment_history", {
+                "timestamp": self._history_updated_at or time.time(), "history": self._history,
+                "state": dict(self.state), "running": bool(self.state.get("running")),
+            })
+            self._history_persisted_at = time.time()
+        except Exception as error:
+            logger.warning("媒体增强 数据补全记录持久化失败：%s", type(error).__name__)
 
     def _ensure_active(self):
         if self._closed:
@@ -450,6 +492,24 @@ class DataEnrichment:
 
     def status(self):
         with self.lock:
+            retained_records = recent_records(self._records, limit=200)
+            if retained_records != self._records:
+                self._records = retained_records
+                self.owner.save_data("enrichment_records", list(self._records))
+                self.state["records"] = list(reversed(self._records))
+            retained = recent_records(self._history, limit=80)
+            if len(retained) != len(self._history):
+                self._history = retained
+                self.state["log"] = [entry["text"] for entry in retained]
+                self._persist_history()
+            if (not self.state["running"] and self._history_updated_at and
+                    time.time() - self._history_updated_at > RECORD_TTL_SECONDS):
+                self.state = {"running": False, "task": "", "done": False, "error": "", "log": [],
+                              "mediainfo": None, "preview": [], "preview_result": None,
+                              "batch_result": None, "preview_repaired": []}
+                self._history = []
+                self._history_updated_at = 0
+                self._history_persisted_at = 0
             return {**self.state, "log": list(self.state["log"]),
                     "preview": list(self.state["preview"]),
                     "preview_repaired": list(self.state["preview_repaired"]),
@@ -630,7 +690,15 @@ class DataEnrichment:
     def log(self, message):
         text = str(message).replace("\n", " ")[:250]
         with self.lock:
-            self.state["log"] = [*self.state["log"][-79:], text]
+            self._history_updated_at = time.time()
+            self._history = recent_records(
+                [*self._history, {"timestamp": self._history_updated_at, "text": text}],
+                now=self._history_updated_at, limit=80,
+            )
+            self.state["log"] = [entry["text"] for entry in self._history]
+            if (self._history_persisted_at == 0 or
+                    self._history_updated_at - self._history_persisted_at >= 3):
+                self._persist_history()
         logger.info("增强工具 数据补全：%s", text)
 
     def _services(self):
@@ -1672,6 +1740,7 @@ class DataEnrichment:
     def _record_enrichment(self, identifier, status, update, fields, audit, message=""):
         audit = audit or {}
         entry = {"time": datetime.now().astimezone().isoformat(timespec="seconds"),
+                 "timestamp": time.time(),
                  "id": str(identifier)[:64], "server": str(audit.get("server") or "")[:80],
                  "title": str(update.get("Name") or audit.get("title") or identifier)[:120],
                  "type": str(update.get("Type") or ""), "status": status,
@@ -1679,7 +1748,8 @@ class DataEnrichment:
                  "fields": list(fields), "message": message[:200]}
         with self.lock:
             self._records.append(entry)
-            self._records = self._records[-200:]
+            self._records = recent_records(self._records, limit=200)
+            self.state["records"] = list(reversed(self._records))
             if hasattr(self.owner, "save_data"):
                 try:
                     self.owner.save_data("enrichment_records", list(self._records))
@@ -1889,8 +1959,12 @@ class DataEnrichment:
             if self.state["running"] or not ENRICHMENT_SLOT.acquire(blocking=False):
                 raise ValueError("已有数据补全任务正在运行，请等待完成")
             self.state.update(running=True, done=False, task=task, error="", log=[], repair_result=None)
+            self._history = []
+            self._history_updated_at = time.time()
+            self._history_persisted_at = 0
             if task in ("分集图片修复", "批量扫描与修复分集图片"):
                 self.state["preview_repaired"] = []
+            self._persist_history()
 
         def worker():
             try:
@@ -1907,6 +1981,8 @@ class DataEnrichment:
                 with self.lock:
                     self.state["running"] = False
                     self.state["done"] = True
+                    self._history_updated_at = time.time()
+                    self._persist_history()
                 ENRICHMENT_SLOT.release()
 
         try:

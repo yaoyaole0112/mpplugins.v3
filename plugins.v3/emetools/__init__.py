@@ -36,6 +36,7 @@ from .missing_episodes import DEFAULT_MISSING, MissingAction, MissingEpisodeDete
 from .missing_fill import MissingFill
 from .media_cleanup import MediaCleanup, DEFAULT_CONFIG as DEFAULT_MEDIA_CLEANUP, DEFAULT_RULES, validate_rules
 from .data_enrichment import DataEnrichment, DEFAULT_ENRICH_CONFIG, validate_enrich_config
+from .record_history import recent_records
 from .enrichment_llm import llm_available, llm_setting
 from .rapid_upload import RapidUpload, validate_configs as validate_rapid_configs
 from . import tool_notifications as notices
@@ -129,7 +130,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.66"
+    plugin_version = "2.10.67"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -227,7 +228,11 @@ class EmeTools(_PluginBase):
         self._cleanup_status = {}
         self._cleanup_message_refs = {}
         self._cleanup_message_lock = threading.Lock()
-        self._last_run = {}
+        saved_runs = recent_records(self.get_data("recent_last_runs") or [], limit=100)
+        self._last_run = {
+            str(record["section"]): str(record["last_run"])
+            for record in saved_runs if record.get("section") and record.get("last_run")
+        }
         if "cookie" in config or "proxy" in config:
             self._persist()
         logger.info("媒体增强：初始化完成，启用=%s，STRM=%s，任务=%s，订阅/关键词监控=%s/%s",
@@ -653,11 +658,21 @@ class EmeTools(_PluginBase):
                             "media_scan_library_ids": list(self._media_scan_library_ids),
                             "rapid_upload": {"configs": copy.deepcopy(self._rapid.configs)}})
 
+    def _record_run(self, section: str) -> None:
+        timestamp = time.time()
+        last_run = datetime.now().isoformat()
+        self._last_run[section] = last_run
+        records = recent_records(self.get_data("recent_last_runs") or [], now=timestamp, limit=100)
+        records.append({"timestamp": timestamp, "section": section, "last_run": last_run})
+        self.save_data("recent_last_runs", recent_records(records, now=timestamp, limit=100))
+
     async def media_status(self) -> dict:
+        self._media.expire_history()
         return {"config": copy.deepcopy(self._media_config),
                 "scan_library_ids": list(self._media_scan_library_ids), "running": self._media.running,
                 "progress": self._media.progress, "last_scan": self._media.last_scan,
                 "last_error": self._media.last_error,
+                "can_delete": bool(self._media._snapshot),
                 "result": copy.deepcopy(self._media.result)}
 
     async def media_libraries(self) -> dict:
@@ -1068,6 +1083,14 @@ class EmeTools(_PluginBase):
                                       command_origin=(source, user))
 
     async def status(self) -> dict:
+        saved_records = self.get_data("recent_last_runs") or []
+        records = recent_records(saved_records, limit=100)
+        if records != saved_records:
+            self.save_data("recent_last_runs", records)
+        self._last_run = {
+            str(record["section"]): str(record["last_run"])
+            for record in records if record.get("section") and record.get("last_run")
+        }
         return {"settings": self._settings(), "schedule": copy.deepcopy(self._schedule),
                 "last_run": dict(self._last_run), "p115_tasks": self._p115_tasks.status(),
                 "rapid_upload": self._rapid.status()}
@@ -1251,6 +1274,7 @@ class EmeTools(_PluginBase):
             self.save_data("missing_cancelled_subscriptions", [])
             self.save_data("last_scan_time", "从未扫描")
             self.save_data("missing_scan_status", {})
+            self.save_data(self._missing._RECORD_TS_KEY, 0)
             return {"message": "检测记录已清空（原插件记录仍保留）"}
         raise HTTPException(status_code=400, detail="未知缺集检测操作")
 
@@ -1845,7 +1869,7 @@ class EmeTools(_PluginBase):
                         if isinstance(error, P115DirectoryUnavailable):
                             self._move_retry_after = time.monotonic() + max(60, self._p115_cooldown_remaining())
                             break
-            self._last_run["p115_move"] = datetime.now().isoformat()
+            self._record_run("p115_move")
             logger.info("媒体增强 文件转存：本次完成，已处理=%d，失败=%d，空目录=%d",
                         moved, len(errors), sum(item["status"] == "empty" for item in details))
             copied = sum(item.get("item_count", 0) for item in details
@@ -2202,7 +2226,7 @@ class EmeTools(_PluginBase):
                     result = self._move_run()
                     if "moved" in result and not result.get("deferred"):
                         notification = notices.file_move(result)
-            self._last_run[section] = datetime.now().isoformat()
+            self._record_run(section)
             if notification:
                 self._send_tool_notice(*notification)
             logger.info("媒体增强 %s：定时任务结束，通知=%s", label, bool(notification))

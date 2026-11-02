@@ -36,6 +36,19 @@ class MediaCleanupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine.delete([str(self.good)])
 
+    def test_scan_result_survives_restart_but_delete_snapshot_does_not(self):
+        stored = {}
+        self.owner.get_data = stored.get
+        self.owner.save_data = stored.__setitem__
+        result = self.engine.scan(["emby::1"])
+
+        restored = MediaCleanup(self.owner, self.config)
+
+        self.assertEqual(restored.result, result)
+        self.assertFalse(restored._snapshot)
+        with self.assertRaises(ValueError):
+            restored.delete([str(self.bad)])
+
     def test_unavailable_mp_naming_protects_ties_without_hiding_lower_versions(self):
         self.good.unlink()
         self.bad.unlink()

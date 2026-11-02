@@ -21,6 +21,7 @@ from app.sdk.logging import logger
 from app.sdk.network import RequestUtils
 from app.sdk.services import MediaServerHelper
 from .emby_guard import emby_request
+from .record_history import RECORD_TTL_SECONDS
 
 
 class MissingAction(str, Enum):
@@ -63,6 +64,7 @@ class MissingEpisodeDetector:
     plugin_name = "媒体增强 缺集检测"
     _DATA_KEY = "missing_episodes"
     _TIME_KEY = "last_scan_time"
+    _RECORD_TS_KEY = "missing_record_timestamp"
     _CANCELLED_KEY = "missing_cancelled_subscriptions"
     _SCAN_KEY = "missing_scan_status"
 
@@ -448,12 +450,28 @@ class MissingEpisodeDetector:
     def _load_saved_data(self):
         results = self.owner.get_data(self._DATA_KEY)
         timestamp = self.owner.get_data(self._TIME_KEY)
+        record_timestamp = self.owner.get_data(self._RECORD_TS_KEY)
         cancelled = self.owner.get_data(self._CANCELLED_KEY)
-        self._results = results if isinstance(results, list) else []
-        self._cancelled_subscriptions = cancelled if isinstance(cancelled, list) else []
-        self._last_scan_time = str(timestamp) if timestamp else "从未扫描"
+        try:
+            record_timestamp = float(record_timestamp or 0)
+        except (TypeError, ValueError):
+            record_timestamp = 0
+        if ((isinstance(results, list) and results or isinstance(cancelled, list) and cancelled)
+                and record_timestamp <= 0):
+            record_timestamp = time.time()
+            self.save_data(self._RECORD_TS_KEY, record_timestamp)
+        is_recent = bool(record_timestamp and 0 <= time.time() - record_timestamp <= RECORD_TTL_SECONDS)
+        self._results = results if isinstance(results, list) and is_recent else []
+        self._cancelled_subscriptions = cancelled if isinstance(cancelled, list) and is_recent else []
+        self._last_scan_time = str(timestamp) if timestamp and is_recent else "从未扫描"
         status = self.owner.get_data(self._SCAN_KEY)
-        self._scan_status = status if isinstance(status, dict) else {}
+        self._scan_status = status if isinstance(status, dict) and is_recent else {}
+        if record_timestamp and not is_recent:
+            self.save_data(self._DATA_KEY, [])
+            self.save_data(self._TIME_KEY, "从未扫描")
+            self.save_data(self._CANCELLED_KEY, [])
+            self.save_data(self._SCAN_KEY, {})
+            self.save_data(self._RECORD_TS_KEY, 0)
 
     def save_data(self, key, value):
         self.owner.save_data(key, value)
@@ -1165,6 +1183,7 @@ class MissingEpisodeDetector:
             self.save_data(self._DATA_KEY, results)
             self.save_data(self._TIME_KEY, self._last_scan_time)
             self.save_data(self._CANCELLED_KEY, self._cancelled_subscriptions)
+            self.save_data(self._RECORD_TS_KEY, time.time())
             self._scan_status = {"complete": not bool(self._scan_issues),
                 "attempted_at": self._last_scan_time, "failed_count": len(self._scan_issues),
                 "retained_count": sum(bool(row.get("PendingReview")) for row in results),
@@ -1198,6 +1217,8 @@ class MissingEpisodeDetector:
                 "error": str(error)[:180] if isinstance(error, ValueError) else type(error).__name__}
             self.save_data(self._DATA_KEY, self._results)
             self.save_data(self._SCAN_KEY, self._scan_status)
+            self.save_data(self._TIME_KEY, self._scan_status["attempted_at"])
+            self.save_data(self._RECORD_TS_KEY, time.time())
             logger.error(f"【{self.plugin_name}】扫描失败：{error}", exc_info=True)
         finally:
             try:

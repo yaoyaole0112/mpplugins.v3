@@ -7,6 +7,28 @@ import re
 import time
 import uuid
 
+from .record_history import RECORD_TTL_SECONDS
+
+
+def _recent_log(entries, now):
+    retained = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            timestamp = float(entry.get("time") or now)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= now - timestamp <= RECORD_TTL_SECONDS:
+            retained.append(entry)
+    return retained
+
+
+def _task_timestamp(task, now):
+    try:
+        return float(task.get("updated_at") or task.get("created_at") or now)
+    except (TypeError, ValueError):
+        return now
 
 INTERACTIVE = {"searching", "choose_series", "resources", "submitting"}
 PENDING = {"awaiting_verify", "uncertain", "verifying"}
@@ -133,12 +155,26 @@ class MissingFill:
         self.plugin = plugin
         saved = plugin.get_data("missing_fill") or {}
         self.max_points = int(saved.get("max_points", 4))
-        self.tasks = saved.get("tasks", [])
+        now = time.time()
+        finished = {"cancelled", "complete", "expired", "failed", "closed"}
+        self.tasks = []
+        saved_tasks = saved.get("tasks", [])
+        for task in saved_tasks if isinstance(saved_tasks, list) else []:
+            if not isinstance(task, dict):
+                continue
+            task["log"] = _recent_log(task.get("log"), now)
+            task_time = _task_timestamp(task, now)
+            if task.get("state") in finished and now - task_time > RECORD_TTL_SECONDS:
+                continue
+            self.tasks.append(task)
         self.spent = set(saved.get("spent", []))
         for task in self.tasks:
             if task["state"] in INTERACTIVE | {"verifying"}:
                 task["state"] = "uncertain" if task.get("submitted") else "expired"
                 task["message"] = "服务重启：已提交任务请复查，未提交任务需重新搜索。"
+                task["updated_at"] = now
+                task.setdefault("log", []).append({"time": now, "message": task["message"]})
+                task["log"] = task["log"][-20:]
         self.active = None
         self.worker = None
         self.expiry = None
@@ -165,6 +201,18 @@ class MissingFill:
 
     async def status(self):
         """返回可展示的任务信息，不暴露回调数据、会话或资源链接。"""
+        now = time.time()
+        finished = {"cancelled", "complete", "expired", "failed", "closed"}
+        kept = []
+        for task in self.tasks:
+            task["log"] = _recent_log(task.get("log"), now)
+            task_time = _task_timestamp(task, now)
+            if task is not self.active and task.get("state") in finished and now - task_time > RECORD_TTL_SECONDS:
+                continue
+            kept.append(task)
+        if len(kept) != len(self.tasks):
+            self.tasks = kept
+            self._persist()
         return {"max_points": self.max_points, "busy": self.busy,
                 "tasks": copy.deepcopy(list(reversed(self.tasks)))}
 

@@ -68,6 +68,8 @@ class RapidUploadTests(unittest.TestCase):
             self.assertEqual(len(client.calls), 1)
             self.assertEqual(client.calls[0]["target"], "U_1_123")
             self.assertEqual(rapid.status()["logs"][0]["status"], "succeeded")
+            restored = RapidUpload(rapid._owner, {"configs": [config]})
+            self.assertEqual(restored.status()["logs"][0]["status"], "succeeded")
 
     def test_modern_p115_upload_file_init_response_is_normalized(self):
         with tempfile.TemporaryDirectory() as directory:

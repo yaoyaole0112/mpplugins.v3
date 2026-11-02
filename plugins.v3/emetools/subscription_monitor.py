@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from app.sdk.logging import logger
 from app.runtime.settings import get_runtime_setting
+from .record_history import recent_records
 
 try:
     from telethon import TelegramClient, events
@@ -104,7 +105,8 @@ class SubscriptionMonitor:
         self._poll_errors = {}
         saved_titles = self.plugin.get_data("monitor_channel_titles") or {}
         self.channel_titles = {scope: dict(saved_titles.get(scope) or {}) for scope in ("sub", "kw")} if isinstance(saved_titles, dict) else {"sub": {}, "kw": {}}
-        self.hits = deque(maxlen=40)
+        saved_hits = recent_records(self.plugin.get_data("monitor_hits") or [], limit=40)
+        self.hits = deque(saved_hits, maxlen=40)
         # Keep de-duplication across MoviePilot/plugin restarts.  Telegram can
         # deliver the same post once through the live handler and again through
         # the one-minute backfill, so the key must use the canonical numeric
@@ -133,6 +135,12 @@ class SubscriptionMonitor:
         # monitor instance started (especially on the first upgrade before a
         # persistent seen-list has been written).
         self._monitor_started_at = time.time()
+
+    def _save_hits(self):
+        try:
+            self.plugin.save_data("monitor_hits", list(self.hits))
+        except Exception as exc:
+            logger.warning("媒体增强 Telegram：保存命中记录失败：%s", type(exc).__name__)
 
     @staticmethod
     def _message_key(chat_id, message_id):
@@ -384,6 +392,10 @@ class SubscriptionMonitor:
         self._channel_entities.clear()
 
     async def status(self):
+        retained_hits = recent_records(list(self.hits), limit=40)
+        if retained_hits != list(self.hits):
+            self.hits = deque(retained_hits, maxlen=40)
+            self._save_hits()
         # A connected MTProto transport can be waiting for a login code (or
         # hold a revoked auth key). Only authorization proves login succeeded.
         logged = False
@@ -625,8 +637,10 @@ class SubscriptionMonitor:
             self._mark_seen(key)
             self._advance_checkpoint(event.chat_id, event.id)
             self.hits.appendleft({"time": datetime.now().strftime("%m-%d %H:%M:%S"),
+                                  "timestamp": time.time(),
                                   "channel": self._channel_display_name(peer_id), "matches": names,
                                   "delivery": delivery})
+            self._save_hits()
             self.last_error = ""
             logger.info("媒体增强 Telegram：频道ID=%s 消息ID=%s 已转发到指定 Bot，方式=%s", event.chat_id, event.id, delivery)
         except Exception as exc:
