@@ -8,6 +8,7 @@ const emit = defineEmits(['close'])
 const panelRoot = ref(null)
 useMobilePage(panelRoot)
 const busy = ref(false)
+const saving = ref(false)
 const loaded = ref(false)
 const error = ref('')
 const notice = ref('')
@@ -19,7 +20,7 @@ let timer
 let savedDelete = false
 let savedDeleteSmall = false
 const base = computed(() => `plugin/${props.pluginId}`)
-const disabled = computed(() => busy.value || !loaded.value)
+const disabled = computed(() => busy.value || saving.value || !loaded.value)
 const configFields = ['enabled', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'delete_source', 'delete_small_files', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
 const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size_gb', label: '生成链接最小文件大小（GB）', type: 'number', step: 'any', placeholder: '例如0.5、1、1.5（GB）', hint: '小于此值不生成、不转发；留空或0不限，单位GB。' }]
 const timingFields = [{ key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '文件停止变化后等待时间，请监控完成目录。' }]
@@ -94,11 +95,18 @@ async function saveSettings() {
     confirmCloudDelete = window.confirm('确认授权当前115账号、网盘监控目录及子目录范围完成后删源？仅处理授权时新生成并完成所选输出的记录，历史链接不追溯删除。TG发送成功不代表接收机器人已转存，请自行确认备份策略；删除结果不明会暂停，不会自动重删。每次保存开启此项均需确认。')
     if (!confirmCloudDelete) return
   }
-  await work(async () => {
+  if (saving.value) return
+  saving.value = true
+  error.value = notice.value = ''
+  try {
     const result = await request('settings', { ...Object.fromEntries(configFields.map(key => [key, settings[key] ?? ''])), confirm_cloud_delete: confirmCloudDelete })
     applySettings(result)
     notice.value = result.message
-  })
+  } catch (failure) {
+    error.value = failure?.message || '保存设置失败，请稍后重试'
+  } finally {
+    saving.value = false
+  }
 }
 async function accountAction(operation, values = {}) {
   await work(async () => {
@@ -131,8 +139,9 @@ onMounted(() => {
   work(async () => {
     applySettings(await request('settings'))
     loaded.value = true
-    await refreshAuth()
-    await refreshCloud()
+  }).then(async () => {
+    try { await refreshAuth() } catch (failure) { error.value = failure?.message || 'Telegram 状态读取失败' }
+    try { await refreshCloud() } catch (failure) { error.value = failure?.message || '网盘状态读取失败' }
   })
   timer = setInterval(() => {
     auth.retry_in = Math.max(0, (auth.retry_in || 0) - 1)
@@ -156,7 +165,7 @@ onUnmounted(() => {
     <header class="ed2k-header">
       <div><h2>自动生成ED2K链接</h2><p>实时目录监控 · 增量生成 · Telegram 自动发送</p></div>
       <div class="header-actions">
-        <button type="button" :disabled="disabled || auth.pending" @click="saveSettings">保存插件设置</button>
+        <button type="button" :disabled="saving || !loaded || auth.pending" @click="saveSettings">{{ saving ? '正在保存…' : '保存插件设置' }}</button>
         <button type="button" class="secondary" :disabled="disabled || !settings.enabled || auth.pending" @click="run">增量补扫／补发链接</button>
         <button type="button" class="secondary" @click="emit('close')">关闭</button>
       </div>

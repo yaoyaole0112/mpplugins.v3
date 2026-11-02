@@ -218,6 +218,21 @@ class WebApiTests(unittest.TestCase):
         self.plugin.init_plugin.assert_not_called()
         self.plugin.update_config.assert_not_called()
 
+    def test_settings_save_returns_without_waiting_for_plugin_reload(self):
+        self.authorize()
+        self.plugin.schedule_reload = Mock(return_value=True)
+        response = self.client.post("/settings", json={
+            "folder": "/media/new",
+            "monitor_enabled": True,
+            "include_subdirectories": True,
+        })
+        self.assertTrue(response.json()["ok"])
+        self.assertTrue(response.json()["applying"])
+        self.assertIn("正在应用", response.json()["message"])
+        self.plugin.update_config.assert_called_once()
+        self.plugin.schedule_reload.assert_called_once()
+        self.plugin.init_plugin.assert_not_called()
+
     def test_strict_payload_validation(self):
         self.authorize()
         for payload in ([1], {"operation": "sign_in", "values": {"session": "secret"}},

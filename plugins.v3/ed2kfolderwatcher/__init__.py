@@ -250,6 +250,9 @@ class Ed2kFolderWatcher(_PluginBase):
     _lock = threading.Lock()
     _web_login = None
     _web_login_lock = threading.Lock()
+    _reload_lock = threading.Lock()
+    _reload_thread = None
+    _reload_pending = None
 
     def init_plugin(self, config: dict = None) -> None:
         self.stop_service()
@@ -379,6 +382,36 @@ class Ed2kFolderWatcher(_PluginBase):
             self._start_monitor()
         if self._enabled and self._cloud_enabled and self._cloud_delete_enabled and self._delete_source:
             self._restore_cloud_delete_checks()
+
+    def schedule_reload(self, config: dict, callback=None) -> bool:
+        with self._reload_lock:
+            self._reload_pending = dict(config)
+            if self._reload_thread is not None and self._reload_thread.is_alive():
+                return False
+            self._reload_thread = threading.Thread(
+                target=self._reload_loop,
+                args=(callback,),
+                name="ed2k-config-reload",
+                daemon=True,
+            )
+            self._reload_thread.start()
+            return True
+
+    def _reload_loop(self, callback=None) -> None:
+        while True:
+            with self._reload_lock:
+                config = self._reload_pending
+                self._reload_pending = None
+            if config is None:
+                with self._reload_lock:
+                    self._reload_thread = None
+                return
+            try:
+                self.init_plugin(config)
+                if callback is not None:
+                    callback()
+            except Exception:
+                logger.exception("自动生成ED2K链接：后台应用插件设置失败")
 
     def _restore_cloud_delete_checks(self):
         try:

@@ -7,6 +7,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.api.dependencies.auth import get_current_active_superuser
+from app.log import logger
 
 from .user_account import UserAccountError
 from .telegram_targets import telegram_targets
@@ -20,11 +21,12 @@ CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_en
 BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled"}
 
 
-def settings_snapshot(plugin):
-    result = {name: getattr(plugin, f"_{name}") for name in CONFIG_FIELDS}
+def settings_snapshot(plugin, config=None):
+    source = config or {}
+    result = {name: source.get(name, getattr(plugin, f"_{name}")) for name in CONFIG_FIELDS}
     result["telegram_mode"] = "user"
-    result["min_file_size_gb"] = minimum_gb_value(plugin._min_file_size)
-    result["include_subdirectories"] = plugin._recursive if plugin._recursive == plugin._cloud_recursive else None
+    result["min_file_size_gb"] = minimum_gb_value(result["min_file_size"])
+    result["include_subdirectories"] = result["recursive"] if result["recursive"] == result["cloud_recursive"] else None
     return result
 
 
@@ -178,12 +180,21 @@ def build_routes(plugin):
             values = await read_body(request, limit=262144)
             config = validate_settings(plugin, values)
             plugin.update_config(config)
-            await asyncio.to_thread(plugin.init_plugin, config)
-            from app.scheduler import Scheduler
-            Scheduler().update_plugin_job(plugin.__class__.__name__)
-            return response({"ok": True, "settings": settings_snapshot(plugin), "message": "插件设置已保存"})
+            def update_schedule():
+                from app.scheduler import Scheduler
+                Scheduler().update_plugin_job(plugin.__class__.__name__)
+            reloaded_now = plugin.schedule_reload(config, callback=update_schedule)
+            snapshot = settings_snapshot(plugin, config)
+            if not reloaded_now:
+                message = "插件设置已保存，当前配置应用完成后将继续应用本次修改"
+            else:
+                message = "插件设置已保存，正在应用监控配置"
+            return response({"ok": True, "settings": snapshot, "message": message, "applying": True})
         except UserAccountError as error:
             return response({"ok": False, "message": str(error)})
+        except Exception as error:
+            logger.exception("自动生成ED2K链接：保存插件设置失败")
+            return response({"ok": False, "message": f"保存插件设置失败（{type(error).__name__}），请查看插件日志"})
 
     async def telegram_status(principal=Depends(get_current_active_superuser)):
         try:
