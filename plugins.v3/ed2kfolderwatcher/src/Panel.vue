@@ -85,7 +85,6 @@ async function runCloud() {
   })
 }
 async function saveSettings() {
-  if (auth.pending) { error.value = '请先完成或取消验证码登录，再保存其他设置'; return }
   if (typeof settings.include_subdirectories !== 'boolean') { error.value = '原本地与网盘子目录设置不一致，请先明确选择是否包含子目录，再保存'; return }
   if (settings.delete_source && !savedDelete && !window.confirm('确定启用完成后删除源文件？本地按原规则处理；115网盘还需单独授权。请先使用测试目录验证。')) return
   if (settings.delete_small_files && !savedDeleteSmall && !window.confirm('确定启用低于阈值文件自动删源？稳定等待后的非空本地文件小于阈值时将直接删除，不生成链接、不等待Telegram或TXT成功，删除不可恢复。请仅使用下载完成目录，并先用测试文件验证。')) return
@@ -165,7 +164,7 @@ onUnmounted(() => {
     <header class="ed2k-header">
       <div><h2>自动生成ED2K链接</h2><p>实时目录监控 · 增量生成 · Telegram 自动发送</p></div>
       <div class="header-actions">
-        <button type="button" :disabled="saving || !loaded || auth.pending" @click="saveSettings">{{ saving ? '正在保存…' : '保存插件设置' }}</button>
+        <button type="button" :disabled="saving || !loaded" @click="saveSettings">{{ saving ? '正在保存…' : '保存插件设置' }}</button>
         <button type="button" class="secondary" :disabled="disabled || !settings.enabled || auth.pending" @click="run">增量补扫／补发链接</button>
         <button type="button" class="secondary" @click="emit('close')">关闭</button>
       </div>
