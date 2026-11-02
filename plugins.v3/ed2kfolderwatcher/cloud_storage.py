@@ -234,9 +234,28 @@ class CloudStorage:
         return [entry for entry in items if allowed_item(entry, self.storage, root) and cloud_path(entry["path"]) != root]
 
     def fresh(self, item):
-        parent = PurePosixPath(item["path"]).parent.as_posix()
+        file_id = item.get("fileid")
+        expected_path = cloud_path(item.get("path"))
+        if file_id in (None, ""):
+            raise CloudError("网盘文件缺少有效ID，无法复核身份，保留记录等待重试")
+        lookup = getattr(getattr(self, "oper", None), "get_item_strict", None)
+        if lookup:
+            try:
+                current = lookup(Path(expected_path))
+            except Exception as failure:
+                raise CloudError(f"网盘文件身份查询暂时失败（{type(failure).__name__}），保留记录等待重试") from None
+            if current is None:
+                raise CloudError("网盘文件当前路径未找到，可能已移动或删除，保留记录等待重试")
+            current = current.model_dump() if hasattr(current, "model_dump") else dict(current)
+            if str(current.get("fileid")) != str(file_id) or cloud_path(current.get("path")) != expected_path:
+                raise CloudError("网盘文件路径对应的ID已变化，可能已移动或替换，保留记录等待重试")
+            if not allowed_item(current, self.storage, PurePosixPath(expected_path).parent.as_posix()):
+                raise CloudError("网盘文件类型或存储身份变化，保留记录等待重试")
+            return current
+        parent = PurePosixPath(expected_path).parent.as_posix()
         matches = [entry for entry in self.list(parent)
-                   if str(entry.get("fileid")) == str(item.get("fileid")) and item.get("fileid") not in (None, "") and cloud_path(entry.get("path")) == cloud_path(item.get("path"))]
+                   if str(entry.get("fileid")) == str(file_id)
+                   and cloud_path(entry.get("path")) == expected_path]
         if len(matches) != 1:
             raise CloudError("网盘文件已移动、删除或查询结果不唯一，保留记录等待重试")
         return matches[0]

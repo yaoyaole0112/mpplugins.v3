@@ -114,6 +114,17 @@ class Ed2kTests(unittest.TestCase):
             self.plugin._maybe_flush_batch(batch_id)
             flush.assert_called_once_with(batch_id)
 
+    def test_movie_batch_does_not_wait_for_series_aggregation_window(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 600
+        batch_id = self.plugin._new_batch("cloud-life")
+        movie_key = "cloud:movie"
+        self.plugin._register_batch_item(batch_id, movie_key, "护肝人(2026).mkv")
+        with patch.object(self.module.time, "monotonic", return_value=100):
+            self.plugin._seal_batch(batch_id)
+        self.assertEqual(self.plugin._batches[batch_id]["group_flush_at"][None], 100)
+
     def test_batch_timeout_moves_unfinished_items_to_retry_batch(self):
         first_key = "cloud:item-1"
         batch_id = self.plugin._new_batch("cloud-scan")
@@ -648,6 +659,17 @@ class Ed2kTests(unittest.TestCase):
         adapter.list.return_value = [{**item, "fileid": 123, "path": "/other/file.mkv"}]
         with self.assertRaises(self.cloud_module.CloudError):
             adapter.fresh(item)
+
+    def test_cloud_fresh_uses_strict_path_lookup(self):
+        item, storage = self.cloud_fixture()
+        adapter = object.__new__(self.cloud_module.CloudStorage)
+        adapter.storage = item["storage"]
+        adapter.oper = Mock()
+        adapter.oper.get_item_strict.return_value = {**item, "fileid": 123}
+        adapter.list = Mock(side_effect=AssertionError("should use direct identity lookup"))
+        self.assertEqual(adapter.fresh(item)["fileid"], 123)
+        adapter.oper.get_item_strict.assert_called_once_with(Path(item["path"]))
+        adapter.list.assert_not_called()
 
     def test_natural_cloud_walk_order(self):
         item, storage = self.cloud_fixture()

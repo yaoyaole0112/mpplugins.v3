@@ -195,7 +195,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.17.3"
+    plugin_version = "1.17.4"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -559,10 +559,12 @@ class Ed2kFolderWatcher(_PluginBase):
             batch = self._batches.get(batch_id)
             if batch:
                 batch["sealed"] = True
-                flush_at = time.monotonic() + self._telegram_aggregate_window if self._telegram_enabled and self._telegram_aggregate else time.monotonic()
                 for group_key in batch.get("group_expected", {}):
                     if group_key not in batch["group_flushed"] and group_key not in batch["group_flushing"]:
-                        batch["group_flush_at"][group_key] = flush_at
+                        delay = self._telegram_aggregate_window if (
+                            self._telegram_enabled and self._telegram_aggregate and group_key is not None
+                        ) else 0
+                        batch["group_flush_at"][group_key] = time.monotonic() + delay
                 empty = not batch.get("group_expected")
                 if empty:
                     self._batches.pop(batch_id, None)
