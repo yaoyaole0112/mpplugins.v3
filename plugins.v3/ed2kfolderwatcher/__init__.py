@@ -110,7 +110,7 @@ def _md4(data: bytes) -> bytes:
     return b"".join(value.to_bytes(4, "little") for value in (a, b, c, d))
 
 
-def ed2k_hash(path: Path, stop_event=None) -> str:
+def ed2k_hash(path: Path, stop_event=None, progress=None) -> str:
     part_hashes = []
     with path.open("rb") as file_handle:
         initial = os.fstat(file_handle.fileno())
@@ -122,6 +122,8 @@ def ed2k_hash(path: Path, stop_event=None) -> str:
             bytes_read += len(chunk)
             digest = _CryptoMD4.new(chunk).digest() if _CryptoMD4 else _md4(chunk)
             part_hashes.append(digest)
+            if progress is not None:
+                progress(bytes_read, initial.st_size)
             if len(chunk) < ED2K_PART_SIZE:
                 break
         final = os.fstat(file_handle.fileno())
@@ -195,7 +197,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.17.7"
+    plugin_version = "1.17.8"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -268,6 +270,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._cloud_iterator = None
         self._cloud_adapter = None
         self._cloud_status = {"scanning": False, "file": "", "bytes_read": 0, "size": 0, "error": "", "completed": 0, "last_scan": None}
+        self._local_active = None
         self._cloud_observed = {}
         self._cloud_failures = {}
         self._local_failures = {}
@@ -620,7 +623,16 @@ class Ed2kFolderWatcher(_PluginBase):
             if not ready:
                 return
             batch["group_flushing"].update(ready)
-        self._flush_batch(batch_id)
+        try:
+            self._flush_batch(batch_id)
+        except Exception:
+            with self._condition:
+                batch = self._batches.get(batch_id)
+                if batch:
+                    batch["group_flushing"].difference_update(ready)
+                    for group_key in ready:
+                        batch["group_flush_at"][group_key] = time.monotonic() + 60
+            logger.exception(f"自动生成ED2K链接：聚合批次处理异常，60秒后重试：{batch_id}")
 
     def _expire_batch(self, batch_id: str) -> None:
         with self._condition:
@@ -838,12 +850,15 @@ class Ed2kFolderWatcher(_PluginBase):
                     del self._pending[key]
                     batch_id = self._pending_batches.pop(key, None)
             for batch_id in flush:
-                if batch_id in expired:
-                    self._expire_batch(batch_id)
-                elif batch_id in self._batches and not self._batches[batch_id]["sealed"]:
-                    self._seal_batch(batch_id)
-                else:
-                    self._maybe_flush_batch(batch_id)
+                try:
+                    if batch_id in expired:
+                        self._expire_batch(batch_id)
+                    elif batch_id in self._batches and not self._batches[batch_id]["sealed"]:
+                        self._seal_batch(batch_id)
+                    else:
+                        self._maybe_flush_batch(batch_id)
+                except Exception:
+                    logger.exception(f"自动生成ED2K链接：批次处理异常，后台工作线程继续运行：{batch_id}")
             if key is None:
                 continue
             batch = [(key, signature)]
@@ -863,8 +878,16 @@ class Ed2kFolderWatcher(_PluginBase):
             for batch_key, batch_signature in batch:
                 item_batch_id = batch_ids.get(batch_key)
                 self._active_batch_id = item_batch_id
-                self._work_item(batch_key, batch_signature)
-                self._active_batch_id = None
+                try:
+                    self._work_item(batch_key, batch_signature)
+                except Exception:
+                    logger.exception(f"自动生成ED2K链接：后台任务异常，工作线程继续运行：{self._batch_item_name(batch_key, batch_signature)}")
+                    if batch_key.startswith("cloud:") and isinstance(batch_signature, dict):
+                        self._queue_cloud_file(batch_signature, delay=300)
+                    elif not batch_key.startswith("__"):
+                        self._queue_event(Path(batch_key), delay=60)
+                finally:
+                    self._active_batch_id = None
                 with self._condition:
                     still_pending = batch_key in self._pending
                     state = self._batches.get(item_batch_id) if item_batch_id and not still_pending else None
@@ -889,6 +912,10 @@ class Ed2kFolderWatcher(_PluginBase):
                 if signature != (stat.st_size, stat.st_mtime_ns, stat.st_ino):
                     self._queue_event(path)
                     return
+                self._local_active = {
+                    "name": path.name, "size": stat.st_size, "bytes_read": 0,
+                    "stage": "正在检查文件", "started_at": time.time(),
+                }
                 self._process_file(path)
                 self._local_failures.pop(key, None)
             except InterruptedError:
@@ -925,6 +952,9 @@ class Ed2kFolderWatcher(_PluginBase):
                 delay = min(300, 60 * 2 ** (failures - 1))
                 logger.warning(f"自动生成ED2K链接：本地文件处理失败，{delay}秒后重试：{path}：{type(err).__name__}: {err}")
                 self._queue_event(path, delay=delay)
+            finally:
+                if not key.startswith("cloud:") and key != "__cloud_scan__":
+                    self._local_active = None
 
     def cloud_status(self) -> dict:
         from .cloud_storage import available_storages
@@ -1253,7 +1283,7 @@ class Ed2kFolderWatcher(_PluginBase):
                         logger.warning(f"自动生成ED2K链接：未获得删源所需SHA1或账号证据，仅生成链接并保留网盘源文件：{item['name']}（{type(failure).__name__}）")
                 digest = lambda data: _CryptoMD4.new(data).digest() if _CryptoMD4 else _md4(data)
                 def progress(done, size):
-                    self._cloud_status.update(bytes_read=done, size=size, reconnecting=False)
+                    self._cloud_status.update(bytes_read=done, size=size, reconnecting=False, updated_at=time.time())
                 def on_retry(attempt):
                     self._cloud_status.update(reconnecting=True, stream_retries=attempt)
                 file_hash = hash_remote(storage, item, stopping, digest, ED2K_PART_SIZE, progress,
@@ -1672,7 +1702,12 @@ class Ed2kFolderWatcher(_PluginBase):
                 if not self._telegram_enabled or (record.get("telegram_sent") and record.get("telegram_target") == self._telegram_target_key()):
                     return
             if not unchanged or legacy_boundary:
-                file_hash = ed2k_hash(path, self._stopping)
+                if self._local_active:
+                    self._local_active["stage"] = "正在计算 ED2K 哈希"
+                file_hash = ed2k_hash(
+                    path, self._stopping,
+                    progress=lambda done, size: self._update_local_hash_progress(path, done, size),
+                )
                 final = path.stat()
                 if signature != (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) or stat.st_ctime_ns != final.st_ctime_ns:
                     self._queue_event(path)
@@ -1688,6 +1723,8 @@ class Ed2kFolderWatcher(_PluginBase):
                 records[key] = record
                 logger.info(f"自动生成ED2K链接：生成完成：{path}")
             self._write_results(output, cache_path, records)
+            if self._local_active:
+                self._local_active["stage"] = "正在完成链接投递与后续处理"
             if self._telegram_aggregate and self._active_batch_id in self._batches:
                 with self._condition:
                     batch = self._batches.get(self._active_batch_id)
@@ -1724,6 +1761,49 @@ class Ed2kFolderWatcher(_PluginBase):
                     record.pop("delete_failed", None)
                     self._write_results(output, cache_path, records)
                     logger.info(f"自动生成ED2K链接：已删除源文件：{path}")
+
+    def _update_local_hash_progress(self, path: Path, bytes_read: int, size: int) -> None:
+        active = self._local_active
+        if active and active.get("name") == path.name:
+            active.update(bytes_read=bytes_read, size=size, stage="正在计算 ED2K 哈希", updated_at=time.time())
+
+    def _progress_snapshot(self) -> dict:
+        with self._condition:
+            active = dict(self._local_active) if self._local_active else None
+            pending = list(self._pending.items())
+            worker_alive = bool(self._worker and self._worker.is_alive())
+            cloud_status = dict(self._cloud_status)
+        items = []
+        if active:
+            items.append({**active, "source": "本地", "status": "active"})
+        for key, (due, signature) in pending:
+            if key.startswith("__") or key.startswith("cloud:"):
+                continue
+            name = Path(key).name
+            if active and active.get("name") == name:
+                continue
+            size = signature[0] if isinstance(signature, tuple) and signature else 0
+            items.append({"name": name, "size": size, "bytes_read": 0, "stage": "等待处理",
+                          "source": "本地", "status": "queued",
+                          "due_at": time.time() + max(0, due - time.monotonic())})
+        if cloud_status.get("file"):
+            items.append({
+                "name": cloud_status["file"], "size": cloud_status.get("size", 0),
+                "bytes_read": cloud_status.get("bytes_read", 0),
+                "stage": "网盘断线重连／续读中" if cloud_status.get("reconnecting") else "正在读取并计算 ED2K 哈希",
+                "source": "网盘", "status": "active",
+                "updated_at": cloud_status.get("updated_at"),
+            })
+        for key, (due, signature) in pending:
+            if not key.startswith("cloud:") or not isinstance(signature, dict):
+                continue
+            items.append({"name": signature.get("name") or key, "size": signature.get("size", 0),
+                          "bytes_read": 0, "stage": "等待处理", "source": "网盘", "status": "queued",
+                          "due_at": time.time() + max(0, due - time.monotonic())})
+        if cloud_status.get("scanning") and not cloud_status.get("file"):
+            items.append({"name": "网盘监控目录", "size": 0, "bytes_read": 0,
+                          "stage": "正在扫描目录并发现文件", "source": "网盘", "status": "active"})
+        return {"items": items[:100], "pending": len(pending), "worker_alive": worker_alive}
 
     def scan(self) -> None:
         if not self._folder or self._stopping.is_set():
@@ -1847,6 +1927,7 @@ class Ed2kFolderWatcher(_PluginBase):
     def recent_records(self) -> dict:
         cache_path = Path(self.get_data_path()) / "records.json"
         try:
+            progress = self._progress_snapshot()
             records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
             if not isinstance(records, dict) or any(not isinstance(record, dict) for record in records.values()):
                 raise ValueError()
@@ -1877,7 +1958,9 @@ class Ed2kFolderWatcher(_PluginBase):
                               "source_path": record.get("source_path", path),
                               "deleted_at": record.get("deleted_at"), "cloud_delete_state": record.get("cloud_delete_state", ""), "cloud_delete_note": record.get("cloud_delete_note", "")})
             return {"ok": True, "items": items, "total": len(records), "limit": 100,
-                    "delete_source_enabled": self._delete_source, "cloud_delete_enabled": self._cloud_delete_enabled}
+                    "delete_source_enabled": self._delete_source, "cloud_delete_enabled": self._cloud_delete_enabled,
+                    "progress": progress["items"], "pending": progress["pending"],
+                    "worker_alive": progress["worker_alive"]}
         except (OSError, ValueError, TypeError):
             return {"ok": False, "message": "读取生成记录失败，原记录已保留，请检查日志或文件权限"}
 

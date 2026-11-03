@@ -61,6 +61,12 @@ class Ed2kTests(unittest.TestCase):
         self.assertIn("决胜巅峰(2014).1080p(PGS 简体中文%2FPGS 繁体中文).mkv", link)
         self.assertTrue(link.endswith("|25204859577|" + "a" * 32 + "|/"))
 
+    def test_ed2k_hash_reports_completed_part_progress(self):
+        path = self.create(data=b"hash progress")
+        progress = []
+        self.module.ed2k_hash(path, progress=lambda done, size: progress.append((done, size)))
+        self.assertEqual(progress, [(len(b"hash progress"), len(b"hash progress"))])
+
     def test_telegram_message_chunks_keep_complete_links(self):
         records = [{"link": "ed2k://|file|" + "a" * 100 + "|1|" + "b" * 32 + "|/"} for _ in range(50)]
         chunks = self.module.telegram_message_chunks(records)
@@ -1693,6 +1699,25 @@ class Ed2kTests(unittest.TestCase):
         self.assertGreater(record["generated_at"], 0)
         self.assertNotIn("path", record)
 
+    def test_recent_records_include_active_and_queued_progress(self):
+        active_path = self.create("active.mkv")
+        queued_path = self.create("queued.mkv")
+        stat = active_path.stat()
+        self.plugin._worker = Mock()
+        self.plugin._worker.is_alive.return_value = True
+        self.plugin._local_active = {
+            "name": active_path.name, "size": stat.st_size, "bytes_read": 3,
+            "stage": "正在计算 ED2K 哈希", "started_at": time.time(),
+        }
+        self.plugin._queue_event(queued_path, delay=60)
+        result = self.plugin.recent_records()
+        self.assertTrue(result["worker_alive"])
+        active = next(item for item in result["progress"] if item["name"] == active_path.name)
+        queued = next(item for item in result["progress"] if item["name"] == queued_path.name)
+        self.assertEqual((active["status"], active["bytes_read"]), ("active", 3))
+        self.assertEqual((queued["status"], queued["stage"]), ("queued", "等待处理"))
+        self.assertGreater(queued["due_at"], time.time())
+
     def test_recent_records_legacy_missing_file_not_inferred_deleted(self):
         path = self.create()
         self.plugin._process_file(path)
@@ -1792,7 +1817,7 @@ class Ed2kTests(unittest.TestCase):
     def test_change_during_hash_requeues(self):
         path = self.create()
 
-        def change(*args):
+        def change(*args, **kwargs):
             path.write_bytes(b"different")
             return "0" * 32
 
