@@ -195,7 +195,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.17.6"
+    plugin_version = "1.17.7"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -270,6 +270,8 @@ class Ed2kFolderWatcher(_PluginBase):
         self._cloud_status = {"scanning": False, "file": "", "bytes_read": 0, "size": 0, "error": "", "completed": 0, "last_scan": None}
         self._cloud_observed = {}
         self._cloud_failures = {}
+        self._local_failures = {}
+        self._empty_files_waiting = set()
         self._cloud_life_lock = threading.Lock()
         self._cloud_life_cursor = 0
         self._cloud_life_started = time.time()
@@ -888,32 +890,41 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._queue_event(path)
                     return
                 self._process_file(path)
+                self._local_failures.pop(key, None)
             except InterruptedError:
                 return
             except Exception as err:
-                if key == "__cloud_scan__" or key.startswith("cloud:"):
+                if key == "__cloud_scan__":
                     from .cloud_storage import CloudError
                     detail = str(err) if isinstance(err, CloudError) else f"网盘任务失败（{type(err).__name__}）"
                     self._cloud_status.update(error=detail, file="")
-                    filename = signature.get("name", "未知文件") if isinstance(signature, dict) else "目录补扫"
-                    logger.warning(f"自动生成ED2K链接：{filename}：{detail}")
-                if key == "__cloud_scan__":
+                    logger.warning(f"自动生成ED2K链接：网盘目录补扫失败：{detail}")
                     self._cloud_iterator = None
                     self._cloud_adapter = None
                     self._cloud_status["scanning"] = False
                     self._seal_batch(self._cloud_scan_batch_id)
                     self._cloud_scan_batch_id = None
-                else:
+                    return
+                if key.startswith("cloud:"):
+                    from .cloud_storage import CloudError
+                    detail = str(err) if isinstance(err, CloudError) else f"网盘任务失败（{type(err).__name__}）"
+                    self._cloud_status.update(error=detail, file="")
+                    filename = signature.get("name", "未知文件") if isinstance(signature, dict) else "未知文件"
+                    logger.warning(f"自动生成ED2K链接：{filename}：{detail}")
                     failures = min(5, self._cloud_failures.get(key, 0) + 1)
                     self._cloud_failures[key] = failures
                     delay = min(3600, 300 * 2 ** (failures - 1))
                     self._cloud_status.update(reconnecting=False, error_key=key, retry_at=time.time() + delay)
                     self._queue_cloud_file(signature, delay=delay)
-                return
-                if isinstance(err, FileNotFoundError):
                     return
-                logger.warning(f"自动生成ED2K链接：处理失败，60秒后重试：{path}：{type(err).__name__}")
-                self._queue_event(path, delay=60)
+                if isinstance(err, FileNotFoundError):
+                    self._empty_files_waiting.discard(key)
+                    return
+                failures = min(5, self._local_failures.get(key, 0) + 1)
+                self._local_failures[key] = failures
+                delay = min(300, 60 * 2 ** (failures - 1))
+                logger.warning(f"自动生成ED2K链接：本地文件处理失败，{delay}秒后重试：{path}：{type(err).__name__}: {err}")
+                self._queue_event(path, delay=delay)
 
     def cloud_status(self) -> dict:
         from .cloud_storage import available_storages
@@ -1630,9 +1641,13 @@ class Ed2kFolderWatcher(_PluginBase):
             output = output if self._output_enabled else None
             stat = path.stat()
             if stat.st_size <= 0:
-                logger.warning(f"自动生成ED2K链接：跳过空文件，保留源文件并等待后续写入：{path.name}")
+                key = str(path)
+                if key not in self._empty_files_waiting:
+                    self._empty_files_waiting.add(key)
+                    logger.info(f"自动生成ED2K链接：本地文件暂为0字节，保留文件并等待写入后复查：{path.name}")
                 self._queue_event(path, delay=max(60, self._min_age))
                 return
+            self._empty_files_waiting.discard(str(path))
             if stat.st_size < minimum_file_bytes(self._min_file_size):
                 if self._delete_small_files:
                     if stat.st_mtime + self._min_age > time.time():
@@ -1728,7 +1743,7 @@ class Ed2kFolderWatcher(_PluginBase):
                     return
                 self._queue_event(path, batch_id=batch_id)
         self._seal_batch(batch_id)
-        logger.info("自动生成ED2K链接：增量补扫已入队，已有链接不会重复计算")
+        logger.info("自动生成ED2K链接：本地增量补扫已入队，已有链接不会重复计算")
 
     def get_service(self) -> List[Dict[str, Any]]:
         if not self._enabled:

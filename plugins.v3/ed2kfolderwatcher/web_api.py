@@ -160,6 +160,16 @@ def build_routes(plugin):
     async def cloud_run(principal=Depends(get_current_active_superuser)):
         return response(plugin.queue_cloud_scan())
 
+    async def local_run(principal=Depends(get_current_active_superuser)):
+        if not plugin._enabled:
+            return response({"ok": False, "message": "请先启用并保存插件设置"})
+        if not plugin._folder:
+            return response({"ok": False, "message": "请先配置并保存本地监控目录"})
+        if plugin._worker is None or not plugin._worker.is_alive():
+            return response({"ok": False, "message": "本地扫描工作线程未运行，请重新保存插件设置后重试"})
+        await asyncio.to_thread(plugin.scan)
+        return response({"ok": True, "message": "本地增量扫描已加入后台队列；已有链接不重复计算"})
+
     async def cloud_browse(request: Request, principal=Depends(get_current_active_superuser)):
         from .cloud_storage import CloudStorage, CloudError, cloud_path
         values = await read_body(request)
@@ -222,12 +232,6 @@ def build_routes(plugin):
             manager = plugin._get_web_login()
             return response({**manager.snapshot(), "ok": False, "message": str(error)})
 
-    async def run(principal=Depends(get_current_active_superuser)):
-        if not plugin._enabled:
-            return response({"ok": False, "message": "请先启用并保存插件设置"})
-        await asyncio.to_thread(plugin.scan)
-        return response({"ok": True, "message": "增量补扫已加入队列；已有链接不重复计算"})
-
     return [{"path": path, "endpoint": endpoint, "methods": [method], "auth": "bear", "summary": summary}
             for path, endpoint, method, summary in (
                 ("/records", recent, "GET", "最近生成链接与删源状态"),
@@ -237,4 +241,5 @@ def build_routes(plugin):
                 ("/cloud/browse", cloud_browse, "POST", "浏览网盘子目录"),
                 ("/settings", status, "GET", "读取安全配置"), ("/settings", save, "POST", "保存插件配置"),
                 ("/telegram/status", telegram_status, "GET", "个人账号登录状态"),
-                ("/telegram/action", telegram_action, "POST", "个人账号网页授权"), ("/run", run, "POST", "增量补扫与补发"))]
+                ("/telegram/action", telegram_action, "POST", "个人账号网页授权"),
+                ("/local/run", local_run, "POST", "本地增量扫描与补发"))]

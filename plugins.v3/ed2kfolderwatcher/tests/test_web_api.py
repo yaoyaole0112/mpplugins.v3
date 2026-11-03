@@ -186,6 +186,7 @@ class WebApiTests(unittest.TestCase):
         self.plugin.delete_source.assert_not_called()
 
     def test_every_route_declares_bearer_admin_auth(self):
+        self.assertNotIn("/run", [route["path"] for route in self.routes])
         for route in self.routes:
             self.assertEqual(route["auth"], "bear")
             dependency = inspect.signature(route["endpoint"]).parameters["principal"].default
@@ -260,7 +261,29 @@ class WebApiTests(unittest.TestCase):
 
     def test_disabled_scan_rejected(self):
         self.authorize()
-        self.assertFalse(self.client.post("/run").json()["ok"])
+        self.assertFalse(self.client.post("/local/run").json()["ok"])
+        self.plugin.scan.assert_not_called()
+
+    def test_local_scan_endpoint_only_calls_local_scanner(self):
+        self.authorize()
+        self.plugin._enabled = True
+        self.plugin._folder = "/media"
+        self.plugin._worker = Mock()
+        self.plugin._worker.is_alive.return_value = True
+        self.plugin.scan = Mock()
+        self.plugin.queue_cloud_scan = Mock(side_effect=AssertionError("local endpoint must not queue cloud scan"))
+        result = self.client.post("/local/run").json()
+        self.assertTrue(result["ok"])
+        self.assertIn("本地增量扫描", result["message"])
+        self.plugin.scan.assert_called_once()
+        self.plugin.queue_cloud_scan.assert_not_called()
+
+    def test_local_scan_rejected_when_worker_is_not_running(self):
+        self.authorize()
+        self.plugin._enabled = True
+        self.plugin._folder = "/media"
+        self.plugin._worker = None
+        self.assertFalse(self.client.post("/local/run").json()["ok"])
         self.plugin.scan.assert_not_called()
 
     def test_cloud_delete_requires_confirmation_and_binds_scope_without_deleting(self):

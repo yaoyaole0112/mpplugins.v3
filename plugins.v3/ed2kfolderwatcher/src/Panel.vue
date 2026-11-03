@@ -96,6 +96,15 @@ async function runCloud() {
     await refreshCloud()
   })
 }
+async function runLocal() {
+  if ((settings.delete_source || settings.delete_small_files) &&
+      !await askConfirmation('当前启用了本地删源设置。本次只扫描已保存的本地监控目录；符合条件的文件可能在生成或补发后删除，低于阈值的文件也可能直接删除。确定继续？')) return
+  await work(async () => {
+    const result = await request('local/run', {})
+    if (!result.ok) throw new Error(result.message || '本地扫描失败')
+    notice.value = result.message
+  })
+}
 async function saveSettings() {
   if (typeof settings.include_subdirectories !== 'boolean') { error.value = '原本地与网盘子目录设置不一致，请先明确选择是否包含子目录，再保存'; return }
   error.value = notice.value = ''
@@ -139,14 +148,6 @@ async function accountAction(operation, values = {}) {
 async function logout() {
   if (await askConfirmation('确定退出本插件的 Telegram 会话？这会撤销本插件授权，不会退出你手机上的账号。')) await accountAction('logout')
 }
-async function run() {
-  if (settings.delete_source && !await askConfirmation('当前启用了成功后删除源文件，确定执行增量补扫和补发？')) return
-  await work(async () => {
-    const result = await request('run', {})
-    if (!result.ok) throw new Error(result.message || '补扫失败')
-    notice.value = result.message
-  })
-}
 onMounted(() => {
   work(async () => {
     applySettings(await request('settings'))
@@ -179,7 +180,6 @@ onUnmounted(() => {
       <div><h2>自动生成ED2K链接</h2><p>实时目录监控 · 增量生成 · Telegram 自动发送</p></div>
       <div class="header-actions">
         <button type="button" :disabled="saving || !loaded" @click="saveSettings">{{ saving ? '正在保存…' : '保存插件设置' }}</button>
-        <button type="button" class="secondary" :disabled="disabled || !settings.enabled || auth.pending" @click="run">增量补扫／补发链接</button>
         <button type="button" class="secondary" @click="emit('close')">关闭</button>
       </div>
     </header>
@@ -212,6 +212,7 @@ onUnmounted(() => {
       <div class="fields"><label>本地监控目录<input v-model="settings.folder" class="monitor-roots" :disabled="disabled" placeholder="/media/movies,/media/tv"><small>容器内绝对路径，多个用英文逗号分隔，最多32个。</small></label><label>本地补扫计划<input v-model="settings.cron" :disabled="disabled || !settings.scan_enabled" placeholder="*/10 * * * *"><small>默认关闭，用于补漏。</small></label></div>
       <label class="switch"><input v-model="settings.delete_small_files" type="checkbox" :disabled="disabled">低于阈值文件自动删源</label>
       <p class="warning" v-if="settings.delete_small_files">低于阈值的非空本地文件会在稳定等待后直接删除，不生成、不转发，且不可恢复；空文件和网盘文件不处理。</p>
+      <div class="actions"><button type="button" class="secondary" :disabled="disabled || !settings.enabled" @click="runLocal">立即本地增量扫描／补发</button></div>
     </article>
 
     <article class="card" data-testid="cloud-source">

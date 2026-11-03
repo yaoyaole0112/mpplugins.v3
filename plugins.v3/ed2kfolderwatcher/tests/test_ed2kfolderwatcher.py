@@ -58,7 +58,7 @@ class Ed2kTests(unittest.TestCase):
     def test_ed2k_link_preserves_slashes_inside_cloud_filename(self):
         filename = "决胜巅峰(2014).1080p(PGS 简体中文/PGS 繁体中文).mkv"
         link = self.module.ed2k_link(filename, "a" * 32, 25204859577)
-        self.assertIn("决胜巅峰(2014).1080p(PGS%20简体中文%2FPGS%20繁体中文).mkv", link)
+        self.assertIn("决胜巅峰(2014).1080p(PGS 简体中文%2FPGS 繁体中文).mkv", link)
         self.assertTrue(link.endswith("|25204859577|" + "a" * 32 + "|/"))
 
     def test_telegram_message_chunks_keep_complete_links(self):
@@ -1162,12 +1162,25 @@ class Ed2kTests(unittest.TestCase):
         self.assertFalse((self.root / "data/records.json").exists())
         self.assertIn(str(path), self.plugin._pending)
 
+    def test_empty_file_wait_is_logged_once_and_retried_without_warning(self):
+        path = self.create(data=b"")
+        self.module.logger.reset_mock()
+        with patch.object(self.plugin, "_queue_event") as queue:
+            self.plugin._process_file(path)
+            self.plugin._process_file(path)
+        self.assertEqual(queue.call_count, 2)
+        queue.assert_called_with(path, delay=60)
+        self.module.logger.info.assert_called_once()
+        self.module.logger.warning.assert_not_called()
+        self.assertIn(str(path), self.plugin._empty_files_waiting)
+
     def test_empty_file_later_filled_is_processed(self):
         path = self.create(data=b"")
         self.plugin._process_file(path)
         path.write_bytes(b"complete file")
         self.plugin._process_file(path)
         self.assertGreater(self.records()[str(path)]["size"], 0)
+        self.assertNotIn(str(path), self.plugin._empty_files_waiting)
 
     def test_invalid_empty_hash_not_published_or_deleted(self):
         path = self.create()
@@ -1787,6 +1800,18 @@ class Ed2kTests(unittest.TestCase):
             self.plugin._process_file(path)
         self.assertIn(str(path), self.plugin._pending)
         self.assertFalse((self.folder / "ed2k.txt").exists())
+
+    def test_local_processing_error_retries_as_local_and_never_kills_worker(self):
+        path = self.create()
+        stat = path.stat()
+        signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+        with patch.object(self.plugin, "_process_file", side_effect=OSError("temporary read failure")), \
+                patch.object(self.plugin, "_queue_event") as queue_event, \
+                patch.object(self.plugin, "_queue_cloud_file") as queue_cloud_file:
+            self.plugin._work_item(str(path), signature)
+        queue_event.assert_called_once_with(path, delay=60)
+        queue_cloud_file.assert_not_called()
+        self.assertEqual(self.plugin._local_failures[str(path)], 1)
 
     def test_corrupt_cache_not_silently_overwritten(self):
         path = self.create()

@@ -57,6 +57,14 @@ document.execCommand = command => {
 }
 window.confirm = () => confirmDelete
 const intervals = new Map()
+async function settleConfirmation(accepted = true) {
+  await vue.nextTick()
+  const dialog = document.querySelector('#app [role=alertdialog]')
+  if (!dialog) throw Error('confirmation dialog missing')
+  const button = dialog.querySelector(accepted ? 'button:not(.secondary)' : 'button.secondary')
+  button.click()
+  await vue.nextTick()
+}
 const originalSetInterval = window.setInterval.bind(window)
 const originalClearInterval = window.clearInterval.bind(window)
 window.setInterval = (callback, delay, ...args) => {
@@ -87,6 +95,8 @@ const api = { get: async path => {
 }, post: async (path, body) => {
   requests.push(path)
   if (path.endsWith('/cloud/browse')) return { ok: true, path: body.path, folders: body.path === '/' ? [{ name: '测试网盘目录', path: '/测试网盘目录/' }] : [] }
+  if (path.endsWith('/local/run')) return { ok: true, message: '本地增量扫描已加入后台队列；已有链接不重复计算' }
+  if (path.endsWith('/cloud/run')) return { ok: true, message: '网盘增量扫描已加入后台队列' }
   if (path.endsWith('/records/delete-source')) {
     if (body.id !== '1'.repeat(64) || body.confirm !== true || Object.keys(body).length !== 2) throw Error('Unsafe delete payload')
     deletions.push(body)
@@ -249,6 +259,26 @@ try {
     const cloudPanel = document.querySelector('#app [data-testid=cloud-source]')
     if (!cloudPanel || !cloudPanel.textContent.includes('默认保留云端文件') || cloudPanel.querySelector('input[type=checkbox]').checked) throw Error(`${name}: cloud defaults are unsafe or panel missing`)
     const commonPanel = document.querySelector('#app [data-testid=common-settings]')
+    const localPanel = document.querySelector('#app [data-testid=local-source]')
+    const localScan = [...localPanel.querySelectorAll('button')].find(button => button.textContent.trim() === '立即本地增量扫描／补发')
+    if (!localScan) throw Error(`${name}: local incremental scan button missing`)
+    const enabledSwitch = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.trim() === '启用插件').querySelector('input')
+    enabledSwitch.click()
+    await vue.nextTick()
+    const localRequestsBefore = requests.length
+    localScan.click()
+    await new Promise(resolve => setTimeout(resolve, 100))
+    if (!requests.slice(localRequestsBefore).some(path => path.endsWith('/local/run')) || requests.slice(localRequestsBefore).some(path => path.endsWith('/cloud/run'))) throw Error(`${name}: local scan used the wrong endpoint`)
+    const cloudToggle = cloudPanel.querySelector('.switches input[type=checkbox]')
+    cloudToggle.click()
+    await vue.nextTick()
+    const cloudScan = [...cloudPanel.querySelectorAll('button')].find(button => button.textContent.trim() === '立即网盘增量扫描／补发')
+    cloudScan.click()
+    await settleConfirmation()
+    await new Promise(resolve => setTimeout(resolve, 100))
+    if (!requests.some(path => path.endsWith('/cloud/run'))) throw Error(`${name}: cloud scan endpoint missing`)
+    cloudToggle.click()
+    await vue.nextTick()
     const recursiveSwitch = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.trim() === '包含子目录')?.querySelector('input')
     if (!recursiveSwitch) throw Error(`${name}: shared recursive switch missing`)
     if (mixedRecursive) {
@@ -273,7 +303,6 @@ try {
     minimumInput.value = '0.5'
     minimumInput.dispatchEvent(new Event('input', { bubbles: true }))
     await vue.nextTick()
-    const localPanel = document.querySelector('#app [data-testid=local-source]')
     const smallDelete = [...localPanel.querySelectorAll('label')].find(label => label.textContent.trim() === '低于阈值文件自动删源')?.querySelector('input')
     if (!smallDelete || smallDelete.checked) throw Error(`${name}: small file deletion must default to off`)
     smallDelete.click()
@@ -334,7 +363,6 @@ try {
     targets.dispatchEvent(new Event('input', { bubbles: true }))
     await vue.nextTick()
     if (!targets.value.includes('\n@channel\n')) throw Error(`${name}: multiline input lost`)
-    let deletionConfirmed = false
     const masterDelete = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.trim() === '完成后删除源文件').querySelector('input')
     const cloudDelete = [...commonPanel.querySelectorAll('label')].find(label => label.textContent.startsWith('单独授权115网盘删源')).querySelector('input')
     if (masterDelete.checked || cloudDelete.checked) throw Error(`${name}: upgrade enabled cloud deletion`)
@@ -342,30 +370,26 @@ try {
     cloudDelete.click()
     cloudPanel.querySelector('input[type=checkbox]').click()
     await vue.nextTick()
-    let cloudConfirmation = false
     const beforeCloudConfirmation = requests.length
-    window.confirm = message => { if (message.includes('确认授权当前115账号')) { cloudConfirmation = true; return false } return true }
     buttons.find(button => button.textContent.trim() === '保存插件设置').click()
-    await vue.nextTick()
-    if (!cloudConfirmation || requests.length !== beforeCloudConfirmation) throw Error(`${name}: cloud deletion confirmation missing or cancellation saved settings`)
+    await settleConfirmation()
+    await settleConfirmation()
+    if (!document.querySelector('#app [role=alertdialog]')?.textContent.includes('确认授权当前115账号')) throw Error(`${name}: cloud deletion confirmation missing`)
+    await settleConfirmation(false)
+    if (requests.length !== beforeCloudConfirmation) throw Error(`${name}: cancelling cloud authorization saved settings`)
     masterDelete.click()
     cloudPanel.querySelector('input[type=checkbox]').click()
     await vue.nextTick()
     if (cloudDelete.checked) throw Error(`${name}: disabling master switch did not revoke cloud deletion`)
-    const requestsBeforeCancel = requests.length
-    window.confirm = message => { deletionConfirmed = message.includes('低于阈值文件自动删源'); return false }
-    buttons.find(button => button.textContent.trim() === '保存插件设置').click()
+    smallDelete.click()
     await vue.nextTick()
-    if (!deletionConfirmed || requests.length !== requestsBeforeCancel) throw Error(`${name}: destructive save confirmation missing`)
-    window.confirm = () => true
     buttons.find(button => button.textContent.trim() === '保存插件设置').click()
     await new Promise(resolve => setTimeout(resolve, 100))
     if (!document.querySelector('#app').innerText.includes('模拟保存成功')) throw Error(`${name}: settings save failed`)
-    window.confirm = () => confirmDelete
     if (buttons.filter(button => button.textContent.trim() === '保存插件设置').length !== 1) throw Error(`${name}: duplicate plugin save buttons`)
     if (buttons.filter(button => button.textContent.trim() === '保存账号设置').length !== 1) throw Error(`${name}: account save missing`)
     const headerButtons = [...document.querySelectorAll('#app .ed2k-header .header-actions button')]
-    if (headerButtons.map(button => button.textContent.trim()).join('|') !== '保存插件设置|增量补扫／补发链接|关闭') throw Error(`${name}: header button order incorrect`)
+    if (headerButtons.map(button => button.textContent.trim()).join('|') !== '保存插件设置|关闭') throw Error(`${name}: header button order incorrect`)
     if (document.querySelector('#app footer')) throw Error(`${name}: duplicate footer actions`)
     const header = document.querySelector('#app .header-actions')
     if (header.scrollWidth > header.clientWidth + 2) throw Error(`${name}: header actions overflow`)
