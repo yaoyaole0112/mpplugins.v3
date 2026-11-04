@@ -19,8 +19,6 @@ const cloud = reactive({ storages: [], folders: [], browsing: '', scanning: fals
 const account = reactive({ api_id: '', api_hash: '', phone: '', code: '', password: '' })
 const auth = reactive({ logged_in: false, pending: false, password_required: false, api_hash_configured: false, expires_in: 0, retry_in: 0 })
 let timer
-let savedDelete = false
-let savedDeleteSmall = false
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || saving.value || !loaded.value)
 const configFields = ['enabled', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'delete_source', 'delete_small_files', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
@@ -60,8 +58,6 @@ function applySettings(result) {
   if (!result.ok) throw new Error(result.message || '读取或保存设置失败')
   Object.assign(settings, result.settings)
   settings.telegram_mode = 'user'
-  savedDelete = !!settings.delete_source
-  savedDeleteSmall = !!settings.delete_small_files
 }
 async function refreshAuth() {
   const result = await request('telegram/status')
@@ -108,19 +104,14 @@ async function runLocal() {
 async function saveSettings() {
   if (typeof settings.include_subdirectories !== 'boolean') { error.value = '原本地与网盘子目录设置不一致，请先明确选择是否包含子目录，再保存'; return }
   error.value = notice.value = ''
-  if (settings.delete_source && !savedDelete && !await askConfirmation('确定启用完成后删除源文件？本地按原规则处理；115网盘还需单独授权。请先使用测试目录验证。')) { notice.value = '已取消保存，设置未更改'; return }
-  if (settings.delete_small_files && !savedDeleteSmall && !await askConfirmation('确定启用低于阈值文件自动删源？稳定等待后的非空本地文件小于阈值时将直接删除，不生成链接、不等待Telegram或TXT成功，删除不可恢复。请仅使用下载完成目录，并先用测试文件验证。')) { notice.value = '已取消保存，设置未更改'; return }
-  let confirmCloudDelete = false
   if (settings.cloud_delete_enabled) {
     if (!settings.delete_source || !settings.cloud_enabled || settings.cloud_storage !== '115网盘Plus') { error.value = '网盘删源仅支持115网盘Plus，请同时开启完成后删除源文件与网盘增量生成；CloudDrive仍只读'; return }
-    confirmCloudDelete = await askConfirmation('确认授权当前115账号、网盘监控目录及子目录范围完成后删源？仅处理授权时新生成并完成所选输出的记录，历史链接不追溯删除。TG发送成功不代表接收机器人已转存，请自行确认备份策略；删除结果不明会暂停，不会自动重删。每次保存开启此项均需确认。')
-    if (!confirmCloudDelete) { notice.value = '已取消保存，设置未更改'; return }
   }
   if (saving.value) return
   saving.value = true
   error.value = notice.value = ''
   try {
-    const result = await request('settings', { ...Object.fromEntries(configFields.map(key => [key, settings[key] ?? ''])), confirm_cloud_delete: confirmCloudDelete })
+    const result = await request('settings', Object.fromEntries(configFields.map(key => [key, settings[key] ?? ''])))
     applySettings(result)
     notice.value = result.message
   } catch (failure) {
@@ -198,7 +189,7 @@ onUnmounted(() => {
       <h3>通用设置</h3>
       <div class="switches"><label class="switch"><input v-model="settings.delete_source" type="checkbox" :disabled="disabled" @change="settings.delete_source || (settings.cloud_delete_enabled = false)">完成后删除源文件</label><label class="switch"><input v-model="settings.cloud_delete_enabled" type="checkbox" :disabled="disabled">单独授权115网盘删源（默认关闭）</label></div>
       <p v-if="settings.delete_source" class="warning">仅在输出全部成功且文件未变化后删除；115还需单独授权，CloudDrive只读。TG发送不代表接收方已备份。</p>
-      <p v-if="settings.cloud_delete_enabled" class="warning">每次保存需确认115授权；账号、目录或子目录变化后需重新授权。历史记录不追删，结果不明会暂停。</p>
+      <p v-if="settings.cloud_delete_enabled" class="warning">此开关即为115删源授权；保存时绑定当前账号与目录范围。历史记录不追删，结果不明会暂停。</p>
       <div class="switches"><label class="switch"><input v-model="settings.enabled" type="checkbox" :disabled="disabled">启用插件</label><label class="switch"><input v-model="settings.output_enabled" type="checkbox" :disabled="disabled">生成本地 TXT</label><label class="switch"><input v-model="settings.include_subdirectories" :indeterminate="settings.include_subdirectories === null" type="checkbox" :disabled="disabled">包含子目录</label></div>
       <p v-if="settings.include_subdirectories === null" class="warning">本地与网盘的子目录设置不一致，请选择后保存。</p>
       <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :step="field.step" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label></div>

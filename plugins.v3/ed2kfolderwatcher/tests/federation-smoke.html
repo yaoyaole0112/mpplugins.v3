@@ -78,7 +78,7 @@ window.clearInterval = identifier => {
 }
 const rows = ['deleted', 'retained', 'delete_failed', 'unknown'].map((source_status, index) => ({
   id: String(index).repeat(64), can_delete: index === 1 || index === 2, link_valid: true,
-  name: `测试文件 ${index}.mkv`, link: `ed2k://|file|测试文件 ${index}.mkv|5|hash|/`,
+  name: `测试文件 ${index}.mkv`, size: 5, link: `ed2k://|file|测试文件 ${index}.mkv|5|hash|/`,
   generated_at: index ? null : 1700000000, source_status,
 }))
 rows.push({ id: 'f'.repeat(64), name: '历史空文件.mkv', link: 'ed2k://|file|历史空文件.mkv|0|31d6cfe0d16ae931b73c59d7e0c089c0|/', link_valid: false, link_error: '历史链接无效：当时文件大小为 0', can_delete: false, source_status: 'retained' })
@@ -106,7 +106,7 @@ const api = { get: async path => {
   if (typeof body.cloud_scan_enabled !== 'boolean') throw Error('Cloud schedule switch missing from save payload')
   if (String(body.min_file_size_gb) !== '0.5') throw Error('Minimum file size missing from save payload')
   if (body.delete_small_files !== true) throw Error('Small file deletion switch missing from save payload')
-  if (body.cloud_delete_enabled !== false || body.confirm_cloud_delete !== false) throw Error('Cloud deletion must remain opt-in and disabled by default')
+  if (body.cloud_delete_enabled !== true || 'confirm_cloud_delete' in body) throw Error('Explicit cloud deletion switch must save without a confirmation prompt')
   if (body.include_subdirectories !== false || 'recursive' in body || 'cloud_recursive' in body) throw Error('Shared recursive switch missing or legacy fields leaked into save payload')
   return { ok: true, settings: body, message: '模拟保存成功' }
 } }
@@ -130,6 +130,7 @@ try {
     if (name !== './Config') {
       const text = document.querySelector('#app').innerText
       if (!text.includes('最近生成记录') || !text.includes('测试文件 0.mkv')) throw Error(`${name}: recent records missing`)
+      if (!document.querySelector('#app .record-time')?.textContent.includes('文件大小：5 B')) throw Error(`${name}: record file size missing`)
       for (const label of ['已删除源文件', '未删除源文件', '删除失败，源文件保留', '历史记录：删源状态未记录']) {
         if (!text.includes(label)) throw Error(`${name}: status missing: ${label}`)
       }
@@ -372,11 +373,9 @@ try {
     await vue.nextTick()
     const beforeCloudConfirmation = requests.length
     buttons.find(button => button.textContent.trim() === '保存插件设置').click()
-    await settleConfirmation()
-    await settleConfirmation()
-    if (!document.querySelector('#app [role=alertdialog]')?.textContent.includes('确认授权当前115账号')) throw Error(`${name}: cloud deletion confirmation missing`)
-    await settleConfirmation(false)
-    if (requests.length !== beforeCloudConfirmation) throw Error(`${name}: cancelling cloud authorization saved settings`)
+    await new Promise(resolve => setTimeout(resolve, 100))
+    if (document.querySelector('#app [role=alertdialog]')) throw Error(`${name}: saving settings unexpectedly prompted`)
+    if (requests.length !== beforeCloudConfirmation + 1) throw Error(`${name}: settings did not save immediately`)
     masterDelete.click()
     cloudPanel.querySelector('input[type=checkbox]').click()
     await vue.nextTick()
@@ -385,6 +384,7 @@ try {
     await vue.nextTick()
     buttons.find(button => button.textContent.trim() === '保存插件设置').click()
     await new Promise(resolve => setTimeout(resolve, 100))
+    if (document.querySelector('#app [role=alertdialog]')) throw Error(`${name}: enabling local small-file deletion unexpectedly prompted`)
     if (!document.querySelector('#app').innerText.includes('模拟保存成功')) throw Error(`${name}: settings save failed`)
     if (buttons.filter(button => button.textContent.trim() === '保存插件设置').length !== 1) throw Error(`${name}: duplicate plugin save buttons`)
     if (buttons.filter(button => button.textContent.trim() === '保存账号设置').length !== 1) throw Error(`${name}: account save missing`)

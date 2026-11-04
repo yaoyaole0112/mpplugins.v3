@@ -108,8 +108,6 @@ def validate_settings(plugin, values):
     result["onlyonce"] = False
     result["cloud_delete_scope"] = ""
     if result["cloud_delete_enabled"]:
-        if confirm_cloud_delete is not True:
-            raise UserAccountError("请单独确认115网盘删源风险，旧本地删源设置不代表云端授权")
         from .cloud_storage import CloudStorage, CloudError
         try:
             if not result["delete_source"] or not result["cloud_enabled"]:

@@ -1731,6 +1731,7 @@ class Ed2kTests(unittest.TestCase):
         record = self.plugin.recent_records()["items"][0]
         self.assertEqual(record["source_status"], "retained")
         self.assertEqual(record["name"], path.name)
+        self.assertEqual(record["size"], path.stat().st_size)
         self.assertGreater(record["generated_at"], 0)
         self.assertNotIn("path", record)
 

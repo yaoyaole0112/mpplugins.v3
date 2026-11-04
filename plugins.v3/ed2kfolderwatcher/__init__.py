@@ -197,7 +197,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.17.9"
+    plugin_version = "1.18.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -1977,7 +1977,7 @@ class Ed2kFolderWatcher(_PluginBase):
                     can_delete = self._source_matches(Path(path), record)
                 except (OSError, ValueError):
                     can_delete = False
-                items.append({"name": record.get("name") or Path(path).name, "link": record.get("link", ""),
+                items.append({"name": record.get("name") or Path(path).name, "size": record.get("size"), "link": record.get("link", ""),
                               "id": self._record_id(path, record), "can_delete": can_delete,
                               "link_valid": not problem, "link_error": problem,
                               "generated_at": record.get("generated_at"), "source_status": source_status,
