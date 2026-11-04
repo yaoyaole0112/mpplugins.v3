@@ -271,12 +271,44 @@ class CloudStorageTests(unittest.TestCase):
         storage.oper.get_item_strict.return_value = {"storage": "u115", "fileid": "123", "type": "file", "path": "/监控/新文件.mkv", "name": "新文件.mkv", "size": 5, "modify_time": 456, "pickcode": "pick"}
         attr = types.ModuleType("p115client.tool.attr")
         attr.get_path = Mock(return_value="/监控/新文件.mkv")
+        attr.get_ancestors = Mock(return_value=[
+            {"id": 0, "parent_id": 0, "name": ""},
+            {"id": 123, "parent_id": 0, "name": "新文件.mkv"},
+        ])
         modules = {"p115client": types.ModuleType("p115client"), "p115client.tool": types.ModuleType("p115client.tool"), "p115client.tool.attr": attr}
         with patch.dict(sys.modules, modules):
             item = storage.item_from_life_event(self.life_event(file_id="123", file_category=1))
         self.assertEqual(item["size"], 5)
         self.assertEqual(item["pickcode"], "pick")
+        attr.get_ancestors.assert_called_once_with(
+            client=storage.oper.client,
+            id="123",
+            ensure_file=True,
+            refresh=True,
+            app="android",
+        )
         storage.oper.get_item_strict.assert_called_once_with(Path("/监控/新文件.mkv"))
+
+    def test_life_event_uses_raw_name_when_filename_contains_slash(self):
+        storage = object.__new__(cloud.CloudStorage)
+        storage.storage = "115网盘Plus"
+        storage.oper = Mock()
+        attr = types.ModuleType("p115client.tool.attr")
+        attr.get_path = Mock(return_value="/监控/字幕/简体/繁体.mkv")
+        attr.get_ancestors = Mock(return_value=[
+            {"id": 0, "parent_id": 0, "name": ""},
+            {"id": 123, "parent_id": 45, "name": "字幕/简体/繁体.mkv"},
+        ])
+        modules = {
+            "p115client": types.ModuleType("p115client"),
+            "p115client.tool": types.ModuleType("p115client.tool"),
+            "p115client.tool.attr": attr,
+        }
+        event = self.life_event(file_id="123", file_category=1, file_size="5", pick_code="pick")
+        with patch.dict(sys.modules, modules):
+            item = storage.item_from_life_event(event)
+        self.assertEqual(item["name"], "字幕/简体/繁体.mkv")
+        self.assertNotEqual(item["name"], Path(item["path"]).name)
 
     def test_life_event_lookup_failures_are_sanitized_and_not_silently_discarded(self):
         storage = object.__new__(cloud.CloudStorage)
@@ -284,6 +316,10 @@ class CloudStorageTests(unittest.TestCase):
         storage.oper = Mock()
         attr = types.ModuleType("p115client.tool.attr")
         attr.get_path = Mock(side_effect=TimeoutError("secret signed URL"))
+        attr.get_ancestors = Mock(return_value=[
+            {"id": 0, "parent_id": 0, "name": ""},
+            {"id": 123, "parent_id": 45, "name": "新文件.mkv"},
+        ])
         modules = {"p115client": types.ModuleType("p115client"), "p115client.tool": types.ModuleType("p115client.tool"), "p115client.tool.attr": attr}
         event = self.life_event(file_id="123", file_category=1)
         with patch.dict(sys.modules, modules):

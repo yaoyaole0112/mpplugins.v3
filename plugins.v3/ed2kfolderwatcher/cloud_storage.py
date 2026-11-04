@@ -350,18 +350,33 @@ class CloudStorage:
             return None
         except Exception as failure:
             raise CloudError(f"生活事件文件路径查询失败（{type(failure).__name__}），保留候选等待退避复查") from None
+        event_name = str(event.get("file_name") or "").strip()
+        if not event_name:
+            try:
+                from p115client.tool.attr import get_ancestors
+                ancestors = get_ancestors(
+                    client=self.oper.client,
+                    id=file_id,
+                    ensure_file=True,
+                    refresh=True,
+                    app="android",
+                )
+                event_name = str(ancestors[-1].get("name") or "").strip() if ancestors else ""
+            except Exception as failure:
+                raise CloudError(f"生活事件原始文件名查询失败（{type(failure).__name__}），保留候选等待复查") from None
+        if not event_name:
+            raise CloudError("生活事件未提供可确认的原始文件名，保留候选等待复查")
         try:
             size = int(event.get("file_size") or 0)
             modify_time = int(event.get("update_time") or event.get("create_time") or 0)
         except (TypeError, ValueError):
             size = modify_time = 0
-        event_name = str(event.get("file_name") or "").strip()
         item = {
             "storage": self.storage,
             "fileid": file_id,
             "type": "file",
             "path": path,
-            "name": event_name or PurePosixPath(path).name,
+            "name": event_name,
             "size": size,
             "modify_time": modify_time,
             "pickcode": str(event.get("pick_code") or ""),
