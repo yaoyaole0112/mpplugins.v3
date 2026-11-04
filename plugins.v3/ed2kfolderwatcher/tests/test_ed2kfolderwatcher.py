@@ -126,8 +126,8 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._telegram_aggregate_window = 600
         batch_id = self.plugin._new_batch("cloud-life")
         movie_key = "cloud:movie"
-        self.plugin._register_batch_item(batch_id, movie_key, "护肝人(2026).mkv")
         with patch.object(self.module.time, "monotonic", return_value=100):
+            self.plugin._register_batch_item(batch_id, movie_key, "护肝人(2026).mkv")
             self.plugin._seal_batch(batch_id)
         self.assertEqual(self.plugin._batches[batch_id]["group_flush_at"][None], 100)
 
@@ -207,6 +207,42 @@ class Ed2kTests(unittest.TestCase):
             self.plugin._maybe_flush_batch(batch_id)
             flush.assert_called_once_with(batch_id)
 
+    def test_open_scan_batch_flushes_ready_group_without_waiting_for_scan_seal(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        batch_id = self.plugin._new_batch("cloud-scan")
+        first_key = "cloud:first-show"
+        second_key = "cloud:other-show"
+        self.plugin._register_batch_item(batch_id, first_key, "第一部.S01E01.mkv")
+        self.plugin._register_batch_item(batch_id, second_key, "第二部.S01E01.mkv")
+        batch = self.plugin._batches[batch_id]
+        first_group = batch["groups"][first_key]
+        second_group = batch["groups"][second_key]
+        batch["group_results"][first_group].add(first_key)
+        batch["group_results"][second_group].add(second_key)
+        batch["group_flush_at"][first_group] = time.monotonic() - 1
+        batch["group_flush_at"][second_group] = time.monotonic() + 600
+        with patch.object(self.plugin, "_flush_group") as flush_group:
+            self.plugin._maybe_flush_batch(batch_id)
+        flush_group.assert_called_once_with(batch_id, first_group)
+        self.assertFalse(batch["sealed"])
+        self.assertIn(batch_id, self.plugin._batches)
+
+    def test_new_same_group_item_resets_wait_window(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 600
+        batch_id = self.plugin._new_batch("cloud-scan")
+        first_key = "cloud:first"
+        second_key = "cloud:second"
+        self.plugin._register_batch_item(batch_id, first_key, "剧名.S01E01.mkv")
+        batch = self.plugin._batches[batch_id]
+        group_key = batch["groups"][first_key]
+        first_deadline = batch["group_flush_at"][group_key]
+        self.plugin._register_batch_item(batch_id, second_key, "剧名.S01E02.mkv")
+        self.assertGreater(batch["group_flush_at"][group_key], first_deadline)
+        self.assertEqual(batch["group_expected"][group_key], {first_key, second_key})
+
     def test_different_show_season_groups_have_independent_flush_times(self):
         self.plugin._telegram_enabled = True
         self.plugin._telegram_aggregate = True
@@ -219,7 +255,6 @@ class Ed2kTests(unittest.TestCase):
         batch = self.plugin._batches[batch_id]
         first_group = batch["groups"][first_key]
         second_group = batch["groups"][second_key]
-        batch["sealed"] = True
         batch["group_results"][first_group].add(first_key)
         batch["group_results"][second_group].add(second_key)
         batch["group_flush_at"][first_group] = time.monotonic() - 1
