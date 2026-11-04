@@ -131,6 +131,22 @@ class Ed2kTests(unittest.TestCase):
             self.plugin._seal_batch(batch_id)
         self.assertEqual(self.plugin._batches[batch_id]["group_flush_at"][None], 100)
 
+    def test_movie_group_result_is_recorded_and_can_flush(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 0
+        batch_id = self.plugin._new_batch("cloud-scan")
+        key = "cloud:movie"
+        self.plugin._register_batch_item(batch_id, key, "雷霆营救(2025).2160p.mkv")
+        self.plugin._seal_batch(batch_id)
+        batch = self.plugin._batches[batch_id]
+        self.assertIn(None, batch["group_expected"])
+        with patch.object(self.plugin, "_flush_batch") as flush:
+            with self.plugin._condition:
+                self.plugin._mark_batch_item_result(batch, key)
+            self.plugin._maybe_flush_batch(batch_id)
+        flush.assert_called_once_with(batch_id)
+
     def test_batch_timeout_moves_unfinished_items_to_retry_batch(self):
         first_key = "cloud:item-1"
         batch_id = self.plugin._new_batch("cloud-scan")

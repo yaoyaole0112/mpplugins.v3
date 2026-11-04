@@ -197,7 +197,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.18.0"
+    plugin_version = "1.18.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -652,10 +652,7 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._pending_batches[key] = retry_batch
                     name = self._batch_item_name(key)
                     self._register_batch_item(retry_batch, key, name)
-                    batch["results"].add(key)
-                    group_key = batch["groups"].get(key)
-                    if group_key is not None:
-                        batch["group_results"].setdefault(group_key, set()).add(key)
+                    self._mark_batch_item_result(batch, key)
             self._seal_batch(retry_batch)
             logger.warning(f"自动生成ED2K链接：批次等待超过30分钟，{len(pending)}个未完成文件转入后续批次：{batch_id}")
         self._seal_batch(batch_id)
@@ -779,6 +776,13 @@ class Ed2kFolderWatcher(_PluginBase):
             return str(pending[1].get("name") or pending[1].get("path") or key)
         return Path(key).name if not key.startswith("cloud:") else key
 
+    @staticmethod
+    def _mark_batch_item_result(batch, key: str) -> None:
+        batch["results"].add(key)
+        if key in batch["groups"]:
+            group_key = batch["groups"][key]
+            batch["group_results"].setdefault(group_key, set()).add(key)
+
     def _register_batch_item(self, batch_id: str, key: str, name: str = None) -> None:
         with self._condition:
             batch = self._batches.get(batch_id)
@@ -816,7 +820,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 if old_batch and old_batch != batch_id:
                     old_state = self._batches.get(old_batch)
                     if old_state:
-                        old_state["results"].add(str(path))
+                        self._mark_batch_item_result(old_state, str(path))
                         completed_old = old_batch
                 self._pending[str(path)] = (time.monotonic() + (max(1, self._min_age) if delay is None else delay), signature)
                 batch_id = self._register_batch_item(batch_id, str(path), path.name)
@@ -888,43 +892,24 @@ class Ed2kFolderWatcher(_PluginBase):
                     logger.exception(f"自动生成ED2K链接：批次处理异常，后台工作线程继续运行：{batch_id}")
             if key is None:
                 continue
-            batch = [(key, signature)]
-            batch_ids = {key: batch_id}
-            if self._telegram_aggregate:
-                with self._condition:
-                    now = time.monotonic()
-                    extras = sorted(
-                        ((extra_key, extra_signature) for extra_key, (extra_due, extra_signature) in self._pending.items()
-                         if not extra_key.startswith("__") and extra_due <= now),
-                        key=lambda item: filename_order(item[1].get("name", item[0]) if isinstance(item[1], dict) else item[0]),
-                    )
-                    for extra_key, extra_signature in extras:
-                        del self._pending[extra_key]
-                        batch_ids[extra_key] = self._pending_batches.pop(extra_key, None)
-                        batch.append((extra_key, extra_signature))
-            for batch_key, batch_signature in batch:
-                item_batch_id = batch_ids.get(batch_key)
-                self._active_batch_id = item_batch_id
-                try:
-                    self._work_item(batch_key, batch_signature)
-                except Exception:
-                    logger.exception(f"自动生成ED2K链接：后台任务异常，工作线程继续运行：{self._batch_item_name(batch_key, batch_signature)}")
-                    if batch_key.startswith("cloud:") and isinstance(batch_signature, dict):
-                        self._queue_cloud_file(batch_signature, delay=300)
-                    elif not batch_key.startswith("__"):
-                        self._queue_event(Path(batch_key), delay=60)
-                finally:
-                    self._active_batch_id = None
-                with self._condition:
-                    still_pending = batch_key in self._pending
-                    state = self._batches.get(item_batch_id) if item_batch_id and not still_pending else None
-                    if state:
-                        state["results"].add(batch_key)
-                        group_key = state["groups"].get(batch_key)
-                        if group_key is not None:
-                            state["group_results"].setdefault(group_key, set()).add(batch_key)
+            self._active_batch_id = batch_id
+            try:
+                self._work_item(key, signature)
+            except Exception:
+                logger.exception(f"自动生成ED2K链接：后台任务异常，工作线程继续运行：{self._batch_item_name(key, signature)}")
+                if key.startswith("cloud:") and isinstance(signature, dict):
+                    self._queue_cloud_file(signature, delay=300)
+                elif not key.startswith("__"):
+                    self._queue_event(Path(key), delay=60)
+            finally:
+                self._active_batch_id = None
+            with self._condition:
+                still_pending = key in self._pending
+                state = self._batches.get(batch_id) if batch_id and not still_pending else None
                 if state:
-                    self._maybe_flush_batch(item_batch_id)
+                    self._mark_batch_item_result(state, key)
+            if state:
+                self._maybe_flush_batch(batch_id)
 
     def _work_item(self, key, signature):
             path = Path(key)

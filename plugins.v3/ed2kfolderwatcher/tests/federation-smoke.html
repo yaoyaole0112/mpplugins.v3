@@ -167,8 +167,15 @@ try {
         if (bounds.bottom > innerHeight + 1 || !last.contains(document.elementFromPoint(bounds.left + 20, Math.min(bounds.bottom - 10, innerHeight - 10)))) throw Error(`${name}: bottom record is masked`)
         window.scrollTo(0, 0)
       } else {
-        if (page.getBoundingClientRect().height > innerHeight * .85 + 1 || page.scrollHeight > page.clientHeight + 1) throw Error(`${name}: outer page overflows`)
-        if (getComputedStyle(list).overflowY !== 'auto' || getComputedStyle(list).scrollbarGutter !== 'stable') throw Error(`${name}: list scrollbar missing reserved space`)
+        if (getComputedStyle(page).maxHeight !== 'none' || getComputedStyle(page).overflowY !== 'visible') throw Error(`${name}: records page should use document scrolling`)
+        if (getComputedStyle(list).overflowY !== 'visible' || list.scrollHeight > list.clientHeight + 1) throw Error(`${name}: records list should not scroll independently`)
+        const progressTop = page.querySelector('.progress-section').getBoundingClientRect().top
+        const recordTop = firstCard.getBoundingClientRect().top
+        window.scrollTo(0, 180)
+        await new Promise(resolve => setTimeout(resolve, 50))
+        if (Math.abs(progressTop - page.querySelector('.progress-section').getBoundingClientRect().top - window.scrollY) > 1
+          || Math.abs(recordTop - firstCard.getBoundingClientRect().top - window.scrollY) > 1) throw Error(`${name}: progress and records should scroll together`)
+        window.scrollTo(0, 0)
       }
       if (firstCard.querySelector('.copy-feedback').getBoundingClientRect().height !== 20 || parseFloat(getComputedStyle(firstCard).paddingBottom) > 12) throw Error(`${name}: card whitespace not compact`)
       const headerTop = page.querySelector('.records-header').getBoundingClientRect().top
