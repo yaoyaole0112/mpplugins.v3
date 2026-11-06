@@ -396,6 +396,20 @@ function mediaVersionDetails(version) {
   if (version.size > 0) entries.push(`${(version.size / 1024 ** 3).toFixed(2)} GB`)
   return entries.length ? entries.join(' · ') : '暂无可识别的媒体参数'
 }
+function rapidFileSize(value) {
+  const bytes = Number(value || 0)
+  if (!Number.isFinite(bytes) || bytes < 0) return '大小未知'
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let size = bytes
+  let unit = 'B'
+  for (const next of units) {
+    if (size < 1024) break
+    size /= 1024
+    unit = next
+  }
+  return `${size.toFixed(unit === 'KB' ? 0 : 2)} ${unit}`
+}
 function dropMediaOption(rule, rank) {
   const from = draggedMediaRank.value
   draggedMediaRank.value = null
@@ -1510,7 +1524,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
         <section class="eme-card">
           <div class="eme-card-heading"><div><h3>本地秒传</h3><p>监控本地文件，计算 SHA1 后调用 115 秒传接口；只在 115 命中时写入网盘，不会把未命中的文件当作普通上传。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !rapid.loaded" @click="addRapidConfig">添加配置</button><button class="eme-button primary" :disabled="busy || !rapid.loaded" @click="saveRapid">保存配置</button></div></div>
           <p v-if="rapidConfigDirty" class="eme-message eme-warning">本地秒传有未保存的修改；点击“立即扫描”时会先自动保存配置。</p>
-          <p class="eme-hint">账号沿用“115 网盘 STRM 助手”中的 Cookie；本地源目录必须是 MoviePilot 容器内可访问的路径，目标目录请选择非根目录。实时监控由目录事件触发，并每 {{ rapid.realtime_poll_seconds || 30 }} 秒轻量比对新增/变更文件作为漏事件兜底；Cron 适合容器重启期间的扫描，三者可同时启用。秒传任务与清理、转存共用 115 串行队列。</p>
+          <p class="eme-hint">账号沿用“115 网盘 STRM 助手”中的 Cookie；本地源目录必须是 MoviePilot 容器内可访问的路径，目标目录请选择非根目录。实时监控由目录事件触发，并每 {{ rapid.realtime_poll_seconds || 30 }} 秒轻量比对新增/变更文件作为漏事件兜底；Cron 适合容器重启期间的扫描，三者可同时启用。秒传任务与清理、转存共用 115 串行队列；未命中表示 115 中没有相同 SHA1 与大小的文件，不会普通上传，源文件会保留。</p>
           <p v-if="rapid.realtime_error && rapid.realtime_watched_configs?.length" class="eme-message eme-warning">{{ rapid.realtime_error }}；轮询监控仍在运行。</p>
           <p v-if="rapid.realtime_unwatched?.length" class="eme-message eme-warning">实时监控未启动：{{ rapid.realtime_unwatched.map(item => `${item.name}：${item.reason}`).join('；') }}。可检查目录挂载/权限，或启用 Cron 自动扫描兜底。</p>
           <div v-for="(config, index) in rapid.configs" :key="config.id" class="eme-rapid-config">
@@ -1521,7 +1535,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           </div>
           <p v-if="!rapid.configs.length" class="eme-hint">还没有配置。点击“添加配置”后填写本地源目录与 115 目标目录。</p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>秒传记录</h3><p>记录最近 200 条成功与失败结果；失败时会显示未命中、文件变化或网络错误原因。</p></div><button class="eme-button text" :disabled="busy || !rapid.logs.length" @click="rapidCommand('clear_logs')">清空记录</button></div><div v-if="rapid.logs.length" class="eme-results eme-rapid-logs"><div v-for="(item, index) in rapidLogItems" :key="`${item.time}-${item.path}-${index}`" class="eme-result"><span>{{ item.status === 'succeeded' ? '✅' : '⚠️' }}</span><div><strong>{{ item.name }}</strong><small>{{ item.time }} · {{ item.config }} · {{ item.message }}</small><small>{{ item.path }}</small></div></div></div><nav v-if="rapidLogsPageCount > 1" class="eme-pagination" aria-label="秒传记录分页"><button class="eme-button secondary" :disabled="rapidLogsPage <= 1" @click="rapidLogsPage--"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ rapidLogsPage }} / {{ rapidLogsPageCount }} 页 · 共 {{ rapid.logs.length }} 条</span><button class="eme-button secondary" :disabled="rapidLogsPage >= rapidLogsPageCount" @click="rapidLogsPage++">下一页<i class="mdi mdi-chevron-right" /></button></nav><p v-if="rapid.logs.length" class="eme-hint">失败目录未填写时，失败文件会继续保留在本地源目录；填写失败目录后，失败文件会按原相对路径移动到该目录。</p><p v-else class="eme-hint">暂无秒传记录。</p></section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>秒传记录</h3><p>记录最近 200 条成功、未命中与失败结果；每条记录显示文件大小和具体原因。</p></div><button class="eme-button text" :disabled="busy || !rapid.logs.length" @click="rapidCommand('clear_logs')">清空记录</button></div><div v-if="rapid.logs.length" class="eme-results eme-rapid-logs"><div v-for="(item, index) in rapidLogItems" :key="`${item.time}-${item.path}-${index}`" class="eme-result"><span>{{ item.status === 'succeeded' ? '✅' : item.status === 'unmatched' ? 'ℹ️' : '⚠️' }}</span><div><strong>{{ item.name }}</strong><small>{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ item.message }}</small><small>{{ item.path }}</small></div></div></div><nav v-if="rapidLogsPageCount > 1" class="eme-pagination" aria-label="秒传记录分页"><button class="eme-button secondary" :disabled="rapidLogsPage <= 1" @click="rapidLogsPage--"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ rapidLogsPage }} / {{ rapidLogsPageCount }} 页 · 共 {{ rapid.logs.length }} 条</span><button class="eme-button secondary" :disabled="rapidLogsPage >= rapidLogsPageCount" @click="rapidLogsPage++">下一页<i class="mdi mdi-chevron-right" /></button></nav><p v-if="rapid.logs.length" class="eme-hint">失败目录未填写时，实际失败文件会继续保留在本地源目录；“未命中”不是网络故障，表示 115 中没有相同 SHA1 与大小的文件，源文件同样会保留。</p><p v-else class="eme-hint">暂无秒传记录。</p></section>
       </template>
     </main>
       <div v-if="enrichSettings.open" class="eme-overlay" @click.self="enrichSettings.open = false">

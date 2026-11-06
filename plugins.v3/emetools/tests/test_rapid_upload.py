@@ -86,7 +86,7 @@ class RapidUploadTests(unittest.TestCase):
             self.assertEqual(len(result["succeeded"]), 1)
             self.assertEqual(client.calls[0]["pid"], "U_1_123")
 
-    def test_unmatched_file_can_move_to_failure_directory_without_uploading(self):
+    def test_unmatched_file_is_recorded_without_moving_or_counting_as_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             failure = root.parent / f"{root.name}-failure"
@@ -99,14 +99,15 @@ class RapidUploadTests(unittest.TestCase):
             rapid = RapidUpload(FakeOwner(), {"configs": [config]})
             with patch.object(rapid, "_p115_client", return_value=client):
                 result = rapid.run("rapid_1")
-            self.assertFalse(result["ok"])
-            self.assertEqual(len(result["failed"]), 1)
-            self.assertFalse(media.exists())
-            self.assertTrue((failure / "movie.mp4").exists())
-            self.assertEqual(rapid.status()["logs"][0]["status"], "failed")
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(result["unmatched"]), 1)
+            self.assertEqual(result["unmatched"][0]["size"], media.stat().st_size)
+            self.assertTrue(media.exists())
+            self.assertFalse(failure.exists())
+            self.assertEqual(rapid.status()["logs"][0]["status"], "unmatched")
             self.assertIn("未命中", rapid.status()["logs"][0]["message"])
 
-    def test_failed_file_stays_in_source_when_failure_directory_is_empty(self):
+    def test_unmatched_file_size_is_preserved_in_record(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             media = root / "movie.mp4"
@@ -117,9 +118,10 @@ class RapidUploadTests(unittest.TestCase):
             rapid = RapidUpload(FakeOwner(), {"configs": [config]})
             with patch.object(rapid, "_p115_client", return_value=client):
                 result = rapid.run("rapid_1")
-            self.assertFalse(result["ok"])
+            self.assertTrue(result["ok"])
             self.assertTrue(media.exists())
-            self.assertNotIn("failure_path", result["failed"][0])
+            self.assertEqual(result["unmatched"][0]["size"], media.stat().st_size)
+            self.assertEqual(rapid.status()["logs"][0]["size"], media.stat().st_size)
 
     def test_successful_files_are_not_uploaded_again_by_later_scans(self):
         with tempfile.TemporaryDirectory() as directory:

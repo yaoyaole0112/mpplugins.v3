@@ -87,6 +87,24 @@ class P115TaskTests(unittest.TestCase):
         self.assertIn("本地秒传任务提交失败（TypeError）", result["message"])
         self.assertNotIn("internal detail", result["message"])
 
+    def test_rapid_action_submits_without_unsupported_manual_keyword(self):
+        class Queue:
+            def submit(self, key, label, callback):
+                self.arguments = (key, label, callback)
+                return {"id": "rapid-job", "done": threading.Event()}
+
+        plugin = object.__new__(EmeTools)
+        plugin._p115_tasks = Queue()
+        plugin._rapid = object()
+
+        async def submission(job):
+            return {"ok": True, "queued": True, "job_id": job["id"]}
+
+        plugin._p115_submission = submission
+        result = asyncio.run(plugin.rapid_action(RapidAction(operation="run", config_id="rapid_1")))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["job_id"], "rapid-job")
+
     def test_failure_releases_queue_without_replaying_callback(self):
         called = []
         def fail():

@@ -113,6 +113,10 @@ class RapidUpload:
         self._configs = validate_configs((saved or {}).get("configs", []) if isinstance(saved, dict) else [])
         saved_logs = owner.get_data(self._LOG_KEY) if hasattr(owner, "get_data") else []
         self._logs = recent_records(saved_logs, timestamp_key="timestamp", limit=200)
+        for record in self._logs:
+            if record.get("status") == "failed" and "未命中秒传" in str(record.get("message") or ""):
+                record["status"] = "unmatched"
+                record["message"] = "115 未命中：网盘中没有相同 SHA1 与大小的文件，未上传原文件"
         if hasattr(owner, "save_data") and self._logs != saved_logs:
             owner.save_data(self._LOG_KEY, self._logs)
         self._running: str | None = None
@@ -428,9 +432,14 @@ class RapidUpload:
                 status = 0
             normalized = dict(response)
             normalized["status"] = status
-            normalized["reuse"] = bool(response.get("reuse")) or normalized["status"] == 2
+            nested = response.get("data") if isinstance(response.get("data"), dict) else {}
+            normalized["reuse"] = (
+                bool(response.get("reuse"))
+                or bool(nested.get("reuse"))
+                or normalized["status"] == 2
+            )
             return normalized
-        return client.upload_init(
+        response = client.upload_init(
             {
                 "filename": path.name,
                 "filesize": size,
@@ -439,6 +448,22 @@ class RapidUpload:
             },
             read_range_bytes_or_hash=read_range,
         )
+        if not isinstance(response, dict):
+            raise TypeError("115 秒传接口返回了无效响应")
+        nested = response.get("data") if isinstance(response.get("data"), dict) else {}
+        status = response.get("status", nested.get("status"))
+        try:
+            status = int(status or 0)
+        except (TypeError, ValueError):
+            status = 0
+        normalized = dict(response)
+        normalized["status"] = status
+        normalized["reuse"] = (
+            bool(response.get("reuse"))
+            or bool(nested.get("reuse"))
+            or status == 2
+        )
+        return normalized
 
     def _move_failure(self, path: Path, config: dict) -> str:
         failure_root = str(config.get("failure_directory") or "").strip()
@@ -489,12 +514,15 @@ class RapidUpload:
         self._running = config["name"]
         succeeded: list[dict] = []
         skipped: list[dict] = []
+        unmatched: list[dict] = []
         failed: list[dict] = []
         client = None
         try:
             client = self._p115_client(cookie)
             target = f"U_1_{config['target_folder_id']}"
             for path in source_files:
+                size = 0
+                sha1 = ""
                 try:
                     before = path.stat()
                     sha1, size = self._sha1(path)
@@ -516,8 +544,15 @@ class RapidUpload:
                             if attempt + 1 >= attempts:
                                 raise
                     status = int((response or {}).get("status") or 0)
-                    if not (response or {}).get("reuse") and status != 2:
-                        raise RuntimeError("115 未命中秒传，未上传原文件")
+                    if not (response or {}).get("reuse") and status not in (1, 2):
+                        raise RuntimeError(f"115 秒传初始化未完成（返回状态 {status}）")
+                    if not (response or {}).get("reuse") and status == 1:
+                        message = "115 未命中（状态 1）：网盘中没有相同 SHA1 与大小的文件，未上传原文件"
+                        item = {"path": str(path), "name": path.name, "size": size,
+                                "sha1": sha1, "message": message}
+                        unmatched.append(item)
+                        self._append_log(config, path, "unmatched", message, size, sha1)
+                        continue
                     item = {"path": str(path), "name": path.name, "size": size, "sha1": sha1}
                     succeeded.append(item)
                     self._remember_completed(config, path, sha1, size)
@@ -532,15 +567,23 @@ class RapidUpload:
                             moved = self._move_failure(path, config)
                     except Exception as move_error:
                         message += f"；失败目录移动失败：{type(move_error).__name__}"
-                    item = {"path": str(path), "name": path.name, "message": message}
+                    item = {"path": str(path), "name": path.name, "size": size,
+                            "sha1": sha1, "message": message}
                     if moved:
                         item["failure_path"] = moved
                     failed.append(item)
-                    self._append_log(config, path, "failed", message)
+                    self._append_log(config, path, "failed", message, size, sha1)
                     logger.warning("媒体增强 本地秒传失败：配置=%s 文件=%s 原因=%s：%s",
                                    config["name"], path.name, type(error).__name__, str(error)[:160])
-            return {"ok": not failed, "message": f"本轮检查 {len(source_files)} 个文件，成功 {len(succeeded)} 个，已处理跳过 {len(skipped)} 个，失败 {len(failed)} 个",
-                    "total": len(source_files), "succeeded": succeeded, "skipped": skipped, "failed": failed}
+            return {
+                "ok": not failed,
+                "message": (
+                    f"本轮检查 {len(source_files)} 个文件，成功 {len(succeeded)} 个，"
+                    f"已处理跳过 {len(skipped)} 个，未命中 {len(unmatched)} 个，失败 {len(failed)} 个"
+                ),
+                "total": len(source_files), "succeeded": succeeded, "skipped": skipped,
+                "unmatched": unmatched, "failed": failed,
+            }
         finally:
             close = getattr(client, "close", None)
             if callable(close):
