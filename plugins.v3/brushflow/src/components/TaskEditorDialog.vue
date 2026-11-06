@@ -19,7 +19,7 @@ const activeTab = ref('base')
 const localTask = ref(cloneTask())
 
 const dialogTitle = computed(() => (localTask.value.id ? '编辑刷流任务' : '新建刷流任务'))
-// 不用 localTask.tag 直接绑输入框，避免和 Vuetify 组件的 tag 属性名冲突导致值显示/写回丢失。
+// 避免 Vuetify 输入组件的 tag 属性名冲突导致下载器标签显示或写回丢失。
 const downloaderTag = computed({
   get: () => localTask.value.tag || '',
   set: value => {
@@ -89,7 +89,7 @@ async function saveTask() {
           <VDivider :vertical="display.mdAndUp.value" />
 
           <VWindow v-model="activeTab" :touch="false" class="brushflow-editor__window">
-            <VWindowItem value="base" eager>
+            <VWindowItem value="base">
               <section class="editor-section">
                 <header class="editor-section__head">
                   <div>
@@ -200,7 +200,7 @@ async function saveTask() {
               </section>
             </VWindowItem>
 
-            <VWindowItem value="selection" eager>
+            <VWindowItem value="selection">
               <section class="editor-section">
                 <header class="editor-section__head">
                   <div>
@@ -268,7 +268,7 @@ async function saveTask() {
               </section>
             </VWindowItem>
 
-            <VWindowItem value="limits" eager>
+            <VWindowItem value="limits">
               <section class="editor-section">
                 <header class="editor-section__head">
                   <div>
@@ -309,7 +309,7 @@ async function saveTask() {
               </section>
             </VWindowItem>
 
-            <VWindowItem value="delete" eager>
+            <VWindowItem value="delete">
               <section class="editor-section">
                 <header class="editor-section__head">
                   <div>
@@ -378,7 +378,7 @@ async function saveTask() {
               </section>
             </VWindowItem>
 
-            <VWindowItem value="advanced" eager>
+            <VWindowItem value="advanced">
               <section class="editor-section">
                 <header class="editor-section__head">
                   <div>

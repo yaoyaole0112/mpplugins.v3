@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, c as cloneTask, n as normalizeTask, t as taskStateMeta, a as formatDateTime, f as formatBytes, b as formatDuration, d as torrentProgress, u as unwrapResponse, e as normalizeSettings } from './_plugin-vue_export-helper-Dq6mgyBc.js';
+import { _ as _export_sfc, c as cloneTask, n as normalizeTask, t as taskStateMeta, a as formatDateTime, f as formatBytes, b as formatDuration, d as torrentProgress, u as unwrapResponse, e as normalizeSettings } from './_plugin-vue_export-helper-DupIvgS5.js';
 
 const {unref:_unref$1,toDisplayString:_toDisplayString$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,createElementVNode:_createElementVNode$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,withModifiers:_withModifiers} = await importShared('vue');
 
@@ -49,7 +49,7 @@ const activeTab = ref$1('base');
 const localTask = ref$1(cloneTask());
 
 const dialogTitle = computed$1(() => (localTask.value.id ? '编辑刷流任务' : '新建刷流任务'));
-// 不用 localTask.tag 直接绑输入框，避免和 Vuetify 组件的 tag 属性名冲突导致值显示/写回丢失。
+// 避免 Vuetify 输入组件的 tag 属性名冲突导致下载器标签显示或写回丢失。
 const downloaderTag = computed$1({
   get: () => localTask.value.tag || '',
   set: value => {
@@ -224,10 +224,7 @@ return (_ctx, _cache) => {
                     class: "brushflow-editor__window"
                   }, {
                     default: _withCtx$1(() => [
-                      _createVNode$1(_component_VWindowItem, {
-                        value: "base",
-                        eager: ""
-                      }, {
+                      _createVNode$1(_component_VWindowItem, { value: "base" }, {
                         default: _withCtx$1(() => [
                           _createElementVNode$1("section", _hoisted_1$1, [
                             _createElementVNode$1("header", _hoisted_2$1, [
@@ -447,10 +444,7 @@ return (_ctx, _cache) => {
                         ]),
                         _: 1
                       }),
-                      _createVNode$1(_component_VWindowItem, {
-                        value: "selection",
-                        eager: ""
-                      }, {
+                      _createVNode$1(_component_VWindowItem, { value: "selection" }, {
                         default: _withCtx$1(() => [
                           _createElementVNode$1("section", _hoisted_6$1, [
                             _cache[57] || (_cache[57] = _createElementVNode$1("header", { class: "editor-section__head" }, [
@@ -624,10 +618,7 @@ return (_ctx, _cache) => {
                         ]),
                         _: 1
                       }),
-                      _createVNode$1(_component_VWindowItem, {
-                        value: "limits",
-                        eager: ""
-                      }, {
+                      _createVNode$1(_component_VWindowItem, { value: "limits" }, {
                         default: _withCtx$1(() => [
                           _createElementVNode$1("section", _hoisted_9$1, [
                             _cache[59] || (_cache[59] = _createElementVNode$1("header", { class: "editor-section__head" }, [
@@ -754,10 +745,7 @@ return (_ctx, _cache) => {
                         ]),
                         _: 1
                       }),
-                      _createVNode$1(_component_VWindowItem, {
-                        value: "delete",
-                        eager: ""
-                      }, {
+                      _createVNode$1(_component_VWindowItem, { value: "delete" }, {
                         default: _withCtx$1(() => [
                           _createElementVNode$1("section", _hoisted_11$1, [
                             _createElementVNode$1("header", _hoisted_12$1, [
@@ -957,10 +945,7 @@ return (_ctx, _cache) => {
                         ]),
                         _: 1
                       }),
-                      _createVNode$1(_component_VWindowItem, {
-                        value: "advanced",
-                        eager: ""
-                      }, {
+                      _createVNode$1(_component_VWindowItem, { value: "advanced" }, {
                         default: _withCtx$1(() => [
                           _createElementVNode$1("section", _hoisted_16$1, [
                             _cache[62] || (_cache[62] = _createElementVNode$1("header", { class: "editor-section__head" }, [
@@ -1096,7 +1081,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const TaskEditorDialog = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-3d563fee"]]);
+const TaskEditorDialog = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-ee5c70a1"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle} = await importShared('vue');
 
@@ -1352,11 +1337,9 @@ function openCreateTask() {
 }
 
 // 打开当前任务的服务端配置快照。
-async function openEditTask() {
-  await loadTaskDetail();
-  const snapshot = taskConfig.value?.id ? taskConfig.value : selectedTask.value;
-  if (!snapshot?.id) return
-  editorTask.value = cloneTask(snapshot);
+function openEditTask() {
+  if (!taskConfig.value.id) return
+  editorTask.value = cloneTask(taskConfig.value);
   editorOpen.value = true;
 }
 
@@ -2637,6 +2620,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const BrushFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-e6f6ec5a"]]);
+const BrushFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-e894b68a"]]);
 
 export { BrushFlowWorkbench as B };

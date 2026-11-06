@@ -180,11 +180,9 @@ function openCreateTask() {
 }
 
 // 打开当前任务的服务端配置快照。
-async function openEditTask() {
-  await loadTaskDetail()
-  const snapshot = taskConfig.value?.id ? taskConfig.value : selectedTask.value
-  if (!snapshot?.id) return
-  editorTask.value = cloneTask(snapshot)
+function openEditTask() {
+  if (!taskConfig.value.id) return
+  editorTask.value = cloneTask(taskConfig.value)
   editorOpen.value = true
 }
 
