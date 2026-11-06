@@ -4,7 +4,7 @@ import time
 import unittest
 
 from emetools.p115_tasks import P115TaskCoordinator
-from emetools import EmeTools, ToolAction
+from emetools import EmeTools, RapidAction, ToolAction
 
 
 class P115TaskTests(unittest.TestCase):
@@ -73,6 +73,18 @@ class P115TaskTests(unittest.TestCase):
         result = asyncio.run(plugin.action(ToolAction(operation="p115_dirs", cid="0")))
         self.assertFalse(result["ok"])
         self.assertIn("读取115目录失败（TypeError）", result["message"])
+        self.assertNotIn("internal detail", result["message"])
+
+    def test_unexpected_rapid_submission_error_is_not_reported_as_unknown(self):
+        class BrokenQueue:
+            def submit(self, *args, **kwargs):
+                raise TypeError("internal detail")
+
+        plugin = object.__new__(EmeTools)
+        plugin._p115_tasks = BrokenQueue()
+        result = asyncio.run(plugin.rapid_action(RapidAction(operation="run", config_id="rapid_1")))
+        self.assertFalse(result["ok"])
+        self.assertIn("本地秒传任务提交失败（TypeError）", result["message"])
         self.assertNotIn("internal detail", result["message"])
 
     def test_failure_releases_queue_without_replaying_callback(self):

@@ -130,7 +130,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.67"
+    plugin_version = "2.10.68"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1129,6 +1129,12 @@ class EmeTools(_PluginBase):
         except (RuntimeError, ValueError, OSError) as error:
             logger.warning("媒体增强 本地秒传失败：%s", type(error).__name__)
             return {"ok": False, "message": str(error)}
+        except Exception as error:
+            logger.warning("媒体增强 本地秒传任务提交异常：%s", type(error).__name__)
+            return {
+                "ok": False,
+                "message": f"本地秒传任务提交失败（{type(error).__name__}），请查看媒体增强日志；未重复提交。",
+            }
 
     async def missing_status(self) -> dict:
         if not self._missing._is_scanning:
