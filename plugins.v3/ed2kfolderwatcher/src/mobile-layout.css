@@ -79,3 +79,44 @@
     overflow: visible;
   }
 }
+
+@supports (-webkit-overflow-scrolling: touch) {
+  html.ed2k-ios-app.v-overlay-scroll-blocked:has(.v-dialog--fullscreen .ed2k-mobile-page),
+  body.ed2k-ios-app:has(.v-dialog--fullscreen .ed2k-mobile-page) {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    max-height: 100% !important;
+    overflow: hidden !important;
+  }
+
+  .ed2k-ios-app .v-dialog--fullscreen:has(.ed2k-mobile-page) {
+    position: fixed !important;
+    inset: 0 !important;
+    height: 100% !important;
+    min-height: 0 !important;
+    max-height: 100% !important;
+    overflow: hidden !important;
+  }
+
+  .ed2k-ios-app .v-dialog--fullscreen:has(.ed2k-mobile-page) > .v-overlay__content {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0 !important;
+    max-height: 100% !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+  }
+
+  .ed2k-ios-app .v-dialog--fullscreen:has(.ed2k-mobile-page) > .v-overlay__content > .v-card,
+  .ed2k-ios-app .v-dialog--fullscreen:has(.ed2k-mobile-page) > .v-overlay__content > .v-card > .v-card-text {
+    min-height: 100%;
+    overflow: visible !important;
+  }
+}
