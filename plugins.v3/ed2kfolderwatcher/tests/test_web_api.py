@@ -108,6 +108,15 @@ class WebApiTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, {"telegram_aggregate_window": value})
 
+    def test_retry_limit_validation_and_snapshot(self):
+        result = web_api.validate_settings(self.plugin, {"retry_limit": 4})
+        self.assertEqual(result["retry_limit"], 4)
+        self.plugin._retry_limit = 4
+        self.assertEqual(web_api.settings_snapshot(self.plugin)["retry_limit"], 4)
+        for value in (-1, 11, "bad", True):
+            with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"retry_limit": value})
+
     def test_small_file_delete_boolean_validation_and_snapshot(self):
         self.assertFalse(web_api.settings_snapshot(self.plugin)["delete_small_files"])
         for value in (True, False):

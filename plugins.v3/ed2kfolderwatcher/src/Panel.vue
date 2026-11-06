@@ -14,14 +14,14 @@ const error = ref('')
 const notice = ref('')
 const confirmation = ref('')
 let confirmationResolver
-const settings = reactive({ telegram_mode: 'user', telegram_aggregate_window: 600, cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
+const settings = reactive({ telegram_mode: 'user', telegram_aggregate_window: 600, retry_limit: 3, cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
 const cloud = reactive({ storages: [], folders: [], browsing: '', scanning: false, pending: 0, file: '', bytes_read: 0, size: 0, error: '' })
 const account = reactive({ api_id: '', api_hash: '', phone: '', code: '', password: '' })
 const auth = reactive({ logged_in: false, pending: false, password_required: false, api_hash_configured: false, expires_in: 0, retry_in: 0 })
 let timer
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || saving.value || !loaded.value)
-const configFields = ['enabled', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'delete_source', 'delete_small_files', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
+const configFields = ['enabled', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'retry_limit', 'delete_source', 'delete_small_files', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
 const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size_gb', label: '生成链接最小文件大小（GB）', type: 'number', step: 'any', placeholder: '例如0.5、1、1.5（GB）', hint: '小于此值不生成、不转发；留空或0不限，单位GB。' }]
 const timingFields = [{ key: 'min_age', label: '文件稳定等待秒数', type: 'number', hint: '文件停止变化后等待时间，请监控完成目录。' }]
 
@@ -193,6 +193,7 @@ onUnmounted(() => {
       <div class="switches"><label class="switch"><input v-model="settings.enabled" type="checkbox" :disabled="disabled">启用插件</label><label class="switch"><input v-model="settings.output_enabled" type="checkbox" :disabled="disabled">生成本地 TXT</label><label class="switch"><input v-model="settings.include_subdirectories" :indeterminate="settings.include_subdirectories === null" type="checkbox" :disabled="disabled">包含子目录</label></div>
       <p v-if="settings.include_subdirectories === null" class="warning">本地与网盘的子目录设置不一致，请选择后保存。</p>
       <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :step="field.step" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label></div>
+      <div class="fields retry-field"><label>失败后自动重试次数<input v-model.number="settings.retry_limit" type="number" min="0" max="10" step="1" :disabled="disabled"><small>0 表示不自动重试；最多10次，不含首次处理。失败后保留记录，可用增量补扫手动重试。</small></label></div>
       <div class="fields timing-fields"><label v-for="field in timingFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :step="field.step" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label><label>TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；留空自动选择路径。关闭后不删除已有文件。</small></label></div>
       <p>Telegram和个人账号授权在下方配置；本地与网盘共用一个计算线程。</p>
     </article>

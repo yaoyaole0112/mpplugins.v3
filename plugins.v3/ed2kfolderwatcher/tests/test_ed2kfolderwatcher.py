@@ -67,6 +67,29 @@ class Ed2kTests(unittest.TestCase):
         self.module.ed2k_hash(path, progress=lambda done, size: progress.append((done, size)))
         self.assertEqual(progress, [(len(b"hash progress"), len(b"hash progress"))])
 
+    def test_retry_limit_stops_after_configured_retries_and_persists_failure(self):
+        self.plugin._retry_limit = 2
+        identity = [12, 34, 56]
+        key = str(self.folder / "retry.mkv")
+        self.assertEqual(self.plugin._retry_failure(key, "local", identity, "retry.mkv", "disk error"), (1, False))
+        self.assertEqual(self.plugin._retry_failure(key, "local", identity, "retry.mkv", "disk error"), (2, False))
+        self.assertEqual(self.plugin._retry_failure(key, "local", identity, "retry.mkv", "disk error"), (3, True))
+        self.assertEqual(self.plugin._load_retry_failures()[key]["attempts"], 3)
+
+    def test_changed_file_identity_resets_retry_count(self):
+        key = str(self.folder / "retry.mkv")
+        self.plugin._retry_failure(key, "local", [12, 34, 56], "retry.mkv", "disk error")
+        self.assertEqual(self.plugin._retry_failure(key, "local", [13, 35, 57], "retry.mkv", "disk error"), (1, False))
+
+    def test_progress_snapshot_includes_exhausted_failure_reason(self):
+        key = str(self.folder / "retry.mkv")
+        self.plugin._retry_limit = 0
+        self.plugin._retry_failure(key, "local", [12, 34, 56], "retry.mkv", "permission denied")
+        progress = self.plugin._progress_snapshot()["items"]
+        failed = next(item for item in progress if item["name"] == "retry.mkv")
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("permission denied", failed["error"])
+
     def test_telegram_message_chunks_keep_complete_links(self):
         records = [{"link": "ed2k://|file|" + "a" * 100 + "|1|" + "b" * 32 + "|/"} for _ in range(50)]
         chunks = self.module.telegram_message_chunks(records)

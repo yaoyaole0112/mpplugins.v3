@@ -197,7 +197,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.18.3"
+    plugin_version = "1.18.4"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -211,6 +211,7 @@ class Ed2kFolderWatcher(_PluginBase):
     _extensions = DEFAULT_EXTENSIONS
     _min_age = 60
     _min_file_size = ""
+    _retry_limit = 3
     _delete_source = False
     _cloud_delete_enabled = False
     _cloud_delete_scope = ""
@@ -274,6 +275,8 @@ class Ed2kFolderWatcher(_PluginBase):
         self._cloud_observed = {}
         self._cloud_failures = {}
         self._local_failures = {}
+        self._retry_state_lock = threading.Lock()
+        self._retry_failures = self._load_retry_failures()
         self._empty_files_waiting = set()
         self._cloud_life_lock = threading.Lock()
         self._cloud_life_cursor = 0
@@ -304,6 +307,18 @@ class Ed2kFolderWatcher(_PluginBase):
         self._output = str(config.get("output") or "").strip()
         self._extensions = str(config.get("extensions") or DEFAULT_EXTENSIONS).strip()
         self._min_file_size = str(config.get("min_file_size") or "").strip()
+        try:
+            self._retry_limit = max(0, min(10, int(config.get("retry_limit", 3))))
+        except (TypeError, ValueError):
+            self._retry_limit = 3
+        self._local_failures = {
+            key: item["attempts"] for key, item in self._retry_failures.items()
+            if item.get("source") == "local" and isinstance(item.get("attempts"), int)
+        }
+        self._cloud_failures = {
+            key: item["attempts"] for key, item in self._retry_failures.items()
+            if item.get("source") == "cloud" and isinstance(item.get("attempts"), int)
+        }
         try:
             if "min_file_size_gb" in config:
                 self._min_file_size = minimum_gb_setting(config["min_file_size_gb"], previous=self._min_file_size if "min_file_size" in config else None)
@@ -732,6 +747,23 @@ class Ed2kFolderWatcher(_PluginBase):
             retry_batch = self._new_batch(f"{batch['source']}-retry")
             for context in failed:
                 if context["kind"] == "cloud":
+                    from .cloud_storage import fingerprint, record_key
+                    item = context["item"]
+                    key = record_key(item)
+                    identity = fingerprint(item)
+                    name = item.get("name") or key
+                else:
+                    path = context["path"]
+                    key = str(path)
+                    identity = list(context["signature"][:3])
+                    name = path.name
+                attempts, exhausted = self._retry_failure(
+                    key, context["kind"], identity, name, "Telegram链接尚未全部发送成功"
+                )
+                if exhausted:
+                    logger.error(f"自动生成ED2K链接：{name}：Telegram投递连续失败{attempts}次，达到重试上限({self._retry_limit})")
+                    continue
+                if context["kind"] == "cloud":
                     self._queue_cloud_file(context["item"], delay=300, batch_id=retry_batch)
                 else:
                     self._queue_event(context["path"], delay=60, batch_id=retry_batch)
@@ -776,6 +808,63 @@ class Ed2kFolderWatcher(_PluginBase):
             return str(pending[1].get("name") or pending[1].get("path") or key)
         return Path(key).name if not key.startswith("cloud:") else key
 
+    def _retry_state_path(self) -> Path:
+        return Path(self.get_data_path()) / "retry_failures.json"
+
+    def _load_retry_failures(self) -> dict:
+        try:
+            state = json.loads(self._retry_state_path().read_text(encoding="utf-8"))
+            entries = state.get("entries", {})
+            if not isinstance(entries, dict):
+                raise ValueError("retry entries must be an object")
+            return {key: item for key, item in entries.items()
+                    if isinstance(key, str) and isinstance(item, dict)
+                    and isinstance(item.get("attempts"), int) and item["attempts"] > 0}
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, TypeError):
+            logger.warning("自动生成ED2K链接：读取失败任务重试状态失败，将重新计数")
+            return {}
+
+    def _save_retry_failures(self) -> None:
+        try:
+            with self._retry_state_lock:
+                self._atomic_write(
+                    self._retry_state_path(),
+                    json.dumps({"entries": self._retry_failures}, ensure_ascii=False, indent=2),
+                )
+        except OSError as failure:
+            logger.warning(f"自动生成ED2K链接：保存失败任务重试状态失败（{type(failure).__name__}）")
+
+    def _clear_retry_failure(self, key: str) -> None:
+        if self._retry_failures.pop(key, None) is not None:
+            self._local_failures.pop(key, None)
+            self._cloud_failures.pop(key, None)
+            self._save_retry_failures()
+
+    def _clear_retry_failures(self, source: str) -> None:
+        removed = [key for key, state in self._retry_failures.items() if state.get("source") == source]
+        if not removed:
+            return
+        for key in removed:
+            self._retry_failures.pop(key, None)
+            self._local_failures.pop(key, None)
+            self._cloud_failures.pop(key, None)
+        self._save_retry_failures()
+
+    def _retry_failure(self, key: str, source: str, identity, name: str, error: str) -> tuple[int, bool]:
+        previous = self._retry_failures.get(key, {})
+        attempts = previous.get("attempts", 0) + 1 if previous.get("identity") == identity else 1
+        exhausted = attempts > self._retry_limit
+        self._retry_failures[key] = {
+            "source": source, "identity": identity, "name": name,
+            "attempts": attempts, "error": str(error)[:500],
+            "failed_at": time.time(), "exhausted": exhausted,
+        }
+        (self._local_failures if source == "local" else self._cloud_failures)[key] = attempts
+        self._save_retry_failures()
+        return attempts, exhausted
+
     @staticmethod
     def _mark_batch_item_result(batch, key: str) -> None:
         batch["results"].add(key)
@@ -813,6 +902,12 @@ class Ed2kFolderWatcher(_PluginBase):
                 return
             stat = path.stat()
             signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+            failure = self._retry_failures.get(str(path))
+            if failure:
+                if failure.get("identity") != list(signature):
+                    self._clear_retry_failure(str(path))
+                elif failure.get("attempts", 0) > self._retry_limit:
+                    return
             batch_id = batch_id or self._active_batch_id or self._live_batch()
             completed_old = None
             with self._condition:
@@ -895,11 +990,27 @@ class Ed2kFolderWatcher(_PluginBase):
             self._active_batch_id = batch_id
             try:
                 self._work_item(key, signature)
-            except Exception:
+            except Exception as failure:
                 logger.exception(f"自动生成ED2K链接：后台任务异常，工作线程继续运行：{self._batch_item_name(key, signature)}")
+                if key.startswith("__"):
+                    continue
                 if key.startswith("cloud:") and isinstance(signature, dict):
+                    from .cloud_storage import fingerprint
+                    source = "cloud"
+                    identity = fingerprint(signature)
+                    name = self._batch_item_name(key, signature)
+                else:
+                    source = "local"
+                    identity = list(signature) if isinstance(signature, tuple) else None
+                    name = self._batch_item_name(key, signature)
+                attempts, exhausted = self._retry_failure(
+                    key, source, identity, name, f"{type(failure).__name__}: {failure}"
+                )
+                if exhausted:
+                    logger.error(f"自动生成ED2K链接：{name}：后台任务连续失败{attempts}次，达到重试上限({self._retry_limit})，停止自动重试")
+                elif source == "cloud":
                     self._queue_cloud_file(signature, delay=300)
-                elif not key.startswith("__"):
+                else:
                     self._queue_event(Path(key), delay=60)
             finally:
                 self._active_batch_id = None
@@ -929,7 +1040,6 @@ class Ed2kFolderWatcher(_PluginBase):
                     "stage": "正在检查文件", "started_at": time.time(),
                 }
                 self._process_file(path)
-                self._local_failures.pop(key, None)
             except InterruptedError:
                 return
             except Exception as err:
@@ -950,20 +1060,28 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._cloud_status.update(error=detail, file="")
                     filename = signature.get("name", "未知文件") if isinstance(signature, dict) else "未知文件"
                     logger.warning(f"自动生成ED2K链接：{filename}：{detail}")
-                    failures = min(5, self._cloud_failures.get(key, 0) + 1)
-                    self._cloud_failures[key] = failures
-                    delay = min(3600, 300 * 2 ** (failures - 1))
-                    self._cloud_status.update(reconnecting=False, error_key=key, retry_at=time.time() + delay)
-                    self._queue_cloud_file(signature, delay=delay)
+                    from .cloud_storage import fingerprint
+                    identity = fingerprint(signature) if isinstance(signature, dict) else None
+                    failures, exhausted = self._retry_failure(key, "cloud", identity, filename, detail)
+                    if exhausted:
+                        self._cloud_status.update(reconnecting=False, error_key=key, retry_at=None)
+                        logger.error(f"自动生成ED2K链接：{filename}：已连续失败{failures}次，达到重试上限({self._retry_limit})，已停止自动重试：{detail}")
+                    else:
+                        delay = min(3600, 300 * 2 ** min(failures - 1, 3))
+                        self._cloud_status.update(reconnecting=False, error_key=key, retry_at=time.time() + delay)
+                        self._queue_cloud_file(signature, delay=delay)
                     return
                 if isinstance(err, FileNotFoundError):
                     self._empty_files_waiting.discard(key)
                     return
-                failures = min(5, self._local_failures.get(key, 0) + 1)
-                self._local_failures[key] = failures
-                delay = min(300, 60 * 2 ** (failures - 1))
-                logger.warning(f"自动生成ED2K链接：本地文件处理失败，{delay}秒后重试：{path}：{type(err).__name__}: {err}")
-                self._queue_event(path, delay=delay)
+                identity = list(signature) if isinstance(signature, tuple) else None
+                failures, exhausted = self._retry_failure(key, "local", identity, path.name, f"{type(err).__name__}: {err}")
+                if exhausted:
+                    logger.error(f"自动生成ED2K链接：本地文件处理失败，已连续失败{failures}次，达到重试上限({self._retry_limit})，停止自动重试：{path}：{type(err).__name__}: {err}")
+                else:
+                    delay = min(300, 60 * 2 ** min(failures - 1, 2))
+                    logger.warning(f"自动生成ED2K链接：本地文件处理失败，{delay}秒后重试（第{failures}/{self._retry_limit}次）：{path}：{type(err).__name__}: {err}")
+                    self._queue_event(path, delay=delay)
             finally:
                 if not key.startswith("cloud:") and key != "__cloud_scan__":
                     self._local_active = None
@@ -1110,13 +1228,15 @@ class Ed2kFolderWatcher(_PluginBase):
             life_lock.release()
 
     def _cloud_succeeded(self, key):
-        self._cloud_failures.pop(key, None)
+        self._clear_retry_failure(key)
         if self._cloud_status.get("error_key") == key:
             self._cloud_status.update(error="", error_key="", retry_at=None)
 
-    def queue_cloud_scan(self) -> dict:
+    def queue_cloud_scan(self, retry_failed=False) -> dict:
         if not self._enabled or not self._cloud_enabled or self._worker is None:
             return {"ok": False, "message": "请先启用插件，并保存网盘来源、目录和增量计划"}
+        if retry_failed:
+            self._clear_retry_failures("cloud")
         with self._condition:
             if not self._cloud_status["scanning"] and "__cloud_scan__" not in self._pending:
                 self._pending["__cloud_scan__"] = (time.monotonic(), None)
@@ -1124,10 +1244,16 @@ class Ed2kFolderWatcher(_PluginBase):
         return {"ok": True, "message": "网盘增量扫描已加入后台队列；不会删除网盘文件，首次读取会消耗完整文件流量"}
 
     def _queue_cloud_file(self, item: dict, delay=0, batch_id=None) -> bool:
-        from .cloud_storage import record_key
+        from .cloud_storage import fingerprint, record_key
         if self._stopping.is_set():
             return False
         key = record_key(item)
+        failure = self._retry_failures.get(key)
+        if failure:
+            if failure.get("identity") != fingerprint(item):
+                self._clear_retry_failure(key)
+            elif failure.get("attempts", 0) > self._retry_limit:
+                return False
         batch_id = batch_id or self._active_batch_id
         created_batch = False
         if batch_id is None:
@@ -1328,7 +1454,6 @@ class Ed2kFolderWatcher(_PluginBase):
                             "output": output, "cache_path": cache_path,
                             "batch_group": batch["groups"].get(key)}
                 self._cloud_observed.pop(record_key(item), None)
-                self._cloud_succeeded(key)
                 self._cloud_status["reconnecting"] = False
                 self._cloud_status["file"] = ""
                 return
@@ -1343,13 +1468,19 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._notify_record(Path(item["name"]), record, checkpoint=lambda: self._write_results(output, cache_path, records))
             self._write_results(output, cache_path, records)
             self._cloud_observed.pop(record_key(item), None)
-            self._cloud_succeeded(key)
             self._cloud_status["reconnecting"] = False
             self._cloud_status["file"] = ""
             if self._telegram_enabled and not record.get("telegram_sent"):
-                delay = self._telegram_aggregate_window if self._telegram_aggregate else 300
-                self._queue_cloud_file(item, delay=delay)
+                attempts, exhausted = self._retry_failure(
+                    key, "cloud", fingerprint(item), item["name"], "Telegram链接尚未全部发送成功"
+                )
+                if exhausted:
+                    logger.error(f"自动生成ED2K链接：{item['name']}：Telegram投递连续失败{attempts}次，达到重试上限({self._retry_limit})")
+                else:
+                    delay = self._telegram_aggregate_window if self._telegram_aggregate else 300
+                    self._queue_cloud_file(item, delay=delay)
             else:
+                self._cloud_succeeded(key)
                 self._maybe_delete_cloud_source(storage, item, record, output, cache_path, records, stopping)
 
     def _maybe_delete_cloud_source(self, storage, item, record, output, cache_path, records, stopping):
@@ -1712,6 +1843,7 @@ class Ed2kFolderWatcher(_PluginBase):
             legacy_boundary = record and stat.st_size > 0 and stat.st_size % ED2K_PART_SIZE == 0 and record.get("hash_version") != 2
             if unchanged and not legacy_boundary and not self._delete_source:
                 if not self._telegram_enabled or (record.get("telegram_sent") and record.get("telegram_target") == self._telegram_target_key()):
+                    self._clear_retry_failure(key)
                     return
             if not unchanged or legacy_boundary:
                 if self._local_active:
@@ -1757,8 +1889,16 @@ class Ed2kFolderWatcher(_PluginBase):
             self._write_results(output, cache_path, records)
             delivered = not self._telegram_enabled or record.get("telegram_sent")
             if not delivered:
-                delay = self._telegram_aggregate_window if self._telegram_aggregate else 60
-                self._queue_event(path, delay=delay)
+                attempts, exhausted = self._retry_failure(
+                    key, "local", list(signature[:3]), path.name, "Telegram链接尚未全部发送成功"
+                )
+                if exhausted:
+                    logger.error(f"自动生成ED2K链接：{path.name}：Telegram投递连续失败{attempts}次，达到重试上限({self._retry_limit})")
+                else:
+                    delay = self._telegram_aggregate_window if self._telegram_aggregate else 60
+                    self._queue_event(path, delay=delay)
+            else:
+                self._clear_retry_failure(key)
             if self._delete_source and delivered and (output is not None or self._telegram_enabled):
                 final = path.stat()
                 if signature == (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) and stat.st_ctime_ns == final.st_ctime_ns and not self._stopping.is_set():
@@ -1812,14 +1952,29 @@ class Ed2kFolderWatcher(_PluginBase):
             items.append({"name": signature.get("name") or key, "size": signature.get("size", 0),
                           "bytes_read": 0, "stage": "等待处理", "source": "网盘", "status": "queued",
                           "due_at": time.time() + max(0, due - time.monotonic())})
+        pending_keys = {key for key, _ in pending}
+        for key, failure in self._retry_failures.items():
+            if failure.get("attempts", 0) <= self._retry_limit or key in pending_keys:
+                continue
+            items.append({
+                "name": failure.get("name") or key,
+                "size": 0,
+                "bytes_read": 0,
+                "stage": f"已停止自动重试（失败{failure['attempts']}次）",
+                "source": "网盘" if failure.get("source") == "cloud" else "本地",
+                "status": "failed",
+                "error": failure.get("error", ""),
+            })
         if cloud_status.get("scanning") and not cloud_status.get("file"):
             items.append({"name": "网盘监控目录", "size": 0, "bytes_read": 0,
                           "stage": "正在扫描目录并发现文件", "source": "网盘", "status": "active"})
         return {"items": items[:100], "pending": len(pending), "worker_alive": worker_alive}
 
-    def scan(self) -> None:
+    def scan(self, retry_failed=False) -> None:
         if not self._folder or self._stopping.is_set():
             return
+        if retry_failed:
+            self._clear_retry_failures("local")
         folder, output, cache_path = self._paths()
         with self._lock:
             records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
@@ -2016,6 +2171,7 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextField", "extensions", "公共扩展名过滤", placeholder="留空处理全部文件，例如 mkv,mp4,flac"),
             field("VTextField", "min_age", "公共稳定等待秒数", type="number", hint="本地和网盘共用，请选择上传完成目录。", persistent_hint=True),
             field("VTextField", "min_file_size_gb", "生成链接最小文件大小（GB）", type="number", step="any", min=0, placeholder="例如0.5、1、1.5，仅填数值", hint="小于此值不生成、不转发；留空或0不限，单位GB。", persistent_hint=True),
+            field("VTextField", "retry_limit", "失败后自动重试次数", type="number", min=0, max=10, hint="0表示不自动重试；最多10次，不含首次处理。达到上限后保留失败记录，可手动增量补扫重试。", persistent_hint=True),
             {"component": "VCardTitle", "text": "本地监控"},
             field("VTextField", "folder", "本地监控目录", placeholder="/downloads/complete,/media/movies", hint="容器内绝对路径，多个用英文逗号分隔，最多32个。", persistent_hint=True),
             field("VSwitch", "monitor_enabled", "本地实时监控文件"),
@@ -2041,4 +2197,4 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅用于带话题的超级群组。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
+        ]}], {"enabled": False, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}

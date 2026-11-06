@@ -17,7 +17,7 @@ from .file_size import minimum_file_bytes, minimum_gb_value, minimum_gb_setting
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
                  "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
                  "telegram_chat_id", "telegram_thread_id", "telegram_aggregate", "telegram_aggregate_window", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
-                 "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
+                 "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source", "retry_limit")
 BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled"}
 
 
@@ -56,10 +56,11 @@ def validate_settings(plugin, values):
         if name in BOOLEAN_FIELDS:
             if not isinstance(value, bool):
                 raise UserAccountError("开关配置格式不正确")
-        elif name in {"min_age", "cloud_read_timeout", "telegram_aggregate_window"}:
-            lower, upper = (0, 86400) if name == "min_age" else ((30, 1800) if name == "cloud_read_timeout" else (0, 3600))
+        elif name in {"min_age", "cloud_read_timeout", "telegram_aggregate_window", "retry_limit"}:
+            lower, upper = (0, 86400) if name == "min_age" else ((30, 1800) if name == "cloud_read_timeout" else ((0, 10) if name == "retry_limit" else (0, 3600)))
             if isinstance(value, bool) or not str(value).isdigit() or not lower <= int(value) <= upper:
-                raise UserAccountError(f"{'文件稳定时间' if name == 'min_age' else '网盘读取超时'}必须为 {lower} 到 {upper} 的整数秒")
+                label = {"min_age": "文件稳定时间", "cloud_read_timeout": "网盘读取超时", "retry_limit": "自动重试次数", "telegram_aggregate_window": "聚合转发等待时间"}[name]
+                raise UserAccountError(f"{label}必须为 {lower} 到 {upper} 的整数")
             value = int(value)
         else:
             if not isinstance(value, str) or len(value) > (32768 if name in {"folder", "cloud_folder"} else 4096):
@@ -156,7 +157,7 @@ def build_routes(plugin):
         return response(await asyncio.to_thread(plugin.cloud_status))
 
     async def cloud_run(principal=Depends(get_current_active_superuser)):
-        return response(plugin.queue_cloud_scan())
+        return response(plugin.queue_cloud_scan(retry_failed=True))
 
     async def local_run(principal=Depends(get_current_active_superuser)):
         if not plugin._enabled:
@@ -165,7 +166,7 @@ def build_routes(plugin):
             return response({"ok": False, "message": "请先配置并保存本地监控目录"})
         if plugin._worker is None or not plugin._worker.is_alive():
             return response({"ok": False, "message": "本地扫描工作线程未运行，请重新保存插件设置后重试"})
-        await asyncio.to_thread(plugin.scan)
+        await asyncio.to_thread(plugin.scan, True)
         return response({"ok": True, "message": "本地增量扫描已加入后台队列；已有链接不重复计算"})
 
     async def cloud_browse(request: Request, principal=Depends(get_current_active_superuser)):
