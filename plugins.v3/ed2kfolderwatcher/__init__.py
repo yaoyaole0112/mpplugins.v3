@@ -197,7 +197,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.18.4"
+    plugin_version = "1.18.5"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -1953,22 +1953,30 @@ class Ed2kFolderWatcher(_PluginBase):
                           "bytes_read": 0, "stage": "等待处理", "source": "网盘", "status": "queued",
                           "due_at": time.time() + max(0, due - time.monotonic())})
         pending_keys = {key for key, _ in pending}
+        failed_tasks = []
         for key, failure in self._retry_failures.items():
             if failure.get("attempts", 0) <= self._retry_limit or key in pending_keys:
                 continue
-            items.append({
+            failed_tasks.append({
                 "name": failure.get("name") or key,
                 "size": 0,
                 "bytes_read": 0,
                 "stage": f"已停止自动重试（失败{failure['attempts']}次）",
                 "source": "网盘" if failure.get("source") == "cloud" else "本地",
                 "status": "failed",
+                "attempts": failure.get("attempts", 0),
                 "error": failure.get("error", ""),
+                "failed_at": failure.get("failed_at"),
             })
         if cloud_status.get("scanning") and not cloud_status.get("file"):
             items.append({"name": "网盘监控目录", "size": 0, "bytes_read": 0,
                           "stage": "正在扫描目录并发现文件", "source": "网盘", "status": "active"})
-        return {"items": items[:100], "pending": len(pending), "worker_alive": worker_alive}
+        return {
+            "items": items[:100],
+            "failed_tasks": failed_tasks[:100],
+            "pending": len(pending),
+            "worker_alive": worker_alive,
+        }
 
     def scan(self, retry_failed=False) -> None:
         if not self._folder or self._stopping.is_set():
@@ -2127,7 +2135,7 @@ class Ed2kFolderWatcher(_PluginBase):
             return {"ok": True, "items": items, "total": len(records), "limit": 100,
                     "delete_source_enabled": self._delete_source, "cloud_delete_enabled": self._cloud_delete_enabled,
                     "progress": progress["items"], "pending": progress["pending"],
-                    "worker_alive": progress["worker_alive"]}
+                    "worker_alive": progress["worker_alive"], "failed_tasks": progress["failed_tasks"]}
         except (OSError, ValueError, TypeError):
             return {"ok": False, "message": "读取生成记录失败，原记录已保留，请检查日志或文件权限"}
 
