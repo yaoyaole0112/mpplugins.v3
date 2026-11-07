@@ -583,5 +583,20 @@
       "v1.1.0": "新增 ED2K 生成成功后按队列删除源文件选项，删除失败自动保留并记录警告。",
       "v1.0.0": "首次发布：支持本地文件夹定时扫描、标准 ED2K 哈希、缓存和链接清单输出。"
     }
+  },
+  "ForumRssQb": {
+    "name": "论坛 RSS 种子下载",
+    "description": "读取论坛 RSS，登录帖子提取 .torrent 附件并交给 qBittorrent。",
+    "labels": "RSS,下载,qBittorrent",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/MoviePilot/v3/docs/images/moviepilot.png",
+    "author": "local",
+    "project_url": "",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 2,
+    "history": {
+      "v1.0.0": "首版：轮询 RSS，使用论坛 Cookie 抓取帖子附件，校验种子文件后上传至 qBittorrent，并按附件 URL 去重。"
+    }
   }
 }
