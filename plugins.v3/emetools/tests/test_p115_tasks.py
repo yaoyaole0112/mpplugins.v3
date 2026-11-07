@@ -3,7 +3,7 @@ import threading
 import time
 import unittest
 
-from emetools.p115_tasks import P115TaskCoordinator
+from emetools.p115_tasks import P115CoordinatorStopped, P115TaskCoordinator
 from emetools import EmeTools, RapidAction, ToolAction
 
 
@@ -198,6 +198,33 @@ class P115TaskTests(unittest.TestCase):
         self.release.set()
         self.assertTrue(newer["done"].wait(2))
         self.assertEqual(executed, [True])
+
+    def test_stale_coordinator_submission_is_handed_to_replacement_once(self):
+        plugin = object.__new__(EmeTools)
+        replacement = P115TaskCoordinator()
+        class StaleQueue:
+            def submit(self, *args, **kwargs):
+                plugin._p115_tasks = replacement
+                raise P115CoordinatorStopped("stopped")
+        plugin._p115_tasks = StaleQueue()
+        executed = []
+
+        job = plugin._submit_p115_task("move", "文件转存", lambda: executed.append(True))
+        self.assertTrue(job["done"].wait(2))
+        self.assertEqual(job["state"], "completed")
+        self.assertEqual(executed, [True])
+        replacement.close()
+
+    def test_scheduled_task_does_not_submit_during_plugin_shutdown(self):
+        plugin = object.__new__(EmeTools)
+        plugin._p115_stop = threading.Event()
+        plugin._p115_stop.set()
+        class BrokenQueue:
+            def run(self, *args, **kwargs):
+                raise AssertionError("shutdown task must not be submitted")
+        plugin._p115_tasks = BrokenQueue()
+
+        self.assertIsNone(plugin._run_scheduled("p115_move"))
 
     def test_duplicate_scheduled_ticks_do_not_accumulate(self):
         active = self.hold()

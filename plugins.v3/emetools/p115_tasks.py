@@ -8,6 +8,10 @@ import uuid
 from app.sdk.logging import logger
 
 
+class P115CoordinatorStopped(ValueError):
+    pass
+
+
 class P115TaskCoordinator:
     def __init__(self):
         self._condition = threading.Condition()
@@ -34,7 +38,7 @@ class P115TaskCoordinator:
     def _reserve(self, key, label, manual):
         with self._condition:
             if self._closed:
-                raise ValueError("115任务协调器已停止，请刷新插件页面后重试")
+                raise P115CoordinatorStopped("115任务协调器已停止，请刷新插件页面后重试")
             now = time.monotonic()
             self._jobs = {token: job for token, job in self._jobs.items()
                           if job["state"] in {"queued", "running"} or now - job["finished"] < 1800}

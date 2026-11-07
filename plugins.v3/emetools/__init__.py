@@ -30,7 +30,7 @@ from app.sdk.services import NotificationHelper
 
 from .invalid_data import InvalidDataCleaner
 from .p115 import P115Client, P115DirectoryUnavailable
-from .p115_tasks import P115TaskCoordinator
+from .p115_tasks import P115CoordinatorStopped, P115TaskCoordinator
 from .subscription_monitor import SubscriptionMonitor, normalize_channel
 from .missing_episodes import DEFAULT_MISSING, MissingAction, MissingEpisodeDetector, normalize_cancel_config
 from .missing_fill import MissingFill
@@ -130,7 +130,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.70"
+    plugin_version = "2.10.71"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -216,9 +216,13 @@ class EmeTools(_PluginBase):
         self._cleaner = InvalidDataCleaner(self._strm_root)
         self._p115_stop = threading.Event()
         self._locks = {name: threading.Lock() for name in self._schedule}
-        if not hasattr(self, "_p115_tasks"):
+        if not hasattr(self, "_p115_lifecycle_lock"):
+            self._p115_lifecycle_lock = threading.Lock()
+        with self._p115_lifecycle_lock:
+            previous_tasks = getattr(self, "_p115_tasks", None)
+            if previous_tasks:
+                previous_tasks.close()
             self._p115_tasks = P115TaskCoordinator()
-        self._p115_tasks.reopen()
         if self._enabled:
             self._rapid.set_realtime_callback(self._run_rapid_realtime)
         self._pending_lock = threading.Lock()
@@ -354,7 +358,7 @@ class EmeTools(_PluginBase):
     def _run_tool_command(self, action: str, data: dict) -> None:
         if action == "emetools_cleanup":
             return self._run_tool_command_serial(action, data)
-        return self._p115_tasks.run(f"bot:{action}", "Bot手动115任务",
+        return self._run_p115_task(f"bot:{action}", "Bot手动115任务",
                                     lambda: self._run_tool_command_serial(action, data), manual=True)
 
     def _run_tool_command_serial(self, action: str, data: dict) -> None:
@@ -462,7 +466,7 @@ class EmeTools(_PluginBase):
     def _handle_media_bot_confirmation(self, token: str, approve: bool, data: dict) -> None:
         if not approve:
             return self._handle_media_bot_confirmation_serial(token, approve, data)
-        return self._p115_tasks.run("media_bot_confirm:" + token, "Bot确认媒体清理",
+        return self._run_p115_task("media_bot_confirm:" + token, "Bot确认媒体清理",
                                     lambda: self._handle_media_bot_confirmation_serial(token, approve, data), manual=True)
 
     def _handle_media_bot_confirmation_serial(self, token: str, approve: bool, data: dict) -> None:
@@ -508,7 +512,12 @@ class EmeTools(_PluginBase):
         rapid = getattr(self, "_rapid", None)
         if rapid:
             rapid.close()
-        if hasattr(self, "_p115_tasks"):
+        lifecycle_lock = getattr(self, "_p115_lifecycle_lock", None)
+        if lifecycle_lock:
+            with lifecycle_lock:
+                if hasattr(self, "_p115_tasks"):
+                    self._p115_tasks.close()
+        elif hasattr(self, "_p115_tasks"):
             self._p115_tasks.close()
         enrichment = getattr(self, "_enrichment", None)
         if enrichment:
@@ -598,7 +607,10 @@ class EmeTools(_PluginBase):
         return services
 
     def _run_media_scheduled(self) -> None:
-        return self._p115_tasks.run("media_cleanup", "定时媒体清理", self._run_media_scheduled_serial)
+        if getattr(self, "_p115_stop", None) and self._p115_stop.is_set():
+            logger.info("媒体增强 媒体清理：插件正在停止，跳过本次定时触发")
+            return
+        return self._run_p115_task("media_cleanup", "定时媒体清理", self._run_media_scheduled_serial)
 
     def _run_media_scheduled_serial(self) -> None:
         if not self._enabled or not self._media_config["enabled"]:
@@ -681,7 +693,7 @@ class EmeTools(_PluginBase):
     async def media_action(self, action: dict) -> dict:
         if action.get("operation") == "confirm_delete":
             saved = copy.deepcopy(action)
-            job = self._p115_tasks.submit("media_delete:" + str(saved.get("token") or ""), "手动媒体清理",
+            job = self._submit_p115_task("media_delete:" + str(saved.get("token") or ""), "手动媒体清理",
                                           lambda: asyncio.run(self._media_action_serial(saved)))
             return await self._p115_submission(job)
         return await self._media_action_serial(action)
@@ -1073,7 +1085,7 @@ class EmeTools(_PluginBase):
             self._claim_tool_confirmation(token, kind)
             execute = lambda: self._execute_tool_confirmation(token, kind, command_origin=(source, user))
             if kind in {"trash", "move"}:
-                self._p115_tasks.run(f"confirm:{token}", self._tool_confirmation_labels(kind)[1], execute, manual=True)
+                self._run_p115_task(f"confirm:{token}", self._tool_confirmation_labels(kind)[1], execute, manual=True)
             else:
                 execute()
         except HTTPException:
@@ -1120,7 +1132,7 @@ class EmeTools(_PluginBase):
         if not config_id:
             raise HTTPException(status_code=400, detail="请选择本地秒传配置")
         try:
-            job = self._p115_tasks.submit(
+            job = self._submit_p115_task(
                 f"rapid_upload:{config_id}", "本地秒传",
                 lambda: self._rapid.run(config_id, action.paths or None),
             )
@@ -2076,7 +2088,7 @@ class EmeTools(_PluginBase):
                     return {"ok": False, "message": "权限配置已变化，未执行清理"}
                 return self._cleanup_confirm(token)
 
-            result = self._p115_tasks.run("cleanup_confirm:" + token, "Telegram确认清理文件", confirm, manual=True)
+            result = self._run_p115_task("cleanup_confirm:" + token, "Telegram确认清理文件", confirm, manual=True)
             if result.get("queued"):
                 return
             notice = notices.file_cleanup(result, {"folders": []}) if "deleted" in result else None
@@ -2115,17 +2127,22 @@ class EmeTools(_PluginBase):
                            _log_label(item.get("path")), _log_label(item.get("message")))
 
     def _run_scheduled(self, section: str) -> None:
+        if getattr(self, "_p115_stop", None) and self._p115_stop.is_set():
+            logger.info("媒体增强 %s：插件正在停止，跳过本次定时触发", SECTION_NAMES.get(section, section))
+            return
         if section == "tools":
             return self._run_scheduled_serial(section)
-        return self._p115_tasks.run(section, f"定时{SECTION_NAMES.get(section, section)}",
-                                    lambda: self._run_scheduled_serial(section))
+        return self._run_p115_task(section, f"定时{SECTION_NAMES.get(section, section)}",
+                                   lambda: self._run_scheduled_serial(section))
 
     def _run_rapid_scheduled(self, config_id: str) -> None:
+        if getattr(self, "_p115_stop", None) and self._p115_stop.is_set():
+            return
         config = next((item for item in self._rapid.configs if item["id"] == config_id), None)
         if not self._enabled or not config or not config.get("cron_enabled"):
             return
         try:
-            result = self._p115_tasks.run(
+            result = self._run_p115_task(
                 f"rapid_upload:{config_id}", f"定时本地秒传：{config['name']}",
                 lambda: self._rapid.run(config_id),
             )
@@ -2136,11 +2153,13 @@ class EmeTools(_PluginBase):
                            _log_label(config["name"]), type(error).__name__)
 
     def _run_rapid_realtime(self, config_id: str, paths: list[str]) -> None:
+        if getattr(self, "_p115_stop", None) and self._p115_stop.is_set():
+            return
         config = next((item for item in self._rapid.configs if item["id"] == config_id), None)
         if not self._enabled or not config or not config.get("realtime_enabled"):
             return
         try:
-            result = self._p115_tasks.run(
+            result = self._run_p115_task(
                 f"rapid_upload:{config_id}", f"实时本地秒传：{config['name']}",
                 lambda: self._rapid.run(config_id, paths),
             )
@@ -2290,6 +2309,28 @@ class EmeTools(_PluginBase):
             self._send_tool_notice(title, text)
         return result
 
+    def _submit_p115_task(self, key: str, label: str, callback):
+        coordinator = self._p115_tasks
+        try:
+            return coordinator.submit(key, label, callback)
+        except P115CoordinatorStopped:
+            current = self._p115_tasks
+            if current is coordinator:
+                raise
+            logger.info("媒体增强115任务：协调器已切换，安全转交尚未提交的任务：%s", label)
+            return current.submit(key, label, callback)
+
+    def _run_p115_task(self, key: str, label: str, callback, manual: bool = False):
+        coordinator = self._p115_tasks
+        try:
+            return coordinator.run(key, label, callback, manual=manual)
+        except P115CoordinatorStopped:
+            current = self._p115_tasks
+            if current is coordinator:
+                raise
+            logger.info("媒体增强115任务：协调器已切换，安全转交尚未启动的任务：%s", label)
+            return current.run(key, label, callback, manual=manual)
+
     async def action(self, action: ToolAction) -> dict:
         if action.operation == "p115_task_status":
             return self._p115_tasks.job_status(action.token)
@@ -2313,7 +2354,8 @@ class EmeTools(_PluginBase):
         elif action.operation == "cleanup_confirm":
             key += ":" + action.token
         try:
-            job = self._p115_tasks.submit(key, labels[action.operation], lambda: asyncio.run(self._action_serial(saved)))
+            job = self._submit_p115_task(key, labels[action.operation],
+                                         lambda: asyncio.run(self._action_serial(saved)))
         except ValueError as error:
             if action.operation in confirmation_kinds:
                 await asyncio.to_thread(self._set_cleanup_status, action.token, "failed", "任务队列未接受本次操作，请重新预览")
