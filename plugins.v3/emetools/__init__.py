@@ -130,7 +130,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.69"
+    plugin_version = "2.10.70"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -2144,11 +2144,19 @@ class EmeTools(_PluginBase):
                 f"rapid_upload:{config_id}", f"实时本地秒传：{config['name']}",
                 lambda: self._rapid.run(config_id, paths),
             )
+            if isinstance(result, dict) and result.get("queued") and result.get("job_id"):
+                job_id = result["job_id"]
+                while not self._p115_stop.wait(1):
+                    job = self._p115_tasks.job_status(job_id)
+                    if job.get("state") not in {"queued", "running"}:
+                        break
             logger.info("媒体增强 本地秒传：实时任务结束，配置=%s，结果=%s",
                         _log_label(config["name"]), _log_label(result.get("message") if isinstance(result, dict) else result))
+            return result
         except (RuntimeError, ValueError, OSError) as error:
             logger.warning("媒体增强 本地秒传：实时任务失败，配置=%s，原因=%s",
                            _log_label(config["name"]), type(error).__name__)
+            return {"ok": False, "message": str(error)}
 
     def _run_scheduled_serial(self, section: str) -> None:
         if not self._enabled or not self._schedule.get(section, {}).get("enabled"):

@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -179,6 +180,79 @@ class RapidUploadTests(unittest.TestCase):
             with patch.object(rapid, "_queue_realtime_event") as queue:
                 rapid._poll_realtime_once()
             queue.assert_called_once_with("rapid_1", str(new_file))
+
+    def test_realtime_paths_arriving_during_dispatch_are_processed_after_current_batch(self):
+        config = normalize_config({"id": "rapid_1", "name": "电视剧", "realtime_enabled": True})
+        rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_processed = threading.Event()
+        dispatched = []
+
+        def callback(config_id, paths):
+            dispatched.append((config_id, paths))
+            if len(dispatched) == 1:
+                first_started.set()
+                release_first.wait(timeout=2)
+            else:
+                second_processed.set()
+            return {"ok": True}
+
+        rapid.set_realtime_callback(callback)
+        rapid._queue_stable_realtime_paths("rapid_1", ["/source/first.mkv"])
+        self.assertTrue(first_started.wait(timeout=2))
+        rapid._queue_stable_realtime_paths("rapid_1", ["/source/second.mkv"])
+        release_first.set()
+        self.assertTrue(second_processed.wait(timeout=2))
+        self.assertEqual(dispatched, [
+            ("rapid_1", ["/source/first.mkv"]),
+            ("rapid_1", ["/source/second.mkv"]),
+        ])
+        rapid.close()
+
+    def test_realtime_queued_batch_is_retried_after_existing_job_finishes(self):
+        config = normalize_config({"id": "rapid_1", "name": "电视剧", "realtime_enabled": True})
+        rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+        attempts = []
+        completed = threading.Event()
+
+        def callback(config_id, paths):
+            attempts.append(paths)
+            if len(attempts) == 1:
+                return {"ok": True, "queued": True}
+            completed.set()
+            return {"ok": True}
+
+        rapid.set_realtime_callback(callback)
+        rapid._queue_stable_realtime_paths("rapid_1", ["/source/queued.mkv"])
+        self.assertTrue(completed.wait(timeout=4))
+        self.assertEqual(attempts, [
+            ["/source/queued.mkv"],
+            ["/source/queued.mkv"],
+        ])
+        rapid.close()
+
+    def test_realtime_batch_retries_when_manual_scan_is_still_running(self):
+        config = normalize_config({"id": "rapid_1", "name": "电视剧", "realtime_enabled": True})
+        rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+        attempts = []
+        completed = threading.Event()
+
+        def callback(config_id, paths):
+            attempts.append(paths)
+            if len(attempts) == 1:
+                return {"ok": False, "message": "配置“电视剧”正在执行，请稍后再试"}
+            completed.set()
+            return {"ok": True}
+
+        rapid.set_realtime_callback(callback)
+        rapid._queue_stable_realtime_paths("rapid_1", ["/source/during-manual-scan.mkv"])
+        self.assertTrue(completed.wait(timeout=4))
+        self.assertEqual(attempts, [
+            ["/source/during-manual-scan.mkv"],
+            ["/source/during-manual-scan.mkv"],
+        ])
+        rapid.close()
 
 
 if __name__ == "__main__":

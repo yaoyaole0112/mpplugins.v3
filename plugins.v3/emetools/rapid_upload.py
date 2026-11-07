@@ -126,6 +126,8 @@ class RapidUpload:
         self._poll_snapshots: dict[str, dict[str, tuple[int, int]]] = {}
         self._watch_timers: dict[str, Any] = {}
         self._pending_paths: dict[str, dict[str, dict[str, Any]]] = {}
+        self._realtime_dispatch_paths: dict[str, set[str]] = {}
+        self._realtime_dispatching: set[str] = set()
         self._watch_lock = threading.RLock()
         self._realtime_callback = None
         self._realtime_watched: list[str] = []
@@ -167,6 +169,8 @@ class RapidUpload:
                 timer.cancel()
             self._watch_timers.clear()
             self._pending_paths.clear()
+            self._realtime_dispatch_paths.clear()
+            self._realtime_dispatching.clear()
             observer = self._observer
             self._observer = None
             poll_thread = self._poll_thread
@@ -234,9 +238,51 @@ class RapidUpload:
                 timer.start()
             if not pending:
                 self._pending_paths.pop(config_id, None)
+        if stable_paths:
+            self._queue_stable_realtime_paths(config_id, stable_paths)
+
+    def _queue_stable_realtime_paths(self, config_id: str, paths: list[str]) -> None:
         callback = self._realtime_callback
-        if callback and stable_paths:
-            callback(config_id, stable_paths)
+        if not callback:
+            return
+        with self._watch_lock:
+            queued = self._realtime_dispatch_paths.setdefault(config_id, set())
+            queued.update(paths)
+            if config_id in self._realtime_dispatching:
+                return
+            self._realtime_dispatching.add(config_id)
+        worker = threading.Thread(target=self._drain_realtime_dispatch,
+                                  args=(config_id,), name=f"emetools-rapid-{config_id}", daemon=True)
+        worker.start()
+
+    def _drain_realtime_dispatch(self, config_id: str) -> None:
+        while not self._poll_stop.is_set():
+            with self._watch_lock:
+                paths = sorted(self._realtime_dispatch_paths.pop(config_id, set()))
+                if not paths:
+                    self._realtime_dispatching.discard(config_id)
+                    return
+            callback = self._realtime_callback
+            if not callback:
+                with self._watch_lock:
+                    self._realtime_dispatching.discard(config_id)
+                return
+            try:
+                result = callback(config_id, paths)
+            except Exception:
+                logger.exception("媒体增强 本地秒传：实时任务回调异常，配置=%s", config_id)
+                continue
+            retry_after_busy = (
+                isinstance(result, dict)
+                and "正在执行" in str(result.get("message") or "")
+            )
+            if isinstance(result, dict) and (result.get("queued") or retry_after_busy):
+                with self._watch_lock:
+                    self._realtime_dispatch_paths.setdefault(config_id, set()).update(paths)
+                if retry_after_busy:
+                    self._poll_stop.wait(2)
+        with self._watch_lock:
+            self._realtime_dispatching.discard(config_id)
 
     def refresh_realtime_watchers(self) -> None:
         self._stop_realtime_watchers()

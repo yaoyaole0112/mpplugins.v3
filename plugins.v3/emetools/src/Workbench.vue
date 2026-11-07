@@ -39,6 +39,7 @@ onUnmounted(() => { mobileQuery?.removeEventListener('change', syncMobileViewpor
 const p115Tasks = ref([])
 let p115PollTimer = null
 let disposed = false
+let rapidPollTimer = null
 const toast = reactive({ visible: false, text: '', kind: 'success' })
 let toastTimer = null
 function showToast(text, kind) {
@@ -462,6 +463,21 @@ async function loadRapid() {
   rapid.realtime_poll_seconds = result.realtime_poll_seconds || 30
   rapid.loaded = true
   savedRapidConfigs.value = JSON.stringify(rapid.configs)
+  scheduleRapidPoll()
+}
+async function pollRapidStatus() {
+  const result = await get('rapid/status')
+  rapid.logs.splice(0, rapid.logs.length, ...(result.logs || []))
+  rapid.running = result.running || ''
+  scheduleRapidPoll()
+}
+function scheduleRapidPoll() {
+  clearTimeout(rapidPollTimer)
+  if (active.value !== 'rapid' || disposed) return
+  rapidPollTimer = setTimeout(async () => {
+    try { await pollRapidStatus() }
+    catch { scheduleRapidPoll() }
+  }, 5000)
 }
 function addRapidConfig() {
   rapid.configs.push(newRapidConfig())
@@ -1252,6 +1268,7 @@ function chooseSection(key) {
   active.value = key
   if (key !== 'missing') { clearTimeout(missingPollTimer); clearTimeout(fillPollTimer) }
   if (key !== 'enrichment') clearTimeout(enrichmentPollTimer)
+  if (key !== 'rapid') clearTimeout(rapidPollTimer)
   toast.visible = false
   notice.value = ''
   error.value = ''
@@ -1261,7 +1278,7 @@ function chooseSection(key) {
   if (key === 'rapid') loadRapid().catch(err => { error.value = err?.message || '读取本地秒传配置失败' })
 }
 onMounted(() => { load(); loadMissing().catch(() => {}); pollP115Tasks() })
-onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer); clearTimeout(fillPollTimer); clearTimeout(enrichmentPollTimer); clearTimeout(toastTimer) })
+onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(mediaPollTimer); clearTimeout(missingPollTimer); clearTimeout(fillPollTimer); clearTimeout(enrichmentPollTimer); clearTimeout(rapidPollTimer); clearTimeout(toastTimer) })
 </script>
 
 <template>
