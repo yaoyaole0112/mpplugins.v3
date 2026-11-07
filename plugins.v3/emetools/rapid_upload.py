@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "media_extensions": "mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v",
     "failure_directory": "",
     "delete_source_on_success": False,
+    "upload_on_unmatched": False,
     "retry_limit": 2,
     "realtime_enabled": False,
     "cron_enabled": False,
@@ -64,6 +65,7 @@ def normalize_config(value: Any, index: int = 0) -> dict:
     result["media_extensions"] = _normalize_extensions(result.get("media_extensions"))
     result["failure_directory"] = str(result.get("failure_directory") or "").strip()
     result["delete_source_on_success"] = bool(result.get("delete_source_on_success"))
+    result["upload_on_unmatched"] = bool(result.get("upload_on_unmatched"))
     result["realtime_enabled"] = bool(result.get("realtime_enabled"))
     result["cron_enabled"] = bool(result.get("cron_enabled"))
     result["cron_expression"] = str(result.get("cron_expression") or "*/10 * * * *").strip()
@@ -523,6 +525,25 @@ class RapidUpload:
         shutil.move(str(path), str(destination))
         return str(destination)
 
+    def _upload_original(self, path: Path, config: dict):
+        target_path = str(config.get("target_folder_path") or "").strip()
+        if not target_path or target_path == "/":
+            raise ValueError("未保存115目标目录路径，请重新选择目标目录后再上传")
+        helper_config = self._owner.get_config("P115StrmHelper") if hasattr(self._owner, "get_config") else {}
+        storage_name = str((helper_config or {}).get("storage_module") or "u115")
+        try:
+            from app.chain.storage import StorageChain
+        except ImportError as error:
+            raise RuntimeError("MoviePilot 未提供 115 存储上传接口，无法执行普通上传") from error
+        storage = StorageChain()
+        target = storage.get_file_item(storage=storage_name, path=Path(target_path))
+        if not target or getattr(target, "type", "dir") != "dir":
+            raise RuntimeError(f"无法读取115目标目录：{target_path}")
+        uploaded = storage.upload_file(target, path, path.name)
+        if uploaded is None:
+            raise RuntimeError("115 普通上传未返回成功结果")
+        return uploaded
+
     def _append_log(self, config: dict, path: Path, status: str, message: str, size: int = 0, sha1: str = ""):
         self._logs.append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "timestamp": time.time(),
                            "config": config["name"],
@@ -559,6 +580,7 @@ class RapidUpload:
             return {"ok": True, "message": "未发现符合后缀的本地文件", "total": 0, "succeeded": [], "failed": []}
         self._running = config["name"]
         succeeded: list[dict] = []
+        uploaded: list[dict] = []
         skipped: list[dict] = []
         unmatched: list[dict] = []
         failed: list[dict] = []
@@ -593,11 +615,39 @@ class RapidUpload:
                     if not (response or {}).get("reuse") and status not in (1, 2):
                         raise RuntimeError(f"115 秒传初始化未完成（返回状态 {status}）")
                     if not (response or {}).get("reuse") and status == 1:
-                        message = "115 未命中（状态 1）：网盘中没有相同 SHA1 与大小的文件，未上传原文件"
                         item = {"path": str(path), "name": path.name, "size": size,
-                                "sha1": sha1, "message": message}
-                        unmatched.append(item)
-                        self._append_log(config, path, "unmatched", message, size, sha1)
+                                "sha1": sha1}
+                        if config["upload_on_unmatched"]:
+                            try:
+                                self._upload_original(path, config)
+                                message = "115 未命中，已改为普通上传成功"
+                                item["message"] = message
+                                succeeded.append(item)
+                                uploaded.append(item)
+                                self._remember_completed(config, path, sha1, size)
+                                self._append_log(config, path, "uploaded", message, size, sha1)
+                                if config["delete_source_on_success"]:
+                                    path.unlink()
+                            except Exception as error:
+                                message = f"115 未命中，普通上传失败：{type(error).__name__}：{str(error)[:140]}"
+                                moved = ""
+                                try:
+                                    if path.exists():
+                                        moved = self._move_failure(path, config)
+                                except Exception as move_error:
+                                    message += f"；失败目录移动失败：{type(move_error).__name__}"
+                                item["message"] = message
+                                if moved:
+                                    item["failure_path"] = moved
+                                failed.append(item)
+                                self._append_log(config, path, "failed", message, size, sha1)
+                                logger.warning("媒体增强 本地秒传普通上传失败：配置=%s 文件=%s 原因=%s：%s",
+                                               config["name"], path.name, type(error).__name__, str(error)[:160])
+                        else:
+                            message = "115 未命中（状态 1）：网盘中没有相同 SHA1 与大小的文件，未上传原文件"
+                            item["message"] = message
+                            unmatched.append(item)
+                            self._append_log(config, path, "unmatched", message, size, sha1)
                         continue
                     item = {"path": str(path), "name": path.name, "size": size, "sha1": sha1}
                     succeeded.append(item)
@@ -625,10 +675,11 @@ class RapidUpload:
                 "ok": not failed,
                 "message": (
                     f"本轮检查 {len(source_files)} 个文件，成功 {len(succeeded)} 个，"
-                    f"已处理跳过 {len(skipped)} 个，未命中 {len(unmatched)} 个，失败 {len(failed)} 个"
+                    f"其中普通上传 {len(uploaded)} 个，已处理跳过 {len(skipped)} 个，"
+                    f"未命中 {len(unmatched)} 个，失败 {len(failed)} 个"
                 ),
                 "total": len(source_files), "succeeded": succeeded, "skipped": skipped,
-                "unmatched": unmatched, "failed": failed,
+                "uploaded": uploaded, "unmatched": unmatched, "failed": failed,
             }
         finally:
             close = getattr(client, "close", None)

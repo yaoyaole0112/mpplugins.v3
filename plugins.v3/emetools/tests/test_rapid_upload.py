@@ -49,6 +49,7 @@ class RapidUploadTests(unittest.TestCase):
         self.assertEqual(config["media_extensions"], "mp4,mkv")
         self.assertEqual(config["retry_limit"], 2)
         self.assertFalse(config["realtime_enabled"])
+        self.assertFalse(config["upload_on_unmatched"])
         self.assertEqual(validate_configs([config])[0]["id"], config["id"])
 
     def test_run_hashes_only_matching_files_and_reports_success(self):
@@ -123,6 +124,48 @@ class RapidUploadTests(unittest.TestCase):
             self.assertTrue(media.exists())
             self.assertEqual(result["unmatched"][0]["size"], media.stat().st_size)
             self.assertEqual(rapid.status()["logs"][0]["size"], media.stat().st_size)
+
+    def test_unmatched_file_can_fall_back_to_normal_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "movie.mp4"
+            media.write_bytes(b"not-found")
+            config = normalize_config({"id": "rapid_1", "name": "电影", "source_path": str(root),
+                                       "target_folder_id": "123", "target_folder_path": "/电影",
+                                       "media_extensions": "mp4", "upload_on_unmatched": True})
+            client = FakeClient({"status": 1, "reuse": False})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            with patch.object(rapid, "_p115_client", return_value=client), \
+                    patch.object(rapid, "_upload_original", return_value=object()) as upload:
+                result = rapid.run("rapid_1")
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(result["unmatched"]), 0)
+            self.assertEqual(len(result["uploaded"]), 1)
+            upload.assert_called_once_with(media, config)
+            self.assertEqual(rapid.status()["logs"][0]["status"], "uploaded")
+            self.assertIn("普通上传成功", rapid.status()["logs"][0]["message"])
+            self.assertTrue(media.exists())
+
+    def test_unmatched_normal_upload_failure_uses_failure_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            failure = root.parent / f"{root.name}-failure"
+            media = root / "movie.mp4"
+            media.write_bytes(b"not-found")
+            config = normalize_config({"id": "rapid_1", "name": "电影", "source_path": str(root),
+                                       "target_folder_id": "123", "target_folder_path": "/电影",
+                                       "failure_directory": str(failure), "media_extensions": "mp4",
+                                       "upload_on_unmatched": True})
+            client = FakeClient({"status": 1, "reuse": False})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            with patch.object(rapid, "_p115_client", return_value=client), \
+                    patch.object(rapid, "_upload_original", side_effect=RuntimeError("upload failed")):
+                result = rapid.run("rapid_1")
+            self.assertFalse(result["ok"])
+            self.assertEqual(len(result["failed"]), 1)
+            self.assertFalse(media.exists())
+            self.assertTrue((failure / media.name).exists())
+            self.assertEqual(rapid.status()["logs"][0]["status"], "failed")
 
     def test_successful_files_are_not_uploaded_again_by_later_scans(self):
         with tempfile.TemporaryDirectory() as directory:
