@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+from threading import Thread
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
@@ -107,7 +108,7 @@ class ForumRssQb(_PluginBase):
     plugin_name = "论坛 RSS 种子下载"
     plugin_desc = "读取论坛 RSS，登录帖子提取 .torrent 附件并交给 qBittorrent。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "helios"
     author_url = ""
     plugin_config_prefix = "forumrssqb_"
@@ -134,7 +135,11 @@ class ForumRssQb(_PluginBase):
         if self._only_once:
             self._only_once = False
             self._save_config()
-            self.run()
+            Thread(
+                target=self.run,
+                name="forum-rss-qb-once",
+                daemon=True,
+            ).start()
 
     def get_state(self) -> bool:
         return self._enabled
