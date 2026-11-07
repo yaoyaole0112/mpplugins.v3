@@ -107,8 +107,8 @@ class ForumRssQb(_PluginBase):
     plugin_name = "论坛 RSS 种子下载"
     plugin_desc = "读取论坛 RSS，登录帖子提取 .torrent 附件并交给 qBittorrent。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.0.1"
-    plugin_author = "local"
+    plugin_version = "1.0.2"
+    plugin_author = "helios"
     author_url = ""
     plugin_config_prefix = "forumrssqb_"
     plugin_order = 50

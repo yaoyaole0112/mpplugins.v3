@@ -588,14 +588,15 @@
     "name": "论坛 RSS 种子下载",
     "description": "读取论坛 RSS，登录帖子提取 .torrent 附件并交给 qBittorrent。",
     "labels": "RSS,下载,qBittorrent",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "https://raw.githubusercontent.com/MoviePilot/v3/docs/images/moviepilot.png",
-    "author": "local",
+    "author": "helios",
     "project_url": "",
     "release": true,
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.2": "更新插件作者信息为 helios。",
       "v1.0.1": "补齐 MoviePilot 插件基类要求的 stop_service 实现，修复插件无法实例化的问题。",
       "v1.0.0": "首版：轮询 RSS，使用论坛 Cookie 抓取帖子附件，校验种子文件后上传至 qBittorrent，并按附件 URL 去重。"
     }
