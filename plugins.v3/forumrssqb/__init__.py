@@ -107,7 +107,7 @@ class ForumRssQb(_PluginBase):
     plugin_name = "论坛 RSS 种子下载"
     plugin_desc = "读取论坛 RSS，登录帖子提取 .torrent 附件并交给 qBittorrent。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "forumrssqb_"
@@ -138,6 +138,10 @@ class ForumRssQb(_PluginBase):
 
     def get_state(self) -> bool:
         return self._enabled
+
+    def stop_service(self) -> None:
+        """The host owns the public scheduler; there is no private worker to stop."""
+        return None
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
