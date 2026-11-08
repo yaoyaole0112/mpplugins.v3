@@ -45,7 +45,7 @@ class MaoyanRank(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/baozaodetudou/MoviePilot-Plugins/main/icons/maoyan.jpg"
     # 插件版本
-    plugin_version = "4.2.1"
+    plugin_version = "4.2.2"
     # 插件作者
     plugin_author = "逗猫"
     # 作者主页
@@ -1210,7 +1210,7 @@ class MaoyanRank(_PluginBase):
         """在猫眼网页的 H5Guard 环境中请求加密接口。"""
         separator = "&" if "?" in path else "?"
         request_path = (
-            f"{path}{separator}yodaReady=h5&csecplatform=4&csecversion=4.3.0"
+            f"/i/api{path}{separator}yodaReady=h5&csecplatform=4&csecversion=4.3.0"
         )
         result = None
         for attempt in range(3):
@@ -1218,12 +1218,19 @@ class MaoyanRank(_PluginBase):
                 result = page.evaluate(
                     """
                     async ({url}) => {
+                      const meta = name =>
+                        document.querySelector(`meta[name="${name}"]`)?.getAttribute('content') || '';
+                      const headers = {Accept: 'application/json, text/plain, */*'};
+                      const uid = meta('csrf');
+                      const deviceId = meta('deviceId');
+                      const channelId = meta('channelId');
+                      if (uid) headers.uid = uid;
+                      if (deviceId) headers.uuid = deviceId;
+                      if (channelId) headers.channelId = channelId;
                       let lastError = '';
                       for (let attempt = 0; attempt < 4; attempt += 1) {
                         try {
-                          const response = await fetch(url, {
-                            headers: {Accept: 'application/json, text/plain, */*'}
-                          });
+                          const response = await fetch(url, {headers});
                           const text = await response.text();
                           if (response.ok && text.trim()) {
                             return {
