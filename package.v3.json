@@ -462,7 +462,7 @@
     "name": "猫眼榜单订阅",
     "description": "监控猫眼电影票房、网播热度、综艺和网络电影榜单，自动添加订阅。",
     "labels": "榜单,订阅",
-    "version": "4.2.0",
+    "version": "4.2.1",
     "icon": "https://raw.githubusercontent.com/baozaodetudou/MoviePilot-Plugins/main/icons/maoyan.jpg",
     "author": "逗猫 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -470,6 +470,7 @@
     "system_version": ">=3.0.0",
     "level": 1,
     "history": {
+      "v4.2.1": "修正猫眼网播与网络电影榜单接口路径，导航导致浏览器上下文销毁时自动重试",
       "v4.2.0": "适配猫眼 H5Guard 加密榜单接口，修复网播与网络电影榜单 403/空响应导致的 JSON 解析失败",
       "v4.1.0": "适配 MoviePilot V3 媒体身份与浏览器接口"
     }

@@ -45,7 +45,7 @@ class MaoyanRank(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/baozaodetudou/MoviePilot-Plugins/main/icons/maoyan.jpg"
     # 插件版本
-    plugin_version = "4.2.0"
+    plugin_version = "4.2.1"
     # 插件作者
     plugin_author = "逗猫"
     # 作者主页
@@ -1212,34 +1212,45 @@ class MaoyanRank(_PluginBase):
         request_path = (
             f"{path}{separator}yodaReady=h5&csecplatform=4&csecversion=4.3.0"
         )
-        result = page.evaluate(
-            """
-            async ({url}) => {
-              let lastError = '';
-              for (let attempt = 0; attempt < 4; attempt += 1) {
-                try {
-                  const response = await fetch(url, {
-                    headers: {Accept: 'application/json, text/plain, */*'}
-                  });
-                  const text = await response.text();
-                  if (response.ok && text.trim()) {
-                    return {
-                      status: response.status,
-                      contentType: response.headers.get('content-type') || '',
-                      text
-                    };
-                  }
-                  lastError = `HTTP ${response.status}`;
-                } catch (error) {
-                  lastError = String(error);
-                }
-                await new Promise(resolve => setTimeout(resolve, 1000));
-              }
-              return {status: 0, contentType: '', text: '', error: lastError};
-            }
-            """,
-            {"url": request_path},
-        )
+        result = None
+        for attempt in range(3):
+            try:
+                result = page.evaluate(
+                    """
+                    async ({url}) => {
+                      let lastError = '';
+                      for (let attempt = 0; attempt < 4; attempt += 1) {
+                        try {
+                          const response = await fetch(url, {
+                            headers: {Accept: 'application/json, text/plain, */*'}
+                          });
+                          const text = await response.text();
+                          if (response.ok && text.trim()) {
+                            return {
+                              status: response.status,
+                              contentType: response.headers.get('content-type') || '',
+                              text
+                            };
+                          }
+                          lastError = `HTTP ${response.status}`;
+                        } catch (error) {
+                          lastError = String(error);
+                        }
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                      }
+                      return {status: 0, contentType: '', text: '', error: lastError};
+                    }
+                    """,
+                    {"url": request_path},
+                )
+                break
+            except Exception as err:
+                if "execution context was destroyed" not in str(err).lower() or attempt == 2:
+                    raise
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
         if not result or result.get("status") != 200:
             detail = (result or {}).get("error") or f"HTTP {(result or {}).get('status', 0)}"
             raise RuntimeError(f"{source_name} 请求失败（{detail}）")
@@ -1298,7 +1309,7 @@ class MaoyanRank(_PluginBase):
                     for platform_type, platform_name in platform_names.items():
                         try:
                             path = (
-                                "/i/api/encrypt/dashboard/webHeatNetData"
+                                "/encrypt/dashboard/webHeatNetData"
                                 f"?showDate={network_date}&platformType={platform_type}"
                                 "&dateType=0&rankType=0"
                             )
@@ -1318,7 +1329,7 @@ class MaoyanRank(_PluginBase):
                                 if not last_date:
                                     continue
                                 path = (
-                                    "/i/api/encrypt/dashboard/webHeatNetData"
+                                    "/encrypt/dashboard/webHeatNetData"
                                     f"?showDate={last_date}&platformType={platform_type}"
                                     "&dateType=0&rankType=0"
                                 )
@@ -1343,7 +1354,7 @@ class MaoyanRank(_PluginBase):
                         series_type = query.get("seriesType", [""])[0]
                         platform_type = query.get("platformType", [""])[0] or "0"
                         path = (
-                            "/i/api/encrypt/dashboard/webHeatData"
+                            "/encrypt/dashboard/webHeatData"
                             f"?showDate={current_date}&seriesType={series_type}"
                             f"&platformType={platform_type}"
                         )
