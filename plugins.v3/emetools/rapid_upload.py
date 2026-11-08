@@ -254,11 +254,15 @@ class RapidUpload:
                 return
             self._realtime_dispatching.add(config_id)
         worker = threading.Thread(target=self._drain_realtime_dispatch,
-                                  args=(config_id,), name=f"emetools-rapid-{config_id}", daemon=True)
+                                  args=(config_id, self._poll_stop),
+                                  name=f"emetools-rapid-{config_id}", daemon=True)
         worker.start()
 
-    def _drain_realtime_dispatch(self, config_id: str) -> None:
-        while not self._poll_stop.is_set():
+    def _drain_realtime_dispatch(self, config_id: str,
+                                 stop_event: threading.Event | None = None) -> None:
+        stop_event = stop_event or self._poll_stop
+        retry_delay = 2
+        while not stop_event.is_set():
             with self._watch_lock:
                 paths = sorted(self._realtime_dispatch_paths.pop(config_id, set()))
                 if not paths:
@@ -273,16 +277,25 @@ class RapidUpload:
                 result = callback(config_id, paths)
             except Exception:
                 logger.exception("媒体增强 本地秒传：实时任务回调异常，配置=%s", config_id)
+                with self._watch_lock:
+                    self._realtime_dispatch_paths.setdefault(config_id, set()).update(paths)
+                stop_event.wait(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
                 continue
             retry_after_busy = (
                 isinstance(result, dict)
                 and "正在执行" in str(result.get("message") or "")
             )
-            if isinstance(result, dict) and (result.get("queued") or retry_after_busy):
+            retryable = isinstance(result, dict) and result.get("retryable")
+            if isinstance(result, dict) and (result.get("queued") or retry_after_busy or retryable):
                 with self._watch_lock:
                     self._realtime_dispatch_paths.setdefault(config_id, set()).update(paths)
-                if retry_after_busy:
-                    self._poll_stop.wait(2)
+                if result.get("queued") or retry_after_busy or retryable:
+                    stop_event.wait(retry_delay if retryable else 2)
+                if retryable:
+                    retry_delay = min(retry_delay * 2, 60)
+            else:
+                retry_delay = 2
         with self._watch_lock:
             self._realtime_dispatching.discard(config_id)
 
@@ -316,8 +329,9 @@ class RapidUpload:
         plugin = self
 
         for config, path in folders:
-            self._poll_snapshots[config["id"]] = self._directory_snapshot(path, config["media_extensions"])
+            self._poll_snapshots[config["id"]] = {}
             self._realtime_watched.append(config["id"])
+        baseline_started_ns = time.time_ns()
         observer = None
         if Observer is not None and FileSystemEventHandler is not None:
             class Handler(FileSystemEventHandler):
@@ -364,18 +378,24 @@ class RapidUpload:
             logger.warning("媒体增强 本地秒传：%s", self._realtime_error)
 
         self._poll_thread = threading.Thread(target=self._poll_realtime_directories,
+                                             args=(folders, self._poll_stop, baseline_started_ns),
                                              name="emetools-rapid-poll", daemon=True)
         self._poll_thread.start()
-        logger.info("媒体增强 本地秒传：监控已就绪，目录=%d，差异轮询间隔=%d秒",
-                    len(folders), self._REALTIME_POLL_SECONDS)
+        logger.info("媒体增强 本地秒传：监控已启动，目录=%d，正在后台建立目录基线",
+                    len(folders))
 
     @staticmethod
-    def _directory_snapshot(root: Path, extensions: str) -> dict[str, tuple[int, int]]:
+    def _directory_snapshot(root: Path, extensions: str,
+                            stop_event: threading.Event | None = None) -> dict[str, tuple[int, int]]:
         allowed = {f".{item}" for item in extensions.split(",") if item}
         snapshot = {}
         for directory, dirnames, filenames in os.walk(root, followlinks=False):
+            if stop_event and stop_event.is_set():
+                break
             dirnames[:] = [name for name in dirnames if not (Path(directory) / name).is_symlink()]
             for name in filenames:
+                if stop_event and stop_event.is_set():
+                    break
                 path = Path(directory) / name
                 if path.is_symlink() or path.suffix.lower() not in allowed:
                     continue
@@ -386,21 +406,71 @@ class RapidUpload:
                 snapshot[str(path)] = (stat.st_size, stat.st_mtime_ns)
         return snapshot
 
-    def _poll_realtime_directories(self) -> None:
-        while not self._poll_stop.wait(self._REALTIME_POLL_SECONDS):
-            self._poll_realtime_once()
+    def _poll_realtime_directories(self, folders=None,
+                                   stop_event: threading.Event | None = None,
+                                   baseline_started_ns: int | None = None) -> None:
+        stop_event = stop_event or self._poll_stop
+        baseline_started_ns = baseline_started_ns or time.time_ns()
+        folders = folders or [
+            (config, Path(config["source_path"]))
+            for config in self._configs
+            if config.get("realtime_enabled") and config.get("source_path")
+            and config["id"] in self._poll_snapshots
+        ]
+        started = time.monotonic()
+        created_during_startup = []
+        for config, path in folders:
+            if stop_event.is_set():
+                return
+            try:
+                snapshot = self._directory_snapshot(
+                    path, config["media_extensions"], stop_event
+                )
+            except OSError as error:
+                logger.warning("媒体增强 本地秒传：初始目录快照失败，配置=%s，原因=%s",
+                               config["name"], type(error).__name__)
+                continue
+            if stop_event.is_set():
+                return
+            self._poll_snapshots[config["id"]] = snapshot
+            created_during_startup.extend(
+                (config["id"], item_path)
+                for item_path, signature in snapshot.items()
+                if signature[1] >= baseline_started_ns
+            )
+        if stop_event.is_set():
+            return
+        logger.info("媒体增强 本地秒传：后台目录基线完成，目录=%d，媒体文件=%d，耗时=%.1f秒",
+                    len(folders), sum(len(items) for items in self._poll_snapshots.values()),
+                    time.monotonic() - started)
+        for config_id, path in created_during_startup:
+            if stop_event.is_set():
+                return
+            self._queue_realtime_event(config_id, path)
+        if created_during_startup:
+            logger.info("媒体增强 本地秒传：启动期间发现新增或变更文件=%d，已补入实时队列",
+                        len(created_during_startup))
+        while not stop_event.wait(self._REALTIME_POLL_SECONDS):
+            self._poll_realtime_once(stop_event)
 
-    def _poll_realtime_once(self) -> None:
+    def _poll_realtime_once(self, stop_event: threading.Event | None = None) -> None:
+        stop_event = stop_event or self._poll_stop
         for config in self._configs:
+            if stop_event.is_set():
+                return
             config_id = config["id"]
             if not config.get("realtime_enabled") or config_id not in self._poll_snapshots:
                 continue
             try:
-                current = self._directory_snapshot(Path(config["source_path"]), config["media_extensions"])
+                current = self._directory_snapshot(
+                    Path(config["source_path"]), config["media_extensions"], stop_event
+                )
             except OSError as error:
                 logger.warning("媒体增强 本地秒传：实时轮询目录失败，配置=%s，原因=%s",
                                config["name"], type(error).__name__)
                 continue
+            if stop_event.is_set():
+                return
             previous = self._poll_snapshots.get(config_id, {})
             changed = [path for path, signature in current.items() if previous.get(path) != signature]
             self._poll_snapshots[config_id] = current
@@ -572,10 +642,24 @@ class RapidUpload:
             raise ValueError("请先填写本地源目录")
         if not config["target_folder_id"]:
             raise ValueError("请先选择 115 目标目录")
-        source_files = self._iter_files(config["source_path"], config["media_extensions"])
         if paths:
-            requested = {os.path.realpath(path) for path in paths}
-            source_files = [path for path in source_files if os.path.realpath(path) in requested]
+            root = Path(config["source_path"])
+            if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+                raise ValueError("本地源目录不存在或不是可读取目录")
+            allowed = {f".{item}" for item in config["media_extensions"].split(",") if item}
+            source_root = root.resolve()
+            source_files = []
+            for requested_path in dict.fromkeys(os.path.realpath(path) for path in paths):
+                path = Path(requested_path)
+                try:
+                    path.resolve().relative_to(source_root)
+                except (OSError, ValueError):
+                    continue
+                if path.is_file() and not path.is_symlink() and path.suffix.lower() in allowed:
+                    source_files.append(path)
+            source_files.sort(key=lambda item: str(item).lower())
+        else:
+            source_files = self._iter_files(config["source_path"], config["media_extensions"])
         if not source_files:
             return {"ok": True, "message": "未发现符合后缀的本地文件", "total": 0, "succeeded": [], "failed": []}
         self._running = config["name"]

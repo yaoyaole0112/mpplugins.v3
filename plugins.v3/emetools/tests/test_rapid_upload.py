@@ -1,5 +1,6 @@
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -193,6 +194,99 @@ class RapidUploadTests(unittest.TestCase):
         state = rapid.status()
         self.assertEqual(state["realtime_watched_configs"], [])
         self.assertEqual(state["realtime_unwatched"][0]["reason"], "未设置本地源目录")
+
+    def test_realtime_initial_snapshot_does_not_block_plugin_startup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = normalize_config({"id": "rapid_1", "name": "电视剧", "source_path": str(root),
+                                       "media_extensions": "mkv", "realtime_enabled": True})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            snapshot_started = threading.Event()
+            release_snapshot = threading.Event()
+            snapshot = {str(root / "existing.mkv"): (3, 1)}
+
+            def slow_snapshot(*_args, **_kwargs):
+                snapshot_started.set()
+                release_snapshot.wait(timeout=2)
+                return snapshot
+
+            with patch("emetools.rapid_upload.Observer", None), \
+                    patch("emetools.rapid_upload.FileSystemEventHandler", None), \
+                    patch.object(RapidUpload, "_directory_snapshot", side_effect=slow_snapshot):
+                started = time.monotonic()
+                rapid.refresh_realtime_watchers()
+                elapsed = time.monotonic() - started
+                self.assertLess(elapsed, 0.5)
+                self.assertTrue(snapshot_started.wait(timeout=1))
+                self.assertEqual(rapid._poll_snapshots["rapid_1"], {})
+                release_snapshot.set()
+                deadline = time.monotonic() + 2
+                while rapid._poll_snapshots["rapid_1"] != snapshot and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(rapid._poll_snapshots["rapid_1"], snapshot)
+            rapid.close()
+
+    def test_initial_snapshot_queues_files_created_while_baseline_is_scanning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = normalize_config({"id": "rapid_1", "name": "电视剧", "source_path": str(root),
+                                       "media_extensions": "mkv", "realtime_enabled": True})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            stop_event = threading.Event()
+            new_file = str(root / "created-during-scan.mkv")
+            signature = (10, time.time_ns())
+            rapid._poll_snapshots["rapid_1"] = {}
+            with patch.object(RapidUpload, "_directory_snapshot", return_value={new_file: signature}), \
+                    patch.object(rapid, "_queue_realtime_event",
+                                 side_effect=lambda *_args: stop_event.set()) as queue:
+                rapid._poll_realtime_directories(
+                    [(config, root)], stop_event, baseline_started_ns=signature[1] - 1
+                )
+            queue.assert_called_once_with("rapid_1", new_file)
+            rapid.close()
+
+    def test_realtime_dispatch_preserves_paths_after_callback_exception(self):
+        config = normalize_config({"id": "rapid_1", "name": "电视剧", "realtime_enabled": True})
+        rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+        first_attempt = threading.Event()
+        second_attempt = threading.Event()
+        attempts = []
+
+        def callback(config_id, paths):
+            attempts.append((config_id, paths))
+            if len(attempts) == 1:
+                first_attempt.set()
+                raise RuntimeError("temporary failure")
+            second_attempt.set()
+            return {"ok": True}
+
+        rapid._realtime_callback = callback
+        rapid._realtime_dispatch_paths["rapid_1"] = {"/source/new.mkv"}
+        rapid._realtime_dispatching.add("rapid_1")
+        rapid._drain_realtime_dispatch("rapid_1", rapid._poll_stop)
+        self.assertTrue(first_attempt.is_set())
+        self.assertTrue(second_attempt.is_set())
+        self.assertEqual(attempts, [
+            ("rapid_1", ["/source/new.mkv"]),
+            ("rapid_1", ["/source/new.mkv"]),
+        ])
+        rapid.close()
+
+    def test_realtime_specific_path_run_does_not_walk_entire_source_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "episode.mkv"
+            media.write_bytes(b"rapid-upload-test")
+            config = normalize_config({"id": "rapid_1", "name": "电视剧", "source_path": str(root),
+                                       "target_folder_id": "123", "media_extensions": "mkv"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            client = FakeClient({"status": 2, "reuse": True})
+            with patch.object(rapid, "_p115_client", return_value=client), \
+                    patch.object(RapidUpload, "_iter_files",
+                                 side_effect=AssertionError("realtime path scan walked the whole tree")):
+                result = rapid.run("rapid_1", [str(media)])
+            self.assertEqual(result["total"], 1)
+            self.assertEqual(result["succeeded"][0]["path"], str(media))
 
     def test_realtime_snapshot_detects_new_and_changed_files(self):
         with tempfile.TemporaryDirectory() as directory:
