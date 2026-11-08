@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
 }
 
 _RANGE_PATTERN = re.compile(r"(?<!\d)(\d+)\s*[-:]\s*(\d+)(?!\d)")
+_FILE_SIGNATURE_FIELDS = ("device", "inode", "size", "mtime_ns", "ctime_ns")
 
 
 def _normalize_extensions(value: Any) -> str:
@@ -107,8 +108,11 @@ def validate_configs(values: Any) -> list[dict]:
 
 class RapidUpload:
     _DATA_KEY = "rapid_upload_completed"
+    _HASH_CACHE_KEY = "rapid_upload_hash_cache"
     _LOG_KEY = "rapid_upload_logs"
-    _REALTIME_POLL_SECONDS = 30
+    _REALTIME_POLL_SECONDS = 300
+    _HASH_CACHE_LIMIT = 20000
+    _HASH_CACHE_SAVE_INTERVAL = 50
 
     def __init__(self, owner, saved: Any = None):
         self._owner = owner
@@ -123,6 +127,7 @@ class RapidUpload:
             owner.save_data(self._LOG_KEY, self._logs)
         self._running: str | None = None
         self._observer = None
+        self._observer_monitor_thread = None
         self._poll_thread = None
         self._poll_stop = threading.Event()
         self._poll_snapshots: dict[str, dict[str, tuple[int, int]]] = {}
@@ -138,6 +143,9 @@ class RapidUpload:
         self._realtime_unwatched: list[dict] = []
         saved_completed = owner.get_data(self._DATA_KEY) if hasattr(owner, "get_data") else {}
         self._completed = dict(saved_completed) if isinstance(saved_completed, dict) else {}
+        saved_hashes = owner.get_data(self._HASH_CACHE_KEY) if hasattr(owner, "get_data") else {}
+        self._hash_cache = dict(saved_hashes) if isinstance(saved_hashes, dict) else {}
+        self._hash_cache_dirty = 0
 
     @property
     def configs(self) -> list[dict]:
@@ -157,11 +165,17 @@ class RapidUpload:
             activity = sorted(self._activity.values(),
                               key=lambda item: item.get("timestamp", 0), reverse=True)
             activity_total = len(activity)
+            realtime_mode = (
+                "event" if self._observer is not None
+                else "polling" if self._poll_thread is not None
+                else "off"
+            )
         return {"configs": [dict(item) for item in self._configs],
                 "logs": [dict(item) for item in self._logs[-200:]],
                 "activity": activity[:500],
                 "activity_total": activity_total,
                 "running": self._running or "",
+                "realtime_mode": realtime_mode,
                 "realtime_available": Observer is not None and FileSystemEventHandler is not None,
                 "realtime_watched_configs": list(self._realtime_watched),
                 "realtime_error": self._realtime_error,
@@ -183,12 +197,17 @@ class RapidUpload:
             self._activity.clear()
             observer = self._observer
             self._observer = None
+            observer_monitor_thread = self._observer_monitor_thread
+            self._observer_monitor_thread = None
             poll_thread = self._poll_thread
             self._poll_thread = None
             self._poll_stop.set()
         if observer is not None:
             observer.stop()
             observer.join(timeout=5)
+        if (observer_monitor_thread and observer_monitor_thread.is_alive()
+                and observer_monitor_thread is not threading.current_thread()):
+            observer_monitor_thread.join(timeout=5)
         if poll_thread and poll_thread.is_alive() and poll_thread is not threading.current_thread():
             poll_thread.join(timeout=5)
 
@@ -407,7 +426,6 @@ class RapidUpload:
         for config, path in folders:
             self._poll_snapshots[config["id"]] = {}
             self._realtime_watched.append(config["id"])
-        baseline_started_ns = time.time_ns()
         observer = None
         if Observer is not None and FileSystemEventHandler is not None:
             class Handler(FileSystemEventHandler):
@@ -442,23 +460,62 @@ class RapidUpload:
                 if not observer.is_alive():
                     raise RuntimeError("目录事件监控线程未能运行")
                 self._observer = observer
-                logger.info("媒体增强 本地秒传：目录事件监控已启动，共 %d 个目录", len(folders))
+                self._observer_monitor_thread = threading.Thread(
+                    target=self._monitor_observer,
+                    args=(observer, folders, self._poll_stop),
+                    name="emetools-rapid-watchdog-health",
+                    daemon=True,
+                )
+                self._observer_monitor_thread.start()
+                logger.info("媒体增强 本地秒传：目录事件监控已启动，共 %d 个目录；使用事件驱动，不执行全目录轮询",
+                            len(folders))
+                return
             except Exception as error:
-                self._realtime_error = f"目录事件不可用（{type(error).__name__}），由 {self._REALTIME_POLL_SECONDS} 秒轮询兜底"
+                if self._observer is observer:
+                    self._observer = None
+                self._realtime_error = (
+                    f"目录事件不可用（{type(error).__name__}），改由每 {self._REALTIME_POLL_SECONDS} 秒低频扫描兜底"
+                )
                 logger.warning("媒体增强 本地秒传：%s", self._realtime_error)
                 if observer is not None:
                     observer.stop()
                     observer.join(timeout=5)
         else:
-            self._realtime_error = f"watchdog 不可用，由 {self._REALTIME_POLL_SECONDS} 秒轮询兜底"
+            self._realtime_error = (
+                f"watchdog 不可用，改由每 {self._REALTIME_POLL_SECONDS} 秒低频扫描兜底"
+            )
             logger.warning("媒体增强 本地秒传：%s", self._realtime_error)
 
         self._poll_thread = threading.Thread(target=self._poll_realtime_directories,
-                                             args=(folders, self._poll_stop, baseline_started_ns),
+                                             args=(folders, self._poll_stop, time.time_ns()),
                                              name="emetools-rapid-poll", daemon=True)
         self._poll_thread.start()
-        logger.info("媒体增强 本地秒传：监控已启动，目录=%d，正在后台建立目录基线",
+        logger.info("媒体增强 本地秒传：低频兜底监控已启动，目录=%d；首次建立目录基线可能较慢",
                     len(folders))
+
+    def _monitor_observer(self, observer, folders, stop_event: threading.Event) -> None:
+        while not stop_event.wait(30):
+            try:
+                if observer.is_alive():
+                    continue
+            except Exception:
+                pass
+            with self._watch_lock:
+                if self._observer is not observer or stop_event.is_set():
+                    return
+                self._observer = None
+                self._realtime_error = (
+                    f"目录事件监控意外停止，改由每 {self._REALTIME_POLL_SECONDS} 秒低频扫描兜底"
+                )
+            logger.warning("媒体增强 本地秒传：%s", self._realtime_error)
+            self._poll_thread = threading.Thread(
+                target=self._poll_realtime_directories,
+                args=(folders, stop_event, time.time_ns()),
+                name="emetools-rapid-poll",
+                daemon=True,
+            )
+            self._poll_thread.start()
+            return
 
     @staticmethod
     def _directory_snapshot(root: Path, extensions: str,
@@ -630,6 +687,45 @@ class RapidUpload:
         return digest.hexdigest().upper(), size
 
     @staticmethod
+    def _file_signature(stat_result: os.stat_result) -> dict[str, int]:
+        return {
+            "device": int(getattr(stat_result, "st_dev", 0)),
+            "inode": int(getattr(stat_result, "st_ino", 0)),
+            "size": int(stat_result.st_size),
+            "mtime_ns": int(getattr(stat_result, "st_mtime_ns", stat_result.st_mtime * 1_000_000_000)),
+            "ctime_ns": int(getattr(stat_result, "st_ctime_ns", stat_result.st_ctime * 1_000_000_000)),
+        }
+
+    @staticmethod
+    def _signature_matches(record: dict | None, signature: dict[str, int]) -> bool:
+        saved = record.get("signature") if isinstance(record, dict) else None
+        return (isinstance(saved, dict)
+                and all(saved.get(field) == signature[field] for field in _FILE_SIGNATURE_FIELDS))
+
+    def _cache_hash(self, key: str, sha1: str, size: int,
+                    signature: dict[str, int]) -> None:
+        self._hash_cache[key] = {
+            "sha1": sha1,
+            "size": size,
+            "signature": dict(signature),
+        }
+        if len(self._hash_cache) > self._HASH_CACHE_LIMIT:
+            self._hash_cache = dict(list(self._hash_cache.items())[-self._HASH_CACHE_LIMIT:])
+        self._hash_cache_dirty += 1
+        if self._hash_cache_dirty >= self._HASH_CACHE_SAVE_INTERVAL:
+            self._flush_hash_cache()
+
+    def _flush_hash_cache(self) -> None:
+        if not self._hash_cache_dirty:
+            return
+        try:
+            if hasattr(self._owner, "save_data"):
+                self._owner.save_data(self._HASH_CACHE_KEY, dict(self._hash_cache))
+            self._hash_cache_dirty = 0
+        except Exception as error:
+            logger.warning("媒体增强 本地秒传：SHA1 缓存写入失败（%s）", type(error).__name__)
+
+    @staticmethod
     def _range_hash(path: Path, sign_check: Any) -> str:
         match = _RANGE_PATTERN.search(str(sign_check or ""))
         if match:
@@ -747,9 +843,15 @@ class RapidUpload:
         if hasattr(self._owner, "save_data"):
             self._owner.save_data(self._LOG_KEY, list(self._logs))
 
-    def _remember_completed(self, config: dict, path: Path, sha1: str, size: int) -> None:
+    def _remember_completed(self, config: dict, path: Path, sha1: str, size: int,
+                            signature: dict[str, int]) -> None:
         key = f"{config['id']}:{path.resolve()}"
-        self._completed[key] = {"sha1": sha1, "size": size, "target": config["target_folder_id"]}
+        self._completed[key] = {
+            "sha1": sha1,
+            "size": size,
+            "target": config["target_folder_id"],
+            "signature": dict(signature),
+        }
         if len(self._completed) > 20000:
             self._completed = dict(list(self._completed.items())[-20000:])
         if hasattr(self._owner, "save_data"):
@@ -810,16 +912,36 @@ class RapidUpload:
             for path in source_files:
                 size = 0
                 sha1 = ""
-                self._set_activity(config, str(path), "processing", "正在计算 SHA1")
+                self._set_activity(config, str(path), "processing", "正在检查文件状态与缓存")
                 try:
                     before = path.stat()
-                    sha1, size = self._sha1(path)
-                    after = path.stat()
-                    if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
-                        raise RuntimeError("文件在计算 SHA1 期间发生变化，已跳过")
-                    completed = self._completed.get(f"{config['id']}:{path.resolve()}")
+                    signature = self._file_signature(before)
+                    key = f"{config['id']}:{path.resolve()}"
+                    completed = self._completed.get(key)
+                    if (completed and completed.get("target") == config["target_folder_id"]
+                            and completed.get("size") == signature["size"]
+                            and self._signature_matches(completed, signature)):
+                        sha1 = str(completed.get("sha1") or "")
+                        size = signature["size"]
+                        skipped.append({"path": str(path), "name": path.name, "size": size, "sha1": sha1})
+                        continue
+                    cached_hash = self._hash_cache.get(key)
+                    if (cached_hash and cached_hash.get("size") == signature["size"]
+                            and self._signature_matches(cached_hash, signature)):
+                        sha1 = str(cached_hash.get("sha1") or "")
+                        size = signature["size"]
+                        if not sha1:
+                            cached_hash = None
+                    if not cached_hash or not sha1:
+                        self._set_activity(config, str(path), "processing", "正在计算 SHA1", signature["size"])
+                        sha1, size = self._sha1(path)
+                        after_signature = self._file_signature(path.stat())
+                        if signature != after_signature:
+                            raise RuntimeError("文件在计算 SHA1 期间发生变化，已跳过")
+                        self._cache_hash(key, sha1, size, signature)
                     if (completed and completed.get("sha1") == sha1 and completed.get("size") == size
                             and completed.get("target") == config["target_folder_id"]):
+                        self._remember_completed(config, path, sha1, size, signature)
                         skipped.append({"path": str(path), "name": path.name, "size": size, "sha1": sha1})
                         continue
                     response = None
@@ -848,7 +970,7 @@ class RapidUpload:
                                 item["message"] = message
                                 succeeded.append(item)
                                 uploaded.append(item)
-                                self._remember_completed(config, path, sha1, size)
+                                self._remember_completed(config, path, sha1, size, signature)
                                 self._append_log(config, path, "uploaded", message, size, sha1)
                                 if config["delete_source_on_success"]:
                                     path.unlink()
@@ -875,7 +997,7 @@ class RapidUpload:
                         continue
                     item = {"path": str(path), "name": path.name, "size": size, "sha1": sha1}
                     succeeded.append(item)
-                    self._remember_completed(config, path, sha1, size)
+                    self._remember_completed(config, path, sha1, size, signature)
                     self._append_log(config, path, "succeeded", "115 秒传成功", size, sha1)
                     if config["delete_source_on_success"]:
                         path.unlink()
@@ -908,6 +1030,7 @@ class RapidUpload:
                 "uploaded": uploaded, "unmatched": unmatched, "failed": failed,
             }
         finally:
+            self._flush_hash_cache()
             close = getattr(client, "close", None)
             if callable(close):
                 close()

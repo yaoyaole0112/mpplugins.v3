@@ -44,6 +44,32 @@ class ModernFakeClient:
         return self.response
 
 
+class FakeEventHandler:
+    def __init__(self):
+        pass
+
+
+class FakeObserver:
+    def __init__(self):
+        self.schedules = []
+        self.started = False
+
+    def schedule(self, handler, path, recursive=False):
+        self.schedules.append((handler, path, recursive))
+
+    def start(self):
+        self.started = True
+
+    def is_alive(self):
+        return self.started
+
+    def stop(self):
+        self.started = False
+
+    def join(self, timeout=None):
+        return None
+
+
 class RapidUploadTests(unittest.TestCase):
     def test_config_normalization_and_validation(self):
         config = normalize_config({"name": "电视剧", "media_extensions": ".MP4, mkv,mp4"})
@@ -277,12 +303,51 @@ class RapidUploadTests(unittest.TestCase):
             owner = FakeOwner()
             client = FakeClient({"status": 2, "reuse": True})
             rapid = RapidUpload(owner, {"configs": [config]})
-            with patch.object(rapid, "_p115_client", return_value=client):
+            with patch.object(rapid, "_p115_client", return_value=client), \
+                    patch.object(RapidUpload, "_sha1", wraps=RapidUpload._sha1) as hash_file:
                 first = rapid.run("rapid_1")
                 second = rapid.run("rapid_1")
             self.assertEqual(len(first["succeeded"]), 1)
             self.assertEqual(second["skipped"][0]["path"], str(media))
             self.assertEqual(len(client.calls), 1)
+            self.assertEqual(hash_file.call_count, 1)
+
+    def test_unmatched_file_reuses_persisted_hash_on_later_scans(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "unmatched.mkv"
+            media.write_bytes(b"not in 115 yet")
+            config = normalize_config({"id": "rapid_1", "name": "电视剧", "source_path": str(root),
+                                       "target_folder_id": "123", "media_extensions": "mkv"})
+            owner = FakeOwner()
+            client = FakeClient({"status": 1})
+            rapid = RapidUpload(owner, {"configs": [config]})
+            with patch.object(rapid, "_p115_client", return_value=client), \
+                    patch.object(RapidUpload, "_sha1", wraps=RapidUpload._sha1) as hash_file:
+                first = rapid.run("rapid_1")
+                restored = RapidUpload(owner, {"configs": [config]})
+                with patch.object(restored, "_p115_client", return_value=client):
+                    second = restored.run("rapid_1")
+            self.assertEqual(len(first["unmatched"]), 1)
+            self.assertEqual(len(second["unmatched"]), 1)
+            self.assertEqual(len(client.calls), 2)
+            self.assertEqual(hash_file.call_count, 1)
+
+    def test_changed_file_signature_recalculates_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "movie.mp4"
+            media.write_bytes(b"original")
+            config = normalize_config({"id": "rapid_1", "name": "电影", "source_path": str(root),
+                                       "target_folder_id": "123", "media_extensions": "mp4"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            client = FakeClient({"status": 2, "reuse": True})
+            with patch.object(rapid, "_p115_client", return_value=client), \
+                    patch.object(RapidUpload, "_sha1", wraps=RapidUpload._sha1) as hash_file:
+                rapid.run("rapid_1")
+                media.write_bytes(b"modified")
+                rapid.run("rapid_1")
+            self.assertEqual(hash_file.call_count, 2)
 
     def test_realtime_status_explains_missing_source_directory(self):
         config = normalize_config({"id": "rapid_1", "name": "电视剧", "realtime_enabled": True})
@@ -318,11 +383,29 @@ class RapidUploadTests(unittest.TestCase):
                 self.assertLess(elapsed, 0.5)
                 self.assertTrue(snapshot_started.wait(timeout=1))
                 self.assertEqual(rapid._poll_snapshots["rapid_1"], {})
+                self.assertEqual(rapid.status()["realtime_poll_seconds"], 300)
                 release_snapshot.set()
                 deadline = time.monotonic() + 2
                 while rapid._poll_snapshots["rapid_1"] != snapshot and time.monotonic() < deadline:
                     time.sleep(0.01)
                 self.assertEqual(rapid._poll_snapshots["rapid_1"], snapshot)
+            rapid.close()
+
+    def test_realtime_watchdog_avoids_recursive_startup_snapshot_and_polling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = normalize_config({"id": "rapid_1", "name": "电视剧", "source_path": str(root),
+                                       "media_extensions": "mkv", "realtime_enabled": True})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            with patch("emetools.rapid_upload.Observer", FakeObserver), \
+                    patch("emetools.rapid_upload.FileSystemEventHandler", FakeEventHandler), \
+                    patch.object(RapidUpload, "_directory_snapshot",
+                                 side_effect=AssertionError("event monitoring must not scan the tree")):
+                rapid.refresh_realtime_watchers()
+            self.assertEqual(rapid.status()["realtime_mode"], "event")
+            self.assertIsNone(rapid._poll_thread)
+            self.assertEqual(len(rapid._observer.schedules), 1)
+            self.assertTrue(rapid._observer.schedules[0][2])
             rapid.close()
 
     def test_initial_snapshot_queues_files_created_while_baseline_is_scanning(self):

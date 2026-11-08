@@ -471,7 +471,7 @@ async function loadRapid() {
   rapid.realtime_watched_configs = result.realtime_watched_configs || []
   rapid.realtime_unwatched = result.realtime_unwatched || []
   rapid.realtime_error = result.realtime_error || ''
-  rapid.realtime_poll_seconds = result.realtime_poll_seconds || 30
+  rapid.realtime_poll_seconds = result.realtime_poll_seconds || 300
   rapid.loaded = true
   savedRapidConfigs.value = JSON.stringify(rapid.configs)
   scheduleRapidPoll()
@@ -512,7 +512,7 @@ async function persistRapidDraft() {
   rapid.realtime_watched_configs = status.realtime_watched_configs || []
   rapid.realtime_unwatched = status.realtime_unwatched || []
   rapid.realtime_error = status.realtime_error || ''
-  rapid.realtime_poll_seconds = status.realtime_poll_seconds || 30
+  rapid.realtime_poll_seconds = status.realtime_poll_seconds || 300
 }
 async function rapidCommand(operation, configId, paths = []) {
   if (rapidActionBusy.value) return
@@ -1571,7 +1571,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
       </template>
       <template v-if="active === 'rapid'">
         <section class="eme-card">
-          <div class="eme-card-heading"><div><h3>本地秒传</h3><p>监控本地文件，优先用 SHA1 调用 115 秒传；未命中默认保留源文件，也可开启 MoviePilot 115 普通上传。Cookie 沿用“115 网盘 STRM 助手”；源目录须在 MoviePilot 容器内可访问，目标目录请选择非根目录。实时监控由目录事件触发，并每 {{ rapid.realtime_poll_seconds || 30 }} 秒比对新增/变更文件兜底；Cron 可补扫容器重启期间的文件，三者可同时启用。秒传与清理、转存共用 115 串行队列。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !rapid.loaded" @click="addRapidConfig">添加配置</button><button class="eme-button primary" :disabled="busy || !rapid.loaded" @click="saveRapid">保存配置</button></div></div>
+          <div class="eme-card-heading"><div><h3>本地秒传</h3><p>监控本地文件，优先用 SHA1 调用 115 秒传；未命中默认保留源文件，也可开启 MoviePilot 115 普通上传。Cookie 沿用“115 网盘 STRM 助手”；源目录须在 MoviePilot 容器内可访问，目标目录请选择非根目录。实时监控优先使用目录事件，不再周期性遍历整个目录；目录事件不可用时，才每 {{ rapid.realtime_poll_seconds || 300 }} 秒低频扫描兜底。Cron 可补扫容器重启期间的文件，秒传与清理、转存共用 115 串行队列。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !rapid.loaded" @click="addRapidConfig">添加配置</button><button class="eme-button primary" :disabled="busy || !rapid.loaded" @click="saveRapid">保存配置</button></div></div>
           <p v-if="rapidConfigDirty" class="eme-message eme-warning">本地秒传有未保存的修改；点击“立即扫描”时会先自动保存配置。</p>
           <p v-if="rapid.realtime_error && rapid.realtime_watched_configs?.length" class="eme-message eme-warning">{{ rapid.realtime_error }}；轮询监控仍在运行。</p>
           <p v-if="rapid.realtime_unwatched?.length" class="eme-message eme-warning">实时监控未启动：{{ rapid.realtime_unwatched.map(item => `${item.name}：${item.reason}`).join('；') }}。可检查目录挂载/权限，或启用 Cron 自动扫描兜底。</p>

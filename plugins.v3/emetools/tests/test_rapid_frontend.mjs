@@ -39,6 +39,8 @@ test('local rapid upload is available from the shared sidebar and page', () => {
   assert.match(source, /config\.upload_on_unmatched/)
   assert.match(source, /未命中后普通上传到网盘/)
   assert.match(source, /realtime_poll_seconds/)
+  assert.match(source, /实时监控优先使用目录事件，不再周期性遍历整个目录/)
+  assert.match(source, /realtime_poll_seconds \|\| 300/)
   assert.match(source, /const status = await get\('rapid\/status'\)/)
   assert.match(source, /实时监控未启动：/)
   assert.match(source, /<h3>秒传记录<\/h3>/)
