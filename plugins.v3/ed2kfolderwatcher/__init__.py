@@ -197,7 +197,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.18.5"
+    plugin_version = "1.18.6"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -1036,7 +1036,7 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._queue_event(path)
                     return
                 self._local_active = {
-                    "name": path.name, "size": stat.st_size, "bytes_read": 0,
+                    "name": path.name, "path": str(path), "size": stat.st_size, "bytes_read": 0,
                     "stage": "正在检查文件", "started_at": time.time(),
                 }
                 self._process_file(path)
@@ -1925,19 +1925,11 @@ class Ed2kFolderWatcher(_PluginBase):
             pending = list(self._pending.items())
             worker_alive = bool(self._worker and self._worker.is_alive())
             cloud_status = dict(self._cloud_status)
+        now_monotonic = time.monotonic()
+        now_wall = time.time()
         items = []
         if active:
             items.append({**active, "source": "本地", "status": "active"})
-        for key, (due, signature) in pending:
-            if key.startswith("__") or key.startswith("cloud:"):
-                continue
-            name = Path(key).name
-            if active and active.get("name") == name:
-                continue
-            size = signature[0] if isinstance(signature, tuple) and signature else 0
-            items.append({"name": name, "size": size, "bytes_read": 0, "stage": "等待处理",
-                          "source": "本地", "status": "queued",
-                          "due_at": time.time() + max(0, due - time.monotonic())})
         if cloud_status.get("file"):
             items.append({
                 "name": cloud_status["file"], "size": cloud_status.get("size", 0),
@@ -1946,12 +1938,35 @@ class Ed2kFolderWatcher(_PluginBase):
                 "source": "网盘", "status": "active",
                 "updated_at": cloud_status.get("updated_at"),
             })
+        queued = []
         for key, (due, signature) in pending:
-            if not key.startswith("cloud:") or not isinstance(signature, dict):
+            if key.startswith("__"):
                 continue
-            items.append({"name": signature.get("name") or key, "size": signature.get("size", 0),
-                          "bytes_read": 0, "stage": "等待处理", "source": "网盘", "status": "queued",
-                          "due_at": time.time() + max(0, due - time.monotonic())})
+            if key.startswith("cloud:"):
+                if not isinstance(signature, dict):
+                    continue
+                queue_path = signature.get("path") or signature.get("name") or key
+                name = signature.get("name") or key
+                size = signature.get("size", 0)
+                source = "网盘"
+            else:
+                queue_path = key
+                name = Path(key).name
+                size = signature[0] if isinstance(signature, tuple) and signature else 0
+                source = "本地"
+                if active and active.get("path") == key:
+                    continue
+            ready = due <= now_monotonic
+            order = (0 if ready else 1, 0 if ready else due, filename_order(queue_path), key)
+            queued.append((order, {
+                "name": name, "size": size, "bytes_read": 0, "stage": "等待处理",
+                "source": source, "status": "queued",
+                "due_at": now_wall + max(0, due - now_monotonic),
+            }))
+        queued.sort(key=lambda entry: entry[0])
+        for position, (_, item) in enumerate(queued, 1):
+            item["queue_position"] = position
+            items.append(item)
         pending_keys = {key for key, _ in pending}
         failed_tasks = []
         for key, failure in self._retry_failures.items():

@@ -85,10 +85,28 @@ class Ed2kTests(unittest.TestCase):
         key = str(self.folder / "retry.mkv")
         self.plugin._retry_limit = 0
         self.plugin._retry_failure(key, "local", [12, 34, 56], "retry.mkv", "permission denied")
-        progress = self.plugin._progress_snapshot()["items"]
-        failed = next(item for item in progress if item["name"] == "retry.mkv")
+        snapshot = self.plugin._progress_snapshot()
+        self.assertFalse(any(item["name"] == "retry.mkv" for item in snapshot["items"]))
+        failed = next(item for item in snapshot["failed_tasks"] if item["name"] == "retry.mkv")
         self.assertEqual(failed["status"], "failed")
         self.assertIn("permission denied", failed["error"])
+
+    def test_progress_snapshot_orders_ready_and_delayed_queue_like_worker(self):
+        self.plugin._pending = {
+            "/z-last.mkv": (90, (3, 0, 1)),
+            "cloud:delayed": (150, {"path": "/a-delayed.mkv", "name": "a-delayed.mkv", "size": 5}),
+            "cloud:ready": (80, {"path": "/b-ready.mkv", "name": "b-ready.mkv", "size": 4}),
+            "/a-first.mkv": (70, (2, 0, 1)),
+        }
+        with patch.object(self.module.time, "monotonic", return_value=100), patch.object(self.module.time, "time", return_value=1000):
+            progress = self.plugin._progress_snapshot()["items"]
+        queued = [item for item in progress if item["status"] == "queued"]
+        self.assertEqual(
+            [(item["name"], item["queue_position"]) for item in queued],
+            [("a-first.mkv", 1), ("b-ready.mkv", 2), ("z-last.mkv", 3), ("a-delayed.mkv", 4)],
+        )
+        self.assertEqual(queued[-1]["due_at"], 1050)
+        self.plugin._pending.clear()
 
     def test_telegram_message_chunks_keep_complete_links(self):
         records = [{"link": "ed2k://|file|" + "a" * 100 + "|1|" + "b" * 32 + "|/"} for _ in range(50)]
