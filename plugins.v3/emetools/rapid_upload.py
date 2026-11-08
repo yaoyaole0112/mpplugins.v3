@@ -559,6 +559,54 @@ class RapidUpload:
             raise ValueError("本地秒传配置不存在")
         return config
 
+    def browse_directory(self, config_id: str, directory: str) -> dict:
+        config = self._config(config_id)
+        source = Path(config["source_path"])
+        if not source.is_absolute() or not source.is_dir() or source.is_symlink():
+            raise ValueError("本地源目录不存在或不是可读取目录")
+
+        source_path = Path(os.path.abspath(source))
+        current_path = Path(os.path.abspath(directory))
+        try:
+            relative_path = current_path.relative_to(source_path)
+        except ValueError as error:
+            raise ValueError("只能浏览当前配置的本地源目录") from error
+
+        candidate = source_path
+        for part in relative_path.parts:
+            candidate /= part
+            if candidate.is_symlink():
+                raise ValueError("不能浏览符号链接目录")
+
+        source_root = source_path.resolve()
+        current_path = current_path.resolve()
+        try:
+            current_path.relative_to(source_root)
+        except ValueError as error:
+            raise ValueError("只能浏览当前配置的本地源目录") from error
+        if not current_path.is_dir():
+            raise ValueError("所选本地目录不存在或不可读取")
+
+        allowed = {f".{item}" for item in config["media_extensions"].split(",") if item}
+        directories = []
+        files = []
+        with os.scandir(current_path) as entries:
+            for entry in entries:
+                if entry.name.startswith(".") or entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    directories.append({"name": entry.name, "path": entry.path})
+                elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in allowed:
+                    files.append({
+                        "name": entry.name,
+                        "path": entry.path,
+                        "size": entry.stat(follow_symlinks=False).st_size,
+                    })
+
+        directories.sort(key=lambda item: item["name"].casefold())
+        files.sort(key=lambda item: item["name"].casefold())
+        return {"path": str(current_path), "dirs": directories, "files": files}
+
     @staticmethod
     def _iter_files(root: str, extensions: str) -> list[Path]:
         path = Path(root)

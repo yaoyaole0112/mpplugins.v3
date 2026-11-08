@@ -86,6 +86,7 @@ class ToolAction(BaseModel):
     operation: str
     path: str = ""
     cid: str = "0"
+    config_id: str = ""
     paths: List[str] = Field(default_factory=list)
     scan_token: str = ""
     token: str = ""
@@ -130,7 +131,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.75"
+    plugin_version = "2.10.76"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -2387,7 +2388,7 @@ class EmeTools(_PluginBase):
 
     async def _action_serial(self, action: ToolAction) -> dict:
         operation = action.operation
-        if operation not in {"dirs", "root_dirs", "p115_dirs", "pending", "move_info", "move_copy_reset"}:
+        if operation not in {"dirs", "root_dirs", "rapid_files", "p115_dirs", "pending", "move_info", "move_copy_reset"}:
             logger.info("媒体增强：页面操作 %s 开始", _log_label(operation))
         try:
             confirmation_kinds = {"trash_clear": "trash", "move_confirm": "move",
@@ -2429,6 +2430,10 @@ class EmeTools(_PluginBase):
                                      if not name.startswith(".") and os.path.isdir(os.path.join(root, name))
                                      and not os.path.islink(os.path.join(root, name)))
                 return {"ok": True, "path": root, "dirs": directories}
+            if operation == "rapid_files":
+                return await asyncio.to_thread(
+                    self._rapid.browse_directory, action.config_id, action.path
+                )
             if operation == "p115_dirs":
                 return await asyncio.to_thread(self._p115_dirs, action.cid)
             if operation == "trash_info":

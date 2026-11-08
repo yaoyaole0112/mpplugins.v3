@@ -683,6 +683,26 @@ class PluginTests(unittest.TestCase):
         response = self.run_async(self.plugin.action(ToolAction(operation="root_dirs", path=str(Path(self.directory.name) / "linked"))))
         self.assertFalse(response["ok"])
 
+    def test_rapid_file_browser_returns_files_for_selected_config(self):
+        media = Path(self.directory.name) / "episode.mkv"
+        media.write_bytes(b"episode")
+        self.plugin._rapid.save([{
+            "id": "rapid_1",
+            "name": "电视剧",
+            "source_path": self.directory.name,
+            "target_folder_id": "123",
+            "media_extensions": "mkv",
+        }])
+
+        response = self.run_async(self.plugin.action(ToolAction(
+            operation="rapid_files",
+            config_id="rapid_1",
+            path=self.directory.name,
+        )))
+
+        self.assertEqual([item["path"] for item in response["files"]], [str(media)])
+        self.assertEqual(response["files"][0]["size"], len(b"episode"))
+
     def test_new_root_updates_unconfigured_scan_path(self):
         new_root = Path(self.directory.name) / "new"
         new_root.mkdir()

@@ -53,6 +53,48 @@ class RapidUploadTests(unittest.TestCase):
         self.assertFalse(config["upload_on_unmatched"])
         self.assertEqual(validate_configs([config])[0]["id"], config["id"])
 
+    def test_browse_directory_lists_only_allowed_media_and_child_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root / "season"
+            nested.mkdir()
+            media = root / "episode.MKV"
+            media.write_bytes(b"video")
+            (root / "notes.txt").write_text("ignored", encoding="utf-8")
+            config = normalize_config({
+                "id": "rapid_1", "name": "电视剧", "source_path": str(root),
+                "media_extensions": "mkv",
+            })
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+
+            result = rapid.browse_directory("rapid_1", str(root))
+
+            self.assertEqual([item["name"] for item in result["dirs"]], ["season"])
+            self.assertEqual([item["name"] for item in result["files"]], ["episode.MKV"])
+            self.assertEqual(result["files"][0]["size"], 5)
+            self.assertEqual(result["files"][0]["path"], str(media))
+
+    def test_browse_directory_rejects_paths_outside_source_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            external_file = Path(outside) / "external.mkv"
+            external_file.write_bytes(b"external")
+            linked = root / "linked"
+            linked.symlink_to(outside, target_is_directory=True)
+            config = normalize_config({
+                "id": "rapid_1", "name": "电视剧", "source_path": str(root),
+                "media_extensions": "mkv",
+            })
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+
+            with self.assertRaisesRegex(ValueError, "只能浏览当前配置"):
+                rapid.browse_directory("rapid_1", str(outside))
+            with self.assertRaisesRegex(ValueError, "符号链接"):
+                rapid.browse_directory("rapid_1", str(linked))
+            result = rapid.browse_directory("rapid_1", str(root))
+            self.assertEqual(result["dirs"], [])
+            self.assertEqual(result["files"], [])
+
     def test_run_hashes_only_matching_files_and_reports_success(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

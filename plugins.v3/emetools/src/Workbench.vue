@@ -86,7 +86,7 @@ const dataConfirmationState = ref('')
 const pendingJobs = ref([])
 const trash = ref(null)
 const moveInfo = ref(null)
-const folder = reactive({ open: false, type: '', index: 0, cid: '0', path: '/', name: '根目录', trail: [], dirs: [], ready: false, error: '' })
+const folder = reactive({ open: false, type: '', index: 0, cid: '0', path: '/', name: '根目录', trail: [], dirs: [], files: [], ready: false, error: '' })
 const rapid = reactive({ configs: [], logs: [], activity: [], activity_total: 0, running: '', loaded: false })
 const rapidActionBusy = ref(false)
 const savedRapidConfigs = ref('')
@@ -514,7 +514,7 @@ async function persistRapidDraft() {
   rapid.realtime_error = status.realtime_error || ''
   rapid.realtime_poll_seconds = status.realtime_poll_seconds || 30
 }
-async function rapidCommand(operation, configId) {
+async function rapidCommand(operation, configId, paths = []) {
   if (rapidActionBusy.value) return
   rapidActionBusy.value = true
   error.value = ''
@@ -524,7 +524,7 @@ async function rapidCommand(operation, configId) {
       if (!rapid.loaded) throw new Error('本地秒传配置尚未加载，请刷新后重试')
       if (rapidConfigDirty.value) await persistRapidDraft()
     }
-    const result = await waitP115Task(await post('rapid/action', { operation, config_id: configId }))
+    const result = await waitP115Task(await post('rapid/action', { operation, config_id: configId, paths }))
     if (result?.ok === false) throw new Error(result.message || '本地秒传未完成')
     notice.value = result.message || '本地秒传任务已完成'
     await loadRapid()
@@ -536,6 +536,12 @@ async function rapidCommand(operation, configId) {
 }
 function rapidConfigLabel(config) {
   return `${config.name || '未命名'} · ${config.source_path || '未设置源目录'}`
+}
+async function rapidFileCommand(file) {
+  const config = rapid.configs[folder.index]
+  if (!config || rapidActionBusy.value) return
+  folder.open = false
+  await rapidCommand('run', config.id, [file.path])
 }
 async function startMediaScan() {
   media.progress = `正在扫描 STRM 目录（${mediaScanScopeLabel()}）`
@@ -1215,15 +1221,20 @@ async function resetMoveCopyRecords() {
   })
 }
 async function browse(type, index = 0) {
+  if (type === 'rapid_file' && rapidConfigDirty.value) {
+    try { await persistRapidDraft() }
+    catch (err) { error.value = err?.message || '保存本地秒传配置失败'; return }
+  }
   folder.open = true
   folder.type = type
   folder.index = index
   folder.cid = '0'
-  const local = ['root', 'rapid_source', 'rapid_failure'].includes(type)
-  folder.path = type === 'root' ? (settings.strm_root || '/strm') : local ? (rapid.configs[index]?.[type === 'rapid_source' ? 'source_path' : 'failure_directory'] || '/') : '/'
+  folder.files = []
+  const local = ['root', 'rapid_source', 'rapid_failure', 'rapid_file'].includes(type)
+  folder.path = type === 'root' ? (settings.strm_root || '/strm') : local ? (rapid.configs[index]?.[type === 'rapid_source' || type === 'rapid_file' ? 'source_path' : 'failure_directory'] || '/') : '/'
   folder.name = '根目录'
   folder.trail = []
-  if (local) {
+  if (local && type !== 'rapid_file') {
     let parent = folder.path.replace(/\/+$/, '') || '/'
     while (parent !== '/') {
       parent = parent.slice(0, parent.lastIndexOf('/')) || '/'
@@ -1235,17 +1246,25 @@ async function browse(type, index = 0) {
 async function loadFolder() {
   folder.ready = false
   folder.error = ''
+  folder.dirs = []
+  folder.files = []
   try {
     const local = ['root', 'rapid_source', 'rapid_failure'].includes(folder.type)
-    const result = await execute(local ? 'root_dirs' : 'p115_dirs', local ? { path: folder.path } : { cid: folder.cid })
-    folder.dirs = local ? (result.dirs || []).map(name => ({ name, path: `${result.path.replace(/\/$/, '')}/${name}` })) : (result.dirs || [])
-    if (local) folder.path = result.path
+    const rapidFile = folder.type === 'rapid_file'
+    const result = await execute(rapidFile ? 'rapid_files' : local ? 'root_dirs' : 'p115_dirs',
+      rapidFile ? { config_id: rapid.configs[folder.index]?.id, path: folder.path }
+        : local ? { path: folder.path } : { cid: folder.cid })
+    folder.dirs = rapidFile ? (result.dirs || [])
+      : local ? (result.dirs || []).map(name => ({ name, path: `${result.path.replace(/\/$/, '')}/${name}` }))
+        : (result.dirs || [])
+    folder.files = rapidFile ? (result.files || []) : []
+    if (local || rapidFile) folder.path = result.path
     folder.ready = true
-  } catch (err) { folder.error = err?.message || '读取目录失败'; folder.dirs = [] }
+  } catch (err) { folder.error = err?.message || '读取目录失败'; folder.dirs = []; folder.files = [] }
 }
 async function enterFolder(item) {
   folder.trail.push({ cid: folder.cid, path: folder.path, name: folder.name })
-  if (['root', 'rapid_source', 'rapid_failure'].includes(folder.type)) folder.path = item.path
+  if (['root', 'rapid_source', 'rapid_failure', 'rapid_file'].includes(folder.type)) folder.path = item.path
   else folder.cid = String(item.cid)
   folder.name = item.name
   await loadFolder()
@@ -1557,7 +1576,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           <p v-if="rapid.realtime_error && rapid.realtime_watched_configs?.length" class="eme-message eme-warning">{{ rapid.realtime_error }}；轮询监控仍在运行。</p>
           <p v-if="rapid.realtime_unwatched?.length" class="eme-message eme-warning">实时监控未启动：{{ rapid.realtime_unwatched.map(item => `${item.name}：${item.reason}`).join('；') }}。可检查目录挂载/权限，或启用 Cron 自动扫描兜底。</p>
           <div v-for="(config, index) in rapid.configs" :key="config.id" class="eme-rapid-config">
-            <div class="eme-card-heading"><div><h4>{{ rapidConfigLabel(config) }}</h4><p>ID：{{ config.id }}</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="!rapid.loaded || rapidActionBusy" @click="rapidCommand('run', config.id)">{{ rapid.running === config.name || rapidActionBusy ? '⌛️秒传中' : '立即扫描' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`删除本地秒传配置 ${index + 1}`" @click="rapid.configs.splice(index, 1)">✕</button></div></div>
+            <div class="eme-card-heading"><div><h4>{{ rapidConfigLabel(config) }}</h4><p>ID：{{ config.id }}</p></div><div class="eme-inline"><button class="eme-button secondary" type="button" :disabled="!rapid.loaded || rapidActionBusy || !config.source_path" @click="browse('rapid_file', index)">选择文件秒传</button><button class="eme-button secondary" :disabled="!rapid.loaded || rapidActionBusy" @click="rapidCommand('run', config.id)">{{ rapid.running === config.name || rapidActionBusy ? '⌛️秒传中' : '立即扫描' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`删除本地秒传配置 ${index + 1}`" @click="rapid.configs.splice(index, 1)">✕</button></div></div>
             <div class="eme-rapid-group"><h4>基础配置</h4><div class="eme-fields"><label>配置名称<input v-model.trim="config.name" placeholder="例如：电视剧" /></label><label>重试次数<input v-model.number="config.retry_limit" type="number" min="0" max="100" /></label></div></div>
             <div class="eme-rapid-group"><h4>目录设置</h4><label>本地源目录<div class="eme-folder-input"><input v-model.trim="config.source_path" placeholder="/media/资源/电视剧" /><button class="eme-button secondary" type="button" @click="browse('rapid_source', index)">浏览</button></div></label><label>115 目标目录<div class="eme-folder-input"><input :value="config.target_folder_path || '未选择目标目录'" readonly /><button class="eme-button secondary" type="button" @click="browse('rapid_target', index)">选择目录</button></div></label><p class="eme-hint">CID：{{ config.target_folder_id || '未选择' }}</p><label>失败目录（可选）<div class="eme-folder-input"><input v-model.trim="config.failure_directory" placeholder="/media/资源/秒传失败/电视剧" /><button class="eme-button secondary" type="button" @click="browse('rapid_failure', index)">浏览</button></div></label></div>
             <div class="eme-rapid-group"><h4>扫描与文件</h4><label>媒体后缀<input v-model.trim="config.media_extensions" placeholder="mp4,mkv,ts" /></label><div class="eme-rapid-switches"><label class="eme-switch-label"><input v-model="config.delete_source_on_success" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>秒传成功后删除本地源文件</span></label><label class="eme-switch-label"><input v-model="config.upload_on_unmatched" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>未命中后普通上传到网盘</span></label><label class="eme-switch-label"><input v-model="config.realtime_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label class="eme-switch-label"><input v-model="config.cron_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 Cron 自动扫描</span></label></div><p class="eme-hint">未命中时开启普通上传会消耗网盘上传流量；上传失败的文件按失败目录规则处理。</p><label v-if="config.cron_enabled">执行周期（cron 表达式）<input v-model.trim="config.cron_expression" placeholder="*/10 * * * *" /></label></div>
@@ -1603,11 +1622,11 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
       </div>
       <div v-if="folder.open" class="eme-overlay" @click.self="folder.open = false">
         <div class="eme-dialog" role="dialog" aria-modal="true" aria-label="选择目录">
-          <div class="eme-card-heading"><h3>选择{{ ['root', 'rapid_source', 'rapid_failure'].includes(folder.type) ? '本地目录' : '115 文件夹' }}</h3><button class="eme-button text" @click="folder.open = false">关闭</button></div>
-          <p class="eme-hint">{{ folder.type === 'root' ? folder.path : `CID: ${folder.cid}` }}</p>
+          <div class="eme-card-heading"><h3>{{ folder.type === 'rapid_file' ? '选择要秒传的本地文件' : `选择${['root', 'rapid_source', 'rapid_failure'].includes(folder.type) ? '本地目录' : '115 文件夹'}` }}</h3><button class="eme-button text" @click="folder.open = false">关闭</button></div>
+          <p class="eme-hint">{{ ['root', 'rapid_source', 'rapid_failure', 'rapid_file'].includes(folder.type) ? folder.path : `CID: ${folder.cid}` }}</p>
           <div v-if="folder.error" class="eme-folder-error"><p class="eme-message eme-error">{{ folder.error }}</p><button class="eme-button secondary" type="button" :disabled="!settingsLoaded" @click="loadFolder">重试读取</button></div>
-          <div class="eme-actions"><button class="eme-button secondary" :disabled="!folder.trail.length" @click="parentFolder">上一级</button><button class="eme-button primary" :disabled="!folder.ready || (['root', 'rapid_source', 'rapid_failure'].includes(folder.type) ? folder.path === '/' : folder.type !== 'local' && folder.cid === '0')" @click="selectFolder">选择当前目录</button></div>
-          <div class="eme-folder-list"><button v-for="item in folder.dirs" :key="item.path || item.cid" class="eme-folder" @click="enterFolder(item)">📁 {{ item.name }}</button><p v-if="folder.ready && !folder.dirs.length" class="eme-hint">没有子目录</p></div>
+          <div class="eme-actions"><button class="eme-button secondary" :disabled="!folder.trail.length" @click="parentFolder">上一级</button><button v-if="folder.type !== 'rapid_file'" class="eme-button primary" :disabled="!folder.ready || (['root', 'rapid_source', 'rapid_failure'].includes(folder.type) ? folder.path === '/' : folder.type !== 'local' && folder.cid === '0')" @click="selectFolder">选择当前目录</button></div>
+          <div class="eme-folder-list"><button v-for="item in folder.dirs" :key="item.path || item.cid" class="eme-folder" @click="enterFolder(item)">📁 {{ item.name }}</button><button v-for="item in folder.files" :key="item.path" class="eme-folder eme-local-file" type="button" :disabled="rapidActionBusy" @click="rapidFileCommand(item)">📄 {{ item.name }} <small>{{ rapidFileSize(item.size) }} · 点击开始秒传</small></button><p v-if="folder.ready && !folder.dirs.length && !folder.files.length" class="eme-hint">没有可选目录或媒体文件</p></div>
         </div>
       </div>
     <Teleport to="body" :disabled="!mobileViewport">
@@ -1880,5 +1899,6 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
 .eme-folder-input{display:flex;align-items:center;gap:8px}.eme-folder-input input{flex:1;min-width:0}.eme-folder-input .eme-button{flex:none}
 .eme-results.eme-rapid-logs{max-height:none;overflow:visible}.eme-rapid-logs .eme-result{align-items:flex-start}.eme-results.eme-rapid-history{display:grid;grid-template-rows:repeat(6,88px)}.eme-rapid-history .eme-result{box-sizing:border-box;height:88px;min-height:88px;align-items:center;overflow:hidden}.eme-rapid-history .eme-result>div{flex:1;min-width:0;overflow:hidden}.eme-rapid-history .eme-result strong,.eme-rapid-history .eme-result small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.eme-rapid-switches{display:flex;flex-wrap:wrap;align-items:center;gap:14px 28px;margin-top:16px}.eme-rapid-switches .eme-switch-label{margin:0;min-height:32px}
 .eme-rapid-activity{margin:12px 0 18px;padding:12px;border:1px solid rgba(var(--v-theme-primary),.3);border-radius:12px;background:rgba(var(--v-theme-primary),.07)}.eme-rapid-activity h4{display:flex;justify-content:space-between;gap:12px;margin:0 0 10px}.eme-rapid-activity>small{display:block;margin-top:8px}
+.eme-local-file{display:flex;flex-direction:column;align-items:flex-start;gap:3px}.eme-local-file small{opacity:.62}
 @media(max-width:760px){.eme-rapid-config .eme-card-heading{gap:10px}.eme-folder-input{align-items:stretch;flex-direction:column}.eme-folder-input .eme-button{width:100%}.eme-rapid-switches{align-items:flex-start;flex-direction:column;gap:12px}}
 </style>
