@@ -130,7 +130,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.73"
+    plugin_version = "2.10.74"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1132,15 +1132,18 @@ class EmeTools(_PluginBase):
         if not config_id:
             raise HTTPException(status_code=400, detail="请选择本地秒传配置")
         try:
+            self._rapid.queue_scan(config_id, action.paths or None)
             job = self._submit_p115_task(
                 f"rapid_upload:{config_id}", "本地秒传",
                 lambda: self._rapid.run(config_id, action.paths or None),
             )
             return await self._p115_submission(job)
         except (RuntimeError, ValueError, OSError) as error:
+            self._rapid.clear_scan_queue(config_id, action.paths or None)
             logger.warning("媒体增强 本地秒传失败：%s", type(error).__name__)
             return {"ok": False, "message": str(error)}
         except Exception as error:
+            self._rapid.clear_scan_queue(config_id, action.paths or None)
             logger.warning("媒体增强 本地秒传任务提交异常：%s", type(error).__name__)
             return {
                 "ok": False,
@@ -2142,6 +2145,7 @@ class EmeTools(_PluginBase):
         if not self._enabled or not config or not config.get("cron_enabled"):
             return
         try:
+            self._rapid.queue_scan(config_id)
             result = self._run_p115_task(
                 f"rapid_upload:{config_id}", f"定时本地秒传：{config['name']}",
                 lambda: self._rapid.run(config_id),
@@ -2149,6 +2153,7 @@ class EmeTools(_PluginBase):
             logger.info("媒体增强 本地秒传：定时任务结束，配置=%s，结果=%s",
                         _log_label(config["name"]), _log_label(result.get("message") if isinstance(result, dict) else result))
         except (RuntimeError, ValueError, OSError) as error:
+            self._rapid._clear_activity(config_id, f"扫描任务：{config['name']}")
             logger.warning("媒体增强 本地秒传：定时任务失败，配置=%s，原因=%s",
                            _log_label(config["name"]), type(error).__name__)
 

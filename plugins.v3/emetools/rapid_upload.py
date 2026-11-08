@@ -130,6 +130,7 @@ class RapidUpload:
         self._pending_paths: dict[str, dict[str, dict[str, Any]]] = {}
         self._realtime_dispatch_paths: dict[str, set[str]] = {}
         self._realtime_dispatching: set[str] = set()
+        self._activity: dict[str, dict[str, Any]] = {}
         self._watch_lock = threading.RLock()
         self._realtime_callback = None
         self._realtime_watched: list[str] = []
@@ -152,8 +153,14 @@ class RapidUpload:
             self._logs = retained
             if hasattr(self._owner, "save_data"):
                 self._owner.save_data(self._LOG_KEY, list(self._logs))
+        with self._watch_lock:
+            activity = sorted(self._activity.values(),
+                              key=lambda item: item.get("timestamp", 0), reverse=True)
+            activity_total = len(activity)
         return {"configs": [dict(item) for item in self._configs],
                 "logs": [dict(item) for item in self._logs[-200:]],
+                "activity": activity[:500],
+                "activity_total": activity_total,
                 "running": self._running or "",
                 "realtime_available": Observer is not None and FileSystemEventHandler is not None,
                 "realtime_watched_configs": list(self._realtime_watched),
@@ -173,6 +180,7 @@ class RapidUpload:
             self._pending_paths.clear()
             self._realtime_dispatch_paths.clear()
             self._realtime_dispatching.clear()
+            self._activity.clear()
             observer = self._observer
             self._observer = None
             poll_thread = self._poll_thread
@@ -186,6 +194,61 @@ class RapidUpload:
 
     def close(self) -> None:
         self._stop_realtime_watchers()
+
+    @staticmethod
+    def _activity_key(config_id: str, path: str) -> str:
+        return f"{config_id}:{path}"
+
+    def _set_activity(self, config: dict, path: str, status: str,
+                      message: str, size: int = 0) -> None:
+        key = self._activity_key(config["id"], path)
+        file_path = Path(path)
+        record = {
+            "config_id": config["id"],
+            "config": config["name"],
+            "name": file_path.name or f"{config['name']} 扫描任务",
+            "path": path,
+            "size": size,
+            "status": status,
+            "message": message,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": time.time(),
+            "activity": True,
+        }
+        with self._watch_lock:
+            self._activity[key] = record
+
+    def _clear_activity(self, config_id: str, path: str) -> None:
+        with self._watch_lock:
+            self._activity.pop(self._activity_key(config_id, path), None)
+
+    def queue_scan(self, config_id: str, paths: list[str] | None = None) -> None:
+        config = self._config(config_id)
+        if not paths:
+            self._set_activity(config, f"扫描任务：{config['name']}", "queued",
+                               "等待 115 任务队列；开始扫描后显示文件")
+            return
+        root = Path(config["source_path"])
+        if not root.is_dir():
+            return
+        allowed = {f".{item}" for item in config["media_extensions"].split(",") if item}
+        source_root = root.resolve()
+        for requested_path in dict.fromkeys(os.path.realpath(path) for path in paths):
+            path = Path(requested_path)
+            try:
+                path.resolve().relative_to(source_root)
+                size = path.stat().st_size
+            except (OSError, ValueError):
+                continue
+            if path.is_file() and not path.is_symlink() and path.suffix.lower() in allowed:
+                self._set_activity(config, str(path), "queued", "等待 115 任务队列", size)
+
+    def clear_scan_queue(self, config_id: str, paths: list[str] | None = None) -> None:
+        config = next((item for item in self._configs if item["id"] == str(config_id)), None)
+        if config:
+            self._clear_activity(config_id, f"扫描任务：{config['name']}")
+        for path in paths or []:
+            self._clear_activity(config_id, os.path.realpath(path))
 
     def _queue_realtime_event(self, config_id: str, path: str) -> None:
         config = next((item for item in self._configs if item["id"] == config_id), None)
@@ -208,6 +271,8 @@ class RapidUpload:
                 return
             pending = self._pending_paths.setdefault(config_id, {})
             pending[str(candidate)] = {"signature": signature, "stable_checks": 0}
+            self._set_activity(config, str(candidate), "stabilizing",
+                               "等待文件写入完成", stat.st_size)
             timer = threading.Timer(3.0, self._dispatch_realtime, args=(config_id,))
             timer.daemon = True
             self._watch_timers[config_id] = timer
@@ -225,6 +290,7 @@ class RapidUpload:
                     signature = (stat.st_size, stat.st_mtime_ns)
                 except OSError:
                     pending.pop(path_text, None)
+                    self._clear_activity(config_id, path_text)
                     continue
                 if signature != state["signature"]:
                     state.update(signature=signature, stable_checks=0)
@@ -232,6 +298,10 @@ class RapidUpload:
                     state["stable_checks"] += 1
                     if state["stable_checks"] >= 2:
                         stable_paths.append(path_text)
+                        config = next((item for item in self._configs if item["id"] == config_id), None)
+                        if config:
+                            self._set_activity(config, path_text, "queued", "等待 115 任务队列",
+                                               signature[0])
                         pending.pop(path_text, None)
             if pending:
                 timer = threading.Timer(3.0, self._dispatch_realtime, args=(config_id,))
@@ -246,7 +316,13 @@ class RapidUpload:
     def _queue_stable_realtime_paths(self, config_id: str, paths: list[str]) -> None:
         callback = self._realtime_callback
         if not callback:
+            for path in paths:
+                self._clear_activity(config_id, path)
             return
+        config = next((item for item in self._configs if item["id"] == config_id), None)
+        if config:
+            for path in paths:
+                self._set_activity(config, path, "queued", "等待 115 任务队列")
         with self._watch_lock:
             queued = self._realtime_dispatch_paths.setdefault(config_id, set())
             queued.update(paths)
@@ -633,6 +709,7 @@ class RapidUpload:
 
     def run(self, config_id: str, paths: list[str] | None = None) -> dict:
         config = self._config(config_id)
+        self._clear_activity(config_id, f"扫描任务：{config['name']}")
         if self._running:
             return {"ok": False, "message": f"配置“{self._running}”正在执行，请稍后再试"}
         cookie = self._owner._source_cookie()
@@ -661,8 +738,18 @@ class RapidUpload:
         else:
             source_files = self._iter_files(config["source_path"], config["media_extensions"])
         if not source_files:
+            if paths:
+                for path in paths:
+                    self._clear_activity(config_id, os.path.realpath(path))
+            self._clear_activity(config_id, f"扫描任务：{config['name']}")
             return {"ok": True, "message": "未发现符合后缀的本地文件", "total": 0, "succeeded": [], "failed": []}
         self._running = config["name"]
+        for path in source_files:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            self._set_activity(config, str(path), "queued", "等待当前秒传任务处理", size)
         succeeded: list[dict] = []
         uploaded: list[dict] = []
         skipped: list[dict] = []
@@ -675,6 +762,7 @@ class RapidUpload:
             for path in source_files:
                 size = 0
                 sha1 = ""
+                self._set_activity(config, str(path), "processing", "正在计算 SHA1")
                 try:
                     before = path.stat()
                     sha1, size = self._sha1(path)
@@ -690,6 +778,8 @@ class RapidUpload:
                     attempts = min(config["retry_limit"] + 1, 4)
                     for attempt in range(attempts):
                         try:
+                            self._set_activity(config, str(path), "processing",
+                                               "正在提交 115 秒传请求", size)
                             response = self._rapid_init(client, path, sha1, size, target)
                             break
                         except Exception:
@@ -703,6 +793,8 @@ class RapidUpload:
                                 "sha1": sha1}
                         if config["upload_on_unmatched"]:
                             try:
+                                self._set_activity(config, str(path), "uploading",
+                                                   "115 未命中，正在普通上传", size)
                                 self._upload_original(path, config)
                                 message = "115 未命中，已改为普通上传成功"
                                 item["message"] = message
@@ -755,6 +847,8 @@ class RapidUpload:
                     self._append_log(config, path, "failed", message, size, sha1)
                     logger.warning("媒体增强 本地秒传失败：配置=%s 文件=%s 原因=%s：%s",
                                    config["name"], path.name, type(error).__name__, str(error)[:160])
+                finally:
+                    self._clear_activity(config_id, str(path))
             return {
                 "ok": not failed,
                 "message": (
@@ -770,3 +864,6 @@ class RapidUpload:
             if callable(close):
                 close()
             self._running = None
+            self.clear_scan_queue(config_id)
+            for path in source_files:
+                self._clear_activity(config_id, str(path))

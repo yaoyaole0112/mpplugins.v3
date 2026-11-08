@@ -87,7 +87,7 @@ const pendingJobs = ref([])
 const trash = ref(null)
 const moveInfo = ref(null)
 const folder = reactive({ open: false, type: '', index: 0, cid: '0', path: '/', name: '根目录', trail: [], dirs: [], ready: false, error: '' })
-const rapid = reactive({ configs: [], logs: [], running: '', loaded: false })
+const rapid = reactive({ configs: [], logs: [], activity: [], activity_total: 0, running: '', loaded: false })
 const rapidActionBusy = ref(false)
 const savedRapidConfigs = ref('')
 const rapidLogsPage = ref(1)
@@ -411,6 +411,15 @@ function rapidFileSize(value) {
   }
   return `${size.toFixed(unit === 'KB' ? 0 : 2)} ${unit}`
 }
+function rapidStatusIcon(status) {
+  return { stabilizing: '⏳', queued: '🕒', processing: '⚡', uploading: '⬆️',
+    succeeded: '✅', uploaded: '⬆️', unmatched: 'ℹ️', failed: '⚠️' }[status] || '•'
+}
+function rapidStatusLabel(status) {
+  return { stabilizing: '等待文件写入完成', queued: '等待处理', processing: '正在秒传',
+    uploading: '正在普通上传', succeeded: '秒传成功', uploaded: '普通上传成功',
+    unmatched: '115 未命中', failed: '处理失败' }[status] || status || '处理中'
+}
 function dropMediaOption(rule, rank) {
   const from = draggedMediaRank.value
   draggedMediaRank.value = null
@@ -455,6 +464,8 @@ async function loadRapid() {
   const result = await get('rapid/status')
   rapid.configs.splice(0, rapid.configs.length, ...(result.configs || []).map(item => ({ ...item })))
   rapid.logs.splice(0, rapid.logs.length, ...(result.logs || []))
+  rapid.activity.splice(0, rapid.activity.length, ...(result.activity || []))
+  rapid.activity_total = Number(result.activity_total || 0)
   rapid.running = result.running || ''
   rapid.realtime_available = result.realtime_available === true
   rapid.realtime_watched_configs = result.realtime_watched_configs || []
@@ -468,6 +479,8 @@ async function loadRapid() {
 async function pollRapidStatus() {
   const result = await get('rapid/status')
   rapid.logs.splice(0, rapid.logs.length, ...(result.logs || []))
+  rapid.activity.splice(0, rapid.activity.length, ...(result.activity || []))
+  rapid.activity_total = Number(result.activity_total || 0)
   rapid.running = result.running || ''
   scheduleRapidPoll()
 }
@@ -1552,7 +1565,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           </div>
           <p v-if="!rapid.configs.length" class="eme-hint">还没有配置。点击“添加配置”后填写本地源目录与 115 目标目录。</p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>秒传记录</h3><p>记录最近 200 条成功、普通上传、未命中与失败结果；每条记录显示文件大小和具体原因。</p></div><button class="eme-button text" :disabled="busy || !rapid.logs.length" @click="rapidCommand('clear_logs')">清空记录</button></div><div v-if="rapid.logs.length" class="eme-results eme-rapid-logs"><div v-for="(item, index) in rapidLogItems" :key="`${item.time}-${item.path}-${index}`" class="eme-result"><span>{{ item.status === 'succeeded' ? '✅' : item.status === 'uploaded' ? '⬆️' : item.status === 'unmatched' ? 'ℹ️' : '⚠️' }}</span><div><strong>{{ item.name }}</strong><small>{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ item.message }}</small><small>{{ item.path }}</small></div></div></div><nav v-if="rapidLogsPageCount > 1" class="eme-pagination" aria-label="秒传记录分页"><button class="eme-button secondary" :disabled="rapidLogsPage <= 1" @click="rapidLogsPage--"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ rapidLogsPage }} / {{ rapidLogsPageCount }} 页 · 共 {{ rapid.logs.length }} 条</span><button class="eme-button secondary" :disabled="rapidLogsPage >= rapidLogsPageCount" @click="rapidLogsPage++">下一页<i class="mdi mdi-chevron-right" /></button></nav><p v-if="rapid.logs.length" class="eme-hint">失败目录未填写时，实际失败文件会继续保留在本地源目录；关闭普通上传时，“未命中”表示 115 中没有相同 SHA1 与大小的文件，源文件会保留；开启普通上传后，上传失败的文件才按失败目录规则处理。</p><p v-else class="eme-hint">暂无秒传记录。</p></section>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>秒传记录</h3><p>显示当前待处理队列和最近 200 条成功、普通上传、未命中与失败结果；每条文件记录包含大小及处理状态。</p></div><button class="eme-button text" :disabled="busy || !rapid.logs.length" @click="rapidCommand('clear_logs')">清空记录</button></div><div v-if="rapid.activity.length" class="eme-rapid-activity"><h4>当前队列 <span>{{ rapid.activity_total }} 项</span></h4><div class="eme-results eme-rapid-logs"><div v-for="item in rapid.activity" :key="`active-${item.config_id}-${item.path}`" class="eme-result"><span>{{ rapidStatusIcon(item.status) }}</span><div><strong>{{ item.name }}</strong><small>{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ rapidStatusLabel(item.status) }}：{{ item.message }}</small><small>{{ item.path }}</small></div></div></div><small v-if="rapid.activity_total > rapid.activity.length">当前仅显示最近 {{ rapid.activity.length }} 项。</small></div><div v-if="rapid.logs.length" class="eme-results eme-rapid-logs"><div v-for="(item, index) in rapidLogItems" :key="`${item.time}-${item.path}-${index}`" class="eme-result"><span>{{ rapidStatusIcon(item.status) }}</span><div><strong>{{ item.name }}</strong><small>{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ item.message }}</small><small>{{ item.path }}</small></div></div></div><nav v-if="rapidLogsPageCount > 1" class="eme-pagination" aria-label="秒传记录分页"><button class="eme-button secondary" :disabled="rapidLogsPage <= 1" @click="rapidLogsPage--"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ rapidLogsPage }} / {{ rapidLogsPageCount }} 页 · 共 {{ rapid.logs.length }} 条</span><button class="eme-button secondary" :disabled="rapidLogsPage >= rapidLogsPageCount" @click="rapidLogsPage++">下一页<i class="mdi mdi-chevron-right" /></button></nav><p v-if="rapid.logs.length" class="eme-hint">失败目录未填写时，实际失败文件会继续保留在本地源目录；关闭普通上传时，“未命中”表示 115 中没有相同 SHA1 与大小的文件，源文件会保留；开启普通上传后，上传失败的文件才按失败目录规则处理。</p><p v-else-if="!rapid.activity.length" class="eme-hint">暂无秒传记录。</p></section>
       </template>
     </main>
       <div v-if="enrichSettings.open" class="eme-overlay" @click.self="enrichSettings.open = false">
@@ -1867,5 +1880,6 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
 .eme-rapid-group{margin-top:14px;padding:14px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:11px;background:rgba(var(--v-theme-surface),.12)}
 .eme-folder-input{display:flex;align-items:center;gap:8px}.eme-folder-input input{flex:1;min-width:0}.eme-folder-input .eme-button{flex:none}
 .eme-results.eme-rapid-logs{max-height:none;overflow:visible}.eme-rapid-logs .eme-result{align-items:flex-start}.eme-rapid-switches{display:flex;flex-wrap:wrap;align-items:center;gap:14px 28px;margin-top:16px}.eme-rapid-switches .eme-switch-label{margin:0;min-height:32px}
+.eme-rapid-activity{margin:12px 0 18px;padding:12px;border:1px solid rgba(var(--v-theme-primary),.3);border-radius:12px;background:rgba(var(--v-theme-primary),.07)}.eme-rapid-activity h4{display:flex;justify-content:space-between;gap:12px;margin:0 0 10px}.eme-rapid-activity>small{display:block;margin-top:8px}
 @media(max-width:760px){.eme-rapid-config .eme-card-heading{gap:10px}.eme-folder-input{align-items:stretch;flex-direction:column}.eme-folder-input .eme-button{width:100%}.eme-rapid-switches{align-items:flex-start;flex-direction:column;gap:12px}}
 </style>

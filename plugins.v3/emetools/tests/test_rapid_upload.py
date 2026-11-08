@@ -74,6 +74,63 @@ class RapidUploadTests(unittest.TestCase):
             restored = RapidUpload(rapid._owner, {"configs": [config]})
             self.assertEqual(restored.status()["logs"][0]["status"], "succeeded")
 
+    def test_status_exposes_waiting_files_and_manual_scan_placeholder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "episode.mkv"
+            media.write_bytes(b"queued")
+            config = normalize_config({"id": "rapid_1", "name": "电视剧", "source_path": str(root),
+                                       "target_folder_id": "123", "media_extensions": "mkv"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            rapid.queue_scan("rapid_1", [str(media)])
+            state = rapid.status()
+            self.assertEqual(state["activity_total"], 1)
+            self.assertEqual(state["activity"][0]["status"], "queued")
+            self.assertEqual(state["activity"][0]["name"], media.name)
+            self.assertEqual(state["activity"][0]["size"], media.stat().st_size)
+            rapid.clear_scan_queue("rapid_1", [str(media)])
+            rapid.queue_scan("rapid_1")
+            self.assertEqual(rapid.status()["activity"][0]["status"], "queued")
+            self.assertIn("扫描任务", rapid.status()["activity"][0]["name"])
+
+    def test_status_shows_current_file_while_hash_is_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "episode.mkv"
+            media.write_bytes(b"processing")
+            config = normalize_config({"id": "rapid_1", "name": "电视剧", "source_path": str(root),
+                                       "target_folder_id": "123", "media_extensions": "mkv"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            hash_started = threading.Event()
+            release_hash = threading.Event()
+            finished = threading.Event()
+            results = []
+
+            def slow_hash(_path):
+                hash_started.set()
+                release_hash.wait(timeout=2)
+                return "ABC123", media.stat().st_size
+
+            client = FakeClient({"status": 2, "reuse": True})
+
+            def run():
+                with patch.object(rapid, "_p115_client", return_value=client), \
+                        patch.object(RapidUpload, "_sha1", side_effect=slow_hash):
+                    results.append(rapid.run("rapid_1"))
+                finished.set()
+
+            worker = threading.Thread(target=run)
+            worker.start()
+            self.assertTrue(hash_started.wait(timeout=1))
+            state = rapid.status()
+            self.assertEqual(state["activity"][0]["status"], "processing")
+            self.assertEqual(state["activity"][0]["path"], str(media))
+            release_hash.set()
+            self.assertTrue(finished.wait(timeout=2))
+            worker.join(timeout=1)
+            self.assertTrue(results[0]["ok"])
+            self.assertEqual(rapid.status()["activity"], [])
+
     def test_modern_p115_upload_file_init_response_is_normalized(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
