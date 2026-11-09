@@ -216,7 +216,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.19.1"
+    plugin_version = "1.19.2"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -1030,18 +1030,21 @@ class Ed2kFolderWatcher(_PluginBase):
         except OSError:
             return
 
+    def _pending_order(self, key, entry, position, now):
+        due, signature = entry
+        ready = due <= now
+        completed_movie = self._movie_hash_job and self._movie_hash_job["key"] == key and self._movie_hash_job["done"]
+        return (not self._can_process_pending(key, signature), not ready, 0 if ready else due,
+                not completed_movie, key != "__cloud_scan__", position)
+
     def _next_pending_key(self):
         now = time.monotonic()
-        eligible = [key for key, (_, item) in self._pending.items() if self._can_process_pending(key, item)]
-        if not eligible:
+        candidates = [(self._pending_order(key, entry, position, now), key)
+                      for position, (key, entry) in enumerate(self._pending.items())]
+        if not candidates:
             return None
-        ready = [key for key in eligible if self._pending[key][0] <= now]
-        def order(key):
-            item = self._pending[key][1]
-            path = item.get("path", key) if key.startswith("cloud:") else key
-            completed_movie = self._movie_hash_job and self._movie_hash_job["key"] == key and self._movie_hash_job["done"]
-            return not completed_movie, key != "__cloud_scan__", filename_order(path)
-        return min(ready, key=order) if ready else min(eligible, key=lambda key: self._pending[key][0])
+        order, key = min(candidates)
+        return key if not order[0] else None
 
     def _can_process_pending(self, key, item):
         job = self._movie_hash_job
@@ -2156,14 +2159,15 @@ class Ed2kFolderWatcher(_PluginBase):
 
     def _progress_snapshot(self) -> dict:
         with self._condition:
+            now_monotonic = time.monotonic()
+            now_wall = time.time()
             active = dict(self._local_active) if self._local_active else None
-            pending = list(self._pending.items())
+            pending = [(self._pending_order(key, entry, position, now_monotonic), key, entry)
+                       for position, (key, entry) in enumerate(self._pending.items())]
             worker_alive = bool(self._worker and self._worker.is_alive())
             cloud_status = dict(self._cloud_status)
             movie_job = self._movie_hash_job
             movie_progress = dict(movie_job["progress"]) if movie_job else None
-        now_monotonic = time.monotonic()
-        now_wall = time.time()
         items = []
         if movie_progress:
             items.append(movie_progress)
@@ -2178,7 +2182,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 "updated_at": cloud_status.get("updated_at"),
             })
         queued = []
-        for key, (due, signature) in pending:
+        for order, key, (due, signature) in pending:
             if key.startswith("__"):
                 continue
             if movie_job and key == movie_job["key"]:
@@ -2186,20 +2190,16 @@ class Ed2kFolderWatcher(_PluginBase):
             if key.startswith("cloud:"):
                 if not isinstance(signature, dict):
                     continue
-                queue_path = signature.get("path") or signature.get("name") or key
                 name = signature.get("name") or key
                 size = signature.get("size", 0)
                 source = "网盘"
             else:
-                queue_path = key
                 name = Path(key).name
                 size = signature[0] if isinstance(signature, tuple) and signature else 0
                 source = "本地"
                 if active and active.get("path") == key:
                     continue
-            ready = due <= now_monotonic
-            eligible = self._can_process_pending(key, signature)
-            order = (0 if eligible else 1, 0 if ready else 1, 0 if ready else due, filename_order(queue_path), key)
+            eligible = not order[0]
             queued.append((order, {
                 "id": self._task_id(key, signature), "can_cancel": True,
                 "name": name, "size": size, "bytes_read": 0,
@@ -2211,7 +2211,7 @@ class Ed2kFolderWatcher(_PluginBase):
         for position, (_, item) in enumerate(queued, 1):
             item["queue_position"] = position
             items.append(item)
-        pending_keys = {key for key, _ in pending}
+        pending_keys = {key for _, key, _ in pending}
         failed_tasks = []
         for key, failure in self._retry_failures.items():
             if failure.get("attempts", 0) <= self._retry_limit or key in pending_keys:

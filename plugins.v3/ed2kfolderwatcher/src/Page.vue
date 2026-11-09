@@ -170,15 +170,15 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <section class="progress-section" aria-live="polite">
       <h3>正在处理与等待队列 <span class="worker-status" :class="workerAlive ? 'worker-on' : 'worker-off'">{{ workerAlive ? '工作线程运行中' : '工作线程未运行' }}</span></h3>
-      <p class="progress-detail">本地／网盘共用计算位；开启两路并发时，电影＋剧集最多两路，同类仍单路。取消任务后，同一文件不会被补扫重新加入。</p>
+      <p class="progress-detail">已就绪任务按入队先后处理；本地／网盘共用计算位，双路模式允许电影与剧集各一路。取消后同一文件不再自动加入。</p>
       <p v-if="!progress.length" class="progress-empty">当前没有本地或网盘文件等待处理。</p>
       <ol v-else class="progress-list">
         <li v-for="(task, index) in progress" :key="task.id || `${task.source}-${task.name}-${index}`" class="progress-item" :class="task.status">
-          <div class="progress-heading"><span class="source-tag">{{ task.source }}</span><strong>{{ task.name }}</strong><span v-if="task.status === 'queued' && task.queue_position" class="queue-position">队列第 {{ task.queue_position }} 位</span><span class="progress-stage">{{ task.stage }}</span><button v-if="task.status === 'queued' && task.can_cancel" type="button" class="cancel-task" :disabled="!!cancelling || busy" @click="cancelTask(task)">{{ cancelling === task.id ? '取消中…' : '取消任务' }}</button></div>
+          <div class="progress-heading"><span class="source-tag">{{ task.source }}</span><strong>{{ task.name }}</strong><span v-if="task.status === 'queued' && task.queue_position" class="queue-position">No.{{ task.queue_position }}</span><span class="progress-stage">{{ task.stage }}</span><button v-if="task.status === 'queued' && task.can_cancel" type="button" class="cancel-task" :disabled="!!cancelling || busy" @click="cancelTask(task)">{{ cancelling === task.id ? '取消中…' : '取消任务' }}</button></div>
           <div v-if="task.status === 'active' && task.size" class="progress-track"><span :style="{ width: `${progressPercent(task)}%` }"></span></div>
           <p class="progress-detail">
             <span v-if="task.status === 'active' && task.size">{{ formatBytes(task.bytes_read) }} / {{ formatBytes(task.size) }}（{{ progressPercent(task) }}%）</span>
-            <span v-else-if="task.status === 'queued' && task.due_at">最早可处理：{{ formatTime(task.due_at) }}</span>
+            <span v-else-if="task.status === 'queued'">文件大小：{{ task.size === null || task.size === undefined ? '未知' : formatBytes(task.size) }}</span>
             <span v-else-if="task.status === 'active'">正在准备任务</span>
             <span v-else-if="task.status === 'failed' && task.error">{{ task.error }}</span>
           </p>

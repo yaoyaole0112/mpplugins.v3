@@ -814,10 +814,94 @@ class Ed2kTests(unittest.TestCase):
         queued = [item for item in progress if item["status"] == "queued"]
         self.assertEqual(
             [(item["name"], item["queue_position"]) for item in queued],
-            [("a-first.mkv", 1), ("b-ready.mkv", 2), ("z-last.mkv", 3), ("a-delayed.mkv", 4)],
+            [("z-last.mkv", 1), ("b-ready.mkv", 2), ("a-first.mkv", 3), ("a-delayed.mkv", 4)],
         )
+        self.assertEqual([item["size"] for item in queued], [3, 4, 2, 5])
         self.assertEqual(queued[-1]["due_at"], 1050)
+        with patch.object(self.module.time, "monotonic", return_value=100):
+            for expected in ("/z-last.mkv", "cloud:ready", "/a-first.mkv", "cloud:delayed"):
+                self.assertEqual(self.plugin._next_pending_key(), expected)
+                self.plugin._pending.pop(expected)
         self.plugin._pending.clear()
+
+    def test_repeated_pending_events_keep_fifo_position_across_sources(self):
+        path = self.create("玫瑰战争.S01E02.mkv")
+        item, storage = self.cloud_fixture()
+        item = {**item, "name": "嫁金钗.S01E01.mkv", "path": "/cloud-test/嫁金钗.S01E01.mkv"}
+        self.plugin._queue_event(path, delay=0)
+        self.assertTrue(self.plugin._queue_cloud_file(item))
+        self.plugin._queue_event(path, delay=0)
+        self.assertFalse(self.plugin._queue_cloud_file(item))
+        queued = [entry for entry in self.plugin._progress_snapshot()["items"] if entry["status"] == "queued"]
+        self.assertEqual([(entry["name"], entry["queue_position"]) for entry in queued],
+                         [(path.name, 1), (item["name"], 2)])
+        self.assertEqual(self.plugin._next_pending_key(), str(path))
+        self.plugin._pending.pop(str(path))
+        self.plugin._queue_event(path, delay=0)
+        self.assertEqual(self.plugin._next_pending_key(), self.cloud_module.record_key(item))
+
+    def test_fifo_preserves_parallel_eligibility_and_result_scan_priority(self):
+        self.plugin._pending = {
+            "/Movies/earlier.mkv": (1, (5, 0, 1)),
+            "/show.S01E02.mkv": (1, (5, 0, 1)),
+        }
+        self.plugin._movie_hash_job = {
+            "key": "/Movies/active.mkv", "done": False,
+            "progress": {"name": "active.mkv", "status": "active", "source": "本地"},
+        }
+        with patch.object(self.module.time, "monotonic", return_value=100):
+            self.assertEqual(self.plugin._next_pending_key(), "/show.S01E02.mkv")
+            queued = [entry for entry in self.plugin._progress_snapshot()["items"] if entry["status"] == "queued"]
+            self.assertEqual([entry["name"] for entry in queued], ["show.S01E02.mkv", "earlier.mkv"])
+            self.plugin._movie_hash_job["done"] = True
+            self.plugin._pending["__cloud_scan__"] = (1, None)
+            self.plugin._pending["/Movies/active.mkv"] = (1, (5, 0, 1))
+            self.assertEqual(self.plugin._next_pending_key(), "/Movies/active.mkv")
+            self.plugin._pending.pop("/Movies/active.mkv")
+            self.plugin._movie_hash_job = None
+            self.assertEqual(self.plugin._next_pending_key(), "__cloud_scan__")
+            self.plugin._pending.pop("__cloud_scan__")
+            self.assertEqual(self.plugin._next_pending_key(), "/Movies/earlier.mkv")
+
+    def test_later_cloud_show_does_not_overtake_waiting_episodes(self):
+        movie, template, storage = self.start_cloud_worker(movie_series_parallel=False)
+        self.plugin._delete_source = False
+        self.plugin._telegram_enabled = False
+        names = [f"玫瑰战争.S01E{episode:02}.mkv" for episode in range(1, 6)]
+        names.extend(f"嫁金钗.S01E{episode:02}.mkv" for episode in range(1, 3))
+        episodes = [{**template, "fileid": f"fifo-{index}", "name": name, "path": f"/cloud-test/{name}"}
+                    for index, name in enumerate(names)]
+        started = threading.Event()
+        release = threading.Event()
+        calculated = []
+        def calculate(reader, item, *args, **kwargs):
+            calculated.append(item["name"])
+            if len(calculated) == 1:
+                started.set()
+                if not release.wait(timeout=20):
+                    raise TimeoutError("FIFO test did not release first episode")
+            return "a" * 32
+        with patch.object(self.cloud_module, "hash_remote", side_effect=calculate):
+            try:
+                self.assertTrue(self.plugin._queue_cloud_file(episodes[0]))
+                self.assertTrue(started.wait(timeout=5))
+                for episode in episodes[1:5]:
+                    self.assertTrue(self.plugin._queue_cloud_file(episode))
+                before = [entry["name"] for entry in self.plugin._progress_snapshot()["items"] if entry["status"] == "queued"]
+                self.assertEqual(before, names[1:5])
+                for episode in episodes[5:]:
+                    self.assertTrue(self.plugin._queue_cloud_file(episode))
+                after = [entry for entry in self.plugin._progress_snapshot()["items"] if entry["status"] == "queued"]
+                self.assertEqual([entry["name"] for entry in after], names[1:])
+                self.assertEqual([entry["queue_position"] for entry in after], list(range(1, 7)))
+                release.set()
+                expected = {self.cloud_module.record_key(item) for item in episodes}
+                self.wait_for(lambda: (self.root / "data" / "records.json").exists()
+                              and expected.issubset(self.records()))
+                self.assertEqual(calculated, names)
+            finally:
+                release.set()
+                self.plugin.stop_service()
 
     def test_telegram_message_chunks_keep_complete_links(self):
         records = [{"link": "ed2k://|file|" + "a" * 100 + "|1|" + "b" * 32 + "|/"} for _ in range(50)]
@@ -1445,19 +1529,19 @@ class Ed2kTests(unittest.TestCase):
         self.assertFalse(self.plugin._recursive)
         self.assertTrue(self.plugin._cloud_recursive)
 
-    def test_natural_local_scan_and_ready_queue_order(self):
+    def test_natural_local_scan_and_fifo_ready_queue_order(self):
         self.assertTrue(self.module.filename_order("①"))
         for name in ("S01E10.mkv", "S01E2.mkv", "S01E1.mkv"):
             self.create(name)
         self.assertEqual([path.name for path in self.plugin._iter_files(self.folder)], ["S01E1.mkv", "S01E2.mkv", "S01E10.mkv"])
         self.plugin._pending = {"/S01E10.mkv": (1, None), "/S01E2.mkv": (2, None), "/S01E1.mkv": (200, None)}
         with patch.object(self.module.time, "monotonic", return_value=100):
-            self.assertEqual(self.plugin._next_pending_key(), "/S01E2.mkv")
+            self.assertEqual(self.plugin._next_pending_key(), "/S01E10.mkv")
         with patch.object(self.module.time, "monotonic", return_value=0):
             self.assertEqual(self.plugin._next_pending_key(), "/S01E10.mkv")
         self.plugin._pending = {"cloud:10": (1, {"path": "/S01E10.mkv"}), "cloud:2": (2, {"path": "/S01E2.mkv"})}
         with patch.object(self.module.time, "monotonic", return_value=100):
-            self.assertEqual(self.plugin._next_pending_key(), "cloud:2")
+            self.assertEqual(self.plugin._next_pending_key(), "cloud:10")
         self.plugin._pending.clear()
 
     def test_cloud_fresh_normalizes_id_type_but_rejects_moved_file(self):

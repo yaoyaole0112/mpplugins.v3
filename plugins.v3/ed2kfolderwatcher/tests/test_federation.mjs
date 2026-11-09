@@ -21,6 +21,17 @@ test('queue cancellation only exposes waiting task IDs and does not delete files
   assert.equal(cancel.includes('delete-source'), false)
 })
 
+test('queue rows display file sizes and No. badges without eligibility timestamps', async () => {
+  const source = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
+  const queue = source.split('<ol v-else class="progress-list">')[1].split('</ol>')[0]
+  assert.match(queue, /class="queue-position">No\.\{\{ task\.queue_position \}\}/)
+  assert.match(queue, /v-else-if="task\.status === 'queued'">文件大小：/)
+  assert.match(queue, /formatBytes\(task\.size\)/)
+  assert.equal(queue.includes('最早可处理'), false)
+  assert.equal(queue.includes('队列第'), false)
+  assert.equal(queue.includes('task.due_at'), false)
+})
+
 test('common settings put toggles before deletion and pair inputs without an empty half-row', async () => {
   const source = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
   const common = source.split('data-testid="common-settings"')[1].split('</article>')[0]

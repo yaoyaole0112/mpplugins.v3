@@ -137,7 +137,7 @@ try {
     requests = []
     queue = [
       { name: '正在计算.mkv', source: '网盘', status: 'active', size: 100, bytes_read: 25, stage: '正在读取并计算 ED2K 哈希' },
-      { id: 'c'.repeat(64), name: '等待取消.S01E02.mkv', source: '网盘', status: 'queued', can_cancel: true, queue_position: 1, due_at: 1700000000, stage: '等待处理' },
+      { id: 'c'.repeat(64), name: '等待取消.S01E02.mkv', source: '网盘', status: 'queued', can_cancel: true, size: 2 * 1024 ** 3, queue_position: 1, due_at: 1700000000, stage: '等待处理' },
     ]
     const app = vue.createApp(factory(), { api, pluginId: 'Ed2kFolderWatcher', onClose: () => { closes++ } })
     app.mount('#app')
@@ -190,6 +190,10 @@ try {
     }
     let buttons = [...document.querySelectorAll('#app button')]
     if (name !== './Config') {
+      const queued = document.querySelector('#app .progress-item.queued')
+      if (queued?.querySelector('.queue-position')?.textContent !== 'No.1') throw Error(`${name}: queue position format is not No.1`)
+      if (!queued.querySelector('.progress-detail')?.textContent.includes('文件大小：2.0 GB')) throw Error(`${name}: queued file size missing`)
+      if (queued.textContent.includes('最早可处理')) throw Error(`${name}: eligibility timestamp still displayed`)
       const cancelButtons = document.querySelectorAll('#app .cancel-task')
       if (cancelButtons.length !== 1 || !cancelButtons[0].closest('.queued')) throw Error(`${name}: cancellation must only appear on queued files`)
       const cancelCount = cancellations.length
