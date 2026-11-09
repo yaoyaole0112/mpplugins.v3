@@ -249,7 +249,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.2.0"
+    plugin_version = "6.2.1"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -1483,7 +1483,7 @@ class BrushFlow(_PluginBase):
                 logger.info(f"刷流任务 [{task.name}] 下载类型通过 {torrent.title}：{media_type}（{source}）")
             hash_string = self.__download(torrent)
             if not hash_string:
-                report["reason_counts"]["最近播出剧集规则未通过或下载器添加失败"] += 1
+                report["reason_counts"]["下载预检未通过或下载器添加失败"] += 1
                 continue
             torrent_task = self._torrent_to_task_record(torrent, site, task)
             torrent_tasks[hash_string] = torrent_task
@@ -2718,14 +2718,34 @@ class BrushFlow(_PluginBase):
         service = self.service_info
         if not downloader or not service:
             return None
+        if isinstance(torrent_content, str) and not torrent_content.startswith("magnet"):
+            response = RequestUtils(cookies=cookies, proxies=proxies, ua=torrent.site_ua).get_res(
+                url=torrent_content
+            )
+            if response is not None and response.ok:
+                torrent_content = response.content
+        expected_hash = TorrentHelper.get_torrent_hash(torrent_content)
+        if not expected_hash:
+            logger.warning(f"刷流任务 [{task.name}] 跳过种子 {torrent.title}：无法解析种子 Hash")
+            return None
+        try:
+            existing_torrents, query_error = downloader.get_torrents(ids=[expected_hash])
+        except Exception as err:
+            logger.warning(
+                f"刷流任务 [{task.name}] 跳过种子 {torrent.title}：下载器 Hash 查询失败（{type(err).__name__}）"
+            )
+            return None
+        if query_error:
+            logger.warning(f"刷流任务 [{task.name}] 跳过种子 {torrent.title}：下载器 Hash 查询失败")
+            return None
+        if existing_torrents:
+            logger.info(
+                f"刷流任务 [{task.name}] 跳过重复种子 {torrent.title}："
+                f"下载器已存在相同 Hash {expected_hash}，保留原任务"
+            )
+            return None
         recent_selection = None
         if task.recent_episodes_only:
-            if isinstance(torrent_content, str) and not torrent_content.startswith("magnet"):
-                response = RequestUtils(cookies=cookies, proxies=proxies, ua=torrent.site_ua).get_res(
-                    url=torrent_content
-                )
-                if response and response.ok:
-                    torrent_content = response.content
             recent_selection = self._recent_episode_file_selection(torrent_content, torrent.title)
             if not recent_selection:
                 return None
@@ -2734,13 +2754,7 @@ class BrushFlow(_PluginBase):
             up_limit = up_speed * 1024 if up_speed else None
             down_limit = down_speed * 1024 if down_speed else None
             random_tag = StringUtils.generate_random_str(10)
-            if isinstance(torrent_content, str) and not torrent_content.startswith("magnet"):
-                response = RequestUtils(cookies=cookies, proxies=proxies, ua=torrent.site_ua).get_res(
-                    url=torrent_content
-                )
-                if response and response.ok:
-                    torrent_content = response.content
-            if not downloader.add_torrent(
+            add_result = downloader.add_torrent(
                 content=torrent_content,
                 download_dir=task.save_path,
                 cookie=cookies,
@@ -2749,12 +2763,21 @@ class BrushFlow(_PluginBase):
                 upload_limit=up_limit,
                 download_limit=down_limit,
                 is_paused=bool(recent_selection),
-            ):
+            )
+            added, added_hashes = self._qb_add_result(add_result)
+            if not added:
+                logger.warning(f"刷流任务 [{task.name}] 添加种子失败：{torrent.title}，不再等待 Hash")
                 return None
-            torrent_hash = downloader.get_torrent_id_by_tag(tags=random_tag)
+            torrent_hash = (
+                expected_hash if expected_hash in added_hashes
+                else downloader.get_torrent_id_by_tag(tags=random_tag)
+            )
             if not torrent_hash:
                 logger.error(f"刷流任务 [{task.name}] 获取种子 Hash 失败")
                 return torrent_hash
+            if str(torrent_hash).lower() != expected_hash:
+                logger.error(f"刷流任务 [{task.name}] 添加结果 Hash 与种子不一致，停止处理：{torrent.title}")
+                return None
             if recent_selection and not self._select_recent_episode_files(
                 downloader, torrent_hash, recent_selection, "qbittorrent", task.name
             ):
@@ -2769,12 +2792,6 @@ class BrushFlow(_PluginBase):
                 logger.warning(f"刷流任务 [{task.name}] 移除随机标签失败：{str(err)}")
             return torrent_hash
         if downloader_helper.is_downloader("transmission", service=service):
-            if isinstance(torrent_content, str) and not torrent_content.startswith("magnet"):
-                response = RequestUtils(cookies=cookies, proxies=proxies, ua=torrent.site_ua).get_res(
-                    url=torrent_content
-                )
-                if response and response.ok:
-                    torrent_content = response.content
             added_torrent = downloader.add_torrent(
                 content=torrent_content,
                 download_dir=task.save_path,
@@ -2800,6 +2817,15 @@ class BrushFlow(_PluginBase):
                 )
             return added_torrent.hashString
         return None
+
+    @staticmethod
+    def _qb_add_result(result: Any) -> Tuple[bool, List[str]]:
+        """兼容宿主新版 (success, hashes) 与旧版布尔返回值。"""
+        if isinstance(result, tuple) and len(result) == 2:
+            success, hashes = result
+            hashes = hashes if isinstance(hashes, (list, tuple)) else []
+            return success is True, [str(value).lower() for value in hashes if value]
+        return result is True, []
 
     @staticmethod
     def _video_file(path: str) -> bool:
