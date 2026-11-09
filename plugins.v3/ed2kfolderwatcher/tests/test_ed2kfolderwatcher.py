@@ -55,6 +55,276 @@ class Ed2kTests(unittest.TestCase):
         self.assertNotEqual(key("美国谍梦.S06E07.mkv"), key("继承之战.S06E07.mkv"))
         self.assertIsNone(key("电影.mkv"))
 
+    def test_media_kind_is_conservative_and_episode_markers_win(self):
+        classify = self.module.media_kind
+        for name in ("剧.S01E02.mkv", "综艺.EP05.mkv", "综艺.20261109.mkv", "动画 - 12.mkv", "剧.第十二集.mkv"):
+            self.assertEqual(classify(name, f"/Movies/{name}"), "series", name)
+        self.assertEqual(classify("电影(2026).mkv", "/影视/电影/电影(2026).mkv"), "movie")
+        self.assertEqual(classify("未命名.mkv", "/影视/动漫/未命名.mkv"), "series")
+        self.assertEqual(classify("未知.mkv", "/media/未知.mkv"), "unknown")
+
+    def test_local_movie_hash_allows_episode_and_preserves_both_records(self):
+        movies = self.folder / "Movies"
+        movies.mkdir()
+        movie = movies / "电影.mkv"
+        movie.write_bytes(b"movie")
+        episode = self.create("剧.S01E01.mkv", b"episode")
+        movie_started = threading.Event()
+        episode_done = threading.Event()
+        release_movie = threading.Event()
+        original_hash = self.module.ed2k_hash
+        def calculate(path, *args, **kwargs):
+            if path == movie:
+                movie_started.set()
+                if not release_movie.wait(timeout=10):
+                    raise TimeoutError("movie test did not release")
+            result = original_hash(path, *args, **kwargs)
+            if path == episode:
+                episode_done.set()
+            return result
+        self.plugin.init_plugin({"enabled": True, "monitor_enabled": False, "folder": str(self.folder), "min_age": 0})
+        with patch.object(self.module, "ed2k_hash", side_effect=calculate):
+            try:
+                self.plugin._queue_event(movie, delay=0)
+                self.assertTrue(movie_started.wait(timeout=5))
+                self.plugin._queue_event(episode, delay=0)
+                self.assertTrue(episode_done.wait(timeout=5), "episode was blocked by the movie")
+                self.wait_for(lambda: (self.root / "data" / "records.json").exists() and str(episode) in self.records())
+                self.assertNotIn(str(movie), self.records())
+                release_movie.set()
+                self.wait_for(lambda: str(movie) in self.records())
+                self.assertEqual(len(self.records()), 2)
+            finally:
+                release_movie.set()
+                self.plugin.stop_service()
+
+    def test_movie_slot_blocks_other_movies_and_unknown_but_allows_series(self):
+        self.plugin._movie_hash_job = {"key": "/Movies/a.mkv", "done": False}
+        self.assertFalse(self.plugin._can_process_pending("/Movies/a.mkv", None))
+        self.assertFalse(self.plugin._can_process_pending("/Movies/b.mkv", None))
+        self.assertFalse(self.plugin._can_process_pending("/media/unknown.mkv", None))
+        self.assertTrue(self.plugin._can_process_pending("/media/show.S01E02.mkv", None))
+        self.assertTrue(self.plugin._can_process_pending("cloud:series", {"name": "综艺.第3期.mkv"}))
+        self.assertFalse(self.plugin._can_process_pending("cloud:movie", {"name": "电影.mkv", "path": "/Movies/电影.mkv"}))
+        self.plugin._movie_hash_job["done"] = True
+        self.assertTrue(self.plugin._can_process_pending("/Movies/a.mkv", None))
+        self.plugin._movie_hash_job = None
+
+    def test_unchanged_movie_events_do_not_duplicate_or_move_its_batch(self):
+        movie = self.create("movie.mkv")
+        stat = movie.stat()
+        signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+        batch = self.plugin._new_batch("original")
+        self.plugin._movie_hash_job = {
+            "key": str(movie), "done": False, "signature": signature, "batch_id": batch,
+        }
+        self.plugin._queue_event(movie, delay=0)
+        self.assertNotIn(str(movie), self.plugin._pending)
+        movie.write_bytes(b"changed movie")
+        self.plugin._queue_event(movie, delay=0)
+        self.assertEqual(self.plugin._pending_batches[str(movie)], batch)
+        self.plugin._movie_hash_job = None
+
+    def test_series_only_stays_on_one_hash_thread(self):
+        first = self.create("剧.S01E01.mkv")
+        second = self.create("剧.S01E02.mkv")
+        started = threading.Event()
+        second_started = threading.Event()
+        release = threading.Event()
+        original_hash = self.module.ed2k_hash
+        def calculate(path, *args, **kwargs):
+            if path == first:
+                started.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("series test did not release")
+            else:
+                second_started.set()
+            return original_hash(path, *args, **kwargs)
+        self.plugin.init_plugin({"enabled": True, "monitor_enabled": False, "folder": str(self.folder), "min_age": 0})
+        with patch.object(self.module, "ed2k_hash", side_effect=calculate):
+            try:
+                self.plugin._queue_event(first, delay=0)
+                self.assertTrue(started.wait(timeout=5))
+                self.plugin._queue_event(second, delay=0)
+                self.assertFalse(second_started.wait(timeout=0.2))
+                self.assertIsNone(self.plugin._movie_hash_thread)
+                release.set()
+                self.wait_for(lambda: (self.root / "data" / "records.json").exists() and len(self.records()) == 2)
+            finally:
+                release.set()
+                self.plugin.stop_service()
+
+    def test_movies_only_never_run_two_hashes_together(self):
+        movies = self.folder / "Movies"
+        movies.mkdir()
+        first = movies / "a.mkv"
+        second = movies / "b.mkv"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+        started = threading.Event()
+        second_started = threading.Event()
+        release = threading.Event()
+        original_hash = self.module.ed2k_hash
+        def calculate(path, *args, **kwargs):
+            if path == first:
+                started.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("movie-only test did not release")
+            else:
+                second_started.set()
+            return original_hash(path, *args, **kwargs)
+        self.plugin.init_plugin({"enabled": True, "monitor_enabled": False, "folder": str(self.folder), "min_age": 0})
+        with patch.object(self.module, "ed2k_hash", side_effect=calculate):
+            try:
+                self.plugin._queue_event(first, delay=0)
+                self.assertTrue(started.wait(timeout=5))
+                self.plugin._queue_event(second, delay=0)
+                self.assertFalse(second_started.wait(timeout=0.2))
+                release.set()
+                self.wait_for(lambda: (self.root / "data" / "records.json").exists() and len(self.records()) == 2)
+            finally:
+                release.set()
+                self.plugin.stop_service()
+
+    def test_parallel_movie_keeps_aggregate_sending_and_deletion_serial(self):
+        movies = self.folder / "Movies"
+        movies.mkdir()
+        movie = movies / "movie.mkv"
+        movie.write_bytes(b"movie")
+        episode = self.create("show.S01E01.mkv")
+        started = threading.Event()
+        release = threading.Event()
+        hash_calls = []
+        output_threads = []
+        original_hash = self.module.ed2k_hash
+        original_write = self.plugin._write_results
+        original_unlink = self.plugin._unlink_source
+        def write_results(*args, **kwargs):
+            output_threads.append(threading.get_ident())
+            return original_write(*args, **kwargs)
+        def unlink_source(*args, **kwargs):
+            output_threads.append(threading.get_ident())
+            return original_unlink(*args, **kwargs)
+        def send_link(*args, **kwargs):
+            output_threads.append(threading.get_ident())
+            return True
+        def calculate(path, *args, **kwargs):
+            hash_calls.append(path)
+            if path == movie:
+                started.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("output test did not release")
+            return original_hash(path, *args, **kwargs)
+        self.plugin.init_plugin({
+            "enabled": True, "monitor_enabled": False, "folder": str(self.folder), "min_age": 0,
+            "telegram_enabled": True, "telegram_chat_id": "@receiver",
+            "telegram_aggregate": True, "telegram_aggregate_window": 0, "delete_source": True,
+        })
+        with patch.object(self.module, "ed2k_hash", side_effect=calculate), \
+                patch.object(self.plugin, "_write_results", side_effect=write_results), \
+                patch.object(self.plugin, "_unlink_source", side_effect=unlink_source), \
+                patch.object(self.plugin, "_send_telegram", side_effect=send_link) as send:
+            try:
+                self.plugin._queue_event(movie, delay=0)
+                self.assertTrue(started.wait(timeout=5))
+                self.plugin._queue_event(episode, delay=0)
+                self.wait_for(lambda: not episode.exists())
+                self.assertTrue(movie.exists())
+                release.set()
+                self.wait_for(lambda: not movie.exists())
+                self.wait_for(lambda: all(record["telegram_sent"] and record["source_deleted"]
+                                          for record in self.records().values()))
+                records = self.records()
+                self.assertEqual(len(records), 2)
+                self.assertTrue(all(record["telegram_sent"] and record["source_deleted"] for record in records.values()))
+                self.assertEqual(send.call_count, 2)
+                self.assertEqual(hash_calls.count(movie), 1)
+                self.assertEqual(set(output_threads), {self.plugin._worker.ident})
+            finally:
+                release.set()
+                self.plugin.stop_service()
+
+    def test_stopping_cancels_movie_hash_without_saving_or_requeueing(self):
+        movies = self.folder / "Movies"
+        movies.mkdir()
+        movie = movies / "cancel.mkv"
+        movie.write_bytes(b"movie")
+        started = threading.Event()
+        def calculate(path, stopping, **kwargs):
+            started.set()
+            if not stopping.wait(timeout=10):
+                raise TimeoutError("stop test timed out")
+            raise InterruptedError()
+        self.plugin.init_plugin({"enabled": True, "monitor_enabled": False, "folder": str(self.folder), "min_age": 0})
+        with patch.object(self.module, "ed2k_hash", side_effect=calculate):
+            self.plugin._queue_event(movie, delay=0)
+            self.assertTrue(started.wait(timeout=5))
+            self.plugin.stop_service()
+        self.assertIsNone(self.plugin._movie_hash_thread)
+        self.assertIsNone(self.plugin._movie_hash_job)
+        self.assertNotIn(str(movie), self.plugin._pending)
+        self.assertTrue(movie.exists())
+        self.assertFalse((self.root / "data" / "records.json").exists())
+
+    def test_movie_result_revalidates_file_identity_and_rehashes_changes(self):
+        movies = self.folder / "Movies"
+        movies.mkdir()
+        movie = movies / "changed.mkv"
+        movie.write_bytes(b"old")
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+        original_hash = self.module.ed2k_hash
+        def calculate(path, *args, **kwargs):
+            result = original_hash(path, *args, **kwargs)
+            calls.append(result)
+            if len(calls) == 1:
+                started.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("change test did not release")
+            return result
+        self.plugin.init_plugin({"enabled": True, "monitor_enabled": False, "folder": str(self.folder), "min_age": 0})
+        with patch.object(self.module, "ed2k_hash", side_effect=calculate):
+            try:
+                self.plugin._queue_event(movie, delay=0)
+                self.assertTrue(started.wait(timeout=5))
+                movie.write_bytes(b"replacement movie")
+                release.set()
+                self.wait_for(lambda: (self.root / "data" / "records.json").exists() and str(movie) in self.records())
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(self.records()[str(movie)]["size"], len(b"replacement movie"))
+                self.assertIn(calls[-1], self.records()[str(movie)]["link"])
+            finally:
+                release.set()
+                self.plugin.stop_service()
+
+    def test_movie_hash_failure_replays_through_normal_retry(self):
+        movies = self.folder / "Movies"
+        movies.mkdir()
+        movie = movies / "failure.mkv"
+        movie.write_bytes(b"movie")
+        self.plugin.init_plugin({"enabled": True, "monitor_enabled": False, "folder": str(self.folder),
+                                 "min_age": 0, "retry_limit": 0})
+        with patch.object(self.module, "ed2k_hash", side_effect=OSError("hash failure")):
+            self.plugin._queue_event(movie, delay=0)
+            self.wait_for(lambda: str(movie) in self.plugin._retry_failures)
+            self.plugin.stop_service()
+        self.assertEqual(self.plugin._retry_failures[str(movie)]["attempts"], 1)
+        self.assertIn("hash failure", self.plugin._retry_failures[str(movie)]["error"])
+        self.assertFalse((self.root / "data" / "records.json").exists())
+
+    def test_local_movie_progress_is_separate_from_foreground_series(self):
+        self.plugin._movie_hash_job = {
+            "key": "/Movies/movie.mkv", "done": False,
+            "progress": {"name": "movie.mkv", "status": "active", "source": "本地",
+                         "stage": "电影后台计算 ED2K 哈希", "size": 100, "bytes_read": 50},
+        }
+        self.plugin._local_active = {"name": "show.S01E01.mkv", "status": "active", "size": 30, "bytes_read": 10}
+        snapshot = self.plugin._progress_snapshot()
+        self.assertEqual([(task["name"], task["bytes_read"]) for task in snapshot["items"]],
+                         [("movie.mkv", 50), ("show.S01E01.mkv", 10)])
+        self.plugin._movie_hash_job = None
+
     def test_ed2k_link_preserves_slashes_inside_cloud_filename(self):
         filename = "决胜巅峰(2014).1080p(PGS 简体中文/PGS 繁体中文).mkv"
         link = self.module.ed2k_link(filename, "a" * 32, 25204859577)

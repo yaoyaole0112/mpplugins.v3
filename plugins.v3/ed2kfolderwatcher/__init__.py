@@ -12,6 +12,7 @@ from urllib.parse import quote, unquote
 from apscheduler.triggers.cron import CronTrigger
 from .file_size import minimum_file_bytes, minimum_gb_setting, minimum_gb_value
 from .file_order import filename_order
+from .media_type import media_kind
 
 try:
     from Crypto.Hash import MD4 as _CryptoMD4
@@ -40,6 +41,10 @@ DEFAULT_EXTENSIONS = ""
 EMPTY_MD4 = "31d6cfe0d16ae931b73c59d7e0c089c0"
 TELEGRAM_MESSAGE_LIMIT = 3800
 CLOUD_LIFE_SILENT_SKIP_REASONS = {"不在所选网盘存储或监控目录", "子目录未开启监控"}
+
+
+class HashDeferred(Exception):
+    pass
 
 
 def record_problem(record: dict) -> str:
@@ -197,7 +202,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.18.6"
+    plugin_version = "1.18.7"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -229,6 +234,8 @@ class Ed2kFolderWatcher(_PluginBase):
     _output_enabled = True
     _observer = None
     _worker = None
+    _movie_hash_thread = None
+    _movie_hash_job = None
     _stopping = None
     _pending = None
     _pending_batches = None
@@ -262,6 +269,10 @@ class Ed2kFolderWatcher(_PluginBase):
         self._stopping = threading.Event()
         self._condition = threading.Condition()
         self._pending = {}
+        self._movie_hash_job = None
+        self._movie_hash_thread = None
+        self._active_work_key = None
+        self._hash_deferred = False
         self._pending_batches = {}
         self._batches = {}
         self._batch_sequence = 0
@@ -902,6 +913,12 @@ class Ed2kFolderWatcher(_PluginBase):
                 return
             stat = path.stat()
             signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+            with self._condition:
+                movie_job = self._movie_hash_job
+                if movie_job and movie_job["key"] == str(path) and not movie_job["done"]:
+                    if signature == movie_job["signature"]:
+                        return
+                    batch_id = movie_job["batch_id"] or batch_id
             failure = self._retry_failures.get(str(path))
             if failure:
                 if failure.get("identity") != list(signature):
@@ -928,12 +945,78 @@ class Ed2kFolderWatcher(_PluginBase):
 
     def _next_pending_key(self):
         now = time.monotonic()
-        ready = [key for key, (due, _) in self._pending.items() if due <= now]
+        eligible = [key for key, (_, item) in self._pending.items() if self._can_process_pending(key, item)]
+        if not eligible:
+            return None
+        ready = [key for key in eligible if self._pending[key][0] <= now]
         def order(key):
             item = self._pending[key][1]
             path = item.get("path", key) if key.startswith("cloud:") else key
-            return key != "__cloud_scan__", filename_order(path)
-        return min(ready, key=order) if ready else min(self._pending, key=lambda key: self._pending[key][0])
+            completed_movie = self._movie_hash_job and self._movie_hash_job["key"] == key and self._movie_hash_job["done"]
+            return not completed_movie, key != "__cloud_scan__", filename_order(path)
+        return min(ready, key=order) if ready else min(eligible, key=lambda key: self._pending[key][0])
+
+    def _can_process_pending(self, key, item):
+        job = self._movie_hash_job
+        if not job or key.startswith("__"):
+            return True
+        if key == job["key"]:
+            return job["done"]
+        name = item.get("name", "") if isinstance(item, dict) else Path(key).name
+        path = item.get("path", "") if isinstance(item, dict) else key
+        return media_kind(name, path) == "series"
+
+    def _local_hash(self, path, initial):
+        key = str(path)
+        identity = (initial.st_size, initial.st_mtime_ns, initial.st_ino, initial.st_dev, initial.st_ctime_ns)
+        with self._condition:
+            job = self._movie_hash_job
+            if job and job["key"] == key and job["done"]:
+                if job["identity"] == identity:
+                    if job.get("error") is not None:
+                        raise job["error"]
+                    return job["result"]
+                self._movie_hash_job = None
+            if self._active_work_key != key or media_kind(path.name, key) != "movie":
+                job = None
+            else:
+                job = {
+                    "key": key, "identity": identity, "done": False,
+                    "signature": (initial.st_size, initial.st_mtime_ns, initial.st_ino),
+                    "batch_id": self._active_batch_id,
+                    "progress": {"name": path.name, "size": initial.st_size, "bytes_read": 0,
+                                 "source": "本地", "status": "active", "stage": "电影后台计算 ED2K 哈希",
+                                 "started_at": time.time()},
+                }
+                self._movie_hash_job = job
+        if job is None:
+            return ed2k_hash(path, self._stopping,
+                             progress=lambda done, size: self._update_local_hash_progress(path, done, size))
+        stopping = self._stopping
+        def progress(done, size):
+            with self._condition:
+                job["progress"].update(bytes_read=done, size=size, updated_at=time.time())
+        def calculate():
+            try:
+                job["result"] = ed2k_hash(path, stopping, progress=progress)
+            except Exception as failure:
+                job["error"] = failure
+            finally:
+                with self._condition:
+                    job["done"] = True
+                    job["progress"]["stage"] = "电影计算结束，等待校验与保存"
+                    if not stopping.is_set():
+                        self._pending.setdefault(key, (time.monotonic(), job["signature"]))
+                        self._pending_batches.setdefault(key, job["batch_id"])
+                    self._condition.notify_all()
+        self._movie_hash_thread = threading.Thread(target=calculate, name="ed2k-movie-hash", daemon=True)
+        try:
+            self._movie_hash_thread.start()
+        except Exception:
+            with self._condition:
+                self._movie_hash_job = None
+            raise
+        raise HashDeferred()
 
     def _work(self) -> None:
         while not self._stopping.is_set():
@@ -965,6 +1048,9 @@ class Ed2kFolderWatcher(_PluginBase):
                     continue
                 else:
                     key = self._next_pending_key()
+                    if key is None:
+                        self._condition.wait(timeout=1)
+                        continue
                     due, signature = self._pending[key]
                     remaining = due - time.monotonic()
                     if remaining > 0:
@@ -988,6 +1074,8 @@ class Ed2kFolderWatcher(_PluginBase):
             if key is None:
                 continue
             self._active_batch_id = batch_id
+            self._active_work_key = key
+            self._hash_deferred = False
             try:
                 self._work_item(key, signature)
             except Exception as failure:
@@ -1014,6 +1102,12 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._queue_event(Path(key), delay=60)
             finally:
                 self._active_batch_id = None
+                self._active_work_key = None
+            if self._hash_deferred:
+                continue
+            with self._condition:
+                if self._movie_hash_job and self._movie_hash_job["key"] == key and self._movie_hash_job["done"]:
+                    self._movie_hash_job = None
             with self._condition:
                 still_pending = key in self._pending
                 state = self._batches.get(batch_id) if batch_id and not still_pending else None
@@ -1040,6 +1134,9 @@ class Ed2kFolderWatcher(_PluginBase):
                     "stage": "正在检查文件", "started_at": time.time(),
                 }
                 self._process_file(path)
+            except HashDeferred:
+                self._hash_deferred = True
+                return
             except InterruptedError:
                 return
             except Exception as err:
@@ -1848,10 +1945,7 @@ class Ed2kFolderWatcher(_PluginBase):
             if not unchanged or legacy_boundary:
                 if self._local_active:
                     self._local_active["stage"] = "正在计算 ED2K 哈希"
-                file_hash = ed2k_hash(
-                    path, self._stopping,
-                    progress=lambda done, size: self._update_local_hash_progress(path, done, size),
-                )
+                file_hash = self._local_hash(path, stat)
                 final = path.stat()
                 if signature != (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) or stat.st_ctime_ns != final.st_ctime_ns:
                     self._queue_event(path)
@@ -1925,10 +2019,14 @@ class Ed2kFolderWatcher(_PluginBase):
             pending = list(self._pending.items())
             worker_alive = bool(self._worker and self._worker.is_alive())
             cloud_status = dict(self._cloud_status)
+            movie_job = self._movie_hash_job
+            movie_progress = dict(movie_job["progress"]) if movie_job else None
         now_monotonic = time.monotonic()
         now_wall = time.time()
         items = []
-        if active:
+        if movie_progress:
+            items.append(movie_progress)
+        if active and (not movie_job or active.get("path") != movie_job["key"]):
             items.append({**active, "source": "本地", "status": "active"})
         if cloud_status.get("file"):
             items.append({
@@ -1941,6 +2039,8 @@ class Ed2kFolderWatcher(_PluginBase):
         queued = []
         for key, (due, signature) in pending:
             if key.startswith("__"):
+                continue
+            if movie_job and key == movie_job["key"]:
                 continue
             if key.startswith("cloud:"):
                 if not isinstance(signature, dict):
@@ -1957,9 +2057,11 @@ class Ed2kFolderWatcher(_PluginBase):
                 if active and active.get("path") == key:
                     continue
             ready = due <= now_monotonic
-            order = (0 if ready else 1, 0 if ready else due, filename_order(queue_path), key)
+            eligible = self._can_process_pending(key, signature)
+            order = (0 if eligible else 1, 0 if ready else 1, 0 if ready else due, filename_order(queue_path), key)
             queued.append((order, {
-                "name": name, "size": size, "bytes_read": 0, "stage": "等待处理",
+                "name": name, "size": size, "bytes_read": 0,
+                "stage": "等待处理" if eligible else "等待电影任务完成（保持单路电影）",
                 "source": source, "status": "queued",
                 "due_at": now_wall + max(0, due - now_monotonic),
             }))
@@ -2167,6 +2269,10 @@ class Ed2kFolderWatcher(_PluginBase):
         if self._worker is not None and self._worker is not threading.current_thread():
             self._worker.join()
             self._worker = None
+        if self._movie_hash_thread is not None and self._movie_hash_thread is not threading.current_thread():
+            self._movie_hash_thread.join()
+            self._movie_hash_thread = None
+        self._movie_hash_job = None
         if self._web_login is not None:
             self._web_login.close()
             self._web_login = None

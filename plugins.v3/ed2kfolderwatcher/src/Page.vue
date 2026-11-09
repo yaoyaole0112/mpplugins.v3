@@ -152,6 +152,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <section class="progress-section" aria-live="polite">
       <h3>正在处理与等待队列 <span class="worker-status" :class="workerAlive ? 'worker-on' : 'worker-off'">{{ workerAlive ? '工作线程运行中' : '工作线程未运行' }}</span></h3>
+      <p class="progress-detail">本地电影可与一项剧集并行；网盘读取最多一路。</p>
       <p v-if="!progress.length" class="progress-empty">当前没有本地或网盘文件等待处理。</p>
       <ol v-else class="progress-list">
         <li v-for="(task, index) in progress" :key="`${task.source}-${task.name}-${index}`" class="progress-item" :class="task.status">
