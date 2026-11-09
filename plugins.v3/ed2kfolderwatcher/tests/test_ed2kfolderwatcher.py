@@ -98,6 +98,376 @@ class Ed2kTests(unittest.TestCase):
                 release_movie.set()
                 self.plugin.stop_service()
 
+    def test_cancel_local_task_persists_across_scan_and_restart(self):
+        path = self.create("cancel.S01E01.mkv")
+        self.plugin._queue_event(path, delay=0)
+        task = self.plugin._progress_snapshot()["items"][0]
+        self.assertTrue(task["can_cancel"])
+        self.assertTrue(self.plugin.cancel_task(task["id"])["ok"])
+        self.assertNotIn(str(path), self.plugin._pending)
+        self.plugin.scan(retry_failed=True)
+        self.assertNotIn(str(path), self.plugin._pending)
+        self.plugin.init_plugin({"folder": str(self.folder), "min_age": 0})
+        self.plugin._queue_event(path, delay=0)
+        with patch.object(self.module, "ed2k_hash") as hashing:
+            self.plugin._process_file(path)
+        hashing.assert_not_called()
+        self.assertNotIn(str(path), self.plugin._pending)
+        self.assertTrue(path.exists())
+        path.write_bytes(b"changed identity")
+        self.plugin._queue_event(path, delay=0)
+        self.assertIn(str(path), self.plugin._pending)
+
+    def test_cancel_cloud_task_ignores_pickcode_changes_but_accepts_new_content(self):
+        item, storage = self.cloud_fixture()
+        key = self.cloud_module.record_key(item)
+        self.plugin._queue_cloud_file(item)
+        task = self.plugin._progress_snapshot()["items"][0]
+        self.assertTrue(self.plugin.cancel_task(task["id"])["ok"])
+        self.assertFalse(self.plugin._queue_cloud_file({**item, "pickcode": "new-token"}))
+        with patch.object(self.cloud_module, "hash_remote") as hashing:
+            self.plugin._process_cloud_file(item)
+        hashing.assert_not_called()
+        self.assertEqual(self.plugin._cloud_item_skip_reason(item), "用户已取消任务")
+        self.assertNotIn(key, self.plugin._pending)
+        self.assertTrue(self.plugin._queue_cloud_file({**item, "size": 10}))
+
+    def test_cancel_failure_or_stale_id_keeps_queue_intact(self):
+        path = self.create("cancel.S01E01.mkv")
+        self.plugin._queue_event(path, delay=0)
+        old_id = self.plugin._progress_snapshot()["items"][0]["id"]
+        path.write_bytes(b"changed")
+        self.plugin._queue_event(path, delay=0)
+        self.assertFalse(self.plugin.cancel_task(old_id)["ok"])
+        new_id = self.plugin._progress_snapshot()["items"][0]["id"]
+        with patch.object(self.plugin, "_atomic_write", side_effect=OSError("disk full")):
+            self.assertFalse(self.plugin.cancel_task(new_id)["ok"])
+        self.assertIn(str(path), self.plugin._pending)
+        self.assertNotIn(str(path), self.plugin._cancelled_tasks)
+        self.plugin._active_work_key = str(path)
+        self.assertFalse(self.plugin.cancel_task(new_id)["ok"])
+        self.plugin._active_work_key = None
+
+    def test_cancelled_member_unblocks_its_aggregate_group_without_delivery(self):
+        path = self.create("show.S01E02.mkv")
+        self.plugin._telegram_aggregate = True
+        batch_id = self.plugin._new_batch("cancel-group")
+        self.plugin._queue_event(path, delay=0, batch_id=batch_id)
+        task = self.plugin._progress_snapshot()["items"][0]
+        batch = self.plugin._batches[batch_id]
+        batch["contexts"][str(path)] = {"kind": "local"}
+        with patch.object(self.plugin, "_send_telegram") as send, patch.object(self.plugin, "_unlink_source") as unlink:
+            self.assertTrue(self.plugin.cancel_task(task["id"])["ok"])
+        self.assertIn(str(path), batch["results"])
+        self.assertNotIn(str(path), batch["contexts"])
+        self.assertTrue(all(expected.issubset(batch["group_results"][group])
+                            for group, expected in batch["group_expected"].items()))
+        send.assert_not_called()
+        unlink.assert_not_called()
+
+    def test_cancel_state_corruption_stops_instead_of_forgetting_cancellations(self):
+        data_path = self.root / "data"
+        data_path.mkdir(exist_ok=True)
+        (data_path / "cancelled_tasks.json").write_text("broken JSON")
+        with self.assertRaises(ValueError):
+            self.plugin.init_plugin({"folder": str(self.folder), "min_age": 0})
+        self.assertIsNone(self.plugin._worker)
+
+    def test_standard_tmdb_movie_names_are_recognized_in_mixed_directories(self):
+        classify = self.module.media_kind
+        self.assertEqual(classify("电影(2026)(tmdbid=123).2160p.mkv", "/mixed/电影(2026)(tmdbid=123).2160p.mkv"), "movie")
+        self.assertEqual(classify("剧(2026)(tmdbid=123).S01E01.mkv", "/mixed/剧(2026)(tmdbid=123).S01E01.mkv"), "series")
+        self.assertEqual(classify("综艺(2026)(tmdbid=123).mkv", "/综艺/综艺(2026)(tmdbid=123).mkv"), "series")
+
+    def start_cloud_worker(self):
+        self.plugin.init_plugin({
+            "enabled": True, "monitor_enabled": False, "folder": str(self.folder), "min_age": 0,
+            "telegram_enabled": True, "telegram_chat_id": "@receiver",
+            "telegram_aggregate": True, "telegram_aggregate_window": 0,
+        })
+        item, storage = self.cloud_delete_fixture()
+        storage.fresh.side_effect = lambda current: dict(current)
+        storage.prepare_delete.side_effect = lambda current, *args: dict(current)
+        movie_name = "电影(2026)(tmdbid=123).2160p.mkv"
+        movie = {**item, "name": movie_name, "path": f"/cloud-test/{movie_name}"}
+        episode = {**item, "fileid": "124", "name": "show.S01E01.mkv", "path": "/cloud-test/show.S01E01.mkv"}
+        return movie, episode, storage
+
+    def test_remote_movie_and_series_overlap_cancel_queue_and_finish_outputs_serially(self):
+        movie, episode, storage = self.start_cloud_worker()
+        cancelled = {**episode, "fileid": "125", "name": "show.S01E02.mkv", "path": "/cloud-test/show.S01E02.mkv"}
+        movie_started = threading.Event()
+        episode_started = threading.Event()
+        release_movie = threading.Event()
+        release_episode = threading.Event()
+        output_threads = []
+        calls = []
+        original_write = self.plugin._write_results
+        def calculate(reader, item, stopping, digest, part_size, progress, **kwargs):
+            calls.append(item["fileid"])
+            progress(1, item["size"])
+            started, release = (movie_started, release_movie) if item["fileid"] == movie["fileid"] else (episode_started, release_episode)
+            started.set()
+            if not release.wait(timeout=12):
+                raise TimeoutError("cloud test did not release")
+            return "a" * 32
+        def write_results(*args):
+            output_threads.append(threading.get_ident())
+            return original_write(*args)
+        def send_link(*args, **kwargs):
+            output_threads.append(threading.get_ident())
+            return True
+        def delete_file(*args):
+            output_threads.append(threading.get_ident())
+            return True
+        storage.delete_prepared.side_effect = delete_file
+        movie_key = self.cloud_module.record_key(movie)
+        episode_key = self.cloud_module.record_key(episode)
+        with patch.object(self.cloud_module, "hash_remote", side_effect=calculate), \
+                patch.object(self.plugin, "_write_results", side_effect=write_results), \
+                patch.object(self.plugin, "_send_telegram", side_effect=send_link) as send:
+            try:
+                self.plugin._queue_cloud_file(movie)
+                self.assertTrue(movie_started.wait(timeout=5))
+                batch_id = self.plugin._new_batch("cloud-series")
+                self.plugin._queue_cloud_file(episode, batch_id=batch_id)
+                self.plugin._queue_cloud_file(cancelled, batch_id=batch_id)
+                self.assertTrue(episode_started.wait(timeout=5), "remote episode was blocked by the remote movie")
+                snapshot = self.plugin._progress_snapshot()["items"]
+                self.assertEqual(len([task for task in snapshot if task["status"] == "active"]), 2)
+                task = next(task for task in snapshot if task["name"] == cancelled["name"])
+                self.assertTrue(self.plugin.cancel_task(task["id"])["ok"])
+                self.assertFalse(self.plugin._queue_cloud_file(cancelled))
+                self.plugin._queue_cloud_file({**movie, "pickcode": "refreshed"})
+                self.assertNotIn(movie_key, self.plugin._pending)
+                release_episode.set()
+                self.wait_for(lambda: (self.root / "data" / "records.json").exists()
+                              and self.records().get(episode_key, {}).get("source_deleted"))
+                self.assertNotIn(movie_key, self.records())
+                release_movie.set()
+                self.wait_for(lambda: self.records().get(movie_key, {}).get("source_deleted"))
+                records = self.records()
+                self.assertEqual(len(records), 2)
+                self.assertTrue(all(record["telegram_sent"] and record["source_deleted"] for record in records.values()))
+                self.assertEqual(calls, ["123", "124"])
+                self.assertEqual(storage.file_sha1.call_count, 2)
+                self.assertEqual(send.call_count, 2)
+                self.assertEqual(storage.delete_prepared.call_count, 2)
+                self.assertEqual(set(output_threads), {self.plugin._worker.ident})
+            finally:
+                release_movie.set()
+                release_episode.set()
+                self.plugin.stop_service()
+
+    def test_remote_movie_slot_blocks_second_movie_and_unknown_file(self):
+        movie, episode, storage = self.start_cloud_worker()
+        second = {**movie, "fileid": "126", "name": "电影(2025)(tmdbid=456).mkv", "path": "/cloud-test/电影(2025)(tmdbid=456).mkv"}
+        started = threading.Event()
+        second_started = threading.Event()
+        release = threading.Event()
+        def calculate(reader, item, *args, **kwargs):
+            if item["fileid"] == movie["fileid"]:
+                started.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("cloud movie test did not release")
+            else:
+                second_started.set()
+            return "a" * 32
+        with patch.object(self.cloud_module, "hash_remote", side_effect=calculate), \
+                patch.object(self.plugin, "_send_telegram", return_value=True):
+            try:
+                self.plugin._queue_cloud_file(movie)
+                self.assertTrue(started.wait(timeout=5))
+                self.plugin._queue_cloud_file(second)
+                self.assertFalse(second_started.wait(timeout=0.2))
+                unknown = {**movie, "fileid": "127", "name": "unknown.mkv", "path": "/cloud-test/unknown.mkv"}
+                self.assertFalse(self.plugin._can_process_pending(self.cloud_module.record_key(unknown), unknown))
+                release.set()
+                self.wait_for(lambda: second_started.is_set())
+            finally:
+                release.set()
+                self.plugin.stop_service()
+
+    def test_stopping_cancels_remote_movie_without_saving_or_deleting(self):
+        movie, episode, storage = self.start_cloud_worker()
+        started = threading.Event()
+        def calculate(reader, item, stopping, *args, **kwargs):
+            started.set()
+            if not stopping.wait(timeout=10):
+                raise TimeoutError("remote stop test timed out")
+            raise InterruptedError()
+        with patch.object(self.cloud_module, "hash_remote", side_effect=calculate):
+            self.plugin._queue_cloud_file(movie)
+            self.assertTrue(started.wait(timeout=5))
+            self.plugin.stop_service()
+        self.assertIsNone(self.plugin._movie_hash_thread)
+        self.assertFalse((self.root / "data" / "records.json").exists())
+        storage.delete_prepared.assert_not_called()
+
+    def test_remote_movie_hash_error_uses_normal_retry_limit(self):
+        movie, episode, storage = self.start_cloud_worker()
+        self.plugin._retry_limit = 0
+        key = self.cloud_module.record_key(movie)
+        with patch.object(self.cloud_module, "hash_remote", side_effect=self.cloud_module.CloudError("stream failure")):
+            self.plugin._queue_cloud_file(movie)
+            self.wait_for(lambda: key in self.plugin._retry_failures)
+            self.plugin.stop_service()
+        self.assertEqual(self.plugin._retry_failures[key]["attempts"], 1)
+        self.assertNotIn(key, self.plugin._pending)
+        storage.delete_prepared.assert_not_called()
+
+    def test_remote_movie_failure_requeues_instead_of_deduplicating_its_retry(self):
+        movie, episode, storage = self.start_cloud_worker()
+        key = self.cloud_module.record_key(movie)
+        with patch.object(self.cloud_module, "hash_remote", side_effect=self.cloud_module.CloudError("stream failure")):
+            self.plugin._queue_cloud_file(movie)
+            self.wait_for(lambda: key in self.plugin._retry_failures and key in self.plugin._pending)
+            self.plugin.stop_service()
+        self.assertEqual(self.plugin._retry_failures[key]["attempts"], 1)
+        self.assertIn(key, self.plugin._pending)
+        storage.delete_prepared.assert_not_called()
+
+    def test_remote_movie_telegram_failure_keeps_retry_and_source(self):
+        movie, episode, storage = self.start_cloud_worker()
+        self.plugin._telegram_aggregate = False
+        key = self.cloud_module.record_key(movie)
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32) as hashing, \
+                patch.object(self.plugin, "_send_telegram", return_value=False):
+            self.plugin._queue_cloud_file(movie)
+            self.wait_for(lambda: key in self.plugin._retry_failures and key in self.plugin._pending)
+            self.plugin.stop_service()
+        self.assertFalse(self.records()[key]["telegram_sent"])
+        self.assertFalse(self.records()[key]["source_deleted"])
+        self.assertEqual(hashing.call_count, 1)
+        storage.delete_prepared.assert_not_called()
+
+    def test_remote_series_only_stays_on_one_hash_thread(self):
+        movie, second, storage = self.start_cloud_worker()
+        first = {**movie, "name": "show.S02E01.mkv", "path": "/cloud-test/show.S02E01.mkv"}
+        started = threading.Event()
+        second_started = threading.Event()
+        release = threading.Event()
+        def calculate(reader, item, *args, **kwargs):
+            if item["fileid"] == first["fileid"]:
+                started.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("remote series test did not release")
+            else:
+                second_started.set()
+            return "a" * 32
+        with patch.object(self.cloud_module, "hash_remote", side_effect=calculate), \
+                patch.object(self.plugin, "_send_telegram", return_value=True):
+            try:
+                self.plugin._queue_cloud_file(first)
+                self.assertTrue(started.wait(timeout=5))
+                self.plugin._queue_cloud_file(second)
+                self.assertFalse(second_started.wait(timeout=0.2))
+                self.assertIsNone(self.plugin._movie_hash_job)
+                release.set()
+                self.wait_for(lambda: second_started.is_set())
+            finally:
+                release.set()
+                self.plugin.stop_service()
+
+    def test_remote_movie_result_revalidates_identity_before_saving(self):
+        movie, episode, storage = self.start_cloud_worker()
+        current = dict(movie)
+        storage.fresh.side_effect = lambda item: dict(current)
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+        key = self.cloud_module.record_key(movie)
+        def calculate(reader, item, *args, **kwargs):
+            calls.append(item["size"])
+            if len(calls) == 1:
+                started.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("remote change test did not release")
+            return ("a" if len(calls) == 1 else "b") * 32
+        with patch.object(self.cloud_module, "hash_remote", side_effect=calculate), \
+                patch.object(self.plugin, "_send_telegram", return_value=True) as send:
+            try:
+                self.plugin._queue_cloud_file(movie)
+                self.assertTrue(started.wait(timeout=5))
+                current.update(size=10, modify_time=2)
+                release.set()
+                self.wait_for(lambda: key in self.plugin._pending and self.plugin._movie_hash_job is None)
+                self.assertFalse((self.root / "data" / "records.json").exists())
+                with self.plugin._condition:
+                    self.plugin._pending[key] = (time.monotonic(), dict(current))
+                    self.plugin._condition.notify_all()
+                self.wait_for(lambda: (self.root / "data" / "records.json").exists()
+                              and self.records().get(key, {}).get("source_deleted"))
+                self.assertEqual(calls, [5, 10])
+                self.assertEqual(self.records()[key]["size"], 10)
+                self.assertIn("|" + "b" * 32 + "|/", self.records()[key]["link"])
+                self.assertEqual(send.call_count, 1)
+            finally:
+                release.set()
+                self.plugin.stop_service()
+
+    def test_remote_movie_does_not_gain_delete_authorization_when_resuming(self):
+        movie, episode, storage = self.start_cloud_worker()
+        self.plugin._cloud_delete_enabled = False
+        started = threading.Event()
+        release = threading.Event()
+        key = self.cloud_module.record_key(movie)
+        def calculate(*args, **kwargs):
+            started.set()
+            if not release.wait(timeout=10):
+                raise TimeoutError("authorization test did not release")
+            return "a" * 32
+        with patch.object(self.cloud_module, "hash_remote", side_effect=calculate), \
+                patch.object(self.plugin, "_send_telegram", return_value=True):
+            try:
+                self.plugin._queue_cloud_file(movie)
+                self.assertTrue(started.wait(timeout=5))
+                self.plugin._cloud_delete_enabled = True
+                release.set()
+                self.wait_for(lambda: (self.root / "data" / "records.json").exists()
+                              and self.records().get(key, {}).get("telegram_sent"))
+                self.plugin.stop_service()
+                self.assertNotIn("cloud_delete_scope", self.records()[key])
+                self.assertFalse(self.records()[key]["source_deleted"])
+                storage.delete_prepared.assert_not_called()
+                storage.file_sha1.assert_not_called()
+            finally:
+                release.set()
+                self.plugin.stop_service()
+
+    def test_cloud_hash_reader_serializes_metadata_requests_not_data_streams(self):
+        storage = Mock()
+        started = threading.Event()
+        second_started = threading.Event()
+        release = threading.Event()
+        def fresh(item):
+            started.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("metadata test did not release")
+            return item
+        def download(item):
+            second_started.set()
+            return ("url", {})
+        storage.fresh.side_effect = fresh
+        storage.download_request.side_effect = download
+        reader = self.module.CloudHashReader(storage, threading.RLock())
+        first = threading.Thread(target=reader.fresh, args=({"fileid": "1"},))
+        second = threading.Thread(target=reader.download_request, args=({"fileid": "2"},))
+        try:
+            first.start()
+            self.assertTrue(started.wait(timeout=2))
+            second.start()
+            self.assertFalse(second_started.wait(timeout=0.2))
+            release.set()
+            self.assertTrue(second_started.wait(timeout=2))
+        finally:
+            release.set()
+            first.join(timeout=5)
+            if second.ident is not None:
+                second.join(timeout=5)
+        storage.fresh.assert_called_once()
+        storage.download_request.assert_called_once()
+
     def test_movie_slot_blocks_other_movies_and_unknown_but_allows_series(self):
         self.plugin._movie_hash_job = {"key": "/Movies/a.mkv", "done": False}
         self.assertFalse(self.plugin._can_process_pending("/Movies/a.mkv", None))

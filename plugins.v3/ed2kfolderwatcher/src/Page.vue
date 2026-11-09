@@ -20,6 +20,7 @@ const error = ref('')
 const loaded = ref(false)
 const configOpen = ref(false)
 const deleting = ref('')
+const cancelling = ref('')
 const notice = ref('')
 const copiedId = ref('')
 const copyFailedId = ref('')
@@ -107,7 +108,7 @@ async function deleteSource(item) {
   }
 }
 async function refresh() {
-  if (busy.value || disposed || configOpen.value || deleting.value) return
+  if (busy.value || disposed || configOpen.value || deleting.value || cancelling.value) return
   busy.value = true
   try {
     const response = await props.api.get(`plugin/${props.pluginId}/records`)
@@ -131,6 +132,23 @@ async function refresh() {
     if (!disposed) busy.value = false
   }
 }
+async function cancelTask(task) {
+  if (cancelling.value || !task.can_cancel || !task.id) return
+  cancelling.value = task.id
+  error.value = ''
+  try {
+    const result = unpack(await props.api.post(`plugin/${props.pluginId}/tasks/cancel`, { id: task.id }))
+    if (!result?.ok) throw new Error(result?.message || '取消任务失败')
+    progress.value = progress.value.filter(item => item.id !== task.id)
+  } catch (failure) {
+    error.value = failure?.message || '取消任务失败，请刷新队列'
+  } finally {
+    const cancelError = error.value
+    cancelling.value = ''
+    await refresh()
+    if (cancelError) error.value = cancelError
+  }
+}
 onMounted(() => {
   emit('layout', { maxWidth: '78rem' })
   refresh()
@@ -152,11 +170,11 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <section class="progress-section" aria-live="polite">
       <h3>正在处理与等待队列 <span class="worker-status" :class="workerAlive ? 'worker-on' : 'worker-off'">{{ workerAlive ? '工作线程运行中' : '工作线程未运行' }}</span></h3>
-      <p class="progress-detail">本地电影可与一项剧集并行；网盘读取最多一路。</p>
+      <p class="progress-detail">本地／网盘：电影＋剧集最多两路，同类单路。取消任务后，同一文件不会被补扫重新加入。</p>
       <p v-if="!progress.length" class="progress-empty">当前没有本地或网盘文件等待处理。</p>
       <ol v-else class="progress-list">
-        <li v-for="(task, index) in progress" :key="`${task.source}-${task.name}-${index}`" class="progress-item" :class="task.status">
-          <div class="progress-heading"><span class="source-tag">{{ task.source }}</span><strong>{{ task.name }}</strong><span v-if="task.status === 'queued' && task.queue_position" class="queue-position">队列第 {{ task.queue_position }} 位</span><span class="progress-stage">{{ task.stage }}</span></div>
+        <li v-for="(task, index) in progress" :key="task.id || `${task.source}-${task.name}-${index}`" class="progress-item" :class="task.status">
+          <div class="progress-heading"><span class="source-tag">{{ task.source }}</span><strong>{{ task.name }}</strong><span v-if="task.status === 'queued' && task.queue_position" class="queue-position">队列第 {{ task.queue_position }} 位</span><span class="progress-stage">{{ task.stage }}</span><button v-if="task.status === 'queued' && task.can_cancel" type="button" class="cancel-task" :disabled="!!cancelling || busy" @click="cancelTask(task)">{{ cancelling === task.id ? '取消中…' : '取消任务' }}</button></div>
           <div v-if="task.status === 'active' && task.size" class="progress-track"><span :style="{ width: `${progressPercent(task)}%` }"></span></div>
           <p class="progress-detail">
             <span v-if="task.status === 'active' && task.size">{{ formatBytes(task.bytes_read) }} / {{ formatBytes(task.size) }}（{{ progressPercent(task) }}%）</span>
@@ -193,6 +211,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
 </template>
 
 <style scoped>
+.cancel-task{flex:none;padding:5px 8px;font-size:12px;white-space:nowrap;color:#df7b7b;background:rgba(220,60,60,.13)}@media(max-width:650px){.progress-heading{flex-wrap:wrap}.progress-heading strong{flex-basis:calc(100% - 60px)}.progress-stage{margin-left:auto}}
 .copy-feedback{height:20px;min-height:20px;font-size:12px;line-height:20px;overflow-wrap:anywhere;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .progress-section{flex:none;margin-top:14px;padding:14px 16px;border:1px solid rgba(var(--v-theme-on-surface),.16);border-radius:12px}.progress-section h3{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:16px}.worker-status,.source-tag,.queue-position{flex:none;border-radius:7px;padding:4px 8px;font-size:12px;background:rgba(var(--v-theme-on-surface),.08)}.worker-on{color:#57b985}.worker-off{color:#df7b7b}.progress-empty,.progress-detail{font-size:13px;margin:6px 0;color:rgba(var(--v-theme-on-surface),.68)}.progress-list{list-style:none;padding:0;margin:8px 0 0}.progress-item{padding:9px 0;border-top:1px solid rgba(var(--v-theme-on-surface),.1)}.progress-item.failed .progress-detail{color:#df7b7b;overflow-wrap:anywhere}.progress-heading{display:flex;align-items:center;gap:8px;min-width:0}.progress-heading strong{min-width:0;overflow-wrap:anywhere;flex:1}.progress-stage{font-size:12px;color:rgba(var(--v-theme-on-surface),.65);text-align:right}.progress-track{height:6px;margin:8px 0 4px;background:rgba(var(--v-theme-on-surface),.1);border-radius:6px;overflow:hidden}.progress-track span{display:block;height:100%;background:rgb(var(--v-theme-primary));transition:width .2s ease}
 .copy-link{display:block;width:100%;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font-family:monospace;font-size:13px;background:transparent;padding:6px 0;color:inherit}.copy-link:hover{text-decoration:underline}.record-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-left:auto}.record-actions .delete-source,.record-actions .source-status{display:inline-flex;align-items:center;justify-content:center;min-width:120px;height:32px;padding:6px 10px;font-size:13px;line-height:20px;white-space:nowrap;box-sizing:border-box}.delete-source{background:rgba(220,60,60,.13);color:#df7b7b}.notice{color:#57b985}.records-actions{flex-wrap:wrap}

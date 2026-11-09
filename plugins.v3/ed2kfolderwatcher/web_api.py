@@ -144,6 +144,12 @@ def build_routes(plugin):
     async def recent(principal=Depends(get_current_active_superuser)):
         return response(await asyncio.to_thread(plugin.recent_records))
 
+    async def cancel_task(request: Request, principal=Depends(get_current_active_superuser)):
+        values = await read_body(request)
+        if set(values) != {"id"} or not isinstance(values.get("id"), str) or not re.fullmatch(r"[0-9a-f]{64}", values["id"]):
+            raise HTTPException(status_code=400, detail="请提供有效的等待任务 ID")
+        return response(await asyncio.to_thread(plugin.cancel_task, values["id"]))
+
     async def delete_source(request: Request, principal=Depends(get_current_active_superuser)):
         values = await read_body(request)
         if set(values) != {"id", "confirm"} or values.get("confirm") is not True or not isinstance(values.get("id"), str) or not re.fullmatch(r"[0-9a-f]{64}", values["id"]):
@@ -234,6 +240,7 @@ def build_routes(plugin):
     return [{"path": path, "endpoint": endpoint, "methods": [method], "auth": "bear", "summary": summary}
             for path, endpoint, method, summary in (
                 ("/records", recent, "GET", "最近生成链接与删源状态"),
+                ("/tasks/cancel", cancel_task, "POST", "取消尚未开始的文件任务"),
                 ("/records/delete-source", delete_source, "POST", "确认后手动删除记录对应的源文件"),
                 ("/cloud/status", cloud_status, "GET", "网盘来源及生成进度"),
                 ("/cloud/run", cloud_run, "POST", "网盘增量扫描与补发"),

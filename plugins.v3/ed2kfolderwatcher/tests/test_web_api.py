@@ -48,6 +48,21 @@ class WebApiTests(unittest.TestCase):
     def authorize(self):
         self.app.dependency_overrides[web_api.get_current_active_superuser] = lambda: types.SimpleNamespace(is_superuser=True)
 
+    def test_cancel_task_requires_admin_and_valid_opaque_id(self):
+        def unauthenticated():
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        self.app.dependency_overrides[web_api.get_current_active_superuser] = unauthenticated
+        self.assertNotEqual(self.client.post("/tasks/cancel", json={"id": "a" * 64}).status_code, 200)
+        self.plugin.cancel_task.assert_not_called()
+        self.authorize()
+        for payload in ({}, {"id": "../file"}, {"id": 123}, {"id": "a" * 64, "path": "/media/file"}):
+            self.assertEqual(self.client.post("/tasks/cancel", json=payload).status_code, 400)
+        self.plugin.cancel_task.return_value = {"ok": True}
+        result = self.client.post("/tasks/cancel", json={"id": "a" * 64})
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue(result.json()["ok"])
+        self.plugin.cancel_task.assert_called_once_with("a" * 64)
+
     def test_multiple_monitor_directories_validate_and_round_trip(self):
         result = web_api.validate_settings(self.plugin, {"folder": " /media/a , /media/b\n/media/a\n", "cloud_folder": "/电影/,/电视剧\n/电影"})
         self.assertEqual(result["folder"], "/media/a,/media/b")

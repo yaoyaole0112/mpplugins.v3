@@ -40,11 +40,25 @@ DEFAULT_CRON = "*/10 * * * *"
 DEFAULT_EXTENSIONS = ""
 EMPTY_MD4 = "31d6cfe0d16ae931b73c59d7e0c089c0"
 TELEGRAM_MESSAGE_LIMIT = 3800
-CLOUD_LIFE_SILENT_SKIP_REASONS = {"不在所选网盘存储或监控目录", "子目录未开启监控"}
+CLOUD_LIFE_SILENT_SKIP_REASONS = {"不在所选网盘存储或监控目录", "子目录未开启监控", "用户已取消任务"}
 
 
 class HashDeferred(Exception):
     pass
+
+
+class CloudHashReader:
+    def __init__(self, storage, request_lock):
+        self.storage = storage
+        self.request_lock = request_lock
+
+    def fresh(self, item):
+        with self.request_lock:
+            return self.storage.fresh(item)
+
+    def download_request(self, item):
+        with self.request_lock:
+            return self.storage.download_request(item)
 
 
 def record_problem(record: dict) -> str:
@@ -202,7 +216,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.18.7"
+    plugin_version = "1.19.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -281,6 +295,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._live_batch_until = 0
         self._cloud_iterator = None
         self._cloud_adapter = None
+        self._cloud_request_lock = threading.RLock()
         self._cloud_status = {"scanning": False, "file": "", "bytes_read": 0, "size": 0, "error": "", "completed": 0, "last_scan": None}
         self._local_active = None
         self._cloud_observed = {}
@@ -288,6 +303,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._local_failures = {}
         self._retry_state_lock = threading.Lock()
         self._retry_failures = self._load_retry_failures()
+        self._cancelled_tasks = self._load_cancelled_tasks()
         self._empty_files_waiting = set()
         self._cloud_life_lock = threading.Lock()
         self._cloud_life_cursor = 0
@@ -582,6 +598,8 @@ class Ed2kFolderWatcher(_PluginBase):
         if path.is_symlink() or not path.is_file() or self._local_root_for(path) is None:
             return False
         excluded = {output.resolve(), cache.resolve(), output.with_name(f".{output.name}.cache.json").resolve()}
+        excluded.update({self._retry_state_path().resolve(),
+                         (Path(self.get_data_path()) / "cancelled_tasks.json").resolve()})
         if resolved in excluded or path.name.startswith(".ed2k-write-"):
             return False
         if path.suffix.lower() in {".part", ".tmp", ".!qb", ".crdownload"}:
@@ -822,6 +840,69 @@ class Ed2kFolderWatcher(_PluginBase):
     def _retry_state_path(self) -> Path:
         return Path(self.get_data_path()) / "retry_failures.json"
 
+    def _load_cancelled_tasks(self):
+        try:
+            entries = json.loads((Path(self.get_data_path()) / "cancelled_tasks.json").read_text(encoding="utf-8"))
+            if not isinstance(entries, dict) or any(
+                not isinstance(key, str) or not isinstance(value, dict) or not isinstance(value.get("identity"), list)
+                for key, value in entries.items()
+            ):
+                raise ValueError("invalid cancelled task state")
+            return entries
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, TypeError):
+            logger.error("自动生成ED2K链接：取消任务状态无法读取，已停止启动任务；请检查 cancelled_tasks.json 后重新保存设置")
+            raise
+
+    @staticmethod
+    def _task_identity(key, signature):
+        if key.startswith("cloud:"):
+            from .cloud_storage import fingerprint
+            return fingerprint(signature)
+        return list(signature)
+
+    @classmethod
+    def _task_id(cls, key, signature):
+        value = [key, cls._task_identity(key, signature)]
+        return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode()).hexdigest()
+
+    def _task_cancelled(self, key, signature):
+        with self._condition:
+            cancelled = self._cancelled_tasks.get(key)
+            return bool(cancelled and cancelled["identity"] == self._task_identity(key, signature))
+
+    def cancel_task(self, task_id):
+        with self._condition:
+            entry = next(((key, signature) for key, (_, signature) in self._pending.items()
+                          if not key.startswith("__") and self._task_id(key, signature) == task_id), None)
+            if entry is None:
+                return {"ok": False, "message": "任务已开始处理、已完成或已变化，请刷新队列"}
+            key, signature = entry
+            if key == self._active_work_key or (self._movie_hash_job and self._movie_hash_job["key"] == key):
+                return {"ok": False, "message": "任务已开始计算，不能作为等待任务取消"}
+            if any(key in batch["contexts"] and batch["groups"].get(key) in batch["group_flushing"]
+                   for batch in self._batches.values()):
+                return {"ok": False, "message": "任务正在完成发送或删源，请刷新队列"}
+            cancelled = {**self._cancelled_tasks, key: {
+                "identity": self._task_identity(key, signature), "cancelled_at": time.time(),
+            }}
+            try:
+                self._atomic_write(Path(self.get_data_path()) / "cancelled_tasks.json",
+                                   json.dumps(cancelled, ensure_ascii=False, indent=2))
+            except OSError:
+                return {"ok": False, "message": "取消状态保存失败，任务未取消，请检查数据目录权限"}
+            self._cancelled_tasks = cancelled
+            self._pending.pop(key, None)
+            self._pending_batches.pop(key, None)
+            for batch in self._batches.values():
+                if key in batch["expected"]:
+                    batch["contexts"].pop(key, None)
+                    self._mark_batch_item_result(batch, key)
+            self._clear_retry_failure(key)
+            self._condition.notify_all()
+        return {"ok": True, "message": "已取消；自动监控、补扫及重启不会重新处理此文件，文件身份变化后视为新任务"}
+
     def _load_retry_failures(self) -> dict:
         try:
             state = json.loads(self._retry_state_path().read_text(encoding="utf-8"))
@@ -914,6 +995,8 @@ class Ed2kFolderWatcher(_PluginBase):
             stat = path.stat()
             signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
             with self._condition:
+                if self._task_cancelled(str(path), signature):
+                    return
                 movie_job = self._movie_hash_job
                 if movie_job and movie_job["key"] == str(path) and not movie_job["done"]:
                     if signature == movie_job["signature"]:
@@ -928,6 +1011,8 @@ class Ed2kFolderWatcher(_PluginBase):
             batch_id = batch_id or self._active_batch_id or self._live_batch()
             completed_old = None
             with self._condition:
+                if self._task_cancelled(str(path), signature):
+                    return
                 old_batch = self._pending_batches.get(str(path))
                 if old_batch and old_batch != batch_id:
                     old_state = self._batches.get(old_batch)
@@ -968,7 +1053,38 @@ class Ed2kFolderWatcher(_PluginBase):
 
     def _local_hash(self, path, initial):
         key = str(path)
+        if self._active_work_key != key or media_kind(path.name, key) != "movie":
+            return ed2k_hash(path, self._stopping,
+                             progress=lambda done, size: self._update_local_hash_progress(path, done, size))
         identity = (initial.st_size, initial.st_mtime_ns, initial.st_ino, initial.st_dev, initial.st_ctime_ns)
+        stopping = self._stopping
+        return self._background_movie_hash(
+            key, identity, (initial.st_size, initial.st_mtime_ns, initial.st_ino),
+            path.name, initial.st_size, "本地",
+            lambda progress, on_retry: ed2k_hash(path, stopping, progress=progress),
+        )
+
+    def _cloud_hash(self, storage, item, delete_evidence_scope):
+        from .cloud_storage import fingerprint, hash_remote, record_key
+        reader = CloudHashReader(storage, self._cloud_request_lock)
+        stopping = self._stopping
+        digest = lambda data: _CryptoMD4.new(data).digest() if _CryptoMD4 else _md4(data)
+        def calculate(progress, on_retry):
+            return hash_remote(reader, item, stopping, digest, ED2K_PART_SIZE, progress,
+                               read_timeout=self._cloud_read_timeout, on_retry=on_retry)
+        key = record_key(item)
+        if self._active_work_key != key or media_kind(item["name"], item["path"]) != "movie":
+            def progress(done, size):
+                self._cloud_status.update(bytes_read=done, size=size, reconnecting=False, updated_at=time.time())
+            def on_retry(attempt):
+                self._cloud_status.update(reconnecting=True, stream_retries=attempt)
+            return calculate(progress, on_retry)
+        return self._background_movie_hash(
+            key, fingerprint(item), dict(item), item["name"], item["size"], "网盘", calculate,
+            context={"item": dict(item), "delete_evidence_scope": delete_evidence_scope},
+        )
+
+    def _background_movie_hash(self, key, identity, signature, name, size, source, calculate_hash, context=None):
         with self._condition:
             job = self._movie_hash_job
             if job and job["key"] == key and job["done"]:
@@ -977,28 +1093,27 @@ class Ed2kFolderWatcher(_PluginBase):
                         raise job["error"]
                     return job["result"]
                 self._movie_hash_job = None
-            if self._active_work_key != key or media_kind(path.name, key) != "movie":
-                job = None
-            else:
-                job = {
-                    "key": key, "identity": identity, "done": False,
-                    "signature": (initial.st_size, initial.st_mtime_ns, initial.st_ino),
-                    "batch_id": self._active_batch_id,
-                    "progress": {"name": path.name, "size": initial.st_size, "bytes_read": 0,
-                                 "source": "本地", "status": "active", "stage": "电影后台计算 ED2K 哈希",
-                                 "started_at": time.time()},
-                }
-                self._movie_hash_job = job
-        if job is None:
-            return ed2k_hash(path, self._stopping,
-                             progress=lambda done, size: self._update_local_hash_progress(path, done, size))
+            if self._movie_hash_job is not None:
+                raise RuntimeError("电影计算位已被占用")
+            job = {
+                "key": key, "identity": identity, "done": False, "signature": signature,
+                "batch_id": self._active_batch_id, "context": context or {},
+                "progress": {"name": name, "size": size, "bytes_read": 0, "source": source,
+                             "status": "active", "stage": "电影后台计算 ED2K 哈希",
+                             "started_at": time.time()},
+            }
+            self._movie_hash_job = job
         stopping = self._stopping
         def progress(done, size):
             with self._condition:
-                job["progress"].update(bytes_read=done, size=size, updated_at=time.time())
+                job["progress"].update(bytes_read=done, size=size, updated_at=time.time(),
+                                       stage="电影后台计算 ED2K 哈希")
+        def on_retry(attempt):
+            with self._condition:
+                job["progress"].update(stage=f"网盘电影断线重连／续读中（第{attempt}次）", updated_at=time.time())
         def calculate():
             try:
-                job["result"] = ed2k_hash(path, stopping, progress=progress)
+                job["result"] = calculate_hash(progress, on_retry)
             except Exception as failure:
                 job["error"] = failure
             finally:
@@ -1058,6 +1173,7 @@ class Ed2kFolderWatcher(_PluginBase):
                         continue
                     del self._pending[key]
                     batch_id = self._pending_batches.pop(key, None)
+                    self._active_work_key = key
             for batch_id in seal:
                 try:
                     self._seal_batch(batch_id)
@@ -1136,6 +1252,8 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._process_file(path)
             except HashDeferred:
                 self._hash_deferred = True
+                if key.startswith("cloud:"):
+                    self._cloud_status.update(file="", reconnecting=False)
                 return
             except InterruptedError:
                 return
@@ -1208,7 +1326,8 @@ class Ed2kFolderWatcher(_PluginBase):
             from .cloud_storage import CloudStorage, CloudError
             storage = self._cloud_adapter or CloudStorage(self._cloud_storage)
             backlog_full = self._cloud_life_source == "shared" and len(self._cloud_life_candidates) > 448
-            events = [] if backlog_full else storage.life_events(self._cloud_life_source, after_id=self._cloud_life_cursor, since_time=self._cloud_life_started)
+            with self._cloud_request_lock:
+                events = [] if backlog_full else storage.life_events(self._cloud_life_source, after_id=self._cloud_life_cursor, since_time=self._cloud_life_started)
             if stopping.is_set() or stopping is not self._stopping:
                 return
             parsed = []
@@ -1268,7 +1387,8 @@ class Ed2kFolderWatcher(_PluginBase):
                 candidate["attempts"] += 1
                 candidate["due"] = now + 60
                 try:
-                    item = storage.item_from_life_event(candidate["event"])
+                    with self._cloud_request_lock:
+                        item = storage.item_from_life_event(candidate["event"])
                 except Exception as failure:
                     if stopping.is_set() or stopping is not self._stopping:
                         return
@@ -1345,6 +1465,14 @@ class Ed2kFolderWatcher(_PluginBase):
         if self._stopping.is_set():
             return False
         key = record_key(item)
+        if self._task_cancelled(key, item):
+            return False
+        with self._condition:
+            movie_job = self._movie_hash_job
+            if movie_job and movie_job["key"] == key and not movie_job["done"]:
+                if fingerprint(item) == movie_job["identity"]:
+                    return True
+                batch_id = movie_job["batch_id"] or batch_id
         failure = self._retry_failures.get(key)
         if failure:
             if failure.get("identity") != fingerprint(item):
@@ -1360,6 +1488,8 @@ class Ed2kFolderWatcher(_PluginBase):
                 batch_id = self._new_batch("cloud-retry")
                 created_batch = True
         with self._condition:
+            if self._task_cancelled(key, item):
+                return False
             if key not in self._pending:
                 self._pending[key] = (time.monotonic() + delay, item)
                 batch_id = self._register_batch_item(batch_id, key, self._batch_item_name(key, item))
@@ -1376,9 +1506,11 @@ class Ed2kFolderWatcher(_PluginBase):
         return not self._cloud_item_skip_reason(item)
 
     def _cloud_item_skip_reason(self, item: dict) -> str:
-        from .cloud_storage import allowed_roots
+        from .cloud_storage import allowed_roots, record_key
         if not allowed_roots(item, self._cloud_storage, self._cloud_folder):
             return "不在所选网盘存储或监控目录"
+        if self._task_cancelled(record_key(item), item):
+            return "用户已取消任务"
         if not allowed_roots(item, self._cloud_storage, self._cloud_folder, self._cloud_recursive):
             return "子目录未开启监控"
         try:
@@ -1425,7 +1557,8 @@ class Ed2kFolderWatcher(_PluginBase):
         if count < 512:
             for index in range(min(32, 512 - count)):
                 try:
-                    item = next(self._cloud_iterator)
+                    with self._cloud_request_lock:
+                        item = next(self._cloud_iterator)
                 except StopIteration:
                     self._cloud_iterator = None
                     self._cloud_status.update(scanning=False, last_scan=time.time())
@@ -1440,7 +1573,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._pending["__cloud_scan__"] = (time.monotonic() + 1, None)
 
     def _process_cloud_file(self, item: dict) -> None:
-        from .cloud_storage import CloudStorage, CloudError, fingerprint, fingerprint_matches, hash_remote, record_key, legacy_record_key
+        from .cloud_storage import CloudStorage, CloudError, fingerprint, fingerprint_matches, record_key, legacy_record_key
         if not self._cloud_enabled or self._stopping.is_set() or not self._cloud_item_is_eligible(item):
             return
         stopping = self._stopping
@@ -1501,7 +1634,8 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._cloud_succeeded(key)
                 self._maybe_delete_cloud_source(storage, item, record, output, cache_path, records, stopping)
                 return
-            fresh = storage.fresh(item)
+            with self._cloud_request_lock:
+                fresh = storage.fresh(item)
             if fingerprint(fresh) != fingerprint(item):
                 self._queue_cloud_file(fresh, delay=max(60, self._min_age))
                 return
@@ -1509,20 +1643,21 @@ class Ed2kFolderWatcher(_PluginBase):
             self._cloud_status.update(file=item["name"], bytes_read=0, size=item["size"], error="", reconnecting=False, stream_retries=0)
             delete_evidence_scope = ""
             if not unchanged:
-                if delete_scope_at_start and delete_scope_at_start == self._cloud_delete_scope and item["storage"] == "115网盘Plus":
+                movie_job = self._movie_hash_job
+                cached_movie = movie_job and movie_job["key"] == key and movie_job["done"] and movie_job["identity"] == fingerprint(item)
+                if cached_movie:
+                    evidence = movie_job["context"]
+                    delete_evidence_scope = evidence.get("delete_evidence_scope", "")
+                    item = {**item, "sha1": evidence.get("item", {}).get("sha1")}
+                elif delete_scope_at_start and delete_scope_at_start == self._cloud_delete_scope and item["storage"] == "115网盘Plus":
                     try:
-                        if storage.delete_scope(self._cloud_folder, self._cloud_recursive) == delete_scope_at_start:
-                            item = {**item, "sha1": storage.file_sha1(item)}
-                            delete_evidence_scope = delete_scope_at_start
+                        with self._cloud_request_lock:
+                            if storage.delete_scope(self._cloud_folder, self._cloud_recursive) == delete_scope_at_start:
+                                item = {**item, "sha1": storage.file_sha1(item)}
+                                delete_evidence_scope = delete_scope_at_start
                     except Exception as failure:
                         logger.warning(f"自动生成ED2K链接：未获得删源所需SHA1或账号证据，仅生成链接并保留网盘源文件：{item['name']}（{type(failure).__name__}）")
-                digest = lambda data: _CryptoMD4.new(data).digest() if _CryptoMD4 else _md4(data)
-                def progress(done, size):
-                    self._cloud_status.update(bytes_read=done, size=size, reconnecting=False, updated_at=time.time())
-                def on_retry(attempt):
-                    self._cloud_status.update(reconnecting=True, stream_retries=attempt)
-                file_hash = hash_remote(storage, item, stopping, digest, ED2K_PART_SIZE, progress,
-                                        read_timeout=self._cloud_read_timeout, on_retry=on_retry)
+                file_hash = self._cloud_hash(storage, item, delete_evidence_scope)
                 if stopping is not self._stopping or stopping.is_set():
                     return
                 record = {"name": item["name"], "size": item["size"], "link": ed2k_link(item["name"], file_hash, item["size"]),
@@ -1600,7 +1735,8 @@ class Ed2kFolderWatcher(_PluginBase):
             self._queue_cloud_file(item, delay=max(1, record["cloud_delete_retry_at"] - time.time()))
             return
         try:
-            current = storage.prepare_delete(item, record.get("cloud_sha1"), self._cloud_folder, self._cloud_recursive, self._cloud_delete_scope)
+            with self._cloud_request_lock:
+                current = storage.prepare_delete(item, record.get("cloud_sha1"), self._cloud_folder, self._cloud_recursive, self._cloud_delete_scope)
         except Exception as failure:
             if transient_read_error(failure):
                 attempts = record.get("cloud_delete_check_attempts", 0) + 1
@@ -1627,7 +1763,8 @@ class Ed2kFolderWatcher(_PluginBase):
         record.update(cloud_delete_state="inflight", cloud_delete_note="删除请求处理中，异常中断后不自动重删", cloud_delete_requested_at=time.time(), cloud_delete_attempts=record.get("cloud_delete_attempts", 0) + 1)
         self._write_results(output, cache_path, records)
         try:
-            deleted = storage.delete_prepared(current, self._cloud_folder, self._cloud_recursive, self._cloud_delete_scope, stopping)
+            with self._cloud_request_lock:
+                deleted = storage.delete_prepared(current, self._cloud_folder, self._cloud_recursive, self._cloud_delete_scope, stopping)
         except Exception as failure:
             record.update(cloud_delete_state="uncertain", cloud_delete_note="删除结果未确认，请到115核实；不会自动重删", delete_failed=True)
             logger.warning(f"自动生成ED2K链接：网盘删除结果未确认，暂停重试：{item['name']}（{type(failure).__name__}）")
@@ -1910,6 +2047,8 @@ class Ed2kFolderWatcher(_PluginBase):
             folder, output, cache_path = self._paths()
             output = output if self._output_enabled else None
             stat = path.stat()
+            if self._task_cancelled(str(path), (stat.st_size, stat.st_mtime_ns, stat.st_ino)):
+                return
             if stat.st_size <= 0:
                 key = str(path)
                 if key not in self._empty_files_waiting:
@@ -2060,8 +2199,9 @@ class Ed2kFolderWatcher(_PluginBase):
             eligible = self._can_process_pending(key, signature)
             order = (0 if eligible else 1, 0 if ready else 1, 0 if ready else due, filename_order(queue_path), key)
             queued.append((order, {
+                "id": self._task_id(key, signature), "can_cancel": True,
                 "name": name, "size": size, "bytes_read": 0,
-                "stage": "等待处理" if eligible else "等待电影任务完成（保持单路电影）",
+                "stage": "等待处理" if eligible else "等待电影任务完成（仅剧集可并行）",
                 "source": source, "status": "queued",
                 "due_at": now_wall + max(0, due - now_monotonic),
             }))

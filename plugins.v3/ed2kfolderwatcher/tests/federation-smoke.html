@@ -10,6 +10,7 @@ const dialogFixture = new URLSearchParams(location.search).has('dialog')
 const manual = new URLSearchParams(location.search).has('manual')
 const requestedComponent = new URLSearchParams(location.search).get('component')
 const mixedRecursive = new URLSearchParams(location.search).has('mixed-recursive')
+const queueOnly = new URLSearchParams(location.search).has('queue-only')
 if (dialogFixture) {
   const stylesheet = document.createElement('link')
   stylesheet.rel = 'stylesheet'
@@ -44,6 +45,9 @@ let copyFails = false
 let fallbackWorks = true
 let confirmDelete = false
 const deletions = []
+let queue = []
+let cancelFails = false
+const cancellations = []
 Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => {
   if (copyFails) throw Error('Clipboard denied')
   copied = value
@@ -89,11 +93,18 @@ const api = { get: async path => {
   requests.push(path)
   if (path.endsWith('/cloud/status')) return { ok: true, storages: [{ type: '115网盘Plus', name: '115网盘Plus' }], scanning: false, pending: 0, file: '', bytes_read: 0, size: 0, error: '' }
   if (path.endsWith('/records')) return mode === 'error' ? { ok: false, message: '模拟读取失败' }
-    : { ok: true, items: mode === 'empty' ? [] : rows.map(row => ({ ...row })), total: mode === 'empty' ? 0 : rows.length, delete_source_enabled: false }
+    : { ok: true, items: mode === 'empty' ? [] : rows.map(row => ({ ...row })), progress: queue.map(task => ({ ...task })), total: mode === 'empty' ? 0 : rows.length, delete_source_enabled: false }
   return path.endsWith('/settings') ? { ok: true, settings }
     : { ok: true, logged_in: false, pending: false, api_id: '', api_hash_configured: false }
 }, post: async (path, body) => {
   requests.push(path)
+  if (path.endsWith('/tasks/cancel')) {
+    if (body.id !== 'c'.repeat(64) || Object.keys(body).length !== 1) throw Error('Unsafe cancellation payload')
+    if (cancelFails) return { ok: false, message: '任务已开始处理，请刷新队列' }
+    cancellations.push(body.id)
+    queue = queue.filter(task => task.id !== body.id)
+    return { ok: true }
+  }
   if (path.endsWith('/cloud/browse')) return { ok: true, path: body.path, folders: body.path === '/' ? [{ name: '测试网盘目录', path: '/测试网盘目录/' }] : [] }
   if (path.endsWith('/local/run')) return { ok: true, message: '本地增量扫描已加入后台队列；已有链接不重复计算' }
   if (path.endsWith('/cloud/run')) return { ok: true, message: '网盘增量扫描已加入后台队列' }
@@ -114,8 +125,13 @@ const api = { get: async path => {
 try {
   remote.init({ vue: { [vue.version]: { get: () => () => vue, loaded: true } } })
   for (const name of manual && ['Page', 'Config', 'AppPage'].includes(requestedComponent) ? [`./${requestedComponent}`] : ['./Page', './Config', './AppPage']) {
+    if (queueOnly && name === './Config') continue
     const factory = await remote.get(name)
     requests = []
+    queue = [
+      { name: '正在计算.mkv', source: '网盘', status: 'active', size: 100, bytes_read: 25, stage: '正在读取并计算 ED2K 哈希' },
+      { id: 'c'.repeat(64), name: '等待取消.S01E02.mkv', source: '网盘', status: 'queued', can_cancel: true, queue_position: 1, due_at: 1700000000, stage: '等待处理' },
+    ]
     const app = vue.createApp(factory(), { api, pluginId: 'Ed2kFolderWatcher', onClose: () => { closes++ } })
     app.mount('#app')
     await new Promise(resolve => setTimeout(resolve, 100))
@@ -128,6 +144,24 @@ try {
     if (document.querySelector('#app option[value=bot]')) throw Error(`${name}: bot mode selectable`)
     let buttons = [...document.querySelectorAll('#app button')]
     if (name !== './Config') {
+      const cancelButtons = document.querySelectorAll('#app .cancel-task')
+      if (cancelButtons.length !== 1 || !cancelButtons[0].closest('.queued')) throw Error(`${name}: cancellation must only appear on queued files`)
+      const cancelCount = cancellations.length
+      const deleteCount = deletions.length
+      cancelFails = true
+      cancelButtons[0].click()
+      await new Promise(resolve => setTimeout(resolve, 100))
+      if (!document.querySelector('#app [role=alert]')?.textContent.includes('任务已开始处理') || !document.querySelector('#app .cancel-task')) throw Error(`${name}: cancellation error was hidden or task disappeared`)
+      cancelFails = false
+      document.querySelector('#app .cancel-task').click()
+      await new Promise(resolve => setTimeout(resolve, 100))
+      if (cancellations.length !== cancelCount + 1 || document.querySelector('#app .cancel-task')) throw Error(`${name}: cancellation did not remove queued task`)
+      if (!document.querySelector('#app .progress-item.active') || deletions.length !== deleteCount) throw Error(`${name}: cancellation changed active task or deleted source`)
+      if (queueOnly) {
+        app.unmount()
+        if (intervals.size) throw Error(`${name}: polling not cleaned up after queue test`)
+        continue
+      }
       const text = document.querySelector('#app').innerText
       if (!text.includes('最近生成记录') || !text.includes('测试文件 0.mkv')) throw Error(`${name}: recent records missing`)
       if (!document.querySelector('#app .record-time')?.textContent.includes('文件大小：5 B')) throw Error(`${name}: record file size missing`)
@@ -135,7 +169,7 @@ try {
         if (!text.includes(label)) throw Error(`${name}: status missing: ${label}`)
       }
       if (text.includes('保存插件设置') || text.includes('保存账号设置') || document.querySelector('#app input')) throw Error(`${name}: configuration leaked into viewing page`)
-      if (requests.some(path => !path.endsWith('/records'))) throw Error(`${name}: viewing page requested settings`)
+      if (requests.some(path => !path.endsWith('/records') && !path.endsWith('/tasks/cancel'))) throw Error(`${name}: viewing page requested settings`)
       await document.fonts.ready
       await new Promise(resolve => setTimeout(resolve, 100))
       const page = document.querySelector('#app .records-page')
@@ -426,7 +460,7 @@ try {
     if (!response.ok) throw Error(`stylesheet failed: ${response.status}`)
   }))
   document.body.dataset.result = manual ? 'ready' : 'passed'
-  document.querySelector('#result').textContent = manual ? 'Ready for touch input' : 'PASS: Page/AppPage show records and source status only; Config keeps settings; empty/error states and CSS loaded'
+  document.querySelector('#result').textContent = manual ? 'Ready for touch input' : (queueOnly ? 'PASS: Page/AppPage cancel waiting tasks, preserve active tasks and do not delete sources' : 'PASS: Page/AppPage show records and source status only; Config keeps settings; empty/error states and CSS loaded')
 } catch (error) {
   document.body.dataset.result = 'failed'
   document.querySelector('#result').textContent = String(error)

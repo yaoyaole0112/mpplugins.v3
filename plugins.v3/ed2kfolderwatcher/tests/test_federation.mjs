@@ -11,6 +11,16 @@ globalThis.document = {
   head: { appendChild: element => styles.push(element.href) },
 }
 
+test('queue cancellation only exposes waiting task IDs and does not delete files', async () => {
+  const source = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
+  assert.match(source, /v-if="task.status === 'queued' && task.can_cancel"/)
+  const cancel = source.match(/async function cancelTask\(task\) \{[\s\S]*?\n\}/)?.[0]
+  assert.ok(cancel)
+  assert.match(cancel, /tasks\/cancel/)
+  assert.match(cancel, /\{ id: task.id \}/)
+  assert.equal(cancel.includes('delete-source'), false)
+})
+
 test('built federation entry resolves all public components and styles', async () => {
   const source = await readFile(entryUrl, 'utf8')
   assert.equal(source.includes('${__federation_expose_'), false)

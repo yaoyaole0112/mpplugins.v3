@@ -21,4 +21,6 @@ def media_kind(name, path=""):
         return "series"
     if any(re.search(r"电影|movies|films", part) for part in directories):
         return "movie"
+    if re.search(r"(?i)[(（](?:19|20)\d{2}[)）]\s*[(（]tmdbid=\d+[)）]", text):
+        return "movie"
     return "unknown"
