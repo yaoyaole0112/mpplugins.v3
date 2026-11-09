@@ -21,6 +21,20 @@ test('queue cancellation only exposes waiting task IDs and does not delete files
   assert.equal(cancel.includes('delete-source'), false)
 })
 
+test('common settings put toggles before deletion and pair inputs without an empty half-row', async () => {
+  const source = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
+  const common = source.split('data-testid="common-settings"')[1].split('</article>')[0]
+  for (const name of ['enabled', 'output_enabled', 'include_subdirectories', 'movie_series_parallel']) {
+    assert.ok(common.indexOf(`v-model="settings.${name}"`) < common.indexOf('v-model="settings.delete_source"'), name)
+  }
+  assert.match(common, /电影\/剧集两路并发/)
+  assert.match(source, /const configFields = \[[^\n]*'movie_series_parallel'/)
+  assert.match(common, /v-model.number="settings.retry_limit"[\s\S]*?v-model="settings.min_age"[\s\S]*?<\/div>/)
+  assert.match(common, /<label class="full-width">TXT 输出路径/)
+  assert.match(source, /\.fields \.full-width\{grid-column:1 \/ -1\}/)
+  assert.equal(source.includes('共用一个计算线程'), false)
+})
+
 test('built federation entry resolves all public components and styles', async () => {
   const source = await readFile(entryUrl, 'utf8')
   assert.equal(source.includes('${__federation_expose_'), false)

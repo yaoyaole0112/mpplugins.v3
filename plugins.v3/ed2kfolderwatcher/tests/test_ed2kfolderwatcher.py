@@ -63,6 +63,76 @@ class Ed2kTests(unittest.TestCase):
         self.assertEqual(classify("未命名.mkv", "/影视/动漫/未命名.mkv"), "series")
         self.assertEqual(classify("未知.mkv", "/media/未知.mkv"), "unknown")
 
+    def test_parallel_setting_defaults_and_persists_through_config_save(self):
+        self.assertTrue(self.plugin._movie_series_parallel)
+        for enabled in (False, True):
+            self.plugin.init_plugin({"folder": str(self.folder), "movie_series_parallel": enabled})
+            self.assertIs(self.plugin._movie_series_parallel, enabled)
+            self.plugin._save_config()
+            self.assertIs(self.plugin.update_config.call_args.args[0]["movie_series_parallel"], enabled)
+            form, defaults = self.plugin.get_form()
+            self.assertIs(defaults["movie_series_parallel"], enabled)
+            models = [entry.get("props", {}).get("model") for entry in form[0]["content"]]
+            for name in ("enabled", "output_enabled", "include_subdirectories", "movie_series_parallel"):
+                self.assertLess(models.index(name), models.index("delete_source"))
+        self.plugin.init_plugin({"folder": str(self.folder)})
+        self.assertTrue(self.plugin._movie_series_parallel)
+
+    def test_parallel_disabled_serializes_all_local_and_cloud_combinations(self):
+        for index, (movie_cloud, episode_cloud) in enumerate(((False, False), (True, True), (True, False), (False, True))):
+            with self.subTest(movie_cloud=movie_cloud, episode_cloud=episode_cloud):
+                movie, episode, storage = self.start_cloud_worker(movie_series_parallel=False)
+                self.plugin._delete_source = False
+                self.plugin._telegram_enabled = False
+                movie_name = f"电影(2026)(tmdbid={1000 + index}).mkv"
+                episode_name = f"show{index}.S01E01.mkv"
+                movie = {**movie, "fileid": f"movie-{index}", "name": movie_name, "path": f"/cloud-test/{movie_name}"}
+                episode = {**episode, "fileid": f"episode-{index}", "name": episode_name, "path": f"/cloud-test/{episode_name}"}
+                local_movie = self.create(movie_name)
+                local_episode = self.create(episode_name)
+                movie_started = threading.Event()
+                episode_started = threading.Event()
+                release_movie = threading.Event()
+                hash_threads = []
+                def calculate(is_movie):
+                    hash_threads.append(threading.get_ident())
+                    if is_movie:
+                        movie_started.set()
+                        if not release_movie.wait(timeout=10):
+                            raise TimeoutError("serial test did not release")
+                    else:
+                        episode_started.set()
+                    return "a" * 32
+                def local_hash(path, *args, **kwargs):
+                    return calculate(path == local_movie)
+                def cloud_hash(reader, item, *args, **kwargs):
+                    return calculate(item["fileid"] == movie["fileid"])
+                movie_key = self.cloud_module.record_key(movie) if movie_cloud else str(local_movie)
+                episode_key = self.cloud_module.record_key(episode) if episode_cloud else str(local_episode)
+                with patch.object(self.module, "ed2k_hash", side_effect=local_hash), \
+                        patch.object(self.cloud_module, "hash_remote", side_effect=cloud_hash):
+                    try:
+                        if movie_cloud:
+                            self.plugin._queue_cloud_file(movie)
+                        else:
+                            self.plugin._queue_event(local_movie, delay=0)
+                        self.assertTrue(movie_started.wait(timeout=5))
+                        if episode_cloud:
+                            self.plugin._queue_cloud_file(episode)
+                        else:
+                            self.plugin._queue_event(local_episode, delay=0)
+                        self.assertFalse(episode_started.wait(timeout=0.2))
+                        self.assertIsNone(self.plugin._movie_hash_job)
+                        self.assertIsNone(self.plugin._movie_hash_thread)
+                        release_movie.set()
+                        self.wait_for(lambda: (self.root / "data" / "records.json").exists()
+                                      and {movie_key, episode_key}.issubset(self.records()))
+                        self.assertTrue(episode_started.is_set())
+                        self.assertEqual(hash_threads, [self.plugin._worker.ident] * 2)
+                    finally:
+                        release_movie.set()
+                        self.plugin.stop_service()
+
     def test_local_movie_hash_allows_episode_and_preserves_both_records(self):
         movies = self.folder / "Movies"
         movies.mkdir()
@@ -179,11 +249,12 @@ class Ed2kTests(unittest.TestCase):
         self.assertEqual(classify("剧(2026)(tmdbid=123).S01E01.mkv", "/mixed/剧(2026)(tmdbid=123).S01E01.mkv"), "series")
         self.assertEqual(classify("综艺(2026)(tmdbid=123).mkv", "/综艺/综艺(2026)(tmdbid=123).mkv"), "series")
 
-    def start_cloud_worker(self):
+    def start_cloud_worker(self, **settings):
         self.plugin.init_plugin({
             "enabled": True, "monitor_enabled": False, "folder": str(self.folder), "min_age": 0,
             "telegram_enabled": True, "telegram_chat_id": "@receiver",
             "telegram_aggregate": True, "telegram_aggregate_window": 0,
+            **settings,
         })
         item, storage = self.cloud_delete_fixture()
         storage.fresh.side_effect = lambda current: dict(current)

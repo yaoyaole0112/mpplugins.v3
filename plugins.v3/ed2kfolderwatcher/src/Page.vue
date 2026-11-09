@@ -170,7 +170,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <section class="progress-section" aria-live="polite">
       <h3>正在处理与等待队列 <span class="worker-status" :class="workerAlive ? 'worker-on' : 'worker-off'">{{ workerAlive ? '工作线程运行中' : '工作线程未运行' }}</span></h3>
-      <p class="progress-detail">本地／网盘：电影＋剧集最多两路，同类单路。取消任务后，同一文件不会被补扫重新加入。</p>
+      <p class="progress-detail">本地／网盘共用计算位；开启两路并发时，电影＋剧集最多两路，同类仍单路。取消任务后，同一文件不会被补扫重新加入。</p>
       <p v-if="!progress.length" class="progress-empty">当前没有本地或网盘文件等待处理。</p>
       <ol v-else class="progress-list">
         <li v-for="(task, index) in progress" :key="task.id || `${task.source}-${task.name}-${index}`" class="progress-item" :class="task.status">

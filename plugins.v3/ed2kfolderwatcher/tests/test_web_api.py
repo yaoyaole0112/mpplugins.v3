@@ -141,6 +141,21 @@ class WebApiTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, {"delete_small_files": value})
 
+    def test_parallel_switch_validates_saves_and_returns_boolean(self):
+        self.authorize()
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                result = self.client.post("/settings", json={"movie_series_parallel": enabled})
+                self.assertTrue(result.json()["ok"])
+                self.assertIs(result.json()["settings"]["movie_series_parallel"], enabled)
+                self.assertIs(self.plugin.update_config.call_args.args[0]["movie_series_parallel"], enabled)
+                self.assertIs(self.plugin.schedule_reload.call_args.args[0]["movie_series_parallel"], enabled)
+                self.plugin._movie_series_parallel = enabled
+                self.assertIs(self.client.get("/settings").json()["settings"]["movie_series_parallel"], enabled)
+        for value in ("true", "false", 0, 1, None):
+            with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"movie_series_parallel": value})
+
     def test_gb_minimum_input_and_legacy_snapshot(self):
         self.plugin._min_file_size = "500M"
         self.assertEqual(web_api.settings_snapshot(self.plugin)["min_file_size_gb"], "0.49")

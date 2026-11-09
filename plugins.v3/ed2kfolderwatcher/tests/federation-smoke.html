@@ -11,6 +11,7 @@ const manual = new URLSearchParams(location.search).has('manual')
 const requestedComponent = new URLSearchParams(location.search).get('component')
 const mixedRecursive = new URLSearchParams(location.search).has('mixed-recursive')
 const queueOnly = new URLSearchParams(location.search).has('queue-only')
+const commonOnly = new URLSearchParams(location.search).has('common-only')
 if (dialogFixture) {
   const stylesheet = document.createElement('link')
   stylesheet.rel = 'stylesheet'
@@ -31,7 +32,7 @@ if (dialogFixture) {
   document.body.prepend(background)
 }
 
-const settings = { enabled: false, folder: '/media/test', recursive: true, include_subdirectories: true, monitor_enabled: true,
+const settings = { enabled: false, movie_series_parallel: true, folder: '/media/test', recursive: true, include_subdirectories: true, monitor_enabled: true,
   output_enabled: true, output: '', extensions: '', min_age: 60, min_file_size: '500M', min_file_size_gb: '0.49', delete_source: false, delete_small_files: false, cloud_delete_enabled: false,
   scan_enabled: false, cron: '*/10 * * * *', telegram_enabled: false, telegram_mode: 'user',
   telegram_chat_id: '', telegram_thread_id: '', telegram_token: '' }
@@ -114,6 +115,11 @@ const api = { get: async path => {
     return { ok: true, message: '源文件已删除，ED2K 链接及记录已保留' }
   }
   if (!path.endsWith('/settings')) throw Error('Unexpected write request')
+  if (typeof body.movie_series_parallel !== 'boolean') throw Error('Parallel switch missing from save payload')
+  if (commonOnly) {
+    Object.assign(settings, body)
+    return { ok: true, settings: { ...settings }, message: '模拟保存成功' }
+  }
   if (typeof body.cloud_scan_enabled !== 'boolean') throw Error('Cloud schedule switch missing from save payload')
   if (String(body.min_file_size_gb) !== '0.5') throw Error('Minimum file size missing from save payload')
   if (body.delete_small_files !== true) throw Error('Small file deletion switch missing from save payload')
@@ -126,6 +132,7 @@ try {
   remote.init({ vue: { [vue.version]: { get: () => () => vue, loaded: true } } })
   for (const name of manual && ['Page', 'Config', 'AppPage'].includes(requestedComponent) ? [`./${requestedComponent}`] : ['./Page', './Config', './AppPage']) {
     if (queueOnly && name === './Config') continue
+    if (commonOnly && name !== './Config') continue
     const factory = await remote.get(name)
     requests = []
     queue = [
@@ -142,6 +149,45 @@ try {
     if (document.querySelector('#app [role=alert]')) throw Error(`${name}: API failed`)
     if (document.querySelector('#app').innerText.includes('Bot Token')) throw Error(`${name}: bot settings visible`)
     if (document.querySelector('#app option[value=bot]')) throw Error(`${name}: bot mode selectable`)
+    if (commonOnly) {
+      await new Promise(resolve => setTimeout(resolve, 100))
+      const common = document.querySelector('[data-testid=common-settings]')
+      const rows = [...common.querySelectorAll('.fields')]
+      if (rows.map(row => row.children.length).join(',') !== '2,2,1') throw Error('Unbalanced common field rows')
+      const labels = [...common.querySelectorAll('.switch')]
+      const find = text => labels.find(label => label.textContent.trim() === text)
+      const deletion = find('完成后删除源文件').getBoundingClientRect()
+      for (const text of ['启用插件', '生成本地 TXT', '包含子目录', '电影/剧集两路并发']) {
+        if (find(text).getBoundingClientRect().bottom > deletion.top) throw Error(`Switch not before deletion: ${text}`)
+      }
+      const columns = getComputedStyle(rows[0]).gridTemplateColumns.split(' ').length
+      if (columns !== (innerWidth <= 650 ? 1 : 2)) throw Error('Unexpected common field columns')
+      if (columns === 2) {
+        for (const row of rows.slice(0, 2)) {
+          const inputs = [...row.querySelectorAll('input')].map(input => input.getBoundingClientRect())
+          if (Math.abs(inputs[0].top - inputs[1].top) > 2 || Math.abs(inputs[0].width - inputs[1].width) > 2) throw Error('Paired common inputs do not align')
+        }
+      }
+      const output = rows[2].firstElementChild.getBoundingClientRect()
+      if (Math.abs(output.width - rows[2].getBoundingClientRect().width) > 2) throw Error('TXT path is not full-width')
+      const parallel = find('电影/剧集两路并发').querySelector('input')
+      if (!parallel.checked) throw Error('Parallel default changed unexpectedly')
+      for (const enabled of [false, true]) {
+        parallel.click()
+        await vue.nextTick()
+        if (parallel.checked !== enabled) throw Error('Parallel toggle did not change')
+        const hint = enabled ? '电影与剧集最多两路，同类仍单路。' : '所有文件单路计算。'
+        if (!common.textContent.includes(hint)) throw Error('Concurrency hint does not match switch')
+        document.querySelector('.header-actions button').click()
+        await new Promise(resolve => setTimeout(resolve, 50))
+        if (settings.movie_series_parallel !== enabled || document.querySelector('[role=alert]')) throw Error('Parallel switch save failed')
+        if (document.querySelector('[role=alertdialog]')) throw Error('Saving unexpectedly prompts')
+      }
+      if (requests.filter(path => path.endsWith('/settings')).length !== 3) throw Error('Unexpected settings request count')
+      app.unmount()
+      if (intervals.size) throw Error('Settings polling not cleaned up')
+      continue
+    }
     let buttons = [...document.querySelectorAll('#app button')]
     if (name !== './Config') {
       const cancelButtons = document.querySelectorAll('#app .cancel-task')
@@ -460,7 +506,7 @@ try {
     if (!response.ok) throw Error(`stylesheet failed: ${response.status}`)
   }))
   document.body.dataset.result = manual ? 'ready' : 'passed'
-  document.querySelector('#result').textContent = manual ? 'Ready for touch input' : (queueOnly ? 'PASS: Page/AppPage cancel waiting tasks, preserve active tasks and do not delete sources' : 'PASS: Page/AppPage show records and source status only; Config keeps settings; empty/error states and CSS loaded')
+  document.querySelector('#result').textContent = manual ? 'Ready for touch input' : (commonOnly ? 'PASS: common layout, parallel switch and boolean settings saves' : (queueOnly ? 'PASS: Page/AppPage cancel waiting tasks, preserve active tasks and do not delete sources' : 'PASS: Page/AppPage show records and source status only; Config keeps settings; empty/error states and CSS loaded'))
 } catch (error) {
   document.body.dataset.result = 'failed'
   document.querySelector('#result').textContent = String(error)

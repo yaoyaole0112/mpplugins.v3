@@ -216,7 +216,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.19.0"
+    plugin_version = "1.19.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -231,6 +231,7 @@ class Ed2kFolderWatcher(_PluginBase):
     _min_age = 60
     _min_file_size = ""
     _retry_limit = 3
+    _movie_series_parallel = True
     _delete_source = False
     _cloud_delete_enabled = False
     _cloud_delete_scope = ""
@@ -317,6 +318,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._web_login_lock = threading.Lock()
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
+        self._movie_series_parallel = config.get("movie_series_parallel", True) is True
         shared_recursive = config.get("include_subdirectories")
         if "include_subdirectories" in config and not isinstance(shared_recursive, bool):
             self._enabled = False
@@ -1053,7 +1055,7 @@ class Ed2kFolderWatcher(_PluginBase):
 
     def _local_hash(self, path, initial):
         key = str(path)
-        if self._active_work_key != key or media_kind(path.name, key) != "movie":
+        if not self._movie_series_parallel or self._active_work_key != key or media_kind(path.name, key) != "movie":
             return ed2k_hash(path, self._stopping,
                              progress=lambda done, size: self._update_local_hash_progress(path, done, size))
         identity = (initial.st_size, initial.st_mtime_ns, initial.st_ino, initial.st_dev, initial.st_ctime_ns)
@@ -1073,7 +1075,7 @@ class Ed2kFolderWatcher(_PluginBase):
             return hash_remote(reader, item, stopping, digest, ED2K_PART_SIZE, progress,
                                read_timeout=self._cloud_read_timeout, on_retry=on_retry)
         key = record_key(item)
-        if self._active_work_key != key or media_kind(item["name"], item["path"]) != "movie":
+        if not self._movie_series_parallel or self._active_work_key != key or media_kind(item["name"], item["path"]) != "movie":
             def progress(done, size):
                 self._cloud_status.update(bytes_read=done, size=size, reconnecting=False, updated_at=time.time())
             def on_retry(attempt):
@@ -2418,7 +2420,7 @@ class Ed2kFolderWatcher(_PluginBase):
             self._web_login = None
 
     def _save_config(self) -> None:
-        fields = ("enabled", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_aggregate", "telegram_aggregate_window", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
+        fields = ("enabled", "movie_series_parallel", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_aggregate", "telegram_aggregate_window", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
         config = {name: getattr(self, f"_{name}") for name in fields}
         config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce, cloud_delete_scope=self._cloud_delete_scope)
         self.update_config(config)
@@ -2433,9 +2435,10 @@ class Ed2kFolderWatcher(_PluginBase):
         return [{"component": "VForm", "content": [
             {"component": "VCardTitle", "text": "通用设置"},
             field("VSwitch", "enabled", "启用插件"),
-            field("VSwitch", "delete_source", "完成后删除源文件", hint="输出全部成功且文件未变化后删除；115需另行授权，CloudDrive只读。", persistent_hint=True),
-            field("VSwitch", "include_subdirectories", "包含子目录", hint="本地与网盘共用；旧配置不一致时请先选择再保存。", persistent_hint=True),
             field("VSwitch", "output_enabled", "生成本地 TXT 文件", hint="本地与网盘链接合并输出；关闭仍保留内部记录。", persistent_hint=True),
+            field("VSwitch", "include_subdirectories", "包含子目录", hint="本地与网盘共用；旧配置不一致时请先选择再保存。", persistent_hint=True),
+            field("VSwitch", "movie_series_parallel", "电影/剧集两路并发", hint="本地与网盘共用；开启最多同时计算一部电影和一项剧集，关闭则所有文件单路。", persistent_hint=True),
+            field("VSwitch", "delete_source", "完成后删除源文件", hint="输出全部成功且文件未变化后删除；115需另行授权，CloudDrive只读。", persistent_hint=True),
             field("VTextField", "output", "TXT 输出路径", placeholder="留空自动选择 ed2k.txt 路径"),
             field("VTextField", "extensions", "公共扩展名过滤", placeholder="留空处理全部文件，例如 mkv,mp4,flac"),
             field("VTextField", "min_age", "公共稳定等待秒数", type="number", hint="本地和网盘共用，请选择上传完成目录。", persistent_hint=True),
@@ -2466,4 +2469,4 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅用于带话题的超级群组。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
+        ]}], {"enabled": False, "movie_series_parallel": self._movie_series_parallel, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
