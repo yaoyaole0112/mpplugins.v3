@@ -229,7 +229,7 @@ onUnmounted(() => {
       <h3>ED2K链接自动转发</h3>
       <div class="switches telegram-switches"><label class="switch"><input v-model="settings.telegram_enabled" type="checkbox" :disabled="disabled">发送 ED2K 链接到 Telegram</label><label class="switch"><input v-model="settings.telegram_aggregate" type="checkbox" :disabled="disabled || !settings.telegram_enabled">聚合转发</label></div>
       <small>同剧名同季数合并为一条消息。</small>
-      <div v-if="settings.telegram_aggregate" class="fields telegram-wait-field"><label>聚合转发延迟等待秒数<input v-model.number="settings.telegram_aggregate_window" type="number" min="0" max="3600" :disabled="disabled"><small>批次完成后继续等待；期间发现的同剧同季文件会合并，默认600秒。</small></label></div>
+      <div v-if="settings.telegram_aggregate" class="fields telegram-wait-field"><label>聚合转发延迟等待秒数<input v-model.number="settings.telegram_aggregate_window" type="number" min="0" max="3600" :disabled="disabled"><small>同剧同季新增文件重置等待；到期先发已完成链接，剩余后续补发，默认600秒。</small></label></div>
       <!-- <select v-model="settings.telegram_mode"><option value="bot">Bot Token（机器人）</option></select> -->
       <!-- <label>发送机器人 Token<input v-model="settings.telegram_token" type="password" autocomplete="new-password"></label> -->
       <div class="fields telegram-targets"><label>接收目标（支持多个）<textarea v-model="settings.telegram_chat_id" :disabled="disabled" rows="1" placeholder="@接收机器人, @频道用户名, -1001234567890" /><small>支持用户名、Chat ID或 t.me 链接，最多50个；逗号、分号或换行分隔。</small><small>指定话题：@群组用户名|123。</small></label><label>默认话题线程 ID（可选）<input v-model="settings.telegram_thread_id" :disabled="disabled" placeholder="普通私聊、频道留空"><small>用于未单独指定话题的目标。</small></label></div>

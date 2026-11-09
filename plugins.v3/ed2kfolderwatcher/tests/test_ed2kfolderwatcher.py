@@ -933,7 +933,7 @@ class Ed2kTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in grouped], [first["name"], second["name"]])
         self.assertIs(grouped[0], first)
 
-    def test_batch_waits_until_all_registered_items_finish(self):
+    def test_batch_without_completed_contexts_does_not_flush_partial_results(self):
         first_key = "local-a"
         second_key = "local-b"
         self.plugin._telegram_enabled = True
@@ -955,6 +955,160 @@ class Ed2kTests(unittest.TestCase):
             batch["group_results"][group_key].add(second_key)
             self.plugin._maybe_flush_batch(batch_id)
             flush.assert_called_once_with(batch_id)
+
+    def prepare_partial_aggregate(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@receiver"
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 90
+        batch_id = self.plugin._new_batch("local-scan")
+        paths = [self.create(f"剧名.S01E{episode:02d}.mkv") for episode in (1, 2, 3)]
+        for path in paths:
+            self.plugin._queue_event(path, delay=0, batch_id=batch_id)
+        self.plugin._active_batch_id = batch_id
+        self.plugin._process_file(paths[0])
+        batch = self.plugin._batches[batch_id]
+        self.plugin._mark_batch_item_result(batch, str(paths[0]))
+        return batch_id, batch, paths, batch["groups"][str(paths[0])]
+
+    def test_expired_partial_group_sends_ready_links_then_later_results_without_duplicates(self):
+        batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
+        batch["sealed"] = True
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as send:
+            self.plugin._maybe_flush_batch(batch_id)
+            send.assert_not_called()
+            batch["group_flush_at"][group_key] = time.monotonic() - 1
+            self.plugin._maybe_flush_batch(batch_id)
+            send.assert_called_once()
+            self.assertTrue(self.records()[str(paths[0])]["telegram_sent"])
+            self.assertIn(batch_id, self.plugin._batches)
+            self.assertNotIn(group_key, batch["group_flushed"])
+            self.assertNotIn(str(paths[0]), batch["contexts"])
+            self.plugin._maybe_flush_batch(batch_id)
+            self.assertEqual(send.call_count, 1)
+            for path in paths[1:]:
+                self.plugin._process_file(path)
+                self.plugin._mark_batch_item_result(batch, str(path))
+            batch["group_flush_at"][group_key] = time.monotonic() - 1
+            self.plugin._maybe_flush_batch(batch_id)
+            self.assertEqual(send.call_count, 2)
+            self.assertNotIn(paths[0].name, send.call_args.args[1])
+            self.assertIn(paths[1].name, send.call_args.args[1])
+            self.assertIn(paths[2].name, send.call_args.args[1])
+            self.assertNotIn(batch_id, self.plugin._batches)
+            self.assertTrue(all(record["telegram_sent"] for record in self.records().values()))
+
+    def test_pending_or_exhausted_sibling_does_not_block_ready_link_or_delete(self):
+        batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
+        self.plugin._delete_source = True
+        self.plugin._retry_limit = 0
+        stat = paths[1].stat()
+        self.plugin._retry_failure(str(paths[1]), "local", [stat.st_size, stat.st_mtime_ns, stat.st_ino],
+                                   paths[1].name, "读取失败")
+        self.plugin._mark_batch_item_result(batch, str(paths[1]))
+        batch["group_flush_at"][group_key] = time.monotonic() - 1
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as send:
+            self.plugin._maybe_flush_batch(batch_id)
+        send.assert_called_once()
+        self.assertFalse(paths[0].exists())
+        self.assertTrue(paths[1].exists())
+        self.assertTrue(paths[2].exists())
+        self.assertTrue(self.records()[str(paths[0])]["source_deleted"])
+        self.assertIn(batch_id, self.plugin._batches)
+
+    def test_duplicate_group_registration_does_not_extend_deadline(self):
+        batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
+        deadline = batch["group_flush_at"][group_key]
+        with patch.object(self.module.time, "monotonic", return_value=deadline + 5):
+            self.plugin._register_batch_item(batch_id, str(paths[1]), paths[1].name)
+        self.assertEqual(batch["group_flush_at"][group_key], deadline)
+        later = self.plugin._new_batch("cloud-life")
+        with patch.object(self.module.time, "monotonic", return_value=deadline + 10):
+            registered = self.plugin._register_batch_item(later, "new", "剧名.S01E04.mkv")
+        self.assertEqual(registered, batch_id)
+        self.assertEqual(batch["group_flush_at"][group_key], deadline + 100)
+
+    def test_new_sibling_arriving_during_partial_send_remains_pending(self):
+        batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
+        batch["group_flush_at"][group_key] = time.monotonic() - 1
+        def send_link(*args, **kwargs):
+            self.plugin._register_batch_item(batch_id, "late", "剧名.S01E04.mkv")
+            return True
+        with patch.object(self.plugin, "_send_telegram", side_effect=send_link):
+            self.plugin._maybe_flush_batch(batch_id)
+        self.assertIn("late", batch["expected"])
+        self.assertNotIn(group_key, batch["group_flushed"])
+        self.assertGreater(batch["group_flush_at"][group_key], time.monotonic())
+        self.assertTrue(self.records()[str(paths[0])]["telegram_sent"])
+
+    def test_requeued_completed_member_is_pending_until_revalidated(self):
+        batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
+        batch["sealed"] = True
+        batch["group_flush_at"][group_key] = time.monotonic() - 1
+        deadline = batch["group_flush_at"][group_key]
+        self.plugin._register_batch_item(batch_id, str(paths[0]), paths[0].name)
+        self.assertNotIn(str(paths[0]), batch["results"])
+        self.assertNotIn(str(paths[0]), batch["group_results"][group_key])
+        self.assertNotIn(str(paths[0]), batch["contexts"])
+        self.assertEqual(batch["group_flush_at"][group_key], deadline)
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as send, \
+                patch.object(self.module, "ed2k_hash", side_effect=AssertionError("should reuse cached hash")):
+            self.plugin._maybe_flush_batch(batch_id)
+            send.assert_not_called()
+            self.assertIn(batch_id, self.plugin._batches)
+            self.plugin._process_file(paths[0])
+            self.plugin._mark_batch_item_result(batch, str(paths[0]))
+            self.plugin._maybe_flush_batch(batch_id)
+            send.assert_called_once()
+
+    def test_hash_progress_flushes_expired_group_and_preserves_saved_delivery(self):
+        for source in ("local", "cloud"):
+            with self.subTest(source=source):
+                self.plugin.init_plugin({"folder": str(self.folder), "min_age": 0})
+                batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
+                other_batch = self.plugin._new_batch("other-show")
+                other = self.create("另一部.S01E01.mkv")
+                item, storage = self.cloud_fixture()
+                item = {**item, "name": other.name, "path": f"/cloud-test/{other.name}"}
+                storage.fresh.return_value = item
+                key = str(other) if source == "local" else self.cloud_module.record_key(item)
+                self.plugin._register_batch_item(other_batch, key, other.name)
+                self.plugin._active_batch_id = other_batch
+                self.plugin._active_work_key = key
+                def calculate(*args, **kwargs):
+                    progress = kwargs["progress"] if source == "local" else args[5]
+                    batch["group_flush_at"][group_key] = time.monotonic() - 1
+                    self.plugin._batch_check_at = 0
+                    progress(1, 5)
+                    self.assertTrue(self.records()[str(paths[0])]["telegram_sent"])
+                    self.assertNotIn(key, self.records())
+                    return "a" * 32
+                module, function = (self.module, "ed2k_hash") if source == "local" else (self.cloud_module, "hash_remote")
+                with patch.object(module, function, side_effect=calculate), \
+                        patch.object(self.plugin, "_send_telegram", return_value=True) as send:
+                    self.plugin._work_item(key, (other.stat().st_size, other.stat().st_mtime_ns, other.stat().st_ino)
+                                           if source == "local" else item)
+                    send.assert_called_once()
+                saved = self.records()
+                self.assertTrue(saved[str(paths[0])]["telegram_sent"])
+                self.assertIn(key, saved)
+                self.assertEqual(self.plugin._retry_failures, {})
+                self.assertFalse(saved[key]["telegram_sent"])
+                (self.root / "data" / "records.json").unlink()
+
+    def test_partial_telegram_failure_remains_bounded_and_never_deletes_source(self):
+        batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
+        self.plugin._delete_source = True
+        self.plugin._retry_limit = 0
+        batch["group_flush_at"][group_key] = time.monotonic() - 1
+        with patch.object(self.plugin, "_send_telegram", return_value=False) as send:
+            self.plugin._maybe_flush_batch(batch_id)
+            self.plugin._maybe_flush_batch(batch_id)
+        send.assert_called_once()
+        self.assertFalse(self.records()[str(paths[0])]["telegram_sent"])
+        self.assertTrue(paths[0].exists())
+        self.assertTrue(self.plugin._retry_failures[str(paths[0])]["exhausted"])
+        self.assertNotIn(str(paths[0]), batch["contexts"])
 
     def test_movie_batch_does_not_wait_for_series_aggregation_window(self):
         self.plugin._telegram_enabled = True
@@ -996,6 +1150,42 @@ class Ed2kTests(unittest.TestCase):
         self.assertIn(first_key, self.plugin._batches[retry_id]["expected"])
         self.assertIn(first_key, self.plugin._batches[batch_id]["results"])
         flush.assert_any_call(batch_id)
+
+    def test_expiring_aggregate_batch_does_not_merge_retry_back_into_expired_group(self):
+        batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
+        batch["group_flush_at"][group_key] = time.monotonic() - 1
+        with patch.object(self.plugin, "_maybe_flush_batch"):
+            self.plugin._expire_batch(batch_id)
+        for path in paths[1:]:
+            retry_id = self.plugin._pending_batches[str(path)]
+            self.assertNotEqual(retry_id, batch_id)
+            self.assertIn(str(path), self.plugin._batches[retry_id]["expected"])
+            self.assertNotIn(str(path), self.plugin._batches[retry_id]["results"])
+            self.assertIn(str(path), batch["results"])
+
+    def test_worker_flushes_ready_episode_without_waiting_for_pending_same_season(self):
+        unused_movie, episode, storage = self.start_cloud_worker(telegram_aggregate_window=0)
+        later = {**episode, "fileid": "later", "name": "show.S01E02.mkv", "path": "/cloud-test/show.S01E02.mkv"}
+        key = self.cloud_module.record_key(episode)
+        later_key = self.cloud_module.record_key(later)
+        with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32) as hashing, \
+                patch.object(self.plugin, "_send_telegram", return_value=True) as send:
+            try:
+                with self.plugin._condition:
+                    batch_id = self.plugin._new_batch("cloud-scan")
+                    self.plugin._queue_cloud_file(episode, batch_id=batch_id)
+                    self.plugin._queue_cloud_file(later, delay=60, batch_id=batch_id)
+                self.wait_for(lambda: (self.root / "data" / "records.json").exists()
+                              and self.records().get(key, {}).get("telegram_sent"))
+                self.wait_for(lambda: self.records().get(key, {}).get("source_deleted"))
+                hashing.assert_called_once()
+                send.assert_called_once()
+                self.assertIn(later_key, self.plugin._pending)
+                self.assertIn(batch_id, self.plugin._batches)
+                self.assertNotIn(later_key, self.records())
+                storage.delete_prepared.assert_called_once()
+            finally:
+                self.plugin.stop_service()
 
     def test_batch_registration_captures_show_season_before_processing(self):
         batch_id = self.plugin._new_batch("local-scan")

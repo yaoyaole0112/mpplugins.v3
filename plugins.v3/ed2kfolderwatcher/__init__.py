@@ -216,7 +216,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.19.2"
+    plugin_version = "1.19.3"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -291,6 +291,7 @@ class Ed2kFolderWatcher(_PluginBase):
         self._pending_batches = {}
         self._batches = {}
         self._batch_sequence = 0
+        self._batch_check_at = 0
         self._active_batch_id = None
         self._live_batch_id = None
         self._live_batch_until = 0
@@ -622,16 +623,14 @@ class Ed2kFolderWatcher(_PluginBase):
     def _merge_batch_for_group(self, batch_id: str, group_key):
         if not self._telegram_aggregate or group_key is None:
             return batch_id
-        now = time.monotonic()
         with self._condition:
             for candidate_id, candidate in reversed(list(self._batches.items())):
                 if candidate_id == batch_id or candidate["flushing"]:
                     continue
                 if group_key not in candidate.get("group_expected", {}) or group_key in candidate.get("group_flushing", set()):
                     continue
-                if group_key in candidate.get("group_flushed", set()) or candidate.get("group_flush_at", {}).get(group_key, 0) <= now:
+                if group_key in candidate.get("group_flushed", set()):
                     continue
-                candidate["group_flush_at"][group_key] = now + self._telegram_aggregate_window
                 return candidate_id
         return batch_id
 
@@ -658,17 +657,43 @@ class Ed2kFolderWatcher(_PluginBase):
         if not empty:
             self._maybe_flush_batch(batch_id)
 
+    def _ready_batch_groups(self, batch, now):
+        return [group_key for group_key, expected in batch.get("group_expected", {}).items()
+                if group_key not in batch["group_flushing"]
+                and group_key not in batch["group_flushed"]
+                and batch["group_flush_at"].get(group_key, 0) <= now
+                and (expected.issubset(batch["group_results"].get(group_key, set()))
+                     or any(key in batch["contexts"]
+                            for key in batch["group_results"].get(group_key, set())))]
+
+    def _flush_due_groups(self):
+        now = time.monotonic()
+        if self._stopping.is_set() or now < self._batch_check_at:
+            return
+        self._batch_check_at = now + 1
+        with self._condition:
+            ready = [batch_id for batch_id, batch in self._batches.items()
+                     if not batch["flushing"] and self._ready_batch_groups(batch, now)]
+        for batch_id in ready:
+            if self._stopping.is_set():
+                break
+            self._maybe_flush_batch(batch_id)
+
     def _maybe_flush_batch(self, batch_id: str) -> None:
+        if not self._lock.acquire(timeout=1):
+            return
+        try:
+            self._flush_ready_batch(batch_id)
+        finally:
+            self._lock.release()
+
+    def _flush_ready_batch(self, batch_id: str) -> None:
         with self._condition:
             batch = self._batches.get(batch_id)
             if not batch or batch["flushing"]:
                 return
             now = time.monotonic()
-            ready = [group_key for group_key, expected in batch.get("group_expected", {}).items()
-                     if group_key not in batch["group_flushing"]
-                     and group_key not in batch["group_flushed"]
-                     and expected.issubset(batch["group_results"].get(group_key, set()))
-                     and batch["group_flush_at"].get(group_key, 0) <= now]
+            ready = self._ready_batch_groups(batch, now)
             if not ready:
                 return
             batch["group_flushing"].update(ready)
@@ -697,7 +722,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 with self._condition:
                     self._pending_batches[key] = retry_batch
                     name = self._batch_item_name(key)
-                    self._register_batch_item(retry_batch, key, name)
+                    self._register_batch_item(retry_batch, key, name, merge=False)
                     self._mark_batch_item_result(batch, key)
             self._seal_batch(retry_batch)
             logger.warning(f"自动生成ED2K链接：批次等待超过30分钟，{len(pending)}个未完成文件转入后续批次：{batch_id}")
@@ -716,23 +741,10 @@ class Ed2kFolderWatcher(_PluginBase):
             if not batch:
                 return
             entries = [(key, context) for key, context in batch["contexts"].items()
-                       if batch["groups"].get(key) == group_key]
-            expected_at_start = set(batch["group_expected"].get(group_key, set()))
+                       if batch["groups"].get(key) == group_key
+                       and key in batch["group_results"].get(group_key, set())]
         if not entries:
-            with self._condition:
-                batch = self._batches.get(batch_id)
-                if batch:
-                    batch["group_flushing"].discard(group_key)
-                    if batch["group_expected"].get(group_key, set()) != expected_at_start:
-                        batch["group_flushed"].discard(group_key)
-                        delay = self._telegram_aggregate_window if (
-                            self._telegram_enabled and self._telegram_aggregate and group_key is not None
-                        ) else 0
-                        batch["group_flush_at"][group_key] = time.monotonic() + delay
-                    else:
-                        batch["group_flushed"].add(group_key)
-                    if batch["sealed"] and batch["group_flushed"] >= set(batch["group_expected"]):
-                        self._batches.pop(batch_id, None)
+            self._finish_batch_group(batch_id, group_key, entries)
             return
         cache_path = entries[0][1]["cache_path"]
         output = entries[0][1]["output"]
@@ -759,6 +771,7 @@ class Ed2kFolderWatcher(_PluginBase):
             if self._telegram_enabled and not record.get("telegram_sent"):
                 failed.append(context)
                 continue
+            self._clear_retry_failure(key)
             if context["kind"] == "cloud":
                 self._maybe_delete_cloud_source(context["storage"], context["item"], record, output, cache_path, records, self._stopping)
             elif self._delete_source and (output is not None or self._telegram_enabled):
@@ -800,16 +813,26 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._queue_event(context["path"], delay=60, batch_id=retry_batch)
             self._seal_batch(retry_batch)
 
+        self._finish_batch_group(batch_id, group_key, entries)
+
+    def _finish_batch_group(self, batch_id, group_key, entries):
         with self._condition:
             batch = self._batches.get(batch_id)
             if batch:
+                for key, context in entries:
+                    if batch["contexts"].get(key) is context:
+                        batch["contexts"].pop(key, None)
                 batch["group_flushing"].discard(group_key)
-                if batch["group_expected"].get(group_key, set()) != expected_at_start:
+                complete = batch["group_expected"].get(group_key, set()).issubset(
+                    batch["group_results"].get(group_key, set()))
+                remaining = any(batch["groups"].get(key) == group_key for key in batch["contexts"])
+                if not complete or remaining:
                     batch["group_flushed"].discard(group_key)
                     delay = self._telegram_aggregate_window if (
                         self._telegram_enabled and self._telegram_aggregate and group_key is not None
                     ) else 0
-                    batch["group_flush_at"][group_key] = time.monotonic() + delay
+                    batch["group_flush_at"][group_key] = max(
+                        batch["group_flush_at"].get(group_key, 0), time.monotonic() + delay)
                 else:
                     batch["group_flushed"].add(group_key)
                 if batch["sealed"] and batch["group_flushed"] >= set(batch["group_expected"]):
@@ -966,16 +989,24 @@ class Ed2kFolderWatcher(_PluginBase):
             group_key = batch["groups"][key]
             batch["group_results"].setdefault(group_key, set()).add(key)
 
-    def _register_batch_item(self, batch_id: str, key: str, name: str = None) -> None:
+    def _register_batch_item(self, batch_id: str, key: str, name: str = None, *, merge=True) -> str:
         with self._condition:
             batch = self._batches.get(batch_id)
             if batch:
                 item_name = name or self._batch_item_name(key)
                 group_key = telegram_aggregate_key(item_name) if self._telegram_aggregate else ("__single__", key)
-                target_batch_id = self._merge_batch_for_group(batch_id, group_key)
+                target_batch_id = self._merge_batch_for_group(batch_id, group_key) if merge and key not in batch["expected"] else batch_id
                 if target_batch_id != batch_id:
                     batch = self._batches.get(target_batch_id)
                 if batch:
+                    new_item = key not in batch["group_expected"].get(group_key, set()) or group_key in batch["group_flushed"]
+                    if key in batch["groups"]:
+                        previous_group = batch["groups"][key]
+                        batch["group_results"].get(previous_group, set()).discard(key)
+                        if previous_group != group_key:
+                            batch["group_expected"].get(previous_group, set()).discard(key)
+                    batch["results"].discard(key)
+                    batch["contexts"].pop(key, None)
                     batch["expected"].add(key)
                     batch["groups"][key] = group_key
                     batch["group_expected"].setdefault(group_key, set()).add(key)
@@ -984,7 +1015,8 @@ class Ed2kFolderWatcher(_PluginBase):
                     delay = self._telegram_aggregate_window if (
                         self._telegram_enabled and self._telegram_aggregate and group_key is not None
                     ) else 0
-                    batch["group_flush_at"][group_key] = time.monotonic() + delay
+                    if new_item:
+                        batch["group_flush_at"][group_key] = time.monotonic() + delay
                     return target_batch_id
         return batch_id
 
@@ -1081,8 +1113,10 @@ class Ed2kFolderWatcher(_PluginBase):
         if not self._movie_series_parallel or self._active_work_key != key or media_kind(item["name"], item["path"]) != "movie":
             def progress(done, size):
                 self._cloud_status.update(bytes_read=done, size=size, reconnecting=False, updated_at=time.time())
+                self._flush_due_groups()
             def on_retry(attempt):
                 self._cloud_status.update(reconnecting=True, stream_retries=attempt)
+                self._flush_due_groups()
             return calculate(progress, on_retry)
         return self._background_movie_hash(
             key, fingerprint(item), dict(item), item["name"], item["size"], "网盘", calculate,
@@ -1150,11 +1184,7 @@ class Ed2kFolderWatcher(_PluginBase):
                     self._live_batch_id = None
                 ready = [batch_id for batch_id, batch in self._batches.items()
                          if not batch["flushing"]
-                         and any(group_key not in batch["group_flushing"]
-                                 and group_key not in batch["group_flushed"]
-                                 and expected.issubset(batch["group_results"].get(group_key, set()))
-                                 and batch["group_flush_at"].get(group_key, 0) <= now
-                                 for group_key, expected in batch["group_expected"].items())]
+                         and self._ready_batch_groups(batch, now)]
                 expired = [batch_id for batch_id, batch in self._batches.items()
                            if not batch["sealed"] and batch["source"] != "cloud-scan"
                            and time.monotonic() >= batch["deadline"]]
@@ -1679,6 +1709,9 @@ class Ed2kFolderWatcher(_PluginBase):
                             record.update(cloud_delete_scope=scope, cloud_sha1=sha1.lower(), cloud_delete_note="等待所选输出完成后校验删源")
                     except CloudError:
                         pass
+                records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+                if key_migrated:
+                    records.pop(old_key, None)
                 records[key] = record
                 self._cloud_status["completed"] += 1
                 logger.info(f"自动生成ED2K链接：网盘文件生成完成：{item['storage']}：{item['name']}")
@@ -2102,6 +2135,7 @@ class Ed2kFolderWatcher(_PluginBase):
                     logger.warning(f"自动生成ED2K链接：大小或哈希校验失败，保留源文件：{path.name}")
                     self._queue_event(path, delay=60)
                     return
+                records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
                 records[key] = record
                 logger.info(f"自动生成ED2K链接：生成完成：{path}")
             self._write_results(output, cache_path, records)
@@ -2156,6 +2190,7 @@ class Ed2kFolderWatcher(_PluginBase):
         active = self._local_active
         if active and active.get("name") == path.name:
             active.update(bytes_read=bytes_read, size=size, stage="正在计算 ED2K 哈希", updated_at=time.time())
+        self._flush_due_groups()
 
     def _progress_snapshot(self) -> dict:
         with self._condition:
@@ -2462,7 +2497,7 @@ class Ed2kFolderWatcher(_PluginBase):
             {"component": "VCardTitle", "text": "ED2K链接自动转发"},
             field("VSwitch", "telegram_enabled", "发送 ED2K 链接到 Telegram"),
             field("VSwitch", "telegram_aggregate", "聚合转发", hint="同剧名同季数链接合并为一条换行消息。", persistent_hint=True),
-            field("VTextField", "telegram_aggregate_window", "聚合转发延迟等待秒数", type="number", min=0, max=3600, hint="批次完成后继续等待；等待期间发现的同剧同季文件会合并，默认600秒。", persistent_hint=True),
+            field("VTextField", "telegram_aggregate_window", "聚合转发延迟等待秒数", type="number", min=0, max=3600, hint="同剧同季新增文件重置等待；到期先发已完成链接，剩余后续补发，默认600秒。", persistent_hint=True),
             # field("VSelect", "telegram_mode", "Telegram 发送方式", items=[{"title": "Bot Token（机器人）", "value": "bot"}, {"title": "个人账号（Telethon）", "value": "user"}]),
             # field("VTextField", "telegram_token", "Telegram Bot Token", type="password"),
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-5"}, "text": "仅使用个人账号发送，可在插件页面完成授权；请使用可信网络或 HTTPS。"},
