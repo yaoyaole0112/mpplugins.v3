@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urljoin, urlpa
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
+from bs4 import BeautifulSoup
 from fastapi import Query
 
 from app import schemas
@@ -21,6 +22,7 @@ from app.api.endpoints.plugin import register_plugin_api
 from app.chain.download import DownloadChain
 from app.chain.tmdb import TmdbChain
 from app.chain.torrents import TorrentsChain
+from app.sdk.cache import cached, fresh
 from app.sdk.config import settings
 from app.sdk.media import MediaInfo
 from app.sdk.events import Event, eventmanager
@@ -33,6 +35,7 @@ from app.runtime.thread import ThreadHelper
 from app.sdk.logging import logger
 from app.modules.qbittorrent import Qbittorrent
 from app.modules.transmission import Transmission
+from app.modules.themoviedb.tmdbapi import TmdbApi
 from app.plugins import _PluginBase
 from app.scheduler import Scheduler
 from app.schemas import MediaType, NotificationType, ServiceInfo, TorrentInfo
@@ -234,7 +237,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.1.7"
+    plugin_version = "6.1.8"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -2666,48 +2669,84 @@ class BrushFlow(_PluginBase):
             return None
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
         accepted = []
-        date_cache: Dict[Tuple[int, int], Dict[int, Optional[str]]] = {}
+        date_cache: Dict[Tuple[int, int, Optional[str]], Dict[int, Optional[str]]] = {}
+        source_cache = {}
         douban_date_cache: Dict[Tuple[str, int], Dict[int, Optional[str]]] = {}
         for path in video_paths:
             try:
                 meta = MetaInfo(path.rsplit("/", 1)[-1])
                 episodes = list(meta.episode_list or [])
-                season = meta.begin_season or 1
+                season = meta.begin_season if meta.begin_season is not None else 1
                 if not episodes and meta.begin_episode:
                     episodes = list(range(meta.begin_episode, (meta.end_episode or meta.begin_episode) + 1))
                 media = self.chain.recognize_media(meta=meta) if episodes else None
-                if not media:
-                    raise ValueError("剧名无法识别")
                 tmdb_id = getattr(media, "tmdb_id", None)
-                air_dates = []
+                dates, sources = {}, {}
                 if tmdb_id:
-                    key = (int(tmdb_id), int(season))
+                    key = (int(tmdb_id), int(season), meta.episode_group)
+                    if key not in date_cache:
+                        date_cache[key], source_cache[key] = {}, {}
+                    dates, sources = date_cache[key], source_cache[key]
                     try:
-                        if key not in date_cache:
-                            date_cache[key] = {
+                        if not dates:
+                            dates.update({
                                 int(ep.episode_number): ep.air_date
                                 for ep in TmdbChain().tmdb_episodes(
                                     tmdbid=key[0], season=key[1], episode_group=meta.episode_group
                                 )
                                 if ep.episode_number is not None
-                            }
-                        air_dates = [date_cache[key].get(int(episode)) for episode in episodes]
+                            })
+                            sources.update({number: "TMDB整季API" for number in dates})
                     except Exception as err:
-                        logger.info(f"TMDB 分集日期查询失败，尝试豆瓣：{path}：{err}")
-                if not air_dates or any(not value for value in air_dates):
+                        logger.info(f"TMDB 整季日期查询失败，继续核验：{path}：{type(err).__name__}")
+                    # 剧集组编号不一定等于默认季集号，不能用默认单集或网页数据填补。
+                    if not meta.episode_group:
+                        missing = [number for number in episodes if not dates.get(number)]
+                        # 多集缺失时先读一次整季网页，避免整季包逐集发起网络请求。
+                        if len(missing) == 1:
+                            number = missing[0]
+                            value = self._tmdb_episode_air_date(key[0], key[1], int(number))
+                            if value:
+                                dates[number], sources[number] = value, "TMDB单集API"
+                        if any(not dates.get(number) for number in missing):
+                            web_dates = self._tmdb_web_episode_air_dates(key[0], key[1])
+                            for number, value in web_dates.items():
+                                if not dates.get(number) and value:
+                                    dates[number], sources[number] = value, "TMDB网页"
+                        for number in missing:
+                            if not dates.get(number) and len(missing) > 1:
+                                value = self._tmdb_episode_air_date(key[0], key[1], int(number))
+                                if value:
+                                    dates[number], sources[number] = value, "TMDB单集API"
+                if any(not dates.get(number) for number in episodes):
+                    if meta.episode_group:
+                        raise ValueError("剧集组日期缺失，不能用默认季集号或豆瓣季集号代替")
                     douban_id = str(getattr(media, "douban_id", "") or "")
                     if not douban_id and str(getattr(media, "media_source", "")).lower().endswith("douban"):
                         douban_id = str(getattr(media, "media_id", "") or "")
                     if not douban_id:
-                        raise ValueError("逐集日期缺失且没有豆瓣媒体 ID")
+                        name = str(getattr(media, "title", "") or meta.cn_name or meta.en_name or "")
+                        year = str(meta.year or (getattr(media, "year", "") if season == 1 else "") or "")
+                        douban_id = self._recent_episode_douban_id(name, year, season)
+                    if not douban_id:
+                        raise ValueError("TMDB逐集日期缺失，豆瓣未精确匹配到剧名/年份/季号")
                     douban_key = (douban_id, int(season))
                     if douban_key not in douban_date_cache:
                         douban_date_cache[douban_key] = self._douban_episode_air_dates(douban_id, season)
-                    air_dates = [douban_date_cache[douban_key].get(int(episode)) for episode in episodes]
+                    for number in episodes:
+                        if not dates.get(number) and douban_date_cache[douban_key].get(number):
+                            dates[number], sources[number] = douban_date_cache[douban_key][number], "豆瓣"
+                air_dates = [dates.get(number) for number in episodes]
                 if not episodes or any(not value for value in air_dates):
                     raise ValueError("季集号或 TMDB/豆瓣逐集播出日期缺失")
+                detail = ", ".join(
+                    f"S{season:02d}E{number:02d}={dates[number]}({sources[number]})" for number in episodes
+                )
                 if all(self._air_date_is_recent(value, today) for value in air_dates):
                     accepted.append(path)
+                    logger.info(f"最近播出剧集规则通过文件 {path}：{detail}，日期下限 {today - timedelta(days=3)}")
+                else:
+                    logger.info(f"最近播出剧集规则排除文件 {path}：{detail}，早于日期下限 {today - timedelta(days=3)}")
             except Exception as err:
                 logger.info(f"最近播出剧集规则排除文件 {path}：{err}")
         if not accepted:
@@ -2716,11 +2755,96 @@ class BrushFlow(_PluginBase):
         return {"accepted": set(accepted), "videos": set(video_paths)}
 
     @staticmethod
+    @cached(maxsize=512, ttl=300, skip_none=False, empty_ttl=60, local_only=True)
+    def _tmdb_episode_air_date(tmdb_id: int, season: int, episode: int) -> Optional[str]:
+        """整季缓存可能落后于单集，缺失时跳过宿主旧缓存核验一次。"""
+        try:
+            with fresh():
+                item = TmdbApi().get_tv_episode_detail(tmdb_id, season, episode)
+            if (item and item.get("season_number") == season
+                    and item.get("episode_number") == episode):
+                return item.get("air_date")
+        except Exception as err:
+            logger.info(f"TMDB单集日期查询失败 {tmdb_id} S{season}E{episode}：{type(err).__name__}")
+        return None
+
+    @staticmethod
+    @cached(maxsize=256, ttl=300, empty_ttl=60, local_only=True)
+    def _tmdb_web_episode_air_dates(tmdb_id: int, season: int) -> Dict[int, str]:
+        """API 尚未同步时，只读官方网页内精确对应季集的显式日期。"""
+        try:
+            response = RequestUtils(
+                ua=settings.NORMAL_USER_AGENT, proxies=settings.PROXY, timeout=12
+            ).get_res(url=f"https://www.themoviedb.org/tv/{tmdb_id}/season/{season}?language=en-US")
+            if response is None or not response.ok:
+                return {}
+            return BrushFlow._parse_tmdb_web_episode_air_dates(response.text, tmdb_id, season)
+        except Exception as err:
+            logger.info(f"TMDB网页日期查询失败 {tmdb_id} S{season}：{type(err).__name__}")
+            return {}
+
+    @staticmethod
+    def _parse_tmdb_web_episode_air_dates(html: str, tmdb_id: int, season: int) -> Dict[int, str]:
+        soup = BeautifulSoup(html, "html.parser")
+        dates = {}
+        for row in soup.select("div.episode"):
+            link = row.select_one("a[data-season-number][data-episode-number]")
+            if not link or link.get("data-season-number") != str(season):
+                continue
+            number = link.get("data-episode-number", "")
+            if not number.isdecimal():
+                continue
+            expected = f"/tv/{tmdb_id}/season/{season}/episode/{int(number)}"
+            if urlparse(link.get("href", "")).path != expected:
+                continue
+            date_node = row.select_one("span.date")
+            if not date_node:
+                continue
+            raw_date = date_node.get_text(" ", strip=True)
+            try:
+                dates[int(number)] = datetime.strptime(raw_date, "%B %d, %Y").date().isoformat()
+            except ValueError:
+                continue
+        return dates
+
+    @staticmethod
+    @cached(maxsize=256, ttl=300, empty_ttl=60, local_only=True)
+    def _recent_episode_douban_id(name: str, year: str, season: int) -> str:
+        if not name:
+            return ""
+        try:
+            query = name if season == 1 else f"{name} 第{season}季"
+            response = RequestUtils(
+                ua=settings.NORMAL_USER_AGENT, referer="https://movie.douban.com/", timeout=12
+            ).get_res(url="https://movie.douban.com/j/subject_suggest", params={"q": query})
+            if response is None or not response.ok:
+                return ""
+            results = response.json()
+            if not isinstance(results, list):
+                return ""
+            normalize = lambda text: re.sub(r"[^\w]", "", str(text)).casefold()
+            matches = set()
+            for item in results:
+                if not isinstance(item, dict) or not str(item.get("id", "")).isdecimal():
+                    continue
+                candidate = MetaInfo(str(item.get("title") or ""))
+                candidate_name = candidate.cn_name or candidate.en_name or ""
+                candidate_season = candidate.begin_season if candidate.begin_season is not None else 1
+                if (normalize(candidate_name) == normalize(name) and candidate_season == season
+                        and (not year or str(item.get("year") or "") == year)):
+                    matches.add(str(item["id"]))
+            return matches.pop() if len(matches) == 1 else ""
+        except Exception as err:
+            logger.info(f"豆瓣剧集匹配失败：{name} S{season}：{type(err).__name__}")
+            return ""
+
+    @staticmethod
+    @cached(maxsize=256, ttl=300, empty_ttl=60, local_only=True)
     def _douban_episode_air_dates(douban_id: str, season: int) -> Dict[int, Optional[str]]:
         """只使用豆瓣逐集明确提供的日期；不从聚合更新进度推测日期。"""
         if not douban_id.isdecimal():
             return {}
-        response = RequestUtils(ua="Mozilla/5.0 (compatible; MoviePilot/3.0)").get_res(
+        response = RequestUtils(ua=settings.NORMAL_USER_AGENT, timeout=12).get_res(
             url=f"https://movie.douban.com/j/tv/series/{douban_id}"
         )
         if not response or not response.ok:
