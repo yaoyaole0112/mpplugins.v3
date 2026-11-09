@@ -237,6 +237,17 @@ async function saveTask() {
                   <VSwitch v-model="localTask.site_hr_active" label="全站 H&R" color="primary" hide-details inset />
                   <VSwitch v-model="localTask.recent_episodes_only" label="仅下载最近播出剧集" color="primary" hide-details inset />
                 </div>
+                <VSelect
+                  v-model="localTask.blacklist_site_ids"
+                  :items="sites"
+                  label="种子黑名单"
+                  multiple
+                  chips
+                  closable-chips
+                  clearable
+                  hint="所选站点之间按完整种子名称互相排重；当前任务站点需包含在选择中"
+                  persistent-hint
+                />
               </section>
 
               <section class="editor-section">

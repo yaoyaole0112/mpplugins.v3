@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 
 from app.sdk.media import MetaInfo
 from brushflow import BrushFlow, RequestUtils
+from brushflow.models import BrushTaskPayload
 
 
 class RecentEpisodeRuleTest(unittest.TestCase):
@@ -38,6 +39,29 @@ class RecentEpisodeRuleTest(unittest.TestCase):
     def test_video_filter_ignores_non_video_files(self):
         self.assertTrue(BrushFlow._video_file("Season 2/E02.mkv"))
         self.assertFalse(BrushFlow._video_file("Season 2/E02.srt"))
+
+    def test_movie_year_uses_tmdb_release_date_then_recognized_or_filename_year(self):
+        self.assertEqual(
+            BrushFlow._movie_year(SimpleNamespace(release_date="2026-12-01", year="2025"), "2024"),
+            2026,
+        )
+        self.assertEqual(BrushFlow._movie_year(SimpleNamespace(year="2026"), None), 2026)
+        self.assertEqual(BrushFlow._movie_year(SimpleNamespace(), "2026"), 2026)
+        self.assertIsNone(BrushFlow._movie_year(SimpleNamespace(), None))
+
+    def test_recent_rule_accepts_current_year_movie_and_rejects_old_or_unknown_year(self):
+        cases = [
+            ("Current.Movie.2026.mkv", SimpleNamespace(type="电影", release_date="2026-05-01"), True),
+            ("Old.Movie.2025.mkv", SimpleNamespace(type="movie", release_date="2025-12-31"), False),
+            ("Unknown.Movie.mkv", SimpleNamespace(type="movie"), False),
+        ]
+        for path, media, expected in cases:
+            with self.subTest(path=path):
+                result = self.select_files([path], media)
+                if expected:
+                    self.assertEqual(result["accepted"], {path})
+                else:
+                    self.assertIsNone(result)
 
     def test_metainfo_extracts_single_and_multi_episode_ranges(self):
         single = MetaInfo("Example.Series.S02E03.mkv")
@@ -216,6 +240,53 @@ class RecentEpisodeRuleTest(unittest.TestCase):
             ("priority", [0], 1),
             ("start", "hash"),
         ])
+
+    def test_blacklist_requires_exact_title_and_other_selected_site(self):
+        history = [
+            SimpleNamespace(torrent_name="Show.S01E01.mkv", torrent_site="站点乙"),
+            SimpleNamespace(torrent_name="Show.S01E01.mkv extra", torrent_site="站点乙"),
+            SimpleNamespace(torrent_name="Show.S01E01.mkv", torrent_site="站点丙"),
+        ]
+        cache = {}
+        with patch("brushflow.DownloadHistoryOper") as history_oper:
+            history_oper.return_value.query.return_value = (history, len(history))
+            blocked, reason = BrushFlow._is_blacklist_duplicate(
+                "Show.S01E01.mkv", {"站点乙"}, cache
+            )
+        self.assertTrue(blocked)
+        self.assertIn("站点乙", reason)
+        self.assertEqual(history_oper.return_value.query.call_count, 1)
+
+    def test_blacklist_normalizes_nfc_and_does_not_block_unselected_sites(self):
+        history = [
+            SimpleNamespace(torrent_name="Café.S01E01.mkv", torrent_site="当前站点"),
+            SimpleNamespace(torrent_name="Café.S01E01.mkv", torrent_site="未选择站点"),
+        ]
+        with patch("brushflow.DownloadHistoryOper") as history_oper:
+            history_oper.return_value.query.return_value = (history, len(history))
+            blocked, reason = BrushFlow._is_blacklist_duplicate(
+                "Cafe\u0301.S01E01.mkv", {"别的站点"}, {}
+            )
+        self.assertFalse(blocked)
+        self.assertEqual(reason, "")
+
+    def test_blacklist_query_failure_is_cached_and_excluded(self):
+        cache = {}
+        with patch("brushflow.DownloadHistoryOper") as history_oper:
+            history_oper.return_value.query.side_effect = RuntimeError("db unavailable")
+            first = BrushFlow._is_blacklist_duplicate("Show.mkv", {"站点乙"}, cache)
+            second = BrushFlow._is_blacklist_duplicate("Show.mkv", {"站点乙"}, cache)
+        self.assertTrue(first[0])
+        self.assertTrue(second[0])
+        self.assertEqual(history_oper.return_value.query.call_count, 1)
+
+    def test_blacklist_site_ids_are_deduplicated_and_positive(self):
+        payload = BrushTaskPayload(
+            name="task", site_id=1, downloader="qb", blacklist_site_ids=[2, 2, 3]
+        )
+        self.assertEqual(payload.blacklist_site_ids, [2, 3])
+        with self.assertRaises(ValueError):
+            BrushTaskPayload(name="task", site_id=1, downloader="qb", blacklist_site_ids=[0])
 
 
 if __name__ == "__main__":

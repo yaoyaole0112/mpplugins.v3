@@ -67,6 +67,7 @@ class BrushTaskPayload(BaseModel):
     qb_category: Optional[str] = None
     site_hr_active: bool = False
     recent_episodes_only: bool = False
+    blacklist_site_ids: list[int] = Field(default_factory=list, max_length=100)
     site_skip_tips: bool = False
     rss_support: bool = False
     tag: Optional[str] = Field(None, validation_alias=AliasChoices("tag", "downloader_tag"))
@@ -133,6 +134,14 @@ class BrushTaskPayload(BaseModel):
         if value and "," in value:
             raise ValueError("下载器标签不能包含逗号")
         return value
+
+    @field_validator("blacklist_site_ids")
+    @classmethod
+    def normalize_blacklist_site_ids(cls, value: list[int]) -> list[int]:
+        """去重并保持所选站点顺序。"""
+        if any(site_id <= 0 for site_id in value):
+            raise ValueError("种子黑名单站点必须是有效站点")
+        return list(dict.fromkeys(value))
 
     @field_validator("size", "seeder", "pubtime", "delete_size_range")
     @classmethod

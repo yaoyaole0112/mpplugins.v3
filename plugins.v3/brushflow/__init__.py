@@ -9,6 +9,7 @@ from collections import Counter
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, Union
+from unicodedata import normalize
 from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urljoin, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,7 @@ from app.sdk.config import settings
 from app.sdk.media import MediaInfo
 from app.sdk.events import Event, eventmanager
 from app.sdk.media import MetaInfo
+from app.db.oper.downloadhistory import DownloadHistoryOper
 from app.db.oper.site import SiteOper
 from app.db.oper.subscribe import SubscribeOper
 from app.sdk.services import DownloaderHelper
@@ -39,6 +41,7 @@ from app.modules.themoviedb.tmdbapi import TmdbApi
 from app.plugins import _PluginBase
 from app.scheduler import Scheduler
 from app.schemas import MediaType, NotificationType, ServiceInfo, TorrentInfo
+from app.schemas.query import DownloadHistoryFilter, QueryPageRequest
 from app.schemas.types import EventType
 from app.sdk.network import RequestUtils
 from app.sdk.utilities import StringUtils
@@ -88,6 +91,7 @@ TASK_CONFIG_FIELDS = (
     "qb_category",
     "site_hr_active",
     "recent_episodes_only",
+    "blacklist_site_ids",
     "site_skip_tips",
     "rss_support",
     "tag",
@@ -114,6 +118,7 @@ LEGACY_SITE_OVERRIDE_FIELDS = {
     "qb_category",
     "site_hr_active",
     "recent_episodes_only",
+    "blacklist_site_ids",
     "site_skip_tips",
     "del_no_free",
     "rss_support",
@@ -182,6 +187,10 @@ class BrushTaskConfig:
         self.qb_category = self._clean_text(config.get("qb_category"))
         self.site_hr_active = bool(config.get("site_hr_active", False))
         self.recent_episodes_only = bool(config.get("recent_episodes_only", False))
+        self.blacklist_site_ids = list(dict.fromkeys(
+            int(site_id) for site_id in config.get("blacklist_site_ids", [])
+            if str(site_id).isdigit() and int(site_id) > 0
+        ))
         self.site_skip_tips = bool(config.get("site_skip_tips", False))
         self.rss_support = bool(config.get("rss_support", False))
         self.tag = self._read_tag(config)
@@ -1425,6 +1434,8 @@ class BrushFlow(_PluginBase):
         report["candidate_count"] = len(torrents)
         torrents.sort(key=lambda item: item.pubdate or "", reverse=True)
         seeding_size = self.__calculate_seeding_torrents_size(torrent_tasks)
+        blacklist_site_names = self._blacklist_other_site_names(task)
+        blacklist_history_cache = {}
         for torrent in torrents:
             passed, reason = self.__evaluate_pre_conditions_for_brush(include_network_conditions=False)
             if not passed:
@@ -1443,6 +1454,21 @@ class BrushFlow(_PluginBase):
             if not passed:
                 report["reason_counts"][reason] += 1
                 continue
+            if blacklist_site_names is None:
+                report["blacklist_excluded"] += 1
+                report["reason_counts"]["种子黑名单站点信息读取失败"] += 1
+                continue
+            if blacklist_site_names:
+                blocked, reason = self._is_blacklist_duplicate(
+                    torrent.title,
+                    blacklist_site_names,
+                    blacklist_history_cache,
+                )
+                if blocked:
+                    report["blacklist_excluded"] += 1
+                    report["reason_counts"][reason] += 1
+                    logger.info(f"刷流任务 [{task.name}] 排除种子 {torrent.title}：{reason}")
+                    continue
             hash_string = self.__download(torrent)
             if not hash_string:
                 report["reason_counts"]["最近播出剧集规则未通过或下载器添加失败"] += 1
@@ -1498,6 +1524,74 @@ class BrushFlow(_PluginBase):
         }
 
     @staticmethod
+    def _normalize_torrent_title(title: str) -> str:
+        """按种子黑名单规则规范化完整标题，不忽略大小写。"""
+        return normalize("NFC", str(title or "").strip())
+
+    @staticmethod
+    def _blacklist_other_site_names(task: BrushTaskConfig) -> Optional[Set[str]]:
+        """取当前任务站点之外的已选站点名称。"""
+        selected_ids = set(task.blacklist_site_ids or [])
+        if task.site_id not in selected_ids:
+            return set()
+        names = set()
+        for site_id in selected_ids - {task.site_id}:
+            try:
+                site = SiteOper().get(site_id)
+                if not site or not site.name:
+                    logger.error(f"种子黑名单站点 {site_id} 不存在或缺少名称")
+                    return None
+                names.add(normalize("NFC", str(site.name).strip()))
+            except Exception as err:
+                logger.error(f"读取种子黑名单站点 {site_id} 失败：{err}")
+                return None
+        return names
+
+    @classmethod
+    def _is_blacklist_duplicate(
+        cls,
+        title: str,
+        other_site_names: Set[str],
+        history_cache: Dict[str, Optional[Set[str]]],
+    ) -> Tuple[bool, str]:
+        """按站点名称与完整种子标题精确匹配其他限定站点的下载历史。"""
+        normalized_title = cls._normalize_torrent_title(title)
+        if not normalized_title:
+            return True, "种子标题为空，无法验证种子黑名单"
+        if normalized_title not in history_cache:
+            sites = set()
+            page_number = 1
+            history_oper = DownloadHistoryOper()
+            try:
+                while True:
+                    records, total = history_oper.query(
+                        DownloadHistoryFilter(text=normalized_title),
+                        QueryPageRequest(page=page_number, count=100),
+                    )
+                    sites.update(
+                        normalize("NFC", str(record.torrent_site or "").strip())
+                        for record in records
+                        if cls._normalize_torrent_title(record.torrent_name) == normalized_title
+                    )
+                    if len(records) < 100 or page_number * 100 >= total:
+                        break
+                    page_number += 1
+            except Exception as err:
+                logger.error(f"种子黑名单下载历史查询失败，按排除处理：{err}")
+                history_cache[normalized_title] = None
+                return True, "种子黑名单历史查询失败"
+            history_cache[normalized_title] = sites
+        if history_cache[normalized_title] is None:
+            return True, "种子黑名单历史查询失败"
+        matched_site = next(
+            (site_name for site_name in other_site_names if site_name in history_cache[normalized_title]),
+            None,
+        )
+        if matched_site:
+            return True, f"种子黑名单命中：已在限定站点 {matched_site} 下载过同名种子"
+        return False, ""
+
+    @staticmethod
     def _new_run_report(kind: str) -> dict:
         """创建一条结构稳定的运行诊断记录"""
         return {
@@ -1510,6 +1604,7 @@ class BrushFlow(_PluginBase):
             "error": None,
             "source_count": 0,
             "subscription_excluded": 0,
+            "blacklist_excluded": 0,
             "candidate_count": 0,
             "filtered_count": 0,
             "added_count": 0,
@@ -2658,6 +2753,23 @@ class BrushFlow(_PluginBase):
         except (TypeError, ValueError):
             return False
 
+    @staticmethod
+    def _is_movie(media: Any) -> bool:
+        media_type = getattr(media, "type", None)
+        media_type = getattr(media_type, "value", media_type)
+        return str(media_type or "").lower() in {"movie", "电影"}
+
+    @staticmethod
+    def _movie_year(media: Any, meta_year: Optional[str]) -> Optional[int]:
+        release_date = getattr(media, "release_date", None)
+        if release_date:
+            match = re.match(r"^(\d{4})", str(release_date))
+            if match:
+                return int(match.group(1))
+        year = getattr(media, "year", None) or meta_year
+        match = re.search(r"\b(\d{4})\b", str(year or ""))
+        return int(match.group(1)) if match else None
+
     def _recent_episode_file_selection(self, torrent_content: Union[str, bytes], title: str) -> Optional[dict]:
         """预检种子内视频，返回符合近期播出规则的文件路径及其名称。"""
         if not isinstance(torrent_content, bytes):
@@ -2679,7 +2791,20 @@ class BrushFlow(_PluginBase):
                 season = meta.begin_season if meta.begin_season is not None else 1
                 if not episodes and meta.begin_episode:
                     episodes = list(range(meta.begin_episode, (meta.end_episode or meta.begin_episode) + 1))
-                media = self.chain.recognize_media(meta=meta) if episodes else None
+                media = self.chain.recognize_media(meta=meta)
+                if self._is_movie(media):
+                    movie_year = self._movie_year(media, meta.year)
+                    if movie_year == today.year:
+                        accepted.append(path)
+                        logger.info(
+                            f"最近播出剧集规则通过电影文件 {path}：上映年份 {movie_year}，当前年份 {today.year}"
+                        )
+                    else:
+                        reason = f"无法识别上映年份（当前年份 {today.year}）" if movie_year is None else (
+                            f"上映年份 {movie_year}，不属于当前年份 {today.year}"
+                        )
+                        logger.info(f"最近播出剧集规则排除电影文件 {path}：{reason}")
+                    continue
                 tmdb_id = getattr(media, "tmdb_id", None)
                 dates, sources = {}, {}
                 if tmdb_id:
