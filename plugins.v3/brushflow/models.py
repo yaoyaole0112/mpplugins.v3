@@ -66,6 +66,7 @@ class BrushTaskPayload(BaseModel):
     del_no_free: bool = False
     qb_category: Optional[str] = None
     site_hr_active: bool = False
+    recent_episodes_only: bool = False
     site_skip_tips: bool = False
     rss_support: bool = False
     tag: Optional[str] = Field(None, validation_alias=AliasChoices("tag", "downloader_tag"))

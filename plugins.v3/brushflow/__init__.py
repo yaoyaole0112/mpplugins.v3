@@ -7,7 +7,7 @@ import time
 import uuid
 from collections import Counter
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, Union
 from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urljoin, urlparse, urlunparse
 from zoneinfo import ZoneInfo
@@ -16,8 +16,10 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import Query
 
 from app import schemas
+from app.application.torrent.download import TorrentHelper
 from app.api.endpoints.plugin import register_plugin_api
 from app.chain.download import DownloadChain
+from app.chain.tmdb import TmdbChain
 from app.chain.torrents import TorrentsChain
 from app.sdk.config import settings
 from app.sdk.media import MediaInfo
@@ -82,6 +84,7 @@ TASK_CONFIG_FIELDS = (
     "del_no_free",
     "qb_category",
     "site_hr_active",
+    "recent_episodes_only",
     "site_skip_tips",
     "rss_support",
     "tag",
@@ -107,6 +110,7 @@ LEGACY_SITE_OVERRIDE_FIELDS = {
     "proxy_delete",
     "qb_category",
     "site_hr_active",
+    "recent_episodes_only",
     "site_skip_tips",
     "del_no_free",
     "rss_support",
@@ -174,6 +178,7 @@ class BrushTaskConfig:
         self.del_no_free = bool(config.get("del_no_free", False)) if self.freeleech in {"free", "2xfree"} else False
         self.qb_category = self._clean_text(config.get("qb_category"))
         self.site_hr_active = bool(config.get("site_hr_active", False))
+        self.recent_episodes_only = bool(config.get("recent_episodes_only", False))
         self.site_skip_tips = bool(config.get("site_skip_tips", False))
         self.rss_support = bool(config.get("rss_support", False))
         self.tag = self._read_tag(config)
@@ -1437,7 +1442,7 @@ class BrushFlow(_PluginBase):
                 continue
             hash_string = self.__download(torrent)
             if not hash_string:
-                report["reason_counts"]["下载器添加失败"] += 1
+                report["reason_counts"]["最近播出剧集规则未通过或下载器添加失败"] += 1
                 continue
             torrent_task = self._torrent_to_task_record(torrent, site, task)
             torrent_tasks[hash_string] = torrent_task
@@ -2551,6 +2556,17 @@ class BrushFlow(_PluginBase):
         service = self.service_info
         if not downloader or not service:
             return None
+        recent_selection = None
+        if task.recent_episodes_only:
+            if isinstance(torrent_content, str) and not torrent_content.startswith("magnet"):
+                response = RequestUtils(cookies=cookies, proxies=proxies, ua=torrent.site_ua).get_res(
+                    url=torrent_content
+                )
+                if response and response.ok:
+                    torrent_content = response.content
+            recent_selection = self._recent_episode_file_selection(torrent_content, torrent.title)
+            if not recent_selection:
+                return None
         downloader_helper = DownloaderHelper()
         if downloader_helper.is_downloader("qbittorrent", service=service):
             up_limit = up_speed * 1024 if up_speed else None
@@ -2570,12 +2586,21 @@ class BrushFlow(_PluginBase):
                 tag=[task.brush_tag, random_tag],
                 upload_limit=up_limit,
                 download_limit=down_limit,
+                is_paused=bool(recent_selection),
             ):
                 return None
             torrent_hash = downloader.get_torrent_id_by_tag(tags=random_tag)
             if not torrent_hash:
                 logger.error(f"刷流任务 [{task.name}] 获取种子 Hash 失败")
                 return torrent_hash
+            if recent_selection and not self._select_recent_episode_files(
+                downloader, torrent_hash, recent_selection, "qbittorrent", task.name
+            ):
+                try:
+                    downloader.delete_torrents(ids=torrent_hash, delete_file=False)
+                except Exception as err:
+                    logger.error(f"移除选集失败的暂停任务失败：{err}")
+                return None
             try:
                 downloader.remove_torrents_tag(ids=torrent_hash, tag=random_tag)
             except Exception as err:
@@ -2593,8 +2618,17 @@ class BrushFlow(_PluginBase):
                 download_dir=task.save_path,
                 cookie=cookies,
                 labels=[task.brush_tag],
+                is_paused=bool(recent_selection),
             )
             if not added_torrent:
+                return None
+            if recent_selection and not self._select_recent_episode_files(
+                downloader, added_torrent.hashString, recent_selection, "transmission", task.name
+            ):
+                try:
+                    downloader.delete_torrents(ids=added_torrent.hashString, delete_file=False)
+                except Exception as err:
+                    logger.error(f"移除选集失败的暂停任务失败：{err}")
                 return None
             if task.up_speed or task.dl_speed:
                 downloader.change_torrent(
@@ -2604,6 +2638,161 @@ class BrushFlow(_PluginBase):
                 )
             return added_torrent.hashString
         return None
+
+    @staticmethod
+    def _video_file(path: str) -> bool:
+        return path.lower().rsplit(".", 1)[-1] in {
+            "mkv", "mp4", "avi", "mov", "wmv", "m4v", "ts", "m2ts", "webm",
+        }
+
+    @staticmethod
+    def _air_date_is_recent(air_date: Optional[str], today: date) -> bool:
+        """三天前（含）至未来日期均属于可下载范围。"""
+        if not air_date:
+            return False
+        try:
+            return datetime.strptime(air_date, "%Y-%m-%d").date() >= today - timedelta(days=3)
+        except (TypeError, ValueError):
+            return False
+
+    def _recent_episode_file_selection(self, torrent_content: Union[str, bytes], title: str) -> Optional[dict]:
+        """预检种子内视频，返回符合近期播出规则的文件路径及其名称。"""
+        if not isinstance(torrent_content, bytes):
+            return None
+        _, paths = TorrentHelper().get_fileinfo_from_torrent_content(torrent_content)
+        video_paths = [path for path in paths if self._video_file(path)]
+        if not video_paths:
+            logger.info(f"最近播出剧集规则排除 {title}：种子内没有可识别的视频文件")
+            return None
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        accepted = []
+        date_cache: Dict[Tuple[int, int], Dict[int, Optional[str]]] = {}
+        douban_date_cache: Dict[Tuple[str, int], Dict[int, Optional[str]]] = {}
+        for path in video_paths:
+            try:
+                meta = MetaInfo(path.rsplit("/", 1)[-1])
+                episodes = list(meta.episode_list or [])
+                season = meta.begin_season or 1
+                if not episodes and meta.begin_episode:
+                    episodes = list(range(meta.begin_episode, (meta.end_episode or meta.begin_episode) + 1))
+                media = self.chain.recognize_media(meta=meta) if episodes else None
+                if not media:
+                    raise ValueError("剧名无法识别")
+                tmdb_id = getattr(media, "tmdb_id", None)
+                air_dates = []
+                if tmdb_id:
+                    key = (int(tmdb_id), int(season))
+                    try:
+                        if key not in date_cache:
+                            date_cache[key] = {
+                                int(ep.episode_number): ep.air_date
+                                for ep in TmdbChain().tmdb_episodes(
+                                    tmdbid=key[0], season=key[1], episode_group=meta.episode_group
+                                )
+                                if ep.episode_number is not None
+                            }
+                        air_dates = [date_cache[key].get(int(episode)) for episode in episodes]
+                    except Exception as err:
+                        logger.info(f"TMDB 分集日期查询失败，尝试豆瓣：{path}：{err}")
+                if not air_dates or any(not value for value in air_dates):
+                    douban_id = str(getattr(media, "douban_id", "") or "")
+                    if not douban_id and str(getattr(media, "media_source", "")).lower().endswith("douban"):
+                        douban_id = str(getattr(media, "media_id", "") or "")
+                    if not douban_id:
+                        raise ValueError("逐集日期缺失且没有豆瓣媒体 ID")
+                    douban_key = (douban_id, int(season))
+                    if douban_key not in douban_date_cache:
+                        douban_date_cache[douban_key] = self._douban_episode_air_dates(douban_id, season)
+                    air_dates = [douban_date_cache[douban_key].get(int(episode)) for episode in episodes]
+                if not episodes or any(not value for value in air_dates):
+                    raise ValueError("季集号或 TMDB/豆瓣逐集播出日期缺失")
+                if all(self._air_date_is_recent(value, today) for value in air_dates):
+                    accepted.append(path)
+            except Exception as err:
+                logger.info(f"最近播出剧集规则排除文件 {path}：{err}")
+        if not accepted:
+            logger.info(f"最近播出剧集规则排除 {title}：没有符合日期范围的剧集")
+            return None
+        return {"accepted": set(accepted), "videos": set(video_paths)}
+
+    @staticmethod
+    def _douban_episode_air_dates(douban_id: str, season: int) -> Dict[int, Optional[str]]:
+        """只使用豆瓣逐集明确提供的日期；不从聚合更新进度推测日期。"""
+        if not douban_id.isdecimal():
+            return {}
+        response = RequestUtils(ua="Mozilla/5.0 (compatible; MoviePilot/3.0)").get_res(
+            url=f"https://movie.douban.com/j/tv/series/{douban_id}"
+        )
+        if not response or not response.ok:
+            return {}
+        try:
+            payload = response.json()
+        except Exception:
+            return {}
+        episodes = payload.get("episodes") if isinstance(payload, dict) else None
+        date_map: Dict[int, Optional[str]] = {}
+        for item in episodes or []:
+            if not isinstance(item, dict) or not str(item.get("episode") or "").isdecimal():
+                continue
+            item_season = item.get("season") or item.get("season_number")
+            if item_season is None and season != 1:
+                continue
+            if item_season is not None and str(item_season) != str(season):
+                continue
+            raw_date = item.get("air_date")
+            if raw_date:
+                try:
+                    date_map[int(item["episode"])] = datetime.strptime(
+                        str(raw_date)[:10], "%Y-%m-%d"
+                    ).date().isoformat()
+                except ValueError:
+                    date_map[int(item["episode"])] = None
+        return date_map
+
+    @staticmethod
+    def _select_recent_episode_files(downloader: Any, torrent_hash: str, selection: dict,
+                                     downloader_type: str, task_name: str) -> bool:
+        """暂停状态下只选择通过日期核验的视频；操作失败时保持暂停。"""
+        try:
+            if not downloader.stop_torrents(torrent_hash):
+                logger.error(f"刷流任务 [{task_name}] 无法确认暂停，未执行选集")
+                return False
+            files = downloader.get_files(torrent_hash)
+            if not files:
+                logger.error(f"刷流任务 [{task_name}] 获取种子文件清单失败，任务保持暂停")
+                return False
+            wanted, unwanted = [], []
+            for index, item in enumerate(files):
+                path = item.get("name") if isinstance(item, dict) else getattr(item, "name", "")
+                file_id = item.get("id", index) if isinstance(item, dict) else getattr(item, "id", index)
+                normalized_path = str(path or "").replace("\\", "/").lstrip("./")
+                selected = any(
+                    normalized_path == accepted
+                    or normalized_path.endswith("/" + accepted)
+                    or accepted.endswith("/" + normalized_path)
+                    for accepted in selection["accepted"]
+                )
+                (wanted if selected else unwanted).append(file_id)
+            if not wanted:
+                return False
+            if downloader_type == "qbittorrent":
+                ok = (not unwanted or downloader.set_files(torrent_hash=torrent_hash, file_ids=unwanted, priority=0))
+                ok = ok and downloader.set_files(torrent_hash=torrent_hash, file_ids=wanted, priority=1)
+            else:
+                ok = downloader.set_files(torrent_hash, wanted)
+                ok = ok and downloader.set_unwanted_files(torrent_hash, unwanted)
+            if not ok or not downloader.start_torrents(torrent_hash):
+                downloader.stop_torrents(torrent_hash)
+                logger.error(f"刷流任务 [{task_name}] 选集或启动未确认，任务保持暂停")
+                return False
+            return True
+        except Exception as err:
+            try:
+                downloader.stop_torrents(torrent_hash)
+            except Exception:
+                pass
+            logger.error(f"刷流任务 [{task_name}] 设置近期播出剧集失败，任务保持暂停：{err}")
+            return False
 
     def __qb_torrents_reannounce(self, torrent_hashes: List[str]) -> None:
         """删除 qBittorrent 种子前强制重新汇报 Tracker"""

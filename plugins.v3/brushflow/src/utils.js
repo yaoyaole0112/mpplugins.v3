@@ -41,6 +41,7 @@ export const taskDefaults = {
   del_no_free: false,
   qb_category: null,
   site_hr_active: false,
+  recent_episodes_only: false,
   site_skip_tips: false,
   rss_support: false,
   tag: null,

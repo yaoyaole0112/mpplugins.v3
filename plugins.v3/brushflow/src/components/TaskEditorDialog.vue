@@ -235,6 +235,7 @@ async function saveTask() {
                   <VSwitch v-model="localTask.rss_support" label="使用 RSS" color="primary" hide-details inset />
                   <VSwitch v-model="localTask.except_subscribe" label="排除订阅" color="primary" hide-details inset />
                   <VSwitch v-model="localTask.site_hr_active" label="全站 H&R" color="primary" hide-details inset />
+                  <VSwitch v-model="localTask.recent_episodes_only" label="仅下载最近播出剧集" color="primary" hide-details inset />
                 </div>
               </section>
 
