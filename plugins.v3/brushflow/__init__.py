@@ -92,6 +92,7 @@ TASK_CONFIG_FIELDS = (
     "site_hr_active",
     "recent_episodes_only",
     "blacklist_site_ids",
+    "download_types",
     "site_skip_tips",
     "rss_support",
     "tag",
@@ -119,6 +120,7 @@ LEGACY_SITE_OVERRIDE_FIELDS = {
     "site_hr_active",
     "recent_episodes_only",
     "blacklist_site_ids",
+    "download_types",
     "site_skip_tips",
     "del_no_free",
     "rss_support",
@@ -191,6 +193,7 @@ class BrushTaskConfig:
             int(site_id) for site_id in config.get("blacklist_site_ids", [])
             if str(site_id).isdigit() and int(site_id) > 0
         ))
+        self.download_types = list(dict.fromkeys(config.get("download_types") or []))
         self.site_skip_tips = bool(config.get("site_skip_tips", False))
         self.rss_support = bool(config.get("rss_support", False))
         self.tag = self._read_tag(config)
@@ -246,7 +249,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.1.9"
+    plugin_version = "6.2.0"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -1436,6 +1439,7 @@ class BrushFlow(_PluginBase):
         seeding_size = self.__calculate_seeding_torrents_size(torrent_tasks)
         blacklist_site_names = self._blacklist_other_site_names(task)
         blacklist_history_cache = {}
+        type_cache = {}
         for torrent in torrents:
             passed, reason = self.__evaluate_pre_conditions_for_brush(include_network_conditions=False)
             if not passed:
@@ -1469,6 +1473,14 @@ class BrushFlow(_PluginBase):
                     report["reason_counts"][reason] += 1
                     logger.info(f"刷流任务 [{task.name}] 排除种子 {torrent.title}：{reason}")
                     continue
+            if task.download_types:
+                media_type, source = self._download_type(torrent, type_cache)
+                if media_type not in task.download_types:
+                    reason = f"下载类型未选择：{media_type}" if media_type else "下载类型无法识别"
+                    report["reason_counts"][reason] += 1
+                    logger.info(f"刷流任务 [{task.name}] 排除种子 {torrent.title}：{reason}（{source}）")
+                    continue
+                logger.info(f"刷流任务 [{task.name}] 下载类型通过 {torrent.title}：{media_type}（{source}）")
             hash_string = self.__download(torrent)
             if not hash_string:
                 report["reason_counts"]["最近播出剧集规则未通过或下载器添加失败"] += 1
@@ -1494,6 +1506,58 @@ class BrushFlow(_PluginBase):
             self.__send_add_message(torrent)
         report["filtered_count"] = max(report["candidate_count"] - report["added_count"], 0)
         report["result"] = "completed"
+
+    @staticmethod
+    def _explicit_download_type(values: list) -> Optional[str]:
+        """只接受明确的分类或标签，避免将种子标题中的普通词误当类别。"""
+        aliases = {
+            "anime": {"动漫", "动画", "动画片", "番剧", "anime", "animation"},
+            "variety": {"综艺", "真人秀", "综艺节目", "variety", "reality", "talk show"},
+            "documentary": {"纪录", "纪录片", "记录片", "documentary"},
+            "sports": {"体育", "运动", "体育赛事", "体育运动", "sports", "sport"},
+            "mv": {"mv", "音乐视频", "音乐录影带", "music video"},
+            "music": {"音乐", "music"},
+            "movie": {"电影", "影片", "movie", "movies", "film"},
+            "tv": {"剧集", "电视剧", "电视", "tv", "tv series", "series"},
+        }
+        labels = {str(value or "").strip().lower() for value in values}
+        for kind, names in aliases.items():
+            if labels & names:
+                return kind
+        return None
+
+    def _download_type(self, torrent: TorrentInfo, cache: dict) -> Tuple[Optional[str], str]:
+        """按明确站点分类及媒体题材分类；未识别时不允许通过筛选。"""
+        category = self._explicit_download_type([torrent.category] + list(torrent.labels or []))
+        if category in {"anime", "variety", "documentary", "sports", "mv", "music"}:
+            return category, "站点分类或标签"
+        key = (torrent.title or "", torrent.description or "", torrent.category or "")
+        if key not in cache:
+            try:
+                cache[key] = self.chain.recognize_media(meta=MetaInfo(torrent.title or ""))
+            except Exception as err:
+                logger.warning(f"下载类型媒体识别失败 {torrent.title}：{type(err).__name__}")
+                cache[key] = None
+        media = cache[key]
+        if media:
+            ids = {str(value) for value in (getattr(media, "genre_ids", None) or [])}
+            names = []
+            for genre in getattr(media, "genres", None) or []:
+                ids.add(str(genre.get("id") if isinstance(genre, dict) else getattr(genre, "id", "")))
+                names.append(genre.get("name") if isinstance(genre, dict) else getattr(genre, "name", genre))
+            explicit = self._explicit_download_type(names)
+            for kind, genre_ids in (("anime", {"16"}), ("documentary", {"99"}),
+                                    ("variety", {"10764", "10767"})):
+                if ids & genre_ids or explicit == kind:
+                    return kind, "媒体题材"
+            media_type = getattr(media, "type", None)
+            media_type = getattr(media_type, "value", media_type)
+            basic = self._explicit_download_type([media_type])
+            if basic:
+                return basic, "媒体识别"
+        if category:
+            return category, "站点分类（媒体识别不可用）"
+        return None, "站点分类及媒体识别均不可用"
 
     @staticmethod
     def _torrent_to_task_record(torrent: TorrentInfo, site: Any, task: BrushTaskConfig) -> dict:

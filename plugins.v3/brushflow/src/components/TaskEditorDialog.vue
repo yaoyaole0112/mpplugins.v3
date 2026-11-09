@@ -248,6 +248,26 @@ async function saveTask() {
                   hint="所选站点之间按完整种子名称互相排重；当前任务站点需包含在选择中"
                   persistent-hint
                 />
+                <VSelect
+                  v-model="localTask.download_types"
+                  :items="[
+                    { title: '电影', value: 'movie' },
+                    { title: '剧集', value: 'tv' },
+                    { title: '综艺', value: 'variety' },
+                    { title: '动漫', value: 'anime' },
+                    { title: '运动 / 体育', value: 'sports' },
+                    { title: '纪录片', value: 'documentary' },
+                    { title: 'MV', value: 'mv' },
+                    { title: '音乐', value: 'music' },
+                  ]"
+                  label="下载类型"
+                  multiple
+                  chips
+                  closable-chips
+                  clearable
+                  hint="留空不限制；选择后仅下载匹配类型，无法识别的种子将被排除"
+                  persistent-hint
+                />
               </section>
 
               <section class="editor-section">

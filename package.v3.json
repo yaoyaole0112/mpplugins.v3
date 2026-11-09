@@ -46,7 +46,7 @@
     "name": "站点刷流",
     "description": "自动托管多个站点刷流任务，并独立调度、统计与诊断。",
     "labels": "刷流,仪表板",
-    "version": "6.1.9",
+    "version": "6.2.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -54,6 +54,8 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v6.2.0": "新增下载类型筛选，支持电影、剧集、综艺、动漫、体育、纪录片、MV 和音乐；无法识别时排除，未设置时不限制。",
+      "v6.1.9": "最近播出规则支持仅下载本年电影；新增跨站同名种子黑名单。",
       "v6.1.8": "修复最近播出规则因 TMDB 整季 API 漏集或日期滞后而误排：增加单集 API 和官方网页精确日期回退、豆瓣剧名/年份/季号匹配、短时查询缓存及日期来源日志；无法确认日期仍排除。",
       "v6.1.7": "新增「仅下载最近播出剧集」规则：逐集核对近三天至未来的播出日期，整季包只选择符合条件的集；TMDB 日期不可用时尝试豆瓣明确提供的逐集日期，无法确认则排除。",
       "v6.1.6": "基于官方 6.1.5 合并分享率删种完成度修复及登录/确认页下载校验；恢复下载器标签兼容和编辑保存保护，避免启动时整表回写清空标签，并在定位种子后移除临时标签。",

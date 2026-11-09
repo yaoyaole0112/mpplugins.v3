@@ -43,6 +43,7 @@ const taskDefaults = {
   site_hr_active: false,
   recent_episodes_only: false,
   blacklist_site_ids: [],
+  download_types: [],
   site_skip_tips: false,
   rss_support: false,
   tag: null,
@@ -110,6 +111,7 @@ function normalizeTask(task) {
   });
   result.site_id = Number(result.site_id);
   result.blacklist_site_ids = [...new Set((result.blacklist_site_ids || []).map(Number).filter(value => value > 0))];
+  result.download_types = [...new Set(result.download_types || [])];
   result.brush_interval = Number(result.brush_interval || 10);
   result.check_interval = Number(result.check_interval || 5);
   result.timezone_offset = Number(result.timezone_offset || 0);
