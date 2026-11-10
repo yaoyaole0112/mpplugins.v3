@@ -3,9 +3,11 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from emetools.rapid_upload import RapidUpload, normalize_config, validate_configs
+from emetools.rapid_transfer import TransferStopped, UploadUncertain
+from emetools.p115 import P115DirectoryUnavailable, P115RequestGate
 
 
 class FakeOwner:
@@ -38,7 +40,7 @@ class ModernFakeClient:
         self.response = response
         self.calls = []
 
-    def upload_file_init(self, filename, filesha1, filesize, dirname, read_range_bytes_or_hash, pid):
+    def upload_file_init(self, filename, filesha1, filesize, dirname, read_range_bytes_or_hash, pid, **kwargs):
         self.calls.append({"filename": filename, "filesha1": filesha1, "filesize": filesize,
                            "dirname": dirname, "pid": pid, "read_range_bytes_or_hash": read_range_bytes_or_hash})
         return self.response
@@ -71,6 +73,18 @@ class FakeObserver:
 
 
 class RapidUploadTests(unittest.TestCase):
+    def setUp(self):
+        request = patch.object(RapidUpload, "_short_request", side_effect=lambda callback: callback())
+        request.start()
+        self.addCleanup(request.stop)
+
+    def wait_for(self, predicate):
+        deadline = time.monotonic() + 3
+        while not predicate():
+            if time.monotonic() >= deadline:
+                self.fail("upload state did not arrive")
+            time.sleep(0.005)
+
     def test_config_normalization_and_validation(self):
         config = normalize_config({"name": "电视剧", "media_extensions": ".MP4, mkv,mp4"})
         self.assertEqual(config["media_extensions"], "mp4,mkv")
@@ -261,15 +275,21 @@ class RapidUploadTests(unittest.TestCase):
                                        "media_extensions": "mp4", "upload_on_unmatched": True})
             client = FakeClient({"status": 1, "reuse": False})
             rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
             with patch.object(rapid, "_p115_client", return_value=client), \
+                    patch.object(rapid, "_start_upload_worker"), \
+                    patch.object(rapid, "_verify_upload", side_effect=[False, True]), \
                     patch.object(rapid, "_upload_original", return_value=object()) as upload:
                 result = rapid.run("rapid_1")
+                self.assertEqual(len(result["uploaded"]), 0)
+                self.assertEqual(len(result["upload_queued"]), 1)
+                key, entry = next(iter(rapid._uploads.items()))
+                rapid._process_upload(key, entry)
             self.assertTrue(result["ok"])
             self.assertEqual(len(result["unmatched"]), 0)
-            self.assertEqual(len(result["uploaded"]), 1)
-            upload.assert_called_once_with(media, config)
-            self.assertEqual(rapid.status()["logs"][0]["status"], "uploaded")
-            self.assertIn("普通上传成功", rapid.status()["logs"][0]["message"])
+            upload.assert_called_once_with(media, config, client, entry)
+            self.assertEqual(rapid.status()["logs"][-1]["status"], "uploaded")
+            self.assertIn("普通上传成功", rapid.status()["logs"][-1]["message"])
             self.assertTrue(media.exists())
 
     def test_unmatched_normal_upload_failure_uses_failure_directory(self):
@@ -284,14 +304,283 @@ class RapidUploadTests(unittest.TestCase):
                                        "upload_on_unmatched": True})
             client = FakeClient({"status": 1, "reuse": False})
             rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
             with patch.object(rapid, "_p115_client", return_value=client), \
+                    patch.object(rapid, "_start_upload_worker"), \
+                    patch.object(rapid, "_verify_upload", return_value=False), \
                     patch.object(rapid, "_upload_original", side_effect=RuntimeError("upload failed")):
                 result = rapid.run("rapid_1")
-            self.assertFalse(result["ok"])
-            self.assertEqual(len(result["failed"]), 1)
+                key, entry = next(iter(rapid._uploads.items()))
+                rapid._process_upload(key, entry)
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(result["upload_queued"]), 1)
             self.assertFalse(media.exists())
             self.assertTrue((failure / media.name).exists())
-            self.assertEqual(rapid.status()["logs"][0]["status"], "failed")
+            self.assertEqual(rapid.status()["logs"][-1]["status"], "failed")
+
+    def test_slow_normal_upload_does_not_block_next_rapid_file_or_duplicate_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.mkv"
+            second = root / "b.mkv"
+            first.write_bytes(b"ordinary")
+            second.write_bytes(b"rapid")
+            config = normalize_config({"id": "rapid_1", "source_path": str(root),
+                                       "target_folder_id": "123", "upload_on_unmatched": True,
+                                       "delete_source_on_success": True})
+            owner = FakeOwner()
+            rapid = RapidUpload(owner, {"configs": [config]})
+            started = threading.Event()
+            release = threading.Event()
+            self.addCleanup(rapid.close)
+            self.addCleanup(release.set)
+            client = FakeClient({})
+            verify_calls = []
+
+            def verify(_client, entry):
+                verify_calls.append(entry["path"])
+                return len(verify_calls) > 1
+
+            def upload(*_args):
+                started.set()
+                release.wait(3)
+
+            def init(_client, path, *_args):
+                if path == first:
+                    return {"status": 1}
+                self.assertTrue(started.wait(2))
+                return {"status": 2}
+
+            with patch.object(rapid, "_p115_client", return_value=client), \
+                    patch.object(rapid, "_rapid_init", side_effect=init), \
+                    patch.object(rapid, "_verify_upload", side_effect=verify), \
+                    patch.object(rapid, "_upload_original", side_effect=upload) as normal:
+                result = rapid.run("rapid_1")
+                self.assertEqual(result["succeeded"][0]["name"], "b.mkv")
+                self.assertFalse(second.exists())
+                self.assertTrue(first.exists())
+                self.assertEqual(rapid.status()["upload_queue"]["uploading"], 1)
+                duplicate = rapid.run("rapid_1", [str(first)])
+                self.assertEqual(len(duplicate["skipped"]), 1)
+                self.assertEqual(normal.call_count, 1)
+                release.set()
+                self.wait_for(lambda: not rapid._uploads)
+                self.assertFalse(first.exists())
+                self.assertEqual(normal.call_count, 1)
+                self.assertEqual(owner.data[RapidUpload._UPLOAD_KEY], {})
+
+    def test_restart_verifies_uncertain_upload_without_replaying_and_retains_changed_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"original")
+            config = normalize_config({"id": "rapid_1", "source_path": directory,
+                                       "target_folder_id": "123", "delete_source_on_success": True})
+            owner = FakeOwner()
+            rapid = RapidUpload(owner, {"configs": [config]})
+            self.addCleanup(rapid.close)
+            with patch.object(rapid, "_start_upload_worker"):
+                rapid._queue_upload(config, path, "ABC", 8, rapid._file_signature(path.stat()))
+            key, entry = next(iter(rapid._uploads.items()))
+            entry.update(state="uploading", commit_started=True)
+            rapid._save_uploads()
+            rapid.close()
+            path.write_bytes(b"changed file")
+            restored = RapidUpload(owner, {"configs": [config]})
+            self.addCleanup(restored.close)
+            self.assertEqual(restored.status()["activity"][0]["status"], "verifying")
+            with patch.object(restored, "_p115_client", return_value=FakeClient({})), \
+                    patch.object(restored, "_verify_upload", return_value=True), \
+                    patch.object(restored, "_upload_original") as normal:
+                restored._process_upload(key, restored._uploads[key])
+            normal.assert_not_called()
+            self.assertTrue(path.exists())
+            self.assertFalse(restored._uploads)
+
+    def test_unknown_completion_retains_source_and_does_not_automatically_reupload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory,
+                                       "target_folder_id": "123", "upload_on_unmatched": True,
+                                       "delete_source_on_success": True})
+            owner = FakeOwner()
+            rapid = RapidUpload(owner, {"configs": [config]})
+            self.addCleanup(rapid.close)
+            with patch.object(rapid, "_start_upload_worker"), \
+                    patch.object(rapid, "_p115_client", return_value=FakeClient({"status": 1})), \
+                    patch.object(rapid, "_verify_upload", return_value=False), \
+                    patch.object(rapid, "_upload_original", side_effect=UploadUncertain("callback lost")) as normal:
+                rapid.run("rapid_1")
+                key, entry = next(iter(rapid._uploads.items()))
+                rapid._process_upload(key, entry)
+                self.assertTrue(path.exists())
+                self.assertEqual(entry["state"], "uncertain")
+                rapid.run("rapid_1")
+                self.assertEqual(entry["state"], "verify_queued")
+                rapid._process_upload(key, entry)
+                self.assertEqual(entry["state"], "uncertain")
+                self.assertEqual(normal.call_count, 1)
+            entry["state"] = "verify_queued"
+            with patch.object(rapid, "_p115_client", return_value=FakeClient({})), \
+                    patch.object(rapid, "_verify_upload", side_effect=UploadUncertain("read error")), \
+                    patch.object(rapid, "_upload_original") as normal:
+                rapid._process_upload(key, entry)
+                self.assertEqual(entry["state"], "uncertain")
+                normal.assert_not_called()
+
+    def test_queue_is_bounded_and_uses_configuration_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+            with patch.object(rapid, "_start_upload_worker"), patch.object(rapid, "_UPLOAD_LIMIT", 1):
+                rapid._queue_upload(config, path, "ABC", 5, rapid._file_signature(path.stat()))
+                config["target_folder_id"] = "456"
+                config["upload_limit_mib"] = 100
+                entry = next(iter(rapid._uploads.values()))
+                self.assertEqual(entry["config"]["target_folder_id"], "123")
+                self.assertEqual(entry["config"]["upload_limit_mib"], 8)
+                with self.assertRaisesRegex(ValueError, "源文件保留"):
+                    rapid._queue_upload(config, path, "ABC", 5, rapid._file_signature(path.stat()))
+                self.assertTrue(path.exists())
+
+    def test_stopped_hash_never_moves_or_deletes_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory,
+                                       "target_folder_id": "123", "delete_source_on_success": True})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+            with patch.object(rapid, "_p115_client", return_value=FakeClient({"status": 2})), \
+                    patch.object(rapid, "_sha1", side_effect=TransferStopped("stopped")):
+                rapid.run("rapid_1")
+            self.assertTrue(path.exists())
+            self.assertEqual(rapid.status()["logs"], [])
+
+    def test_remote_verification_requires_name_size_sha1_and_complete_pagination(self):
+        config = normalize_config({"id": "rapid_1", "target_folder_id": "123"})
+        rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+        self.addCleanup(rapid.close)
+        entry = {"config": config, "path": "/source/episode.mkv", "size": 100, "sha1": "ABC"}
+        client = Mock()
+        client.fs_files.side_effect = [
+            {"state": True, "count": 2, "data": [{"n": "episode.mkv", "s": 100, "sha": "DEF"}]},
+            {"state": True, "count": 2, "data": [{"n": "episode.mkv", "s": 100, "sha": "abc"}]},
+        ]
+        self.assertTrue(rapid._verify_upload(client, entry))
+        self.assertEqual(client.fs_files.call_args_list[-1].args[0]["offset"], 1)
+        client.fs_files.side_effect = None
+        client.fs_files.return_value = {"state": True, "count": 1,
+                                       "data": [{"n": "episode.mkv", "s": 99, "sha": "ABC"}]}
+        self.assertFalse(rapid._verify_upload(client, entry))
+        client.fs_files.return_value = {"state": True, "data": []}
+        with self.assertRaises(UploadUncertain):
+            rapid._verify_upload(client, entry)
+
+    def test_normal_upload_reuses_cached_sha1_and_does_not_wait_in_storage_chain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+            entry = {"config": config, "path": str(path), "size": 5, "sha1": "ABC",
+                     "signature": rapid._file_signature(path.stat()), "state": "uploading"}
+            client = FakeClient({})
+            with patch.object(rapid, "_rapid_init", return_value={"status": 1}) as init, \
+                    patch.object(rapid, "_sha1", side_effect=AssertionError("must not reread the whole file")), \
+                    patch("emetools.rapid_upload.upload_oss") as oss:
+                rapid._upload_original(path, config, client, entry)
+            init.assert_called_once_with(client, path, "ABC", 5, "U_1_123")
+            self.assertEqual(oss.call_args.args[4], 8)
+            self.assertEqual(oss.call_count, 1)
+
+    def test_restart_can_resume_uncommitted_partial_upload_and_clear_logs_is_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123"})
+            owner = FakeOwner()
+            rapid = RapidUpload(owner, {"configs": [config]})
+            self.addCleanup(rapid.close)
+            with patch.object(rapid, "_start_upload_worker"):
+                rapid._queue_upload(config, path, "ABC", 5, rapid._file_signature(path.stat()))
+            entry = next(iter(rapid._uploads.values()))
+            entry.update(state="uploading", commit_started=False)
+            rapid._save_uploads()
+            rapid._append_log(config, path, "upload_queued", "queued")
+            rapid.clear_logs()
+            self.assertEqual(owner.data[RapidUpload._LOG_KEY], [])
+            rapid.close()
+            restored = RapidUpload(owner, {"configs": [config]}, upload_slot=rapid._upload_slot)
+            self.addCleanup(restored.close)
+            self.assertEqual(next(iter(restored._uploads.values()))["state"], "queued")
+            self.assertIs(restored._upload_slot, rapid._upload_slot)
+            self.assertEqual(restored.status()["logs"], [])
+
+    def test_preupload_read_failure_is_deferred_instead_of_permanently_marked_uncertain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+            with patch.object(rapid, "_start_upload_worker"):
+                rapid._queue_upload(config, path, "ABC", 5, rapid._file_signature(path.stat()))
+            key, entry = next(iter(rapid._uploads.items()))
+            with patch.object(rapid, "_p115_client", return_value=FakeClient({})), \
+                    patch.object(rapid, "_verify_upload", side_effect=[UploadUncertain("read failed"), False, True]), \
+                    patch.object(rapid, "_upload_original") as normal:
+                rapid._process_upload(key, entry)
+                self.assertEqual(entry["state"], "queued")
+                self.assertGreater(entry["retry_at"], time.time())
+                self.assertFalse(entry["commit_started"])
+                normal.assert_not_called()
+                rapid._process_upload(key, entry)
+                normal.assert_called_once()
+            self.assertFalse(rapid._uploads)
+            self.assertTrue(path.exists())
+
+    def test_cooldown_before_initialization_defers_without_marking_a_write_as_submitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+            with patch.object(rapid, "_start_upload_worker"):
+                rapid._queue_upload(config, path, "ABC", 5, rapid._file_signature(path.stat()))
+            key, entry = next(iter(rapid._uploads.items()))
+            with patch.object(rapid, "_p115_client", return_value=FakeClient({})), \
+                    patch.object(rapid, "_verify_upload", return_value=False), \
+                    patch.object(rapid, "_short_request", side_effect=P115DirectoryUnavailable("cooldown")):
+                rapid._process_upload(key, entry)
+            self.assertEqual(entry["state"], "queued")
+            self.assertFalse(entry["commit_started"])
+            self.assertTrue(path.exists())
+
+    def test_verified_upload_with_source_delete_error_is_not_moved_to_failure_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123",
+                                       "delete_source_on_success": True, "failure_directory": "/failure"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+            with patch.object(rapid, "_start_upload_worker"):
+                rapid._queue_upload(config, path, "ABC", 5, rapid._file_signature(path.stat()))
+            key, entry = next(iter(rapid._uploads.items()))
+            with patch.object(rapid, "_p115_client", return_value=FakeClient({})), \
+                    patch.object(rapid, "_verify_upload", return_value=True), \
+                    patch.object(Path, "unlink", side_effect=PermissionError("denied")), \
+                    patch.object(rapid, "_move_failure") as move:
+                rapid._process_upload(key, entry)
+            move.assert_not_called()
+            self.assertTrue(path.exists())
+            self.assertEqual(entry["state"], "uncertain")
 
     def test_successful_files_are_not_uploaded_again_by_later_scans(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -572,6 +861,27 @@ class RapidUploadTests(unittest.TestCase):
             ["/source/during-manual-scan.mkv"],
         ])
         rapid.close()
+
+
+class RapidRequestTests(unittest.TestCase):
+    def test_network_timeout_pauses_shared_requests_without_exposing_or_replaying_submission(self):
+        import httpx
+
+        owner = FakeOwner()
+        owner._run_p115_task = Mock(side_effect=lambda key, label, callback: callback())
+        rapid = RapidUpload(owner)
+        self.addCleanup(rapid.close)
+        gate = P115RequestGate()
+        callback = Mock(side_effect=httpx.RemoteProtocolError("private-signed-url"))
+        with patch("emetools.p115._request_gate", return_value=gate):
+            with self.assertRaises(UploadUncertain) as raised:
+                rapid._short_request(callback)
+            self.assertNotIn("private", str(raised.exception))
+            self.assertGreater(gate.remaining(), 55)
+            with self.assertRaises(P115DirectoryUnavailable):
+                rapid._short_request(callback)
+        self.assertEqual(callback.call_count, 1)
+        self.assertTrue(owner._run_p115_task.call_args.args[0].startswith("rapid_api:"))
 
 
 if __name__ == "__main__":

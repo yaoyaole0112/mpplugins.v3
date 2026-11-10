@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 import re
@@ -13,6 +14,8 @@ from typing import Any
 
 from app.sdk.logging import logger
 from .record_history import recent_records
+from .rapid_transfer import LimitedReader, TransferStopped, UploadUncertain, upload_oss
+from .p115 import P115DirectoryUnavailable
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -36,6 +39,8 @@ DEFAULT_CONFIG = {
     "failure_directory": "",
     "delete_source_on_success": False,
     "upload_on_unmatched": False,
+    "hash_limit_mib": 32,
+    "upload_limit_mib": 8,
     "retry_limit": 2,
     "realtime_enabled": False,
     "cron_enabled": False,
@@ -67,6 +72,11 @@ def normalize_config(value: Any, index: int = 0) -> dict:
     result["failure_directory"] = str(result.get("failure_directory") or "").strip()
     result["delete_source_on_success"] = bool(result.get("delete_source_on_success"))
     result["upload_on_unmatched"] = bool(result.get("upload_on_unmatched"))
+    for field in ("hash_limit_mib", "upload_limit_mib"):
+        try:
+            result[field] = max(1, min(1024, int(result[field])))
+        except (TypeError, ValueError):
+            result[field] = DEFAULT_CONFIG[field]
     result["realtime_enabled"] = bool(result.get("realtime_enabled"))
     result["cron_enabled"] = bool(result.get("cron_enabled"))
     result["cron_expression"] = str(result.get("cron_expression") or "*/10 * * * *").strip()
@@ -113,8 +123,12 @@ class RapidUpload:
     _REALTIME_POLL_SECONDS = 300
     _HASH_CACHE_LIMIT = 20000
     _HASH_CACHE_SAVE_INTERVAL = 50
+    _UPLOAD_KEY = "rapid_upload_queue"
+    _UPLOAD_LIMIT = 2000
+    _UPLOAD_SLOT = threading.Lock()
+    _HASH_CONTEXT = threading.local()
 
-    def __init__(self, owner, saved: Any = None):
+    def __init__(self, owner, saved: Any = None, upload_slot=None, scan_slot=None):
         self._owner = owner
         self._configs = validate_configs((saved or {}).get("configs", []) if isinstance(saved, dict) else [])
         saved_logs = owner.get_data(self._LOG_KEY) if hasattr(owner, "get_data") else []
@@ -146,6 +160,30 @@ class RapidUpload:
         saved_hashes = owner.get_data(self._HASH_CACHE_KEY) if hasattr(owner, "get_data") else {}
         self._hash_cache = dict(saved_hashes) if isinstance(saved_hashes, dict) else {}
         self._hash_cache_dirty = 0
+        self._state_lock = threading.RLock()
+        self._scan_lock = scan_slot or threading.Lock()
+        self._stop = threading.Event()
+        self._upload_wake = threading.Event()
+        self._upload_thread = None
+        self._upload_slot = upload_slot or self._UPLOAD_SLOT
+        saved_uploads = owner.get_data(self._UPLOAD_KEY) if hasattr(owner, "get_data") else {}
+        self._uploads = {}
+        if isinstance(saved_uploads, dict):
+            for key, entry in list(saved_uploads.items())[:self._UPLOAD_LIMIT]:
+                if (not isinstance(entry, dict) or not isinstance(entry.get("config"), dict)
+                        or not isinstance(entry.get("path"), str)
+                        or not isinstance(entry.get("size"), int) or entry["size"] < 0
+                        or not isinstance(entry.get("sha1"), str)
+                        or not isinstance(entry.get("signature"), dict)):
+                    continue
+                restored = copy.deepcopy(entry)
+                restored["config"] = normalize_config(restored["config"])
+                if restored.get("state") == "uploading" and restored.get("commit_started") is False:
+                    restored["state"] = "queued"
+                elif restored.get("state") != "queued":
+                    restored["state"] = "verify_queued"
+                self._uploads[key] = restored
+                self._show_upload(restored)
 
     @property
     def configs(self) -> list[dict]:
@@ -156,14 +194,20 @@ class RapidUpload:
         return [dict(item) for item in self._configs]
 
     def status(self) -> dict:
-        retained = recent_records(self._logs, timestamp_key="timestamp", limit=200)
-        if retained != self._logs:
-            self._logs = retained
-            if hasattr(self._owner, "save_data"):
-                self._owner.save_data(self._LOG_KEY, list(self._logs))
+        with self._state_lock:
+            retained = recent_records(self._logs, timestamp_key="timestamp", limit=200)
+            if retained != self._logs:
+                self._logs = retained
+                if hasattr(self._owner, "save_data"):
+                    self._owner.save_data(self._LOG_KEY, list(self._logs))
+            logs = copy.deepcopy(self._logs[-200:])
+            upload_counts = {state: sum(entry["state"] == state for entry in self._uploads.values())
+                             for state in ("queued", "uploading", "verifying", "uncertain", "verify_queued")}
         with self._watch_lock:
             activity = sorted(self._activity.values(),
-                              key=lambda item: item.get("timestamp", 0), reverse=True)
+                              key=lambda item: (
+                                  item.get("status") in {"processing", "uploading", "verifying"},
+                                  item.get("timestamp", 0)), reverse=True)
             activity_total = len(activity)
             realtime_mode = (
                 "event" if self._observer is not None
@@ -171,7 +215,8 @@ class RapidUpload:
                 else "off"
             )
         return {"configs": [dict(item) for item in self._configs],
-                "logs": [dict(item) for item in self._logs[-200:]],
+                "logs": logs,
+                "upload_queue": upload_counts,
                 "activity": activity[:500],
                 "activity_total": activity_total,
                 "running": self._running or "",
@@ -185,6 +230,7 @@ class RapidUpload:
     def set_realtime_callback(self, callback) -> None:
         self._realtime_callback = callback
         self.refresh_realtime_watchers()
+        self._start_upload_worker()
 
     def _stop_realtime_watchers(self) -> None:
         with self._watch_lock:
@@ -194,7 +240,8 @@ class RapidUpload:
             self._pending_paths.clear()
             self._realtime_dispatch_paths.clear()
             self._realtime_dispatching.clear()
-            self._activity.clear()
+            self._activity = {key: item for key, item in self._activity.items()
+                              if item.get("status") in {"upload_queued", "uploading", "verifying", "uncertain"}}
             observer = self._observer
             self._observer = None
             observer_monitor_thread = self._observer_monitor_thread
@@ -212,7 +259,13 @@ class RapidUpload:
             poll_thread.join(timeout=5)
 
     def close(self) -> None:
+        with self._state_lock:
+            self._stop.set()
+        self._upload_wake.set()
         self._stop_realtime_watchers()
+        worker = self._upload_thread
+        if worker and worker is not threading.current_thread():
+            worker.join(timeout=3)
 
     @staticmethod
     def _activity_key(config_id: str, path: str) -> str:
@@ -235,11 +288,19 @@ class RapidUpload:
             "activity": True,
         }
         with self._watch_lock:
+            current = self._activity.get(key)
+            if current and current["status"] in {"upload_queued", "uploading", "verifying", "uncertain"} \
+                    and status not in {"upload_queued", "uploading", "verifying", "uncertain"}:
+                return
             self._activity[key] = record
 
-    def _clear_activity(self, config_id: str, path: str) -> None:
+    def _clear_activity(self, config_id: str, path: str, include_upload=False) -> None:
         with self._watch_lock:
-            self._activity.pop(self._activity_key(config_id, path), None)
+            key = self._activity_key(config_id, path)
+            current = self._activity.get(key)
+            if include_upload or not current or current["status"] not in {
+                    "upload_queued", "uploading", "verifying", "uncertain"}:
+                self._activity.pop(key, None)
 
     def queue_scan(self, config_id: str, paths: list[str] | None = None) -> None:
         config = self._config(config_id)
@@ -678,8 +739,10 @@ class RapidUpload:
         digest = hashlib.sha1()
         size = 0
         with path.open("rb") as stream:
+            stop = getattr(RapidUpload._HASH_CONTEXT, "stop", threading.Event())
+            reader = LimitedReader(stream, stop, getattr(RapidUpload._HASH_CONTEXT, "limit", 0))
             while True:
-                chunk = stream.read(chunk_size)
+                chunk = reader.read(chunk_size)
                 if not chunk:
                     break
                 digest.update(chunk)
@@ -757,6 +820,7 @@ class RapidUpload:
                 "",
                 read_range,
                 target,
+                timeout=30,
             )
             if not isinstance(response, dict):
                 raise TypeError("115 秒传接口返回了无效响应")
@@ -785,6 +849,7 @@ class RapidUpload:
                 "target": target,
             },
             read_range_bytes_or_hash=read_range,
+            timeout=30,
         )
         if not isinstance(response, dict):
             raise TypeError("115 秒传接口返回了无效响应")
@@ -815,36 +880,309 @@ class RapidUpload:
         shutil.move(str(path), str(destination))
         return str(destination)
 
-    def _upload_original(self, path: Path, config: dict):
-        target_path = str(config.get("target_folder_path") or "").strip()
-        if not target_path or target_path == "/":
-            raise ValueError("未保存115目标目录路径，请重新选择目标目录后再上传")
-        helper_config = self._owner.get_config("P115StrmHelper") if hasattr(self._owner, "get_config") else {}
-        storage_name = str((helper_config or {}).get("storage_module") or "u115")
+    def _short_request(self, callback):
+        def guarded():
+            if self._stop.is_set():
+                raise TransferStopped("插件已停止，未发送115请求")
+            from .p115 import _request_gate
+            import httpx
+            gate = _request_gate(self._owner._source_cookie())
+            with gate.lock:
+                gate.check()
+                if gate.last_finished is not None:
+                    delay = 1 - (time.monotonic() - gate.last_finished)
+                    if delay > 0 and self._stop.wait(delay):
+                        raise TransferStopped("插件已停止，未发送115请求")
+                try:
+                    result = callback()
+                    gate.failures = 0
+                    return result
+                except (httpx.RequestError, ConnectionError, TimeoutError):
+                    delay = gate.defer(minimum=60, retry_reads=False)
+                    raise UploadUncertain(f"115 网络请求结果待核实，已暂停短请求{delay}秒，未重放提交") from None
+                finally:
+                    gate.last_finished = time.monotonic()
+        coordinator = getattr(self._owner, "_run_p115_task", None)
+        if callable(coordinator):
+            return coordinator(f"rapid_api:{threading.get_ident()}", "本地秒传接口请求", guarded)
+        return guarded()
+
+    @staticmethod
+    def _upload_key(config: dict, path: Path) -> str:
+        return f"{config['target_folder_id']}:{path.resolve()}"
+
+    def _save_uploads(self):
+        if hasattr(self._owner, "save_data"):
+            self._owner.save_data(self._UPLOAD_KEY, copy.deepcopy(self._uploads))
+
+    def _show_upload(self, entry):
+        state = entry["state"]
+        status = "upload_queued" if state == "queued" else "verifying" if state == "verify_queued" else state
+        message = {
+            "queued": "等待独立普通上传队列；其他文件可继续秒传",
+            "uploading": "正在普通上传，不占用秒传通道",
+            "verify_queued": "重启或上次结果不确定，等待只读复核，不重复上传",
+            "verifying": "正在复核网盘文件的名称、大小与 SHA1",
+            "uncertain": "上传结果待核实，保留源文件；立即扫描可再次只读复核",
+        }.get(state, state)
+        if state == "queued" and entry.get("retry_at", 0) > time.time():
+            message = "目标目录暂不可读，稍后自动复查；尚未提交普通上传"
+        self._set_activity(entry["config"], entry["path"], status, message, entry["size"])
+
+    def _queue_upload(self, config, path, sha1, size, signature):
+        key = self._upload_key(config, path)
+        with self._state_lock:
+            if self._stop.is_set():
+                raise TransferStopped("插件已停止，未加入普通上传队列")
+            if key in self._uploads:
+                return False
+            if len(self._uploads) >= self._UPLOAD_LIMIT:
+                raise ValueError("普通上传待办已达2000项上限，源文件保留，请等待队列消化后再扫描")
+            entry = {"config": copy.deepcopy(config), "path": str(path), "sha1": sha1,
+                     "size": size, "signature": dict(signature), "state": "queued", "commit_started": False}
+            self._uploads[key] = entry
+            try:
+                self._save_uploads()
+            except Exception:
+                self._uploads.pop(key, None)
+                raise
+            self._show_upload(entry)
+        self._start_upload_worker()
+        return True
+
+    def _start_upload_worker(self):
+        if self._stop.is_set():
+            return
+        with self._state_lock:
+            self._upload_wake.set()
+            if not self._uploads or self._upload_thread and self._upload_thread.is_alive():
+                return
+            worker = threading.Thread(target=self._drain_uploads, name="emetools-normal-upload", daemon=True)
+            self._upload_thread = worker
+            worker.start()
+
+    def _verify_upload(self, client, entry):
         try:
-            from app.chain.storage import StorageChain
-        except ImportError as error:
-            raise RuntimeError("MoviePilot 未提供 115 存储上传接口，无法执行普通上传") from error
-        storage = StorageChain()
-        target = storage.get_file_item(storage=storage_name, path=Path(target_path))
-        if not target or getattr(target, "type", "dir") != "dir":
-            raise RuntimeError(f"无法读取115目标目录：{target_path}")
-        uploaded = storage.upload_file(target, path, path.name)
-        if uploaded is None:
-            raise RuntimeError("115 普通上传未返回成功结果")
-        return uploaded
+            return self._read_uploaded_file(client, entry)
+        except TransferStopped:
+            raise
+        except Exception as error:
+            raise UploadUncertain("只读复核失败，保留源文件与待办，不重复提交上传") from error
+
+    def _read_uploaded_file(self, client, entry):
+        offset = 0
+        while True:
+            response = self._short_request(lambda: client.fs_files({
+                "cid": entry["config"]["target_folder_id"], "offset": offset, "limit": 200,
+                "show_dir": 0, "o": "user_ptime", "asc": 0,
+            }, timeout=30))
+            if not isinstance(response, dict) or not response.get("state"):
+                raise UploadUncertain("无法读取目标目录，待核实结果")
+            items = response.get("data")
+            if not isinstance(items, list):
+                raise UploadUncertain("目标目录返回不完整，待核实结果")
+            for item in items:
+                if (str(item.get("n") or item.get("name") or item.get("file_name") or "") == Path(entry["path"]).name
+                        and str(item.get("sha") or item.get("sha1") or item.get("file_sha1") or "").upper() == entry["sha1"]
+                        and int(item.get("s") or item.get("size") or item.get("file_size") or 0) == entry["size"]):
+                    return True
+            offset += len(items)
+            total = response.get("count")
+            if total is None or (not items and offset < int(total)):
+                raise UploadUncertain("目标目录分页不完整，待核实结果")
+            if offset >= int(total):
+                return False
+
+    def _upload_original(self, path: Path, config: dict, client, entry):
+        def initialize():
+            with self._state_lock:
+                if self._stop.is_set():
+                    raise TransferStopped("插件已停止，未提交上传初始化")
+                entry["commit_started"] = True
+                self._save_uploads()
+            return self._rapid_init(client, path, entry["sha1"], entry["size"],
+                                    f"U_1_{config['target_folder_id']}")
+
+        try:
+            response = self._short_request(initialize)
+        except (TransferStopped, P115DirectoryUnavailable):
+            raise
+        except Exception as error:
+            raise UploadUncertain("上传初始化结果待核实，未自动重放") from error
+        if response.get("reuse") or response.get("status") == 2:
+            return
+        if response.get("status") != 1:
+            raise RuntimeError("115 上传初始化失败，未上传原文件")
+        with self._state_lock:
+            entry["commit_started"] = False
+            self._save_uploads()
+        last_progress = [0.0]
+
+        def progress(sent, total):
+            if time.monotonic() - last_progress[0] < 1 and sent < total:
+                return
+            last_progress[0] = time.monotonic()
+            self._set_activity(config, str(path), "uploading",
+                               f"普通上传 {sent / max(1, total):.1%}；其他文件可继续秒传", total)
+
+        def before_complete():
+            if path.is_symlink() or not self._signature_matches(entry, self._file_signature(path.stat())):
+                raise ValueError("源文件在上传过程中变化，未提交完成，保留源文件")
+            with self._state_lock:
+                if self._stop.is_set():
+                    raise TransferStopped("插件已停止，未提交上传完成")
+                entry["commit_started"] = True
+                self._save_uploads()
+
+        upload_oss(client, path, response, self._stop, config["upload_limit_mib"],
+                   self._short_request, progress, before_complete)
+
+    def _drain_uploads(self):
+        from .p115 import _request_gate
+
+        while not self._stop.is_set():
+            with self._state_lock:
+                candidate = next(((key, item) for key, item in self._uploads.items()
+                                  if item["state"] in {"queued", "verify_queued"}
+                                  and item.get("retry_at", 0) <= time.time()), None)
+            if candidate is None:
+                self._upload_wake.wait(1)
+                self._upload_wake.clear()
+                continue
+            remaining = _request_gate(self._owner._source_cookie()).remaining()
+            if remaining:
+                self._stop.wait(min(remaining, 5))
+                continue
+            if not self._upload_slot.acquire(timeout=0.5):
+                continue
+            try:
+                if not self._stop.is_set():
+                    self._process_upload(*candidate)
+            finally:
+                self._upload_slot.release()
+
+    def _process_upload(self, key, entry):
+        client = None
+        verified = False
+        config = entry["config"]
+        path = Path(entry["path"])
+        try:
+            client = self._p115_client(self._owner._source_cookie())
+            recovery = entry["state"] == "verify_queued"
+            if self._stop.is_set():
+                return
+            with self._state_lock:
+                entry["state"] = "verifying" if recovery else "uploading"
+                self._save_uploads()
+                self._show_upload(entry)
+            if recovery:
+                if not self._verify_upload(client, entry):
+                    raise UploadUncertain("未确认网盘中存在完整文件，保留源文件；不自动重新上传")
+            else:
+                if path.is_symlink() or not self._signature_matches(entry, self._file_signature(path.stat())):
+                    raise ValueError("待上传源文件已变化，未上传或移动；请重新扫描")
+                try:
+                    exists = self._verify_upload(client, entry)
+                except UploadUncertain:
+                    with self._state_lock:
+                        if self._stop.is_set():
+                            return
+                        entry.update(state="queued", retry_at=time.time() + 60)
+                        self._save_uploads()
+                        self._show_upload(entry)
+                    logger.warning("媒体增强 本地秒传：目标目录暂不可读，配置=%s 文件=%s；60秒后复查，未提交普通上传",
+                                   config["name"], path.name)
+                    return
+                if not exists:
+                    self._upload_original(path, config, client, entry)
+                    if self._stop.is_set():
+                        return
+                    with self._state_lock:
+                        entry["state"] = "verifying"
+                        self._save_uploads()
+                        self._show_upload(entry)
+                    if not self._verify_upload(client, entry):
+                        raise UploadUncertain("上传已提交但目录尚未确认，保留源文件，不重复上传")
+            verified = True
+            if self._stop.is_set():
+                return
+            with self._state_lock:
+                if self._stop.is_set():
+                    return
+                if (config["delete_source_on_success"] and path.exists() and not path.is_symlink()
+                        and self._signature_matches(entry, self._file_signature(path.stat()))):
+                    path.unlink()
+                self._remember_completed(config, path, entry["sha1"], entry["size"], entry["signature"])
+                self._append_log(config, path, "uploaded", "普通上传成功，已复核网盘大小与 SHA1",
+                                 entry["size"], entry["sha1"])
+                self._uploads.pop(key, None)
+                self._save_uploads()
+                self._clear_activity(config["id"], str(path), include_upload=True)
+        except TransferStopped:
+            return
+        except Exception as error:
+            if self._stop.is_set():
+                return
+            with self._state_lock:
+                if self._stop.is_set():
+                    return
+                if isinstance(error, P115DirectoryUnavailable) and not entry.get("commit_started"):
+                    entry.update(state="queued", retry_at=time.time() + 60)
+                    self._save_uploads()
+                    self._show_upload(entry)
+                    return
+                if verified or isinstance(error, UploadUncertain) or entry.get("commit_started"):
+                    entry["state"] = "uncertain"
+                    self._save_uploads()
+                    self._show_upload(entry)
+                    status = "uncertain"
+                    message = f"普通上传结果待核实（{type(error).__name__}），源文件保留；立即扫描可只读复核"
+                else:
+                    status = "failed"
+                    message = f"普通上传失败（{type(error).__name__}），未提交上传完成"
+                    if (path.exists() and not path.is_symlink() and config.get("failure_directory")
+                            and self._signature_matches(entry, self._file_signature(path.stat()))):
+                        try:
+                            self._move_failure(path, config)
+                            message += "；已移至失败目录"
+                        except Exception:
+                            message += "；移动失败，源文件保留"
+                    else:
+                        message += "；源文件保留"
+                    self._uploads.pop(key, None)
+                    self._save_uploads()
+                    self._clear_activity(config["id"], str(path), include_upload=True)
+                self._append_log(config, path, status, message, entry["size"], entry["sha1"])
+                logger.warning("媒体增强 本地秒传普通上传未完成：配置=%s 文件=%s 状态=%s 原因=%s",
+                               config["name"], path.name, status, type(error).__name__)
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
 
     def _append_log(self, config: dict, path: Path, status: str, message: str, size: int = 0, sha1: str = ""):
-        self._logs.append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "timestamp": time.time(),
-                           "config": config["name"],
-                           "path": str(path), "name": path.name, "size": size,
-                           "sha1": sha1, "status": status, "message": message})
-        self._logs = recent_records(self._logs, limit=200)
-        if hasattr(self._owner, "save_data"):
-            self._owner.save_data(self._LOG_KEY, list(self._logs))
+        with self._state_lock:
+            self._logs.append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "timestamp": time.time(),
+                               "config": config["name"],
+                               "path": str(path), "name": path.name, "size": size,
+                               "sha1": sha1, "status": status, "message": message})
+            self._logs = recent_records(self._logs, limit=200)
+            if hasattr(self._owner, "save_data"):
+                self._owner.save_data(self._LOG_KEY, list(self._logs))
+
+    def clear_logs(self):
+        with self._state_lock:
+            self._logs.clear()
+            if hasattr(self._owner, "save_data"):
+                self._owner.save_data(self._LOG_KEY, [])
 
     def _remember_completed(self, config: dict, path: Path, sha1: str, size: int,
                             signature: dict[str, int]) -> None:
+        with self._state_lock:
+            self._save_completed(config, path, sha1, size, signature)
+
+    def _save_completed(self, config: dict, path: Path, sha1: str, size: int,
+                        signature: dict[str, int]) -> None:
         key = f"{config['id']}:{path.resolve()}"
         self._completed[key] = {
             "sha1": sha1,
@@ -858,7 +1196,17 @@ class RapidUpload:
             self._owner.save_data(self._DATA_KEY, dict(self._completed))
 
     def run(self, config_id: str, paths: list[str] | None = None) -> dict:
-        config = self._config(config_id)
+        if not self._scan_lock.acquire(blocking=False):
+            return {"ok": False, "message": f"配置“{self._running or '其他配置'}”正在执行，请稍后再试"}
+        try:
+            return self._run_serial(config_id, paths)
+        finally:
+            self._scan_lock.release()
+
+    def _run_serial(self, config_id: str, paths: list[str] | None = None) -> dict:
+        config = copy.deepcopy(self._config(config_id))
+        if self._stop.is_set():
+            return {"ok": False, "message": "插件已停止，未提交秒传或上传"}
         self._clear_activity(config_id, f"扫描任务：{config['name']}")
         if self._running:
             return {"ok": False, "message": f"配置“{self._running}”正在执行，请稍后再试"}
@@ -894,6 +1242,9 @@ class RapidUpload:
             self._clear_activity(config_id, f"扫描任务：{config['name']}")
             return {"ok": True, "message": "未发现符合后缀的本地文件", "total": 0, "succeeded": [], "failed": []}
         self._running = config["name"]
+        self._HASH_CONTEXT.stop = self._stop
+        self._HASH_CONTEXT.limit = config["hash_limit_mib"]
+        self._start_upload_worker()
         for path in source_files:
             try:
                 size = path.stat().st_size
@@ -905,17 +1256,31 @@ class RapidUpload:
         skipped: list[dict] = []
         unmatched: list[dict] = []
         failed: list[dict] = []
+        upload_queued: list[dict] = []
         client = None
         try:
             client = self._p115_client(cookie)
             target = f"U_1_{config['target_folder_id']}"
             for path in source_files:
+                if self._stop.is_set():
+                    break
                 size = 0
                 sha1 = ""
                 self._set_activity(config, str(path), "processing", "正在检查文件状态与缓存")
                 try:
                     before = path.stat()
                     signature = self._file_signature(before)
+                    with self._state_lock:
+                        pending = self._uploads.get(self._upload_key(config, path))
+                        if pending:
+                            if pending["state"] == "uncertain":
+                                pending["state"] = "verify_queued"
+                                self._save_uploads()
+                                self._show_upload(pending)
+                                self._upload_wake.set()
+                            skipped.append({"path": str(path), "name": path.name, "size": before.st_size,
+                                            "message": "已在普通上传队列中，未重复提交"})
+                            continue
                     key = f"{config['id']}:{path.resolve()}"
                     completed = self._completed.get(key)
                     if (completed and completed.get("target") == config["target_folder_id"]
@@ -950,11 +1315,14 @@ class RapidUpload:
                         try:
                             self._set_activity(config, str(path), "processing",
                                                "正在提交 115 秒传请求", size)
-                            response = self._rapid_init(client, path, sha1, size, target)
+                            response = self._short_request(
+                                lambda: self._rapid_init(client, path, sha1, size, target))
                             break
                         except Exception:
                             if attempt + 1 >= attempts:
                                 raise
+                    if self._stop.is_set():
+                        break
                     status = int((response or {}).get("status") or 0)
                     if not (response or {}).get("reuse") and status not in (1, 2):
                         raise RuntimeError(f"115 秒传初始化未完成（返回状态 {status}）")
@@ -963,32 +1331,18 @@ class RapidUpload:
                                 "sha1": sha1}
                         if config["upload_on_unmatched"]:
                             try:
-                                self._set_activity(config, str(path), "uploading",
-                                                   "115 未命中，正在普通上传", size)
-                                self._upload_original(path, config)
-                                message = "115 未命中，已改为普通上传成功"
-                                item["message"] = message
-                                succeeded.append(item)
-                                uploaded.append(item)
-                                self._remember_completed(config, path, sha1, size, signature)
-                                self._append_log(config, path, "uploaded", message, size, sha1)
-                                if config["delete_source_on_success"]:
-                                    path.unlink()
+                                created = self._queue_upload(config, path, sha1, size, signature)
+                                upload_queued.append(item)
+                                if created:
+                                    self._append_log(config, path, "upload_queued",
+                                                     "115 未命中，已加入独立普通上传队列", size, sha1)
+                            except TransferStopped:
+                                raise
                             except Exception as error:
-                                message = f"115 未命中，普通上传失败：{type(error).__name__}：{str(error)[:140]}"
-                                moved = ""
-                                try:
-                                    if path.exists():
-                                        moved = self._move_failure(path, config)
-                                except Exception as move_error:
-                                    message += f"；失败目录移动失败：{type(move_error).__name__}"
+                                message = f"普通上传排队失败（{type(error).__name__}），源文件保留"
                                 item["message"] = message
-                                if moved:
-                                    item["failure_path"] = moved
                                 failed.append(item)
                                 self._append_log(config, path, "failed", message, size, sha1)
-                                logger.warning("媒体增强 本地秒传普通上传失败：配置=%s 文件=%s 原因=%s：%s",
-                                               config["name"], path.name, type(error).__name__, str(error)[:160])
                         else:
                             message = "115 未命中（状态 1）：网盘中没有相同 SHA1 与大小的文件，未上传原文件"
                             item["message"] = message
@@ -999,8 +1353,11 @@ class RapidUpload:
                     succeeded.append(item)
                     self._remember_completed(config, path, sha1, size, signature)
                     self._append_log(config, path, "succeeded", "115 秒传成功", size, sha1)
-                    if config["delete_source_on_success"]:
+                    if (config["delete_source_on_success"] and not self._stop.is_set()
+                            and self._signature_matches({"signature": signature}, self._file_signature(path.stat()))):
                         path.unlink()
+                except TransferStopped:
+                    break
                 except Exception as error:
                     message = f"{type(error).__name__}：{str(error)[:160]}"
                     moved = ""
@@ -1020,14 +1377,14 @@ class RapidUpload:
                 finally:
                     self._clear_activity(config_id, str(path))
             return {
-                "ok": not failed,
+                "ok": not failed and not self._stop.is_set(),
                 "message": (
                     f"本轮检查 {len(source_files)} 个文件，成功 {len(succeeded)} 个，"
-                    f"其中普通上传 {len(uploaded)} 个，已处理跳过 {len(skipped)} 个，"
+                    f"普通上传已排队 {len(upload_queued)} 个（独立执行），已处理跳过 {len(skipped)} 个，"
                     f"未命中 {len(unmatched)} 个，失败 {len(failed)} 个"
                 ),
                 "total": len(source_files), "succeeded": succeeded, "skipped": skipped,
-                "uploaded": uploaded, "unmatched": unmatched, "failed": failed,
+                "uploaded": uploaded, "upload_queued": upload_queued, "unmatched": unmatched, "failed": failed,
             }
         finally:
             self._flush_hash_cache()
@@ -1035,6 +1392,8 @@ class RapidUpload:
             if callable(close):
                 close()
             self._running = None
+            self._HASH_CONTEXT.limit = 0
+            self._HASH_CONTEXT.stop = threading.Event()
             self.clear_scan_queue(config_id)
             for path in source_files:
                 self._clear_activity(config_id, str(path))

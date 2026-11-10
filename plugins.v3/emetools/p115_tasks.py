@@ -18,6 +18,7 @@ class P115TaskCoordinator:
         self._local = threading.local()
         self._waiting = []
         self._active = None
+        self._rapid_active = None
         self._jobs = {}
         self._closed = False
 
@@ -54,6 +55,7 @@ class P115TaskCoordinator:
             for job in finished[:-50]:
                 self._jobs.pop(job["id"], None)
             job = dict(id=uuid.uuid4().hex, key=key, label=label, manual=manual, state="queued",
+                       lane="rapid" if key.startswith("rapid_upload:") else "control",
                        message="已排队，当前操作结束后优先执行" if manual else "等待其他115任务完成",
                        done=threading.Event(), result=None, finished=None)
             self._waiting.append(job)
@@ -63,22 +65,25 @@ class P115TaskCoordinator:
                             label, self._active["label"], len(self._waiting))
             return job, True
 
-    def _ordered(self):
-        return sorted(self._waiting, key=lambda job: not job["manual"])
+    def _ordered(self, lane=None):
+        return sorted((job for job in self._waiting if lane is None or job["lane"] == lane),
+                      key=lambda job: not job["manual"])
 
     def _execute(self, job, callback):
+        active_field = "_rapid_active" if job["lane"] == "rapid" else "_active"
         with self._condition:
             while job["state"] == "queued":
-                if self._active is None and self._ordered()[0] is job:
+                if getattr(self, active_field) is None and self._ordered(job["lane"])[0] is job:
                     self._waiting.remove(job)
-                    self._active = job
+                    setattr(self, active_field, job)
                     job.update(state="running", message="正在执行")
                     logger.info("媒体增强115任务：开始%s，剩余等待=%d", job["label"], len(self._waiting))
                     break
                 self._condition.wait()
             if job["state"] != "running":
                 return {"ok": False, "message": job["message"]}
-        self._local.active = True
+        previous_lane = getattr(self._local, "active", None)
+        self._local.active = job["lane"]
         try:
             result = callback()
             with self._condition:
@@ -92,16 +97,17 @@ class P115TaskCoordinator:
                 job.update(state="failed", message=f"任务未完成（{type(error).__name__}），请查看日志后重新确认")
             raise
         finally:
-            self._local.active = False
+            self._local.active = previous_lane
             with self._condition:
                 job["finished"] = time.monotonic()
                 logger.info("媒体增强115任务：%s结束，状态=%s", job["label"], job["state"])
-                self._active = None
+                setattr(self, active_field, None)
                 job["done"].set()
                 self._condition.notify_all()
 
     def run(self, key, label, callback, manual=False):
-        if getattr(self._local, "active", False):
+        lane = "rapid" if key.startswith("rapid_upload:") else "control"
+        if getattr(self._local, "active", None) == lane:
             return callback()
         job, created = self._reserve(key, label, manual)
         if not created:
@@ -142,5 +148,5 @@ class P115TaskCoordinator:
 
     def status(self):
         with self._condition:
-            jobs = ([self._active] if self._active else []) + self._ordered()
+            jobs = [job for job in (self._active, self._rapid_active) if job] + self._ordered()
             return [{key: job[key] for key in ("id", "label", "state", "message")} for job in jobs]

@@ -87,11 +87,17 @@ const pendingJobs = ref([])
 const trash = ref(null)
 const moveInfo = ref(null)
 const folder = reactive({ open: false, type: '', index: 0, cid: '0', path: '/', name: '根目录', trail: [], dirs: [], files: [], ready: false, error: '' })
-const rapid = reactive({ configs: [], logs: [], activity: [], activity_total: 0, running: '', loaded: false })
+const rapid = reactive({ configs: [], logs: [], activity: [], activity_total: 0, upload_queue: {}, running: '', loaded: false })
 const rapidActionBusy = ref(false)
 const savedRapidConfigs = ref('')
 const rapidLogsPage = ref(1)
 const rapidLogsPageSize = 6
+const rapidQueuePage = ref(1)
+const rapidQueuePageCount = computed(() => Math.max(1, Math.ceil(rapid.activity.length / rapidLogsPageSize)))
+const rapidQueueItems = computed(() => rapid.activity.slice(
+  (rapidQueuePage.value - 1) * rapidLogsPageSize, rapidQueuePage.value * rapidLogsPageSize,
+))
+watch(rapidQueuePageCount, count => { rapidQueuePage.value = Math.min(rapidQueuePage.value, count) })
 const rapidLogsPageCount = computed(() => Math.max(1, Math.ceil(rapid.logs.length / rapidLogsPageSize)))
 const rapidLogItems = computed(() => [...rapid.logs].reverse().slice(
   (rapidLogsPage.value - 1) * rapidLogsPageSize,
@@ -102,7 +108,8 @@ watch(rapidLogsPageCount, count => { rapidLogsPage.value = Math.min(rapidLogsPag
 function newRapidConfig() {
   return { id: `rapid_${Date.now()}`, name: `配置 ${rapid.configs.length + 1}`, source_path: '', target_folder_id: '', target_folder_path: '',
     media_extensions: 'mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v', failure_directory: '',
-    delete_source_on_success: false, upload_on_unmatched: false, retry_limit: 2, realtime_enabled: false, cron_enabled: false, cron_expression: '*/10 * * * *' }
+    delete_source_on_success: false, upload_on_unmatched: false, hash_limit_mib: 32, upload_limit_mib: 8,
+    retry_limit: 2, realtime_enabled: false, cron_enabled: false, cron_expression: '*/10 * * * *' }
 }
 const base = computed(() => `plugin/${props.pluginId}`)
 const current = computed(() => sections.find(section => section.key === active.value))
@@ -412,11 +419,12 @@ function rapidFileSize(value) {
   return `${size.toFixed(unit === 'KB' ? 0 : 2)} ${unit}`
 }
 function rapidStatusIcon(status) {
-  return { stabilizing: '⏳', queued: '🕒', processing: '⚡', uploading: '⬆️',
+  return { stabilizing: '⏳', queued: '🕒', upload_queued: '🕒', verifying: '🔍', uncertain: '⚠️', processing: '⚡', uploading: '⬆️',
     succeeded: '✅', uploaded: '⬆️', unmatched: 'ℹ️', failed: '⚠️' }[status] || '•'
 }
 function rapidStatusLabel(status) {
   return { stabilizing: '等待文件写入完成', queued: '等待处理', processing: '正在秒传',
+    upload_queued: '等待普通上传', verifying: '正在复核', uncertain: '结果待核实',
     uploading: '正在普通上传', succeeded: '秒传成功', uploaded: '普通上传成功',
     unmatched: '115 未命中', failed: '处理失败' }[status] || status || '处理中'
 }
@@ -466,6 +474,7 @@ async function loadRapid() {
   rapid.logs.splice(0, rapid.logs.length, ...(result.logs || []))
   rapid.activity.splice(0, rapid.activity.length, ...(result.activity || []))
   rapid.activity_total = Number(result.activity_total || 0)
+  rapid.upload_queue = result.upload_queue || {}
   rapid.running = result.running || ''
   rapid.realtime_available = result.realtime_available === true
   rapid.realtime_watched_configs = result.realtime_watched_configs || []
@@ -481,6 +490,7 @@ async function pollRapidStatus() {
   rapid.logs.splice(0, rapid.logs.length, ...(result.logs || []))
   rapid.activity.splice(0, rapid.activity.length, ...(result.activity || []))
   rapid.activity_total = Number(result.activity_total || 0)
+  rapid.upload_queue = result.upload_queue || {}
   rapid.running = result.running || ''
   scheduleRapidPoll()
 }
@@ -1571,19 +1581,30 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
       </template>
       <template v-if="active === 'rapid'">
         <section class="eme-card">
-          <div class="eme-card-heading"><div><h3>本地秒传</h3><p>监控本地文件，优先用 SHA1 调用 115 秒传；未命中默认保留源文件，也可开启 MoviePilot 115 普通上传。Cookie 沿用“115 网盘 STRM 助手”；源目录须在 MoviePilot 容器内可访问，目标目录请选择非根目录。实时监控优先使用目录事件，不再周期性遍历整个目录；目录事件不可用时，才每 {{ rapid.realtime_poll_seconds || 300 }} 秒低频扫描兜底。Cron 可补扫容器重启期间的文件，秒传与清理、转存共用 115 串行队列。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !rapid.loaded" @click="addRapidConfig">添加配置</button><button class="eme-button primary" :disabled="busy || !rapid.loaded" @click="saveRapid">保存配置</button></div></div>
+          <div class="eme-card-heading"><div><h3>本地秒传</h3><p>监控本地文件，优先用 SHA1 调用 115 秒传；未命中可进入独立普通上传队列，默认同时最多 1 个秒传处理和 1 个普通上传，慢文件不再阻塞后续秒传。Cookie 沿用“115 网盘 STRM 助手”；源目录须在 MoviePilot 容器内可访问，目标目录请选择非根目录。实时监控优先使用目录事件，不再周期性遍历整个目录；目录事件不可用时，才每 {{ rapid.realtime_poll_seconds || 300 }} 秒低频扫描兜底，Cron 可补扫。短接口请求仍与清理、转存统一协调；普通上传复用 SHA1，直接分片上传，不重复等待秒传。</p></div><div class="eme-inline"><button class="eme-button secondary" :disabled="busy || !rapid.loaded" @click="addRapidConfig">添加配置</button><button class="eme-button primary" :disabled="busy || !rapid.loaded" @click="saveRapid">保存配置</button></div></div>
           <p v-if="rapidConfigDirty" class="eme-message eme-warning">本地秒传有未保存的修改；点击“立即扫描”时会先自动保存配置。</p>
           <p v-if="rapid.realtime_error && rapid.realtime_watched_configs?.length" class="eme-message eme-warning">{{ rapid.realtime_error }}；轮询监控仍在运行。</p>
           <p v-if="rapid.realtime_unwatched?.length" class="eme-message eme-warning">实时监控未启动：{{ rapid.realtime_unwatched.map(item => `${item.name}：${item.reason}`).join('；') }}。可检查目录挂载/权限，或启用 Cron 自动扫描兜底。</p>
           <div v-for="(config, index) in rapid.configs" :key="config.id" class="eme-rapid-config">
             <div class="eme-card-heading"><div><h4>{{ rapidConfigLabel(config) }}</h4><p>ID：{{ config.id }}</p></div><div class="eme-inline"><button class="eme-button secondary" type="button" :disabled="!rapid.loaded || rapidActionBusy || !config.source_path" @click="browse('rapid_file', index)">选择文件秒传</button><button class="eme-button secondary" :disabled="!rapid.loaded || rapidActionBusy" @click="rapidCommand('run', config.id)">{{ rapid.running === config.name || rapidActionBusy ? '⌛️秒传中' : '立即扫描' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`删除本地秒传配置 ${index + 1}`" @click="rapid.configs.splice(index, 1)">✕</button></div></div>
-            <div class="eme-rapid-group"><h4>基础配置</h4><div class="eme-fields"><label>配置名称<input v-model.trim="config.name" placeholder="例如：电视剧" /></label><label>重试次数<input v-model.number="config.retry_limit" type="number" min="0" max="100" /></label></div></div>
+            <div class="eme-rapid-group"><h4>基础配置</h4><div class="eme-fields"><label>配置名称<input v-model.trim="config.name" placeholder="例如：电视剧" /></label><label>秒传请求重试次数<input v-model.number="config.retry_limit" type="number" min="0" max="100" /></label><label>SHA1 读取上限（MiB/s）<input v-model.number="config.hash_limit_mib" type="number" min="1" max="1024" /></label><label>普通上传上限（MiB/s）<input v-model.number="config.upload_limit_mib" type="number" min="1" max="1024" /></label></div><p class="eme-hint">默认读取上限 32 MiB/s、普通上传上限 8 MiB/s；并发固定为各 1 个，降低 NAS 负载。保存只影响后续提交，已排队上传沿用提交时配置。</p></div>
             <div class="eme-rapid-group"><h4>目录设置</h4><label>本地源目录<div class="eme-folder-input"><input v-model.trim="config.source_path" placeholder="/media/资源/电视剧" /><button class="eme-button secondary" type="button" @click="browse('rapid_source', index)">浏览</button></div></label><label>115 目标目录<div class="eme-folder-input"><input :value="config.target_folder_path || '未选择目标目录'" readonly /><button class="eme-button secondary" type="button" @click="browse('rapid_target', index)">选择目录</button></div></label><p class="eme-hint">CID：{{ config.target_folder_id || '未选择' }}</p><label>失败目录（可选）<div class="eme-folder-input"><input v-model.trim="config.failure_directory" placeholder="/media/资源/秒传失败/电视剧" /><button class="eme-button secondary" type="button" @click="browse('rapid_failure', index)">浏览</button></div></label></div>
-            <div class="eme-rapid-group"><h4>扫描与文件</h4><label>媒体后缀<input v-model.trim="config.media_extensions" placeholder="mp4,mkv,ts" /></label><div class="eme-rapid-switches"><label class="eme-switch-label"><input v-model="config.delete_source_on_success" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>秒传成功后删除本地源文件</span></label><label class="eme-switch-label"><input v-model="config.upload_on_unmatched" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>未命中后普通上传到网盘</span></label><label class="eme-switch-label"><input v-model="config.realtime_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label class="eme-switch-label"><input v-model="config.cron_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 Cron 自动扫描</span></label></div><p class="eme-hint">未命中时开启普通上传会消耗网盘上传流量；上传失败的文件按失败目录规则处理。</p><label v-if="config.cron_enabled">执行周期（cron 表达式）<input v-model.trim="config.cron_expression" placeholder="*/10 * * * *" /></label></div>
+            <div class="eme-rapid-group"><h4>扫描与文件</h4><label>媒体后缀<input v-model.trim="config.media_extensions" placeholder="mp4,mkv,ts" /></label><div class="eme-rapid-switches"><label class="eme-switch-label"><input v-model="config.delete_source_on_success" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>秒传/上传成功后删除本地源文件</span></label><label class="eme-switch-label"><input v-model="config.upload_on_unmatched" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>未命中后普通上传到网盘</span></label><label class="eme-switch-label"><input v-model="config.realtime_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用实时监控</span></label><label class="eme-switch-label"><input v-model="config.cron_enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用 Cron 自动扫描</span></label></div><p class="eme-hint">普通上传消耗上传流量，已排队不代表成功。完成后复核网盘名称、大小及 SHA1 才按开关删除源文件；明确失败按失败目录规则处理，结果不确定时保留源文件，立即扫描仅复核、不重复上传。</p><label v-if="config.cron_enabled">执行周期（cron 表达式）<input v-model.trim="config.cron_expression" placeholder="*/10 * * * *" /></label></div>
           </div>
           <p v-if="!rapid.configs.length" class="eme-hint">还没有配置。点击“添加配置”后填写本地源目录与 115 目标目录。</p>
         </section>
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>秒传记录</h3><p>显示当前待处理队列和最近 200 条成功、普通上传、未命中与失败结果；每条文件记录包含大小及处理状态。</p></div><button class="eme-button text" :disabled="busy || !rapid.logs.length" @click="rapidCommand('clear_logs')">清空记录</button></div><div v-if="rapid.activity.length" class="eme-rapid-activity"><h4>当前队列 <span>{{ rapid.activity_total }} 项</span></h4><div class="eme-results eme-rapid-logs"><div v-for="item in rapid.activity" :key="`active-${item.config_id}-${item.path}`" class="eme-result"><span>{{ rapidStatusIcon(item.status) }}</span><div><strong>{{ item.name }}</strong><small>{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ rapidStatusLabel(item.status) }}：{{ item.message }}</small><small>{{ item.path }}</small></div></div></div><small v-if="rapid.activity_total > rapid.activity.length">当前仅显示最近 {{ rapid.activity.length }} 项。</small></div><div v-if="rapid.logs.length" class="eme-results eme-rapid-logs eme-rapid-history"><div v-for="(item, index) in rapidLogItems" :key="`${item.time}-${item.path}-${index}`" class="eme-result"><span>{{ rapidStatusIcon(item.status) }}</span><div><strong :title="item.name">{{ item.name }}</strong><small>{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ item.message }}</small><small :title="item.path">{{ item.path }}</small></div></div></div><nav v-if="rapidLogsPageCount > 1" class="eme-pagination" aria-label="秒传记录分页"><button class="eme-button secondary" :disabled="rapidLogsPage <= 1" @click="rapidLogsPage--"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ rapidLogsPage }} / {{ rapidLogsPageCount }} 页 · 共 {{ rapid.logs.length }} 条</span><button class="eme-button secondary" :disabled="rapidLogsPage >= rapidLogsPageCount" @click="rapidLogsPage++">下一页<i class="mdi mdi-chevron-right" /></button></nav><p v-if="!rapid.logs.length && !rapid.activity.length" class="eme-hint">暂无秒传记录。</p></section>
+        <section class="eme-card">
+          <div class="eme-card-heading"><div><h3>秒传记录</h3><p>显示两个处理通道的队列、上传进度及最近 24 小时内最多 200 条结果；待上传任务跨重启保留，完成结果不确定时先复核，不自动重复上传。</p></div><button class="eme-button text" :disabled="busy || !rapid.logs.length" @click="rapidCommand('clear_logs')">清空记录</button></div>
+          <p class="eme-hint">秒传处理：{{ rapid.running || '空闲' }} · 普通上传：{{ rapid.upload_queue.uploading || 0 }} · 待上传：{{ rapid.upload_queue.queued || 0 }} · 复核/待核实：{{ (rapid.upload_queue.verifying || 0) + (rapid.upload_queue.verify_queued || 0) + (rapid.upload_queue.uncertain || 0) }}</p>
+          <div v-if="rapid.activity.length" class="eme-rapid-activity"><h4>当前队列 <span>{{ rapid.activity_total }} 项</span></h4>
+            <div class="eme-results eme-rapid-logs eme-rapid-history"><div v-for="item in rapidQueueItems" :key="`active-${item.config_id}-${item.path}`" class="eme-result"><span>{{ rapidStatusIcon(item.status) }}</span><div><strong :title="item.name">{{ item.name }}</strong><small :title="item.message">{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ rapidStatusLabel(item.status) }}：{{ item.message }}</small><small :title="item.path">{{ item.path }}</small></div></div></div>
+            <nav v-if="rapidQueuePageCount > 1" class="eme-pagination" aria-label="上传队列分页"><button class="eme-button secondary" :disabled="rapidQueuePage <= 1" @click="rapidQueuePage--">上一页</button><span>第 {{ rapidQueuePage }} / {{ rapidQueuePageCount }} 页</span><button class="eme-button secondary" :disabled="rapidQueuePage >= rapidQueuePageCount" @click="rapidQueuePage++">下一页</button></nav>
+            <small v-if="rapid.activity_total > rapid.activity.length">当前仅显示最近 {{ rapid.activity.length }} 项。</small>
+          </div>
+          <div v-if="rapid.logs.length" class="eme-results eme-rapid-logs eme-rapid-history"><div v-for="(item, index) in rapidLogItems" :key="`${item.time}-${item.path}-${index}`" class="eme-result"><span>{{ rapidStatusIcon(item.status) }}</span><div><strong :title="item.name">{{ item.name }}</strong><small :title="item.message">{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ item.message }}</small><small :title="item.path">{{ item.path }}</small></div></div></div>
+          <nav v-if="rapidLogsPageCount > 1" class="eme-pagination" aria-label="秒传记录分页"><button class="eme-button secondary" :disabled="rapidLogsPage <= 1" @click="rapidLogsPage--"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ rapidLogsPage }} / {{ rapidLogsPageCount }} 页 · 共 {{ rapid.logs.length }} 条</span><button class="eme-button secondary" :disabled="rapidLogsPage >= rapidLogsPageCount" @click="rapidLogsPage++">下一页<i class="mdi mdi-chevron-right" /></button></nav>
+          <p v-if="!rapid.logs.length && !rapid.activity.length" class="eme-hint">暂无秒传记录。</p>
+        </section>
       </template>
     </main>
       <div v-if="enrichSettings.open" class="eme-overlay" @click.self="enrichSettings.open = false">

@@ -131,7 +131,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.77"
+    plugin_version = "2.10.78"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -204,10 +204,13 @@ class EmeTools(_PluginBase):
             self._enrichment_config = dict(DEFAULT_ENRICH_CONFIG)
         self._enrichment = DataEnrichment(self)
         try:
-            self._rapid = RapidUpload(self, config.get("rapid_upload") or {})
+            self._rapid = RapidUpload(self, config.get("rapid_upload") or {},
+                                      upload_slot=getattr(previous_rapid, "_upload_slot", None),
+                                      scan_slot=getattr(previous_rapid, "_scan_lock", None))
         except ValueError:
             logger.warning("媒体增强：本地秒传配置无效，已恢复为空配置")
-            self._rapid = RapidUpload(self, {})
+            self._rapid = RapidUpload(self, {}, upload_slot=getattr(previous_rapid, "_upload_slot", None),
+                                      scan_slot=getattr(previous_rapid, "_scan_lock", None))
         self._schedule = copy.deepcopy(DEFAULT_SCHEDULE)
         for name, defaults in self._schedule.items():
             saved = (config.get("schedule") or {}).get(name) or {}
@@ -1125,7 +1128,7 @@ class EmeTools(_PluginBase):
 
     async def rapid_action(self, action: RapidAction) -> dict:
         if action.operation == "clear_logs":
-            self._rapid._logs.clear()
+            self._rapid.clear_logs()
             return {"ok": True, "message": "本地秒传日志已清空"}
         if action.operation not in {"run", "enqueue"}:
             raise HTTPException(status_code=400, detail="未知的本地秒传操作")
