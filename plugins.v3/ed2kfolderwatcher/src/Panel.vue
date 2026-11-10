@@ -14,14 +14,14 @@ const error = ref('')
 const notice = ref('')
 const confirmation = ref('')
 let confirmationResolver
-const settings = reactive({ movie_series_parallel: true, telegram_mode: 'user', telegram_aggregate_window: 600, retry_limit: 3, cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared' })
+const settings = reactive({ movie_series_parallel: true, telegram_mode: 'user', telegram_aggregate_window: 600, retry_limit: 3, cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared', local_upload_enabled: false, local_upload_mode: 'mp', local_upload_folder: '', local_upload_target: '' })
 const cloud = reactive({ storages: [], folders: [], browsing: '', scanning: false, pending: 0, file: '', bytes_read: 0, size: 0, error: '' })
 const account = reactive({ api_id: '', api_hash: '', phone: '', code: '', password: '' })
 const auth = reactive({ logged_in: false, pending: false, password_required: false, api_hash_configured: false, expires_in: 0, retry_in: 0 })
 let timer
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || saving.value || !loaded.value)
-const configFields = ['enabled', 'movie_series_parallel', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'retry_limit', 'delete_source', 'delete_small_files', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source']
+const configFields = ['enabled', 'movie_series_parallel', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'retry_limit', 'delete_source', 'delete_small_files', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source', 'local_upload_enabled', 'local_upload_mode', 'local_upload_folder', 'local_upload_target']
 const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size_gb', label: '生成链接最小文件大小（GB）', type: 'number', step: 'any', placeholder: '例如0.5、1、1.5（GB）', hint: '小于此值不生成、不转发；留空或0不限，单位GB。' }]
 
 function unpack(response) {
@@ -97,6 +97,14 @@ async function runLocal() {
   await work(async () => {
     const result = await request('local/run', {})
     if (!result.ok) throw new Error(result.message || '本地扫描失败')
+    notice.value = result.message
+  })
+}
+async function runUpload() {
+  if (!await askConfirmation('将扫描已保存的本地计算上传目录。直传模式会调用115上传；已确认的上传不重复，未确认的上传会先查目标再允许重试。启用删源时，校验和输出全部成功后只删除本地源文件。确定继续？')) return
+  await work(async () => {
+    const result = await request('local-upload/run', {})
+    if (!result.ok) throw new Error(result.message || '本地计算上传扫描失败')
     notice.value = result.message
   })
 }
@@ -195,6 +203,19 @@ onUnmounted(() => {
       <div class="fields"><label>失败后自动重试次数<input v-model.number="settings.retry_limit" type="number" min="0" max="10" step="1" :disabled="disabled"><small>0 表示不自动重试；最多10次，不含首次处理。可用增量补扫手动重试。</small></label><label>文件稳定等待秒数<input v-model="settings.min_age" type="number" min="0" :disabled="disabled"><small>文件停止变化后等待时间，请监控完成目录。</small></label></div>
       <div class="fields"><label class="full-width">TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；留空自动选择路径。关闭后不删除已有文件。</small></label></div>
       <p>本地与网盘共用计算位：{{ settings.movie_series_parallel ? '电影与剧集最多两路，同类仍单路。' : '所有文件单路计算。' }}</p>
+    </article>
+
+    <article class="card" data-testid="local-upload">
+      <h3>本地计算，上传115</h3>
+      <div class="switches"><label class="switch"><input v-model="settings.local_upload_enabled" type="checkbox" :disabled="disabled">启用本地计算上传115</label></div>
+      <div class="fields">
+        <label>上传方式<select v-model="settings.local_upload_mode" :disabled="disabled || !settings.local_upload_enabled"><option value="mp">使用现有MP整理上传（复制）</option><option value="direct">调用115插件直接上传（不整理）</option></select><small>先计算本地ED2K与SHA1；115大小与SHA1一致后才输出、转发。</small></label>
+        <label>本地计算上传目录<input v-model="settings.local_upload_folder" class="monitor-roots" :disabled="disabled || !settings.local_upload_enabled" placeholder="/downloads/complete"><small>多个用英文逗号分隔；自动监控新增文件，每10分钟补漏。沿用通用过滤与子目录设置。</small></label>
+      </div>
+      <div v-if="settings.local_upload_mode === 'direct'" class="fields"><label class="full-width">115上传目标目录<input v-model="settings.local_upload_target" :disabled="disabled || !settings.local_upload_enabled" placeholder="/影视资源/本地上传"><small>保留本地根目录内相对结构；缺少目录由115插件创建，同名异内容不覆盖。</small></label></div>
+      <p v-else class="warning">不会主动发起MP整理，请沿用现有复制上传流程，并保留本地文件到计算完成。MP可独立上传，但需收到启用后的整理完成事件；移动上传或其他工具上传不适用。</p>
+      <p>开启后先扫描目录内现有文件，随后增量处理。完成后删除源文件仅删除本地原文件；此流程的115副本受保护，不自动删网盘副本。</p>
+      <div class="actions"><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.local_upload_enabled" @click="runUpload">立即本地计算／上传／补发</button></div>
     </article>
 
     <article class="card" data-testid="local-source">

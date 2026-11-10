@@ -17,15 +17,20 @@ class Ed2kTests(unittest.TestCase):
         modules["app"].__path__ = []
         modules["app.log"].logger = Mock()
         modules["app.plugins"]._PluginBase = type("PluginBase", (), {})
+        modules["app.sdk"] = types.ModuleType("app.sdk")
+        modules["app.sdk.events"] = types.ModuleType("app.sdk.events")
+        modules["app.sdk.events"].eventmanager = types.SimpleNamespace(register=lambda event: lambda handler: handler)
+        modules["app.schemas"] = types.ModuleType("app.schemas")
+        modules["app.schemas.types"] = types.ModuleType("app.schemas.types")
+        modules["app.schemas.types"].EventType = types.SimpleNamespace(TransferComplete="transfer.complete")
         plugin_path = Path(__file__).resolve().parents[1] / "__init__.py"
         spec = importlib.util.spec_from_file_location("ed2k_test_plugin", plugin_path)
         cls.module = importlib.util.module_from_spec(spec)
         modules["ed2k_test_plugin"] = cls.module
         with patch.dict(sys.modules, modules):
             spec.loader.exec_module(cls.module)
-            cloud_spec = importlib.util.spec_from_file_location("ed2k_test_plugin.cloud_storage", plugin_path.with_name("cloud_storage.py"))
-            cls.cloud_module = importlib.util.module_from_spec(cloud_spec)
-            cloud_spec.loader.exec_module(cls.cloud_module)
+            cls.cloud_module = sys.modules["ed2k_test_plugin.cloud_storage"]
+            cls.upload_module = sys.modules["ed2k_test_plugin.local_upload"]
             cls.module.cloud_storage = cls.cloud_module
 
     def setUp(self):
@@ -2227,7 +2232,7 @@ class Ed2kTests(unittest.TestCase):
     def test_form_uses_updated_headings_and_cloud_schedule_switch(self):
         form, defaults = self.plugin.get_form()
         fields = form[0]["content"]
-        self.assertEqual([field["text"] for field in fields if field["component"] == "VCardTitle"], ["通用设置", "本地监控", "网盘监控", "ED2K链接自动转发"])
+        self.assertEqual([field["text"] for field in fields if field["component"] == "VCardTitle"], ["通用设置", "本地计算，上传115", "本地监控", "网盘监控", "ED2K链接自动转发"])
         models = {field.get("props", {}).get("model"): field for field in fields}
         self.assertEqual(models["cloud_scan_enabled"]["props"]["label"], "网盘定时增量补扫")
         self.assertEqual(models["cloud_folder"]["props"]["label"], "网盘监控目录")

@@ -325,6 +325,44 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(self.client.post("/local/run").json()["ok"])
         self.plugin.scan.assert_not_called()
 
+    def test_local_upload_settings_validate_and_round_trip(self):
+        from ed2k_api_test_package import cloud_storage
+        with patch.object(cloud_storage, "CloudStorage") as adapter:
+            for mode in ("mp", "direct"):
+                values = {
+                    "local_upload_enabled": True, "local_upload_mode": mode,
+                    "local_upload_folder": "/downloads/a,/downloads/b,/downloads/a",
+                    "local_upload_target": "/影视资源/本地上传/",
+                }
+                result = web_api.validate_settings(self.plugin, values)
+                self.assertEqual(result["local_upload_folder"], "/downloads/a,/downloads/b")
+                self.assertEqual(result["local_upload_target"], "/影视资源/本地上传")
+                self.assertEqual(result["local_upload_mode"], mode)
+            adapter.assert_called()
+        for values in (
+            {"local_upload_mode": "other"},
+            {"local_upload_enabled": "true"},
+            {"local_upload_enabled": True},
+            {"local_upload_enabled": True, "local_upload_mode": "direct", "local_upload_folder": "/downloads"},
+            {"local_upload_folder": "/downloads/../etc"},
+            {"local_upload_target": "relative"},
+        ):
+            with self.subTest(values=values), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, values)
+
+    def test_upload_endpoint_only_scans_upload_source_and_requires_enabled_worker(self):
+        self.authorize()
+        self.assertFalse(self.client.post("/local-upload/run").json()["ok"])
+        self.plugin.scan.assert_not_called()
+        self.plugin._enabled = True
+        self.plugin._local_upload_enabled = True
+        self.plugin._worker = None
+        self.assertFalse(self.client.post("/local-upload/run").json()["ok"])
+        self.plugin._worker = Mock()
+        self.plugin._worker.is_alive.return_value = True
+        self.assertTrue(self.client.post("/local-upload/run").json()["ok"])
+        self.plugin.scan.assert_called_once_with(True, True)
+
     def test_cloud_delete_opt_in_binds_scope_without_save_confirmation(self):
         from ed2k_api_test_package import cloud_storage
         values = {"cloud_enabled": True, "cloud_storage": "115网盘Plus", "cloud_folder": "/test", "cloud_cron": "*/10 * * * *", "cloud_delete_enabled": True, "delete_source": True, "output_enabled": True}

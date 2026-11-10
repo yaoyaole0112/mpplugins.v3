@@ -12,13 +12,14 @@ from app.log import logger
 from .user_account import UserAccountError
 from .telegram_targets import telegram_targets
 from .file_size import minimum_file_bytes, minimum_gb_value, minimum_gb_setting
+from .local_upload import UPLOAD_FIELDS
 
 
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
                  "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
                  "telegram_chat_id", "telegram_thread_id", "telegram_aggregate", "telegram_aggregate_window", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
-                 "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source", "retry_limit", "movie_series_parallel")
-BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled", "movie_series_parallel"}
+                 "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source", "retry_limit", "movie_series_parallel") + UPLOAD_FIELDS
+BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled", "movie_series_parallel", "local_upload_enabled"}
 
 
 def settings_snapshot(plugin, config=None):
@@ -63,7 +64,7 @@ def validate_settings(plugin, values):
                 raise UserAccountError(f"{label}必须为 {lower} 到 {upper} 的整数")
             value = int(value)
         else:
-            if not isinstance(value, str) or len(value) > (32768 if name in {"folder", "cloud_folder"} else 4096):
+            if not isinstance(value, str) or len(value) > (32768 if name in {"folder", "cloud_folder", "local_upload_folder"} else 4096):
                 raise UserAccountError("配置文本格式不正确或过长")
             value = value.strip()
         result[name] = value
@@ -72,6 +73,10 @@ def validate_settings(plugin, values):
     try:
         result["folder"] = ",".join(monitor_roots(result["folder"]))
         result["cloud_folder"] = ",".join(monitor_roots(result["cloud_folder"], cloud=True))
+        result["local_upload_folder"] = ",".join(monitor_roots(result["local_upload_folder"]))
+        from .cloud_storage import cloud_path
+        if result["local_upload_target"]:
+            result["local_upload_target"] = cloud_path(result["local_upload_target"])
     except ValueError as failure:
         raise UserAccountError(str(failure)) from None
     try:
@@ -80,6 +85,21 @@ def validate_settings(plugin, values):
         raise UserAccountError(str(failure)) from None
     if result["cloud_life_source"] not in {"shared", "direct"}:
         raise UserAccountError("生活事件来源无效")
+    result["local_upload_mode"] = result["local_upload_mode"] or "mp"
+    if result["local_upload_mode"] not in {"mp", "direct"}:
+        raise UserAccountError("请选择有效的本地计算上传方式")
+    if result["local_upload_enabled"]:
+        if not result["local_upload_folder"]:
+            raise UserAccountError("请填写本地计算上传目录")
+        if result["local_upload_mode"] == "direct" and not result["local_upload_target"]:
+            raise UserAccountError("直传模式请填写115上传目标目录")
+        from .cloud_storage import CloudStorage, CloudError
+        try:
+            storage = CloudStorage("115网盘Plus")
+            if result["local_upload_mode"] == "direct" and not callable(getattr(storage.oper, "get_item_strict", None)):
+                raise CloudError("请更新115插件以提供严格目标查询")
+        except CloudError as failure:
+            raise UserAccountError(str(failure)) from None
     if result["cloud_monitor_enabled"] and result["cloud_storage"] != "115网盘Plus":
         raise UserAccountError("115生活事件仅支持115网盘Plus")
     try:
@@ -175,6 +195,14 @@ def build_routes(plugin):
         await asyncio.to_thread(plugin.scan, True)
         return response({"ok": True, "message": "本地增量扫描已加入后台队列；已有链接不重复计算"})
 
+    async def upload_run(principal=Depends(get_current_active_superuser)):
+        if not plugin._enabled or not plugin._local_upload_enabled:
+            return response({"ok": False, "message": "请先启用并保存本地计算上传设置"})
+        if plugin._worker is None or not plugin._worker.is_alive():
+            return response({"ok": False, "message": "工作线程未运行，请重新保存设置"})
+        await asyncio.to_thread(plugin.scan, True, True)
+        return response({"ok": True, "message": "本地计算上传增量补扫已入队；先核对115目标，未确认的上传允许再次尝试"})
+
     async def cloud_browse(request: Request, principal=Depends(get_current_active_superuser)):
         from .cloud_storage import CloudStorage, CloudError, cloud_path
         values = await read_body(request)
@@ -248,4 +276,5 @@ def build_routes(plugin):
                 ("/settings", status, "GET", "读取安全配置"), ("/settings", save, "POST", "保存插件配置"),
                 ("/telegram/status", telegram_status, "GET", "个人账号登录状态"),
                 ("/telegram/action", telegram_action, "POST", "个人账号网页授权"),
+                ("/local-upload/run", upload_run, "POST", "本地计算上传115增量补扫与补发"),
                 ("/local/run", local_run, "POST", "本地增量扫描与补发"))]

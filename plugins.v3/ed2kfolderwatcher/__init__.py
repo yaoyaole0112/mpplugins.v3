@@ -13,6 +13,7 @@ from apscheduler.triggers.cron import CronTrigger
 from .file_size import minimum_file_bytes, minimum_gb_setting, minimum_gb_value
 from .file_order import filename_order
 from .media_type import media_kind
+from .local_upload import LocalUploadMixin, UPLOAD_FIELDS
 
 try:
     from Crypto.Hash import MD4 as _CryptoMD4
@@ -21,6 +22,11 @@ except ImportError:
 
 from app.log import logger
 from app.plugins import _PluginBase
+try:
+    from app.sdk.events import eventmanager
+except ImportError:
+    from app.core.event import eventmanager
+from app.schemas.types import EventType
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -129,7 +135,7 @@ def _md4(data: bytes) -> bytes:
     return b"".join(value.to_bytes(4, "little") for value in (a, b, c, d))
 
 
-def ed2k_hash(path: Path, stop_event=None, progress=None) -> str:
+def ed2k_hash(path: Path, stop_event=None, progress=None, checksum=None) -> str:
     part_hashes = []
     with path.open("rb") as file_handle:
         initial = os.fstat(file_handle.fileno())
@@ -139,6 +145,8 @@ def ed2k_hash(path: Path, stop_event=None, progress=None) -> str:
                 raise InterruptedError("任务已停止")
             chunk = file_handle.read(ED2K_PART_SIZE)
             bytes_read += len(chunk)
+            if checksum is not None:
+                checksum.update(chunk)
             digest = _CryptoMD4.new(chunk).digest() if _CryptoMD4 else _md4(chunk)
             part_hashes.append(digest)
             if progress is not None:
@@ -212,11 +220,11 @@ def telegram_message_chunks(records: list) -> list:
     return chunks
 
 
-class Ed2kFolderWatcher(_PluginBase):
+class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.19.4"
+    plugin_version = "1.20.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -415,21 +423,25 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._cloud_status["error"] = str(failure)
                 logger.warning(f"自动生成ED2K链接：网盘来源配置无效：{failure}")
         self._onlyonce = bool(config.get("onlyonce", False))
-        if (self._folder or self._cloud_enabled) and (self._enabled or self._onlyonce):
+        self._init_local_upload(config)
+        local_sources = self._folder or (self._local_upload_enabled and self._local_upload_folder)
+        if (local_sources or self._cloud_enabled) and (self._enabled or self._onlyonce):
             try:
                 self._refresh_link_names()
             except (OSError, ValueError) as err:
                 logger.warning(f"自动生成ED2K链接：更新历史链接文件名失败，保留原记录：{type(err).__name__}")
             self._worker = threading.Thread(target=self._work, name="ed2k-worker", daemon=True)
             self._worker.start()
-        if self._onlyonce and (self._folder or self._cloud_enabled):
+        if self._onlyonce and (local_sources or self._cloud_enabled):
             self._onlyonce = False
             self._save_config()
             self.scan()
             if self._cloud_enabled:
                 self.queue_cloud_scan()
-        if self._enabled and self._folder and self._monitor_enabled:
+        if self._enabled and ((self._folder and self._monitor_enabled) or self._local_upload_enabled):
             self._start_monitor()
+        if self._enabled and self._local_upload_enabled:
+            self.scan(upload_only=True)
         if self._enabled and self._cloud_enabled and self._cloud_delete_enabled and self._delete_source:
             self._restore_cloud_delete_checks()
 
@@ -488,6 +500,10 @@ class Ed2kFolderWatcher(_PluginBase):
     def get_state(self) -> bool:
         return self._enabled
 
+    @eventmanager.register(EventType.TransferComplete)
+    def on_local_upload_transfer(self, event):
+        self._on_local_upload_transfer(event)
+
     @staticmethod
     def get_render_mode() -> Tuple[str, str]:
         return "vue", "dist/assets"
@@ -539,9 +555,14 @@ class Ed2kFolderWatcher(_PluginBase):
             self._atomic_write(cache, json.dumps(records, ensure_ascii=False))
         return folder, output, cache
 
-    def _local_roots(self):
+    def _local_roots(self, watching=False, upload_only=False):
         from .cloud_storage import monitor_roots
-        roots = [Path(root) for root in monitor_roots(self._folder)]
+        folders = []
+        if not upload_only and (not watching or self._monitor_enabled):
+            folders.extend(monitor_roots(self._folder))
+        if self._local_upload_enabled:
+            folders.extend(monitor_roots(self._local_upload_folder))
+        roots = [Path(root) for root in folders]
         unique = {}
         for root in roots:
             unique.setdefault(root.resolve(), root)
@@ -561,7 +582,7 @@ class Ed2kFolderWatcher(_PluginBase):
             logger.warning("自动生成ED2K链接：watchdog 不可用，实时监控未启动")
             return
         folders = []
-        for folder in self._local_roots():
+        for folder in self._local_roots(watching=True):
             if folder.is_dir():
                 folders.append(folder)
             else:
@@ -572,12 +593,14 @@ class Ed2kFolderWatcher(_PluginBase):
 
         class Handler(FileSystemEventHandler):
             def _queue(self, path: str) -> None:
-                plugin._queue_event(Path(path))
+                source = Path(path)
+                if plugin._monitor_enabled or plugin._upload_root_for(source):
+                    plugin._queue_event(source)
 
             def on_created(self, event):
                 if event.is_directory:
                     for path in plugin._iter_files(Path(event.src_path)):
-                        plugin._queue_event(path)
+                        self._queue(str(path))
                 else:
                     self._queue(event.src_path)
 
@@ -588,7 +611,7 @@ class Ed2kFolderWatcher(_PluginBase):
             def on_moved(self, event):
                 if event.is_directory:
                     for path in plugin._iter_files(Path(event.dest_path)):
-                        plugin._queue_event(path)
+                        self._queue(str(path))
                 else:
                     self._queue(event.dest_path)
 
@@ -614,7 +637,8 @@ class Ed2kFolderWatcher(_PluginBase):
             return False
         excluded = {output.resolve(), cache.resolve(), output.with_name(f".{output.name}.cache.json").resolve()}
         excluded.update({self._retry_state_path().resolve(),
-                         (Path(self.get_data_path()) / "cancelled_tasks.json").resolve()})
+                         (Path(self.get_data_path()) / "cancelled_tasks.json").resolve(),
+                         (Path(self.get_data_path()) / "local_upload_receipts.json").resolve()})
         if resolved in excluded or path.name.startswith(".ed2k-write-"):
             return False
         if path.suffix.lower() in {".part", ".tmp", ".!qb", ".crdownload"}:
@@ -765,7 +789,8 @@ class Ed2kFolderWatcher(_PluginBase):
         except (OSError, ValueError):
             records = {}
         eligible = [(key, context, records.get(key)) for key, context in entries]
-        eligible = [(key, context, record) for key, context, record in eligible if record]
+        eligible = [(key, context, record) for key, context, record in eligible if record
+                    and (not record.get("upload_mode") or record.get("upload_verified"))]
         grouped = {}
         for key, context, record in eligible:
             if record.get("telegram_sent"):
@@ -783,12 +808,16 @@ class Ed2kFolderWatcher(_PluginBase):
             if self._telegram_enabled and not record.get("telegram_sent"):
                 failed.append(context)
                 continue
-            self._clear_retry_failure(key)
+            if not record.get("upload_mode"):
+                self._clear_retry_failure(key)
             if context["kind"] == "cloud":
                 self._maybe_delete_cloud_source(context["storage"], context["item"], record, output, cache_path, records, self._stopping)
             elif self._delete_source and (output is not None or self._telegram_enabled):
                 path = context["path"]
                 try:
+                    if record.get("upload_mode"):
+                        self._finish_uploaded_local_delete(path, record, output, cache_path, records)
+                        continue
                     final = path.stat()
                     if context["signature"] == (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) and not self._stopping.is_set():
                         self._unlink_source(path, final)
@@ -799,6 +828,8 @@ class Ed2kFolderWatcher(_PluginBase):
                 except OSError:
                     record["delete_failed"] = True
                     self._write_results(output, cache_path, records)
+            elif record.get("upload_mode"):
+                self._clear_retry_failure(key)
         if failed:
             retry_batch = self._new_batch(f"{batch['source']}-retry")
             for context in failed:
@@ -1336,6 +1367,10 @@ class Ed2kFolderWatcher(_PluginBase):
                 if isinstance(err, FileNotFoundError):
                     self._empty_files_waiting.discard(key)
                     return
+                try:
+                    self._record_upload_error(path, err)
+                except (OSError, ValueError):
+                    logger.warning("自动生成ED2K链接：上传失败状态未能保存，仍保留本地文件")
                 identity = list(signature) if isinstance(signature, tuple) else None
                 failures, exhausted = self._retry_failure(key, "local", identity, path.name, f"{type(err).__name__}: {err}")
                 if exhausted:
@@ -1662,6 +1697,9 @@ class Ed2kFolderWatcher(_PluginBase):
             _, output, cache_path = self._paths()
             output = output if self._output_enabled else None
             records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+            if self._skip_uploaded_cloud(storage, item, records):
+                self._cloud_succeeded(record_key(item))
+                return
             key = record_key(item)
             record = records.get(key)
             old_key = legacy_record_key(item)
@@ -1766,6 +1804,8 @@ class Ed2kFolderWatcher(_PluginBase):
                 self._maybe_delete_cloud_source(storage, item, record, output, cache_path, records, stopping)
 
     def _maybe_delete_cloud_source(self, storage, item, record, output, cache_path, records, stopping):
+        if self._uploaded_record(item, records):
+            return
         from .cloud_storage import CloudError, transient_read_error
         if stopping is not self._stopping or stopping.is_set() or not self._delete_source or not self._cloud_delete_enabled:
             return
@@ -1937,6 +1977,8 @@ class Ed2kFolderWatcher(_PluginBase):
         return self._send_telegram(Path(path_name), text, target=target)
 
     def _notify_record(self, path: Path, record: dict, checkpoint=None) -> None:
+        if record.get("upload_mode") and not record.get("upload_verified"):
+            return
         if not self._telegram_enabled:
             return
         target_key = self._telegram_target_key()
@@ -1975,6 +2017,7 @@ class Ed2kFolderWatcher(_PluginBase):
         record["telegram_target"] = target_key if record["telegram_sent"] else ""
 
     def _notify_records(self, records: list, checkpoint=None) -> None:
+        records = [record for record in records if not record.get("upload_mode") or record.get("upload_verified")]
         if not records:
             return
         if not self._telegram_enabled:
@@ -2026,6 +2069,7 @@ class Ed2kFolderWatcher(_PluginBase):
             return [record]
         candidates = [item for item in records.values()
                       if not item.get("telegram_sent")
+                      and (not item.get("upload_mode") or item.get("upload_verified"))
                       and telegram_aggregate_key(item.get("name", "")) == key
                       and not record_problem(item)
                       and time.time() - float(item.get("generated_at", time.time())) <= self._telegram_aggregate_window]
@@ -2069,7 +2113,8 @@ class Ed2kFolderWatcher(_PluginBase):
     def _write_results(self, output: Optional[Path], cache_path: Path, records: dict) -> None:
         self._atomic_write(cache_path, json.dumps(records, ensure_ascii=False, indent=2))
         if output is not None:
-            links = sorted({item["link"] for item in records.values() if not record_problem(item)})
+            links = sorted({item["link"] for item in records.values() if not record_problem(item)
+                            and (not item.get("upload_mode") or item.get("upload_verified"))})
             self._atomic_write(output, "\n".join(links) + ("\n" if links else ""))
 
     def _refresh_link_names(self) -> None:
@@ -2108,7 +2153,7 @@ class Ed2kFolderWatcher(_PluginBase):
                 return
             self._empty_files_waiting.discard(str(path))
             if stat.st_size < minimum_file_bytes(self._min_file_size):
-                if self._delete_small_files:
+                if self._delete_small_files and self._upload_root_for(path) is None:
                     if stat.st_mtime + self._min_age > time.time():
                         self._queue_event(path)
                         return
@@ -2119,9 +2164,14 @@ class Ed2kFolderWatcher(_PluginBase):
             if stat.st_mtime + self._min_age > time.time():
                 self._queue_event(path)
                 return
+            if self._upload_root_for(path):
+                self._process_local_upload(path, stat, output, cache_path)
+                return
             records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
             key = str(path.resolve())
             record = records.get(key)
+            if record and record.get("upload_mode") and not record.get("upload_verified"):
+                return
             signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_dev)
             unchanged = record and not record_problem(record) and (record.get("size"), record.get("mtime_ns")) == signature[:2]
             if unchanged and record.get("inode") is not None:
@@ -2184,6 +2234,9 @@ class Ed2kFolderWatcher(_PluginBase):
             else:
                 self._clear_retry_failure(key)
             if self._delete_source and delivered and (output is not None or self._telegram_enabled):
+                if record.get("upload_mode"):
+                    self._delete_uploaded_local(path, record, output, cache_path, records)
+                    return
                 final = path.stat()
                 if signature == (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) and stat.st_ctime_ns == final.st_ctime_ns and not self._stopping.is_set():
                     try:
@@ -2284,18 +2337,20 @@ class Ed2kFolderWatcher(_PluginBase):
             "worker_alive": worker_alive,
         }
 
-    def scan(self, retry_failed=False) -> None:
-        if not self._folder or self._stopping.is_set():
+    def scan(self, retry_failed=False, upload_only=False) -> None:
+        if (not self._folder and not self._local_upload_enabled) or self._stopping.is_set():
             return
         if retry_failed:
             self._clear_retry_failures("local")
         folder, output, cache_path = self._paths()
         with self._lock:
             records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+            if retry_failed and upload_only:
+                self._reset_upload_attempts(cache_path, records)
             if self._output_enabled:
                 self._write_results(output, cache_path, records)
         batch_id = self._new_batch("local-scan")
-        for folder in self._local_roots():
+        for folder in self._local_roots(upload_only=upload_only):
             if not folder.is_dir():
                 logger.warning(f"自动生成ED2K链接：目录不存在：{folder}")
                 continue
@@ -2312,6 +2367,8 @@ class Ed2kFolderWatcher(_PluginBase):
         services = []
         if self._folder and self._scan_enabled:
             services.append({"id": "Ed2kFolderWatcher", "name": "扫描本地文件夹并生成 ED2K", "trigger": CronTrigger.from_crontab(self._cron), "func": self.scan})
+        if self._local_upload_enabled:
+            services.append({"id": "Ed2kFolderWatcherUpload", "name": "本地计算上传增量补扫", "trigger": CronTrigger.from_crontab(DEFAULT_CRON), "func": lambda: self.scan(upload_only=True)})
         if self._cloud_enabled:
             if self._cloud_scan_enabled:
                 services.append({"id": "Ed2kFolderWatcherCloud", "name": "网盘定时增量补扫", "trigger": CronTrigger.from_crontab(self._cloud_cron), "func": self.queue_cloud_scan})
@@ -2335,7 +2392,9 @@ class Ed2kFolderWatcher(_PluginBase):
     def _source_matches(self, path: Path, record: dict) -> bool:
         if record.get("source_type") == "cloud":
             return False
-        if record_problem(record) or record.get("source_deleted") is True or not self._folder or not self._eligible(path):
+        if record.get("upload_mode") and not record.get("upload_verified"):
+            return False
+        if record_problem(record) or record.get("source_deleted") is True or not self._eligible(path):
             return False
         current = path.stat()
         if (record.get("size"), record.get("mtime_ns")) != (current.st_size, current.st_mtime_ns):
@@ -2437,6 +2496,8 @@ class Ed2kFolderWatcher(_PluginBase):
                               "generated_at": record.get("generated_at"), "source_status": source_status,
                               "source_type": record.get("source_type", "local"), "storage": record.get("storage", "local"),
                               "source_path": record.get("source_path", path),
+                              "upload_state": record.get("upload_state", ""), "upload_note": record.get("upload_note", ""),
+                              "upload_path": record.get("upload_cloud_item", {}).get("path", ""),
                               "deleted_at": record.get("deleted_at"), "cloud_delete_state": record.get("cloud_delete_state", ""), "cloud_delete_note": record.get("cloud_delete_note", "")})
             return {"ok": True, "items": items, "total": len(records), "limit": 100,
                     "delete_source_enabled": self._delete_source, "cloud_delete_enabled": self._cloud_delete_enabled,
@@ -2468,7 +2529,7 @@ class Ed2kFolderWatcher(_PluginBase):
 
     def _save_config(self) -> None:
         fields = ("enabled", "movie_series_parallel", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_aggregate", "telegram_aggregate_window", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
-        config = {name: getattr(self, f"_{name}") for name in fields}
+        config = {name: getattr(self, f"_{name}") for name in fields + UPLOAD_FIELDS + ("retry_limit",)}
         config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce, cloud_delete_scope=self._cloud_delete_scope)
         self.update_config(config)
 
@@ -2491,6 +2552,12 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextField", "min_age", "公共稳定等待秒数", type="number", hint="本地和网盘共用，请选择上传完成目录。", persistent_hint=True),
             field("VTextField", "min_file_size_gb", "生成链接最小文件大小（GB）", type="number", step="any", min=0, placeholder="例如0.5、1、1.5，仅填数值", hint="小于此值不生成、不转发；留空或0不限，单位GB。", persistent_hint=True),
             field("VTextField", "retry_limit", "失败后自动重试次数", type="number", min=0, max=10, hint="0表示不自动重试；最多10次，不含首次处理。达到上限后保留失败记录，可手动增量补扫重试。", persistent_hint=True),
+            {"component": "VCardTitle", "text": "本地计算，上传115"},
+            field("VSwitch", "local_upload_enabled", "启用本地计算上传115"),
+            field("VSelect", "local_upload_mode", "上传方式", items=[{"title": "使用现有MP整理上传（复制）", "value": "mp"}, {"title": "调用115插件直接上传（不整理）", "value": "direct"}]),
+            field("VTextField", "local_upload_folder", "本地计算上传目录", hint="多个目录用英文逗号分隔；自动监控新增文件，包含子目录及过滤沿用通用设置。", persistent_hint=True),
+            field("VTextField", "local_upload_target", "115上传目标目录（直传模式）", hint="单个115绝对路径；保留本地根目录内相对结构，同名异内容不覆盖。", persistent_hint=True),
+            {"component": "VAlert", "props": {"type": "info"}, "text": "先计算本地ED2K与SHA1，再上传并核验后转发。MP模式不主动整理，须用复制上传并保留本地文件；直传复用115插件。完成后删源只删本地文件，上传后的网盘副本不自动删除。"},
             {"component": "VCardTitle", "text": "本地监控"},
             field("VTextField", "folder", "本地监控目录", placeholder="/downloads/complete,/media/movies", hint="容器内绝对路径，多个用英文逗号分隔，最多32个。", persistent_hint=True),
             field("VSwitch", "monitor_enabled", "本地实时监控文件"),
@@ -2516,4 +2583,4 @@ class Ed2kFolderWatcher(_PluginBase):
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅用于带话题的超级群组。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "movie_series_parallel": self._movie_series_parallel, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared"}
+        ]}], {"enabled": False, "movie_series_parallel": self._movie_series_parallel, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared", "local_upload_enabled": False, "local_upload_mode": "mp", "local_upload_folder": "", "local_upload_target": ""}

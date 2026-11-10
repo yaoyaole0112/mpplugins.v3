@@ -533,15 +533,16 @@
   },
   "Ed2kFolderWatcher": {
     "name": "自动生成ED2K链接",
-    "description": "监控本地或115/CloudDrive目录，电影与剧集受控双路生成ED2K并转发Telegram，支持取消等待任务。",
+    "description": "监控本地或网盘生成ED2K，支持本地计算后经MP或115插件上传、校验及Telegram转发。",
     "labels": "工具,文件管理",
-    "version": "1.19.4",
+    "version": "1.20.0",
     "icon": "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png",
     "author": "helios",
     "v3": true,
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
     "level": 1,
     "history": {
+      "v1.20.0": "新增本地计算上传115卡片：可选择现有MP复制整理或115插件直传，本地一次读取计算ED2K与SHA1，上传大小及SHA1一致后才输出转发；保留相对目录、同名异内容不覆盖，失败有限重试且结果不明不盲目重复上传，保护网盘副本并仅在全部输出成功后删除本地源文件。",
       "v1.19.4": "新增受控频道增量读取接口供站点刷流插件复用Telethon个人账号；读取与发送共用Session文件锁，限制单轮耗时并支持FloodWait退避，避免并发打开Session影响原有发送。",
       "v1.19.3": "修复聚合等待超时仍被同剧未完成任务阻塞：到期先发已完成链接，剩余文件后续补发；本地和网盘哈希读取进度中检查到期分组，避免长文件拖延转发。新同组文件重置等待，重复登记不延时；保持逐目标投递记录、失败重试上限和成功后删源校验。",
       "v1.19.2": "等待队列改为已就绪任务按入队先后处理，后来发现的其他剧不再按名称插队；后台调度与展示共用排序规则，保留稳定等待、重试退避及双路限制。排队序号改为No.1形式，文件名下改为显示文件大小。",

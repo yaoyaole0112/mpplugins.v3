@@ -46,6 +46,22 @@ test('common settings put toggles before deletion and pair inputs without an emp
   assert.equal(source.includes('共用一个计算线程'), false)
 })
 
+test('local upload card precedes local monitoring and offers MP and direct modes', async () => {
+  const source = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
+  assert.ok(source.indexOf('data-testid="local-upload"') < source.indexOf('data-testid="local-source"'))
+  const upload = source.split('data-testid="local-upload"')[1].split('</article>')[0]
+  assert.match(upload, /本地计算，上传115/)
+  for (const name of ['local_upload_enabled', 'local_upload_mode', 'local_upload_folder', 'local_upload_target']) {
+    assert.ok(upload.includes(`v-model="settings.${name}"`), name)
+    assert.ok(source.includes(`'${name}'`), name)
+  }
+  assert.match(upload, /value="mp"/)
+  assert.match(upload, /value="direct"/)
+  assert.match(upload, /复制上传/)
+  assert.match(upload, /只删除本地|仅删除本地/)
+  assert.match(source, /request\('local-upload\/run'/)
+})
+
 test('built federation entry resolves all public components and styles', async () => {
   const source = await readFile(entryUrl, 'utf8')
   assert.equal(source.includes('${__federation_expose_'), false)
