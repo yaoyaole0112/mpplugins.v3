@@ -3,7 +3,9 @@ import fcntl
 import json
 import os
 import tempfile
+import time
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -64,14 +66,19 @@ class TelegramUserAccount:
                 path.chmod(0o600)
 
     @contextmanager
-    def exclusive(self):
+    def exclusive(self, wait_seconds=0):
         self._permissions()
         descriptor = os.open(self.directory / "account.lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise UserAccountError("个人账号正在登录或发送；请等待当前任务完成，不要并行操作同一 Session", 60) from None
+            deadline = time.monotonic() + wait_seconds
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise UserAccountError("个人账号正在登录或发送；请等待当前任务完成，不要并行操作同一 Session", 60) from None
+                    time.sleep(0.1)
             yield
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -101,7 +108,7 @@ class TelegramUserAccount:
             except Exception:
                 pass
 
-    async def _operation(self, credentials, destination=None, link=None, thread_id=None):
+    async def _operation(self, credentials, destination=None, link=None, thread_id=None, channels=None, last_ids=None):
         client = None
         try:
             client = self._client(credentials)
@@ -114,15 +121,59 @@ class TelegramUserAccount:
             if destination is not None:
                 recipient = int(destination) if destination.lstrip("-").isdigit() else destination
                 await client.send_message(recipient, link, parse_mode=None, link_preview=False, reply_to=thread_id)
+            if channels is not None:
+                rows = []
+                errors = []
+                cursors = {}
+                processed_channels = []
+                read_started = time.monotonic()
+                for channel in channels:
+                    if time.monotonic() - read_started >= 15:
+                        break
+                    cursor = int((last_ids or {}).get(channel) or 0)
+                    processed_channels.append(channel)
+                    try:
+                        async with asyncio.timeout(8):
+                            recipient = int(channel) if str(channel).lstrip("-").isdigit() else channel
+                            entity = await client.get_entity(recipient)
+                            latest_id = cursor
+                            kwargs = {"min_id": cursor, "reverse": True, "limit": 200}
+                            if not cursor:
+                                kwargs["offset_date"] = datetime.now(timezone.utc) - timedelta(hours=72)
+                            async for message in client.iter_messages(entity, **kwargs):
+                                message_id = int(getattr(message, "id", 0) or 0)
+                                latest_id = max(latest_id, message_id)
+                                message_date = getattr(message, "date", None)
+                                text = getattr(message, "message", None) or getattr(message, "text", None) or ""
+                                if message_id and message_date and text:
+                                    rows.append({
+                                        "channel": channel,
+                                        "message_id": message_id,
+                                        "published_at": message_date.timestamp(),
+                                        "text": str(text),
+                                    })
+                            cursors[channel] = latest_id
+                    except Exception as error:
+                        if type(error).__name__ in {
+                            "FloodWaitError", "SlowModeWaitError", "FloodPremiumWaitError",
+                        }:
+                            raise
+                        errors.append({"channel": channel, "error": type(error).__name__})
+                rows.sort(key=lambda row: (row["published_at"], row["message_id"]))
+                return {"messages": rows, "cursors": cursors, "errors": errors,
+                        "processed_channels": processed_channels}
             return {"user_id": me.id, "authorized": True}
         finally:
             await self._disconnect(client)
 
-    def _execute(self, destination=None, link=None, thread_id=None):
+    def _execute(self, destination=None, link=None, thread_id=None, channels=None, last_ids=None):
         try:
             credentials = self._credentials()
-            with self.exclusive():
-                result = asyncio.run(asyncio.wait_for(self._operation(credentials, destination, link, thread_id), timeout=60))
+            with self.exclusive(wait_seconds=35 if destination is not None else 0):
+                result = asyncio.run(asyncio.wait_for(
+                    self._operation(credentials, destination, link, thread_id, channels, last_ids),
+                    timeout=30 if channels is not None else 60,
+                ))
                 self._permissions()
                 return result
         except UserAccountError:
@@ -143,6 +194,10 @@ class TelegramUserAccount:
 
     def send(self, destination: str, link: str, thread_id=None):
         return self._execute(destination, link, thread_id)
+
+    def read_channel_messages(self, channels: list[str], last_ids: dict):
+        """Fetch new messages without opening a second client or sharing the session unsafely."""
+        return self._execute(channels=channels, last_ids=last_ids)
 
     def save_credentials(self, credentials):
         self._permissions()

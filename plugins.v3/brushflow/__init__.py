@@ -47,6 +47,8 @@ from app.sdk.network import RequestUtils
 from app.sdk.utilities import StringUtils
 
 from .models import BrushFlowSettingsPayload, BrushTaskPayload, BrushTaskStatePayload
+from .models import ChannelDedupSettingsPayload
+from .channel_dedup import normalize_title, parse_candidate_file, parse_channel_messages, parse_torrent_files, same_release, specs_match
 
 
 TASK_CONFIG_FIELDS = (
@@ -249,7 +251,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.2.1"
+    plugin_version = "6.3.0"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -263,6 +265,11 @@ class BrushFlow(_PluginBase):
 
     def init_plugin(self, config: dict = None) -> None:
         """初始化全局开关、任务配置、运行锁和历史数据迁移"""
+        old_poll_lock = getattr(self, "_channel_dedup_lock", None)
+        if old_poll_lock:
+            self._channel_stopping = True
+            with old_poll_lock:
+                pass
         raw_config = config or {}
         self._task_context = threading.local()
         self._task_locks: Dict[str, threading.Lock] = {}
@@ -271,6 +278,32 @@ class BrushFlow(_PluginBase):
         self._runtime_lock = threading.Lock()
         self._runtime: Dict[str, dict] = {}
         self._subscribe_infos: Dict[str, List[str]] = {}
+        self._channel_dedup_lock = threading.Lock()
+        self._channel_state_lock = threading.RLock()
+        self._channel_dedup_retry_after = 0
+        self._channel_identity_cache = {}
+        self._channel_generation = 0
+        self._channel_stopping = False
+        try:
+            channel_config = ChannelDedupSettingsPayload.model_validate({
+                "enabled": raw_config.get("channel_dedup_enabled", False),
+                "channels": raw_config.get("channel_dedup_channels", []),
+                "attributes": raw_config.get(
+                    "channel_dedup_attributes", ["resolution", "effects", "codec", "source", "fps"]
+                ),
+                "size_tolerance_pct": raw_config.get("channel_dedup_size_tolerance_pct", 5),
+            })
+        except ValueError as err:
+            channel_config = ChannelDedupSettingsPayload()
+            logger.warning(f"频道去重配置无效，已使用默认值：{err}")
+        self._channel_dedup_enabled = channel_config.enabled
+        self._channel_dedup_channels = channel_config.channels
+        self._channel_dedup_attributes = channel_config.attributes
+        self._channel_dedup_size_tolerance_pct = channel_config.size_tolerance_pct
+        self._channel_dedup_state = self.get_data("channel_dedup_state") or {
+            "cursors": {}, "records": [], "last_poll_at": None, "last_error": "", "last_poll_ok": None,
+        }
+        self._prune_channel_dedup_records()
         self._enabled = bool(raw_config.get("enabled", False))
         self._show_sidebar_nav = bool(raw_config.get("show_sidebar_nav", True))
 
@@ -375,6 +408,27 @@ class BrushFlow(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "更新刷流插件设置",
+            },
+            {
+                "path": "/channel-dedup",
+                "endpoint": self.get_channel_dedup,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取频道监听与去重状态",
+            },
+            {
+                "path": "/channel-dedup/settings",
+                "endpoint": self.update_channel_dedup_settings,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "更新频道监听设置",
+            },
+            {
+                "path": "/channel-dedup/poll",
+                "endpoint": self.request_channel_dedup_poll,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "立即读取频道新消息",
             },
             {
                 "path": "/tasks",
@@ -508,10 +562,25 @@ class BrushFlow(_PluginBase):
                         "func_kwargs": {"task_id": task.id},
                     }
                 )
+        if getattr(self, "_channel_dedup_enabled", False) and self._channel_dedup_channels:
+            services.append(
+                {
+                    "id": "ChannelDedupPoll",
+                    "name": "频道资源记录同步",
+                    "trigger": "interval",
+                    "func": self.poll_channel_messages,
+                    "kwargs": {"minutes": 1},
+                }
+            )
         return services
 
     def stop_service(self) -> None:
         """插件不再维护私有调度器，公共服务由宿主统一停止"""
+        self._channel_stopping = True
+        poll_lock = getattr(self, "_channel_dedup_lock", None)
+        if poll_lock:
+            with poll_lock:
+                pass
         with getattr(self, "_runtime_lock", threading.Lock()):
             for runtime in getattr(self, "_runtime", {}).values():
                 runtime.update({"state": "idle", "operation": None})
@@ -540,6 +609,131 @@ class BrushFlow(_PluginBase):
     def get_status(self) -> schemas.Response:
         """返回全局设置、任务摘要和前端可选项"""
         return schemas.Response(success=True, data=self._build_status_data())
+
+    def get_channel_dedup(self) -> schemas.Response:
+        return schemas.Response(success=True, data=self._channel_dedup_payload(include_records=True))
+
+    def update_channel_dedup_settings(self, payload: ChannelDedupSettingsPayload) -> schemas.Response:
+        with self._channel_state_lock:
+            self._channel_dedup_enabled = payload.enabled
+            self._channel_dedup_channels = payload.channels
+            self._channel_dedup_attributes = payload.attributes
+            self._channel_dedup_size_tolerance_pct = payload.size_tolerance_pct
+            self._channel_generation += 1
+            self._channel_dedup_retry_after = 0
+            self._prune_channel_dedup_records()
+        self._save_config()
+        self._refresh_scheduler()
+        if payload.enabled and payload.channels and self.get_state():
+            ThreadHelper().submit(self.poll_channel_messages)
+        return schemas.Response(success=True, data=self._channel_dedup_payload(include_records=True))
+
+    def request_channel_dedup_poll(self) -> schemas.Response:
+        if not self._channel_dedup_enabled:
+            return schemas.Response(success=False, message="请先开启频道监听")
+        if not self._channel_dedup_channels:
+            return schemas.Response(success=False, message="请至少添加一个 Telegram 频道")
+        try:
+            ThreadHelper().submit(self.poll_channel_messages)
+        except Exception as err:
+            logger.error(f"提交频道消息同步任务失败：{type(err).__name__}")
+            return schemas.Response(success=False, message="提交频道同步失败")
+        return schemas.Response(success=True, message="已提交频道消息同步")
+
+    def poll_channel_messages(self) -> None:
+        """通过 ED2K 插件的受锁 Telethon Session 增量读取频道消息。"""
+        if getattr(self, "_channel_stopping", False) or not self.get_state():
+            return
+        if not getattr(self, "_channel_dedup_enabled", False) or not self._channel_dedup_channels:
+            return
+        if time.monotonic() < getattr(self, "_channel_dedup_retry_after", 0):
+            return
+        if not self._channel_dedup_lock.acquire(blocking=False):
+            return
+        try:
+            with self._channel_state_lock:
+                self._prune_channel_dedup_records(save=False)
+                state = copy.deepcopy(self._channel_dedup_state)
+                channels = list(self._channel_dedup_channels)
+                offset = int(state.get("channel_offset") or 0) % len(channels)
+                channels = channels[offset:] + channels[:offset]
+                generation = self._channel_generation
+            try:
+                from app.runtime.extensions.plugin.manager import PluginManager
+
+                ed2k = next(
+                    (
+                        plugin for plugin in PluginManager().running_plugins.values()
+                        if type(plugin).__name__ == "Ed2kFolderWatcher"
+                    ),
+                    None,
+                )
+                if not ed2k or not callable(getattr(ed2k, "read_telegram_channel_messages", None)):
+                    raise RuntimeError("自动生成ED2K链接插件未运行")
+                result = ed2k.read_telegram_channel_messages(channels, dict(state.get("cursors") or {}))
+                cutoff = time.time() - 72 * 60 * 60
+                records = list(state.get("records") or [])
+                known = {(item.get("channel"), item.get("message_id"), item.get("file_key")) for item in records}
+                parsed_count = 0
+                for message in result.get("messages") or []:
+                    channel = str(message.get("channel") or "")
+                    message_id = int(message.get("message_id") or 0)
+                    if message_id:
+                        state.setdefault("cursors", {})[channel] = max(
+                            int(state.get("cursors", {}).get(channel) or 0), message_id
+                        )
+                    parsed_records = parse_channel_messages(
+                        channel, message_id, message.get("published_at"), message.get("text")
+                    )
+                    for record in parsed_records:
+                        key = (channel, message_id, record.get("file_key"))
+                        if record["published_at"] >= cutoff and key not in known:
+                            records.append(record)
+                            known.add(key)
+                            parsed_count += 1
+                for channel, message_id in (result.get("cursors") or {}).items():
+                    state.setdefault("cursors", {})[str(channel)] = max(
+                        int(state.get("cursors", {}).get(str(channel)) or 0), int(message_id or 0)
+                    )
+                errors = result.get("errors") or []
+                processed_count = len(result.get("processed_channels") or channels)
+                state["channel_offset"] = (offset + processed_count) % len(channels)
+                state["records"] = records
+                state["last_poll_at"] = time.time()
+                state["last_poll_ok"] = not errors
+                state["last_error"] = "; ".join(
+                    f"{item.get('channel')}: {item.get('error')}" for item in errors
+                )
+                with self._channel_state_lock:
+                    if generation != self._channel_generation or self._channel_stopping:
+                        return
+                    self._channel_dedup_retry_after = 0
+                    self._channel_dedup_state = state
+                    self._prune_channel_dedup_records(save=False)
+                    self._save_channel_dedup_state()
+                if errors:
+                    logger.warning(f"频道资源记录同步部分失败：{state['last_error']}")
+                else:
+                    logger.info(
+                        f"频道资源记录同步完成：新增 {parsed_count} 条结构化记录，保留 {len(state['records'])} 条"
+                    )
+            except Exception as err:
+                state["last_poll_at"] = time.time()
+                state["last_poll_ok"] = False
+                state["last_error"] = (
+                    "请先更新并启用自动生成ED2K链接插件，完成 Telegram 个人账号授权"
+                    if isinstance(err, RuntimeError) else type(err).__name__
+                )
+                with self._channel_state_lock:
+                    if generation != self._channel_generation or self._channel_stopping:
+                        return
+                    retry_after = int(getattr(err, "retry_after", 60) or 60)
+                    self._channel_dedup_retry_after = time.monotonic() + max(60, min(retry_after, 86400))
+                    self._channel_dedup_state = state
+                    self._save_channel_dedup_state()
+                logger.warning(f"频道资源记录同步失败：{state['last_error']}")
+        finally:
+            self._channel_dedup_lock.release()
 
     def update_settings(self, payload: BrushFlowSettingsPayload) -> schemas.Response:
         """更新插件全局开关并刷新宿主任务调度"""
@@ -684,11 +878,65 @@ class BrushFlow(_PluginBase):
             "schema_version": self.DATA_SCHEMA_VERSION,
             "enabled": bool(getattr(self, "_enabled", False)),
             "show_sidebar_nav": bool(getattr(self, "_show_sidebar_nav", True)),
+            "channel_dedup_enabled": bool(getattr(self, "_channel_dedup_enabled", False)),
+            "channel_dedup_channels": list(getattr(self, "_channel_dedup_channels", [])),
+            "channel_dedup_attributes": list(getattr(self, "_channel_dedup_attributes", [])),
+            "channel_dedup_size_tolerance_pct": getattr(self, "_channel_dedup_size_tolerance_pct", 5),
             "tasks": [task.to_dict() for task in getattr(self, "_task_configs", {}).values()],
         }
         config.update({field: getattr(self, f"_{field}", None) for field in GLOBAL_LIMIT_FIELDS})
         config.update({field: getattr(self, f"_{field}", None) for field in GLOBAL_DYNAMIC_DELETE_FIELDS})
         return config
+
+    def _save_channel_dedup_state(self) -> None:
+        self.save_data("channel_dedup_state", self._channel_dedup_state)
+
+    def _prune_channel_dedup_records(self, save: bool = True) -> None:
+        with self._channel_state_lock:
+            state = getattr(self, "_channel_dedup_state", None)
+            if not isinstance(state, dict):
+                self._channel_dedup_state = {
+                    "cursors": {}, "records": [], "last_poll_at": None, "last_error": "", "last_poll_ok": None,
+                }
+                return
+            cutoff = time.time() - 72 * 60 * 60
+            records = state.get("records") if isinstance(state.get("records"), list) else []
+            channels = set(self._channel_dedup_channels)
+            kept_records = [
+                row for row in records
+                if isinstance(row, dict) and isinstance(row.get("published_at"), (int, float))
+                and cutoff <= row["published_at"] <= time.time() + 300
+                and row.get("channel") in channels
+            ]
+            cursors = state.get("cursors") if isinstance(state.get("cursors"), dict) else {}
+            kept_cursors = {channel: value for channel, value in cursors.items() if channel in channels}
+            changed = kept_records != state.get("records") or kept_cursors != state.get("cursors")
+            state["records"] = kept_records
+            state["cursors"] = kept_cursors
+            if save and changed:
+                self._save_channel_dedup_state()
+
+    def _channel_dedup_payload(self, include_records: bool = False) -> dict:
+        with self._channel_state_lock:
+            self._prune_channel_dedup_records()
+            state = self._channel_dedup_state
+            payload = {
+                "enabled": self._channel_dedup_enabled,
+                "channels": list(self._channel_dedup_channels),
+                "attributes": list(self._channel_dedup_attributes),
+                "size_tolerance_pct": self._channel_dedup_size_tolerance_pct,
+                "retention_hours": 72,
+                "last_poll_at": state.get("last_poll_at"),
+                "last_poll_ok": state.get("last_poll_ok"),
+                "last_error": state.get("last_error") or "",
+                "syncing": self._channel_dedup_lock.locked(),
+                "record_count": len(state.get("records") or []),
+            }
+            if include_records:
+                payload["records"] = sorted(
+                    state.get("records") or [], key=lambda row: row["published_at"], reverse=True
+                )[:100]
+            return payload
 
     def _save_config(self) -> None:
         """保存全局设置和全部任务配置"""
@@ -1118,6 +1366,7 @@ class BrushFlow(_PluginBase):
         return {
             "enabled": self.get_state(),
             "show_sidebar_nav": self._show_sidebar_nav,
+            "channel_dedup": self._channel_dedup_payload(include_records=False),
             **{field: getattr(self, f"_{field}", None) for field in GLOBAL_LIMIT_FIELDS},
             **{field: getattr(self, f"_{field}", None) for field in GLOBAL_DYNAMIC_DELETE_FIELDS},
             "summary": aggregate,
@@ -2749,6 +2998,24 @@ class BrushFlow(_PluginBase):
             recent_selection = self._recent_episode_file_selection(torrent_content, torrent.title)
             if not recent_selection:
                 return None
+        if getattr(self, "_channel_dedup_enabled", False) and getattr(self, "_channel_dedup_attributes", []):
+            dedup_selection = self._channel_dedup_file_selection(
+                torrent_content,
+                torrent.title,
+                accepted_paths=recent_selection.get("accepted") if recent_selection else None,
+            )
+            if dedup_selection and dedup_selection["excluded"]:
+                if recent_selection:
+                    remaining = set(recent_selection.get("accepted") or []) - dedup_selection["excluded"]
+                    if not remaining:
+                        logger.info(f"频道同规格去重排除种子 {torrent.title}：符合条件的剧集文件均已在监听频道发布")
+                        return None
+                    recent_selection = {**recent_selection, "accepted": remaining}
+                elif dedup_selection["video_count"] and dedup_selection["matched_video_count"] >= dedup_selection["video_count"]:
+                    logger.info(f"频道同规格去重排除种子 {torrent.title}：包内视频均已在监听频道发布")
+                    return None
+                else:
+                    recent_selection = {"accepted": dedup_selection["remaining_paths"]}
         downloader_helper = DownloaderHelper()
         if downloader_helper.is_downloader("qbittorrent", service=service):
             up_limit = up_speed * 1024 if up_speed else None
@@ -2968,6 +3235,125 @@ class BrushFlow(_PluginBase):
             logger.info(f"最近播出剧集规则排除 {title}：没有符合日期范围的剧集")
             return None
         return {"accepted": set(accepted), "videos": set(video_paths)}
+
+    def _channel_dedup_file_selection(
+        self,
+        torrent_content: Union[str, bytes],
+        title: str,
+        accepted_paths: Optional[Set[str]] = None,
+    ) -> Optional[dict]:
+        """逐集比较频道记录与种子内部媒体文件，未知信息一律放行。"""
+        if not isinstance(torrent_content, bytes) or not self._channel_dedup_attributes:
+            return None
+        with self._channel_state_lock:
+            self._prune_channel_dedup_records()
+            records = list(self._channel_dedup_state.get("records") or [])
+            attributes = list(self._channel_dedup_attributes)
+            tolerance = self._channel_dedup_size_tolerance_pct
+        if not records:
+            return None
+        files = parse_torrent_files(torrent_content)
+        if not files:
+            logger.info(f"频道同规格去重跳过 {title}：无法读取种子内逐文件大小与路径，按未命中放行")
+            return None
+        selected_keys = {
+            str(path).replace("\\", "/").casefold() for path in accepted_paths or []
+        } if accepted_paths is not None else None
+        file_paths = [item["path"] for item in files]
+        considered = [
+            item for item in files
+            if self._video_file(item["path"])
+            and (selected_keys is None or item["path"].replace("\\", "/").casefold() in selected_keys)
+        ]
+        excluded: Set[str] = set()
+        matched_count = 0
+        episode_records = {}
+        for record in records:
+            for number in record.get("episodes") or []:
+                episode_records.setdefault((record.get("season"), number), []).append(record)
+        for item in considered:
+            candidate = parse_candidate_file(item["path"], item.get("size"), title)
+            if not candidate:
+                continue
+            if getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None):
+                continue
+            matched_records = []
+            for episode in candidate["episodes"]:
+                one_episode = {**candidate, "episodes": [episode]}
+                plausible = [
+                    record for record in episode_records.get((candidate["season"], episode), [])
+                    if specs_match(one_episode, record, attributes, tolerance)
+                    and ("size" not in attributes or set(candidate["episodes"]) == set(record.get("episodes") or []))
+                ]
+                matched_record = next(
+                    (record for record in plausible if same_release(one_episode, record, attributes, tolerance)), None
+                )
+                if not matched_record and any(record.get("tmdb_id") for record in plausible) and not candidate.get("tmdb_id"):
+                    identity = self._channel_candidate_tmdb_identity(item["path"], title)
+                    if identity:
+                        candidate["tmdb_id"] = identity
+                        one_episode["tmdb_id"] = identity
+                        matched_record = next(
+                            (record for record in plausible if same_release(one_episode, record, attributes, tolerance)),
+                            None,
+                        )
+                matched_records.append(matched_record)
+            if matched_records and all(matched_records):
+                excluded.add(item["path"])
+                matched_count += 1
+                matched_from = sorted({record.get("channel", "") for record in matched_records if record})
+                episode_text = ",".join(f"E{number:02d}" for number in candidate["episodes"])
+                logger.info(
+                    f"频道同规格去重命中 {item['path']}：S{candidate['season']:02d}{episode_text}；"
+                    f"频道 {', '.join(matched_from)}；匹配规格 "
+                    f"{', '.join(f'{key}={candidate['specs'].get(key)}' for key in attributes)}"
+                )
+        if not excluded:
+            return None
+        excluded_keys = {path.replace("\\", "/").casefold() for path in excluded}
+        return {
+            "excluded": excluded,
+            "remaining_paths": {
+                path for path in file_paths if path.replace("\\", "/").casefold() not in excluded_keys
+            },
+            "video_count": len(considered),
+            "matched_video_count": matched_count,
+        }
+
+    def _channel_candidate_tmdb_identity(self, path: str, title: str) -> Optional[int]:
+        """只对已有同季集/规格候选查询身份，并拒绝模糊剧名误识别。"""
+        meta = MetaInfo(path.rsplit("/", 1)[-1])
+        if getattr(meta, "episode_group", None):
+            return None
+        if not getattr(meta, "name", None):
+            meta = MetaInfo(title)
+        names = {
+            normalize_title(getattr(meta, field, None)) for field in ("cn_name", "en_name", "name")
+        } - {""}
+        if not names:
+            return None
+        key = (tuple(sorted(names)), str(getattr(meta, "year", "") or ""))
+        with self._channel_state_lock:
+            cached_identity = self._channel_identity_cache.get(key)
+            if cached_identity and cached_identity[0] > time.monotonic():
+                return cached_identity[1]
+        identity = None
+        try:
+            media = self.chain.recognize_media(meta=meta)
+            aliases = {
+                normalize_title(getattr(media, field, None))
+                for field in ("title", "en_title", "original_title", "original_name", "hk_title", "tw_title", "sg_title")
+            } | {normalize_title(name) for name in getattr(media, "names", []) or []}
+            if not self._is_movie(media) and names.intersection(aliases):
+                raw_id = getattr(media, "tmdb_id", None)
+                identity = int(raw_id) if raw_id else None
+        except Exception as err:
+            logger.info(f"频道同规格去重无法确认剧集身份 {path}：{type(err).__name__}，按未命中放行")
+        with self._channel_state_lock:
+            if len(self._channel_identity_cache) >= 1024:
+                self._channel_identity_cache.clear()
+            self._channel_identity_cache[key] = (time.monotonic() + (600 if identity else 60), identity)
+        return identity
 
     @staticmethod
     @cached(maxsize=512, ttl=300, skip_none=False, empty_ttl=60, local_only=True)

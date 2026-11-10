@@ -5,6 +5,7 @@ import stat
 import tempfile
 import types
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -71,6 +72,71 @@ class TelegramUserAccountTests(unittest.TestCase):
             with self.assertRaisesRegex(account_module.UserAccountError, "不要并行"):
                 another.check()
         self.factory.assert_not_called()
+
+    def test_reads_new_channel_messages_with_shared_session_lock(self):
+        self.client.get_entity = AsyncMock(return_value=types.SimpleNamespace(id=123))
+        message = types.SimpleNamespace(
+            id=12,
+            date=datetime(2026, 11, 10, 8, 56, 36, tzinfo=timezone.utc),
+            message="new release post",
+        )
+
+        def iter_messages(entity, min_id, reverse, limit):
+            self.assertEqual(entity.id, 123)
+            self.assertEqual((min_id, reverse, limit), (10, True, 200))
+
+            async def rows():
+                yield message
+
+            return rows()
+
+        self.client.iter_messages = Mock(side_effect=iter_messages)
+        result = self.account.read_channel_messages(["@channel"], {"@channel": 10})
+        self.assertEqual(result["cursors"], {"@channel": 12})
+        self.assertEqual(result["messages"][0]["text"], "new release post")
+        self.assertEqual(result["messages"][0]["channel"], "@channel")
+        self.client.disconnect.assert_awaited_once()
+
+    def test_channel_read_error_is_scoped_to_channel(self):
+        self.client.get_entity = AsyncMock(side_effect=RuntimeError("private details"))
+        result = self.account.read_channel_messages(["@bad"], {})
+        self.assertEqual(result["errors"], [{"channel": "@bad", "error": "RuntimeError"}])
+        self.assertNotIn("private details", str(result))
+        self.client.disconnect.assert_awaited_once()
+
+    def test_initial_read_starts_at_72_hour_boundary_and_uses_numeric_channel_id(self):
+        self.client.get_entity = AsyncMock(return_value=types.SimpleNamespace(id=123))
+
+        def iter_messages(entity, **kwargs):
+            self.assertEqual(kwargs["min_id"], 0)
+            self.assertTrue(kwargs["reverse"])
+            age = datetime.now(timezone.utc) - kwargs["offset_date"]
+            self.assertAlmostEqual(age.total_seconds(), 72 * 3600, delta=5)
+
+            async def rows():
+                if False:
+                    yield None
+
+            return rows()
+
+        self.client.iter_messages = Mock(side_effect=iter_messages)
+        result = self.account.read_channel_messages(["-1001234567890"], {})
+        self.client.get_entity.assert_awaited_once_with(-1001234567890)
+        self.assertEqual(result["processed_channels"], ["-1001234567890"])
+
+    def test_partial_read_failure_preserves_fetched_messages_for_cursor_progress(self):
+        self.client.get_entity = AsyncMock(return_value=types.SimpleNamespace(id=123))
+
+        def iter_messages(entity, **kwargs):
+            async def rows():
+                yield types.SimpleNamespace(id=12, date=datetime.now(timezone.utc), message="release")
+                raise TimeoutError("private details")
+            return rows()
+
+        self.client.iter_messages = Mock(side_effect=iter_messages)
+        result = self.account.read_channel_messages(["@channel"], {"@channel": 10})
+        self.assertEqual(result["messages"][0]["message_id"], 12)
+        self.assertEqual(result["errors"], [{"channel": "@channel", "error": "TimeoutError"}])
 
     def test_private_exception_text_never_propagated(self):
         self.client.connect.side_effect = RuntimeError("secret-phone secret-password private-api-hash")

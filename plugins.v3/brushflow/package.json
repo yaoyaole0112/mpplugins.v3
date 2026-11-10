@@ -1,7 +1,7 @@
 {
   "name": "moviepilot-brushflow-plugin",
   "private": true,
-  "version": "6.2.1",
+  "version": "6.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite build --watch",
@@ -12,6 +12,7 @@
     "vuetify": "3.7.3"
   },
   "devDependencies": {
+    "@mdi/font": "7.4.47",
     "@originjs/vite-plugin-federation": "^1.4.1",
     "@vitejs/plugin-vue": "^5.0.4",
     "vite": "^5.4.11"

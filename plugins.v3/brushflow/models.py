@@ -5,6 +5,9 @@ from typing import Literal, Optional
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+CHANNEL_DEDUP_ATTRIBUTES = {"resolution", "effects", "codec", "source", "fps", "size"}
+
+
 def _normalize_optional_positive_number(value):
     """把历史配置中的空值和 0 统一转换为未设置。"""
     if value is None or value == "":
@@ -254,4 +257,54 @@ class BrushFlowSettingsPayload(BaseModel):
         """启用全局动态删种时要求配置有效体积阈值。"""
         if self.global_proxy_delete and not self.global_delete_size_range:
             raise ValueError("启用全局动态删种时必须设置动态删种阈值")
+        return self
+
+
+class ChannelDedupSettingsPayload(BaseModel):
+    """频道重复资源过滤配置。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    channels: list[str] = Field(default_factory=list, max_length=50)
+    attributes: list[str] = Field(default_factory=lambda: ["resolution", "effects", "codec", "source", "fps"])
+    size_tolerance_pct: float = Field(5, ge=0, le=20)
+
+    @field_validator("channels", mode="before")
+    @classmethod
+    def normalize_channels(cls, value):
+        if isinstance(value, str):
+            value = re.split(r"[,\n\r]+", value)
+        if value is None:
+            return []
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("频道列表必须是文本或列表")
+        channels = []
+        for channel in value:
+            cleaned = re.sub(r"^https?://(?:www\.)?(?:t\.me|telegram\.me)/", "", str(channel or "").strip(), flags=re.I)
+            cleaned = cleaned.strip().strip("/")
+            if not cleaned:
+                continue
+            if cleaned.startswith("+"):
+                raise ValueError("仅支持公开频道用户名或当前账号有权限访问的频道 ID")
+            normalized = cleaned if cleaned.startswith("-") or cleaned.startswith("@") else f"@{cleaned}"
+            if not re.fullmatch(r"(?:@[A-Za-z][A-Za-z0-9_]{3,31}|-[1-9]\d{1,18})", normalized):
+                raise ValueError("请输入有效频道用户名、频道链接或负数频道 ID，不支持邀请链接和消息链接")
+            channels.append(normalized.lower())
+        if len(set(channels)) > 50:
+            raise ValueError("最多可监听 50 个频道")
+        return list(dict.fromkeys(channels))
+
+    @field_validator("attributes")
+    @classmethod
+    def validate_attributes(cls, value):
+        unknown = set(value) - CHANNEL_DEDUP_ATTRIBUTES
+        if unknown:
+            raise ValueError("存在不支持的规格项")
+        return list(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def validate_enabled_channels(self):
+        if self.enabled and not self.channels:
+            raise ValueError("开启频道监听时请至少添加一个频道")
         return self

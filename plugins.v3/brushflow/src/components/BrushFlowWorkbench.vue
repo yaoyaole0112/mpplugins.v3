@@ -44,6 +44,20 @@ const editorTask = ref(cloneTask())
 const deleteDialog = ref(false)
 const clearDialog = ref(false)
 const settingsMenu = ref(false)
+const channelDedupDialog = ref(false)
+const channelDedupLoading = ref(false)
+const channelDedupSaving = ref(false)
+const channelDedupError = ref('')
+const channelDedup = ref({ enabled: false, channels: [], attributes: [], records: [] })
+const channelDedupDraft = ref({ enabled: false, channels: '', attributes: [], size_tolerance_pct: 5 })
+const channelDedupAttributes = [
+  { value: 'resolution', title: '分辨率' },
+  { value: 'effects', title: '特效' },
+  { value: 'codec', title: '编码' },
+  { value: 'source', title: '来源' },
+  { value: 'fps', title: '帧率' },
+  { value: 'size', title: '文件大小' },
+]
 const settingsDraft = ref({
   enabled: false,
   show_sidebar_nav: true,
@@ -56,6 +70,7 @@ const settingsDraft = ref({
 })
 const hostToast = inject('moviepilot:toast', null)
 let refreshTimer
+let channelRefreshTimer
 
 const pluginBase = computed(() => `plugin/${props.pluginId || 'BrushFlow'}`)
 const tasks = computed(() => status.value.tasks || [])
@@ -256,6 +271,93 @@ async function saveSettings() {
   }
 }
 
+async function loadChannelDedup({ resetDraft = true } = {}) {
+  channelDedupLoading.value = true
+  channelDedupError.value = ''
+  try {
+    const data = unwrapResponse(await props.api.get(`${pluginBase.value}/channel-dedup`))
+    channelDedup.value = data || channelDedup.value
+    if (resetDraft) {
+      channelDedupDraft.value = {
+        enabled: Boolean(data?.enabled),
+        channels: (data?.channels || []).join('\n'),
+        attributes: [...(data?.attributes || [])],
+        size_tolerance_pct: Number(data?.size_tolerance_pct ?? 5),
+      }
+    }
+  } catch (err) {
+    channelDedupError.value = err?.message || '读取频道监听设置失败'
+  } finally {
+    channelDedupLoading.value = false
+  }
+}
+
+async function openChannelDedup() {
+  channelDedupDialog.value = true
+  await loadChannelDedup()
+}
+
+async function saveChannelDedup() {
+  channelDedupSaving.value = true
+  channelDedupError.value = ''
+  try {
+    const data = unwrapResponse(await props.api.post(`${pluginBase.value}/channel-dedup/settings`, {
+      enabled: channelDedupDraft.value.enabled,
+      channels: channelDedupDraft.value.channels,
+      attributes: channelDedupDraft.value.attributes,
+      size_tolerance_pct: channelDedupDraft.value.size_tolerance_pct,
+    }))
+    channelDedup.value = data || channelDedup.value
+    await loadChannelDedup()
+    await loadStatus()
+    notify('频道监听设置已保存')
+  } catch (err) {
+    channelDedupError.value = err?.message || '保存频道监听设置失败'
+  } finally {
+    channelDedupSaving.value = false
+  }
+}
+
+async function pollChannelDedup() {
+  channelDedupSaving.value = true
+  channelDedupError.value = ''
+  try {
+    unwrapResponse(await props.api.post(`${pluginBase.value}/channel-dedup/poll`, {}))
+    notify('已提交频道消息同步')
+    if (channelRefreshTimer) window.clearTimeout(channelRefreshTimer)
+    channelRefreshTimer = window.setTimeout(() => loadChannelDedup({ resetDraft: false }), 2500)
+  } catch (err) {
+    channelDedupError.value = err?.message || '提交频道同步失败'
+  } finally {
+    channelDedupSaving.value = false
+  }
+}
+
+function formatChannelTimestamp(value) {
+  if (!value) return '尚未同步'
+  return new Date(Number(value) * 1000).toLocaleString()
+}
+
+function channelRecordEpisodes(record) {
+  const season = String(record.season || 0).padStart(2, '0')
+  const episodes = (record.episodes || []).map(number => `E${String(number).padStart(2, '0')}`).join(', ')
+  return `S${season} ${episodes}`
+}
+
+function channelRecordSpecs(record) {
+  const specs = record.specs || {}
+  return channelDedupAttributes
+    .map(({ value, title }) => {
+      const item = specs[value]
+      if (item === null || item === undefined || item === '') return ''
+      if (value === 'size') return `${title} ${formatBytes(item)}`
+      if (value === 'fps') return `${title} ${item} FPS`
+      return `${title} ${item}`
+    })
+    .filter(Boolean)
+    .join(' · ')
+}
+
 // 删除当前没有活跃种子的任务。
 async function confirmDeleteTask() {
   saving.value = true
@@ -336,11 +438,13 @@ onMounted(async () => {
   await loadStatus({ preserveSelection: false })
   refreshTimer = window.setInterval(() => {
     if (!editorOpen.value && document.visibilityState === 'visible') loadStatus()
+    if (channelDedupDialog.value && document.visibilityState === 'visible') loadChannelDedup({ resetDraft: false })
   }, 30000)
 })
 
 onUnmounted(() => {
   if (refreshTimer) window.clearInterval(refreshTimer)
+  if (channelRefreshTimer) window.clearTimeout(channelRefreshTimer)
 })
 
 defineExpose({ loadStatus, refreshAll, loading, saving })
@@ -360,6 +464,17 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
         <VChip v-if="status.summary.task_count" size="small" variant="tonal">
           {{ status.summary.running_count ?? status.summary.enabled_count ?? 0 }} / {{ status.summary.task_count }} 运行
         </VChip>
+        <VTooltip text="频道监听与同规格去重">
+          <template #activator="{ props: tooltipProps }">
+            <VBtn
+              v-bind="tooltipProps"
+              icon="mdi-send"
+              variant="text"
+              aria-label="频道监听与同规格去重"
+              @click="openChannelDedup"
+            />
+          </template>
+        </VTooltip>
         <VMenu v-model="settingsMenu" :close-on-content-click="false" location="bottom end">
           <template #activator="{ props: menuProps }">
             <VBtn v-bind="menuProps" icon="mdi-tune-variant" variant="text" aria-label="全局设置" />
@@ -845,6 +960,112 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
       @save="saveTask"
     />
 
+    <VDialog v-model="channelDedupDialog" max-width="52rem" scrollable>
+      <VCard>
+        <VCardTitle class="channel-dedup__title">
+          <VIcon icon="mdi-send" color="primary" />
+          <span>频道监听与同规格去重</span>
+        </VCardTitle>
+        <VCardText class="channel-dedup__body">
+          <VAlert v-if="channelDedupError" type="error" variant="tonal" density="compact">
+            {{ channelDedupError }}
+          </VAlert>
+          <VAlert v-if="channelDedup.last_error" type="warning" variant="tonal" density="compact">
+            {{ channelDedup.last_error }}
+          </VAlert>
+          <VSwitch
+            v-model="channelDedupDraft.enabled"
+            label="启用频道监听与同规格去重"
+            color="primary"
+            hide-details
+            inset
+          />
+          <VTextarea
+            v-model="channelDedupDraft.channels"
+            label="Telegram 频道"
+            placeholder="@channel_name 或 https://t.me/channel_name"
+            hint="每行一个公开频道用户名或已加入频道的数字 ID"
+            persistent-hint
+            rows="3"
+            auto-grow
+            :disabled="!channelDedupDraft.enabled"
+          />
+          <div class="channel-dedup__section">
+            <div class="text-subtitle-2">重复判断规格</div>
+            <div class="channel-dedup__attributes">
+              <VCheckbox
+                v-for="attribute in channelDedupAttributes"
+                :key="attribute.value"
+                v-model="channelDedupDraft.attributes"
+                :label="attribute.title"
+                :value="attribute.value"
+                color="primary"
+                density="compact"
+                hide-details
+                :disabled="!channelDedupDraft.enabled"
+              />
+            </div>
+          </div>
+          <VTextField
+            v-if="channelDedupDraft.attributes.includes('size')"
+            v-model.number="channelDedupDraft.size_tolerance_pct"
+            type="number"
+            min="0"
+            max="20"
+            step="1"
+            suffix="%"
+            label="单集文件大小容差"
+            hint="按种子内单个视频文件大小比较，不使用整包总大小"
+            persistent-hint
+            :disabled="!channelDedupDraft.enabled"
+          />
+          <VDivider />
+          <div class="channel-dedup__status">
+            <div><span>账号来源</span><strong>自动生成ED2K链接</strong></div>
+            <div><span>监听状态</span><strong>{{ channelDedup.syncing ? '同步中' : channelDedup.enabled ? '已启用' : '未启用' }}</strong></div>
+            <div><span>结构化记录</span><strong>{{ channelDedup.record_count || 0 }}</strong></div>
+            <div><span>最近同步</span><strong>{{ formatChannelTimestamp(channelDedup.last_poll_at) }}</strong></div>
+            <VBtn
+              prepend-icon="mdi-sync"
+              variant="tonal"
+              :loading="channelDedupSaving"
+              :disabled="!channelDedup.enabled || !channelDedup.channels?.length"
+              @click="pollChannelDedup"
+            >立即同步</VBtn>
+            <VTooltip text="刷新监听状态">
+              <template #activator="{ props: tooltipProps }">
+                <VBtn v-bind="tooltipProps" icon="mdi-refresh" variant="text" aria-label="刷新监听状态"
+                  :loading="channelDedupLoading" @click="loadChannelDedup({ resetDraft: false })" />
+              </template>
+            </VTooltip>
+          </div>
+          <div class="channel-dedup__section">
+            <div class="text-subtitle-2">最近 72 小时解析记录</div>
+            <div v-if="channelDedupLoading" class="text-body-2 text-medium-emphasis">正在读取…</div>
+            <div v-else-if="!channelDedup.records?.length" class="text-body-2 text-medium-emphasis">暂无可用于匹配的频道记录</div>
+            <div v-else class="channel-dedup__records">
+              <div v-for="record in channelDedup.records" :key="`${record.channel}-${record.message_id}-${record.file_key || ''}`" class="channel-dedup__record">
+                <div class="channel-dedup__record-main">
+                  <strong>{{ record.title }}</strong>
+                  <span>{{ channelRecordEpisodes(record) }}</span>
+                  <small>{{ channelRecordSpecs(record) || '未识别规格' }}</small>
+                </div>
+                <div class="channel-dedup__record-meta">
+                  <span>{{ record.channel }}</span>
+                  <time>{{ formatChannelTimestamp(record.published_at) }}</time>
+                </div>
+              </div>
+            </div>
+          </div>
+        </VCardText>
+        <VCardActions>
+          <VSpacer />
+          <VBtn variant="text" @click="channelDedupDialog = false">关闭</VBtn>
+          <VBtn color="primary" variant="flat" :loading="channelDedupSaving" @click="saveChannelDedup">保存设置</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+
     <VDialog v-model="deleteDialog" max-width="28rem">
       <VCard title="删除刷流任务">
         <VCardText>确认删除“{{ selectedTask?.name }}”？存在活跃种子时不会执行删除。</VCardText>
@@ -957,6 +1178,95 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
 .brushflow-settings-menu {
   inline-size: min(25rem, calc(100vw - 24px));
+}
+
+.channel-dedup__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 1.125rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.channel-dedup__body {
+  display: grid;
+  gap: 16px;
+  max-block-size: min(76vh, 48rem);
+}
+
+.channel-dedup__section {
+  display: grid;
+  gap: 8px;
+  min-inline-size: 0;
+}
+
+.channel-dedup__attributes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: 2px 12px;
+}
+
+.channel-dedup__status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+}
+
+.channel-dedup__status > div {
+  display: grid;
+  gap: 2px;
+  min-inline-size: 6rem;
+}
+
+.channel-dedup__status span,
+.channel-dedup__record-meta {
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
+  font-size: 0.8rem;
+}
+
+.channel-dedup__records {
+  display: grid;
+  max-block-size: 18rem;
+  overflow: auto;
+}
+
+.channel-dedup__record {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
+.channel-dedup__record-main,
+.channel-dedup__record-meta {
+  display: grid;
+  gap: 4px;
+  min-inline-size: 0;
+}
+
+.channel-dedup__record-main strong,
+.channel-dedup__record-main small,
+.channel-dedup__record-meta span,
+.channel-dedup__record-meta time {
+  overflow-wrap: anywhere;
+}
+
+.channel-dedup__record-meta {
+  flex: 0 0 auto;
+  text-align: end;
+}
+
+@media (max-width: 600px) {
+  .channel-dedup__record {
+    flex-direction: column;
+  }
+
+  .channel-dedup__record-meta {
+    text-align: start;
+  }
 }
 
 .brushflow-loading,

@@ -216,7 +216,7 @@ class Ed2kFolderWatcher(_PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.19.3"
+    plugin_version = "1.19.4"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -510,6 +510,18 @@ class Ed2kFolderWatcher(_PluginBase):
 
     async def telegram_account_action(self, change):
         return await self._get_web_login().call(str(change.get("operation") or ""), change.get("values") or {})
+
+    def read_telegram_channel_messages(self, channels: list[str], last_ids: dict):
+        """让其他插件复用本插件的 Telethon Session 与文件锁读取频道增量。"""
+        from .user_account import TelegramUserAccount
+        try:
+            from app.runtime.settings import get_runtime_setting
+            proxy = get_runtime_setting("PROXY")
+        except ImportError:
+            from app.core.config import settings
+            proxy = settings.PROXY
+        account = TelegramUserAccount(Path(self.get_data_path()), proxy=proxy)
+        return account.read_channel_messages(channels, last_ids)
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:

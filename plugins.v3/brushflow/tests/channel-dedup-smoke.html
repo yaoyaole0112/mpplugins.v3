@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BrushFlow Channel Dedup Test</title>
+  <link rel="stylesheet" href="../node_modules/vuetify/dist/vuetify.min.css">
+  <link rel="stylesheet" href="../node_modules/@mdi/font/css/materialdesignicons.min.css">
+  <script type="importmap">
+    {"imports":{"vue":"../node_modules/vue/dist/vue.esm-browser.prod.js"}}
+  </script>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    :root { --app-surface-radius: 8px; --app-control-radius: 6px; }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+<script type="module">
+  import * as vue from 'vue'
+  import * as vuetify from '../node_modules/vuetify/dist/vuetify.esm.js'
+  import * as remote from '../dist/assets/remoteEntry.js'
+
+  const status = {
+    enabled: true, show_sidebar_nav: true, tasks: [],
+    summary: { task_count: 15, running_count: 14 }, options: { sites: [], downloaders: [] },
+  }
+  let settings = {
+    enabled: true, channels: ['@example_channel'], attributes: ['resolution', 'effects', 'codec', 'source'],
+    size_tolerance_pct: 5, record_count: 2, last_poll_at: Date.now() / 1000, last_error: '',
+    records: [1, 2].map(number => ({
+      channel: '@example_channel', message_id: 42, file_key: `file-${number}`,
+      title: number === 1 ? 'PSYREN 决战游戏' : 'A Very Long Series Name With Several Words',
+      tmdb_id: 297903, season: 1, episodes: [number + 4], published_at: Date.now() / 1000,
+      specs: { resolution: '1080p', effects: 'SDR', codec: 'H.264', source: 'WEB-DL', fps: 24, size: 1251017826 },
+    })),
+  }
+  window.brushflowRequests = []
+  window.brushflowFailSave = false
+  const api = {
+    get: async path => {
+      window.brushflowRequests.push({ method: 'GET', path })
+      return { success: true, data: structuredClone(path.endsWith('/status') ? status : settings) }
+    },
+    post: async (path, body) => {
+      body = JSON.parse(JSON.stringify(body))
+      window.brushflowRequests.push({ method: 'POST', path, body })
+      if (path.endsWith('/channel-dedup/settings')) {
+        if (window.brushflowFailSave) return { success: false, message: '模拟保存失败' }
+        settings = { ...settings, ...body, channels: body.channels.split('\n').filter(Boolean) }
+        return { success: true, data: structuredClone(settings) }
+      }
+      return { success: true, message: '已提交' }
+    },
+  }
+  remote.init({
+    vue: { [vue.version]: { get: () => () => vue, loaded: true } },
+    vuetify: { [vuetify.version]: { get: () => () => vuetify, loaded: true } },
+  })
+  const factory = await remote.get('./Page')
+  const app = vue.createApp({
+    render: () => vue.h(vuetify.components.VApp, null, () => vue.h(factory(), { api })),
+  })
+  app.use(vuetify.createVuetify({
+    components: vuetify.components, directives: vuetify.directives,
+    theme: { defaultTheme: 'light', themes: { light: { colors: { primary: '#8b5cf6' } } } },
+  }))
+  app.mount('#app')
+  window.brushflowReady = true
+</script>
+</body>
+</html>
