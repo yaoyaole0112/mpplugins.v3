@@ -63,7 +63,7 @@ try {
     }
     throw new Error(`Browser wait expired: ${expression}`)
   }
-  for (const width of [320, 390, 430, 760, 1280]) {
+  for (const width of process.env.RAPID_LAYOUT_ONLY ? [] : [320, 390, 430, 760, 1280]) {
     await command('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: width <= 760 })
     await command('Page.navigate', { url: `${origin}/tests/browser/mobile_dialog.html` })
     await waitFor('window.fixtureReady && document.querySelector(".eme-hit")')
@@ -118,6 +118,56 @@ try {
     const restored = await evaluate('({ host: document.querySelector(".v-overlay__content").getAttribute("style"), original: window.originalHostStyle, hostClass: document.querySelector(".v-overlay__content").className, wrappers: document.querySelectorAll(".eme-mobile-dialog-wrapper").length })')
     assert.deepEqual({ ...restored, host: restored.host || null }, { host: null, original: null, hostClass: 'v-overlay__content', wrappers: 0 }, `host restored on close: ${JSON.stringify(restored)}`)
     console.log(`PASS: ${width}px dialog layout`)
+  }
+  for (const entry of ['dialog', 'sidebar']) {
+    for (const width of [390, 1280]) {
+      for (const count of [1, 7]) {
+        await command('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: width <= 760 })
+        await command('Page.navigate', { url: `${origin}/tests/browser/mobile_dialog.html?entry=${entry}&rapid_count=${count}` })
+        await waitFor('window.fixtureReady && document.querySelector(".eme-nav")')
+        await evaluate(width <= 760
+          ? `(() => { const select = document.querySelector('.eme-mobile-navigation select'); select.value = 'rapid'; select.dispatchEvent(new Event('change')); })()`
+          : `Array.from(document.querySelectorAll('.eme-nav')).find(button => button.textContent.includes('本地秒传')).click()`)
+        await waitFor('document.querySelector(".eme-rapid-queue .eme-result")')
+        const state = await evaluate(`(() => {
+          const queue = document.querySelector('.eme-rapid-queue')
+          const history = document.querySelector('.eme-rapid-history')
+          const progress = queue.querySelector('progress')
+          return { rows: queue.children.length, height: queue.getBoundingClientRect().height,
+            historyHeight: history.getBoundingClientRect().height,
+            historyRows: history.children.length, percent: progress.value,
+            label: progress.getAttribute('aria-label'), text: queue.children[0].textContent,
+            historyText: history.textContent,
+            overflow: queue.scrollWidth > queue.clientWidth + 2 }
+        })()`)
+        assert.equal(state.rows, Math.min(count, 6))
+        assert.equal(state.historyRows, 6)
+        assert.equal(state.historyHeight, 528)
+        assert.equal(state.percent, 25)
+        assert.match(state.label, /文件传输 25.0%/)
+        assert.equal((state.text.match(/正在普通上传/g) || []).length, 1)
+        assert.match(state.historyText, /100%/)
+        assert.equal(state.overflow, false)
+        if (count === 1) {
+          assert.ok(state.height < 250, `${entry} ${width}px: single queue row has no empty reserved rows`)
+          await evaluate(`document.querySelector('.eme-rapid-activity').scrollIntoView({ block: 'start' })`)
+          const screenshot = await command('Page.captureScreenshot', { format: 'png' })
+          await writeFile(path.join(profile, `rapid-${entry}-${width}.png`), Buffer.from(screenshot.data, 'base64'))
+        } else {
+          assert.ok(await evaluate(`(() => {
+            const progress = [...document.querySelectorAll('.eme-rapid-queue progress')]
+            return progress.some(item => item.value === 50 && item.getAttribute('aria-label').startsWith('SHA1 校验'))
+              && progress.filter(item => !item.hasAttribute('value')).length === 3
+          })()`), 'hash percent and indeterminate server stages are distinct')
+          await evaluate(`Array.from(document.querySelectorAll('nav[aria-label="上传队列分页"] button')).find(button => button.textContent.includes('下一页')).click()`)
+          await waitFor('document.querySelector(".eme-rapid-queue").children.length === 1')
+          assert.ok(await evaluate('document.querySelector(".eme-rapid-queue").getBoundingClientRect().height < 250'), 'last queue page shrinks')
+          assert.equal(await evaluate('document.querySelector(".eme-rapid-history").getBoundingClientRect().height'), 528)
+        }
+        await evaluate('window.fixtureApp.unmount()')
+        console.log(`PASS: ${entry} ${width}px rapid queue with ${count} items`)
+      }
+    }
   }
   assert.deepEqual(browserErrors, [], 'no uncaught browser errors')
 } finally {

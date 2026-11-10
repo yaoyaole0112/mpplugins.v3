@@ -213,6 +213,92 @@ class RapidUploadTests(unittest.TestCase):
             self.assertTrue(results[0]["ok"])
             self.assertEqual(rapid.status()["activity"], [])
 
+    def test_progress_is_throttled_in_memory_and_distinguishes_confirmation(self):
+        owner = FakeOwner()
+        config = normalize_config({"id": "rapid_1"})
+        rapid = RapidUpload(owner, {"configs": [config]})
+        self.addCleanup(rapid.close)
+        callback = rapid._progress_callback(config, Path("/source/episode.mkv"), "processing",
+                                            "正在计算 SHA1", "hashing", 10)
+        with patch.object(owner, "save_data") as persist, \
+                patch("emetools.rapid_upload.time.monotonic", return_value=100):
+            callback(0)
+            callback(2)
+            self.assertEqual(rapid.status()["activity"][0]["progress"]["percent"], 0)
+            with patch("emetools.rapid_upload.time.monotonic", return_value=101):
+                callback(5)
+                self.assertEqual(rapid.status()["activity"][0]["progress"]["percent"], 50)
+                callback(10)
+                self.assertEqual(rapid.status()["activity"][0]["progress"]["percent"], 100)
+            persist.assert_not_called()
+        self.assertIsNone(rapid._progress("rapid")["percent"])
+        self.assertIsNone(rapid._progress("committing", 10, 10)["percent"])
+        self.assertIsNone(rapid._progress("verifying")["percent"])
+        self.assertEqual(rapid._progress("uploading", 20, 10)["completed"], 10)
+
+    def test_sha1_reader_reports_verified_bytes_without_extra_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"abcdefghij")
+            progress = Mock()
+            with patch.object(RapidUpload._HASH_CONTEXT, "progress", progress, create=True), \
+                    patch.object(RapidUpload._HASH_CONTEXT, "limit", 0, create=True):
+                digest, size = RapidUpload._sha1(path, chunk_size=4)
+            self.assertEqual(size, 10)
+            self.assertEqual(len(digest), 40)
+            self.assertEqual([item.args[0] for item in progress.call_args_list], [4, 8, 10])
+
+    def test_rapid_api_confirmation_is_indeterminate_and_hash_callback_is_cleared(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+
+            def initialize(*args):
+                state = rapid.status()["activity"][0]
+                self.assertEqual(state["progress"]["phase"], "rapid")
+                self.assertIsNone(state["progress"]["percent"])
+                return {"status": 2, "reuse": True}
+
+            with patch.object(rapid, "_p115_client", return_value=FakeClient({})), \
+                    patch.object(rapid, "_rapid_init", side_effect=initialize):
+                result = rapid.run("rapid_1")
+            self.assertTrue(result["ok"])
+            self.assertIsNone(RapidUpload._HASH_CONTEXT.progress)
+
+    def test_normal_upload_exposes_bytes_then_waits_for_final_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+            entry = {"config": config, "path": str(path), "size": 5, "sha1": "ABC",
+                     "signature": rapid._file_signature(path.stat()), "state": "uploading"}
+
+            def transfer(*args):
+                progress = args[-2]
+                before_complete = args[-1]
+                with patch("emetools.rapid_upload.time.monotonic", return_value=time.monotonic() + 2):
+                    progress(2, 5)
+                    state = rapid.status()["activity"][0]
+                    self.assertEqual(state["progress"]["phase"], "uploading")
+                    self.assertEqual(state["progress"]["percent"], 40)
+                    self.assertEqual(state["progress"]["completed"], 2)
+                    progress(5, 5)
+                    self.assertEqual(rapid.status()["activity"][0]["progress"]["percent"], 100)
+                before_complete()
+                state = rapid.status()["activity"][0]
+                self.assertEqual(state["progress"]["phase"], "committing")
+                self.assertIsNone(state["progress"]["percent"])
+
+            with patch.object(rapid, "_rapid_init", return_value={"status": 1}), \
+                    patch("emetools.rapid_upload.upload_oss", side_effect=transfer):
+                rapid._upload_original(path, config, FakeClient({}), entry)
+            self.assertTrue(entry["commit_started"])
+
     def test_modern_p115_upload_file_init_response_is_normalized(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -274,7 +274,7 @@ class RapidUpload:
         return f"{config_id}:{path}"
 
     def _set_activity(self, config: dict, path: str, status: str,
-                      message: str, size: int = 0) -> None:
+                      message: str, size: int = 0, progress: dict | None = None) -> None:
         key = self._activity_key(config["id"], path)
         file_path = Path(path)
         record = {
@@ -289,12 +289,36 @@ class RapidUpload:
             "timestamp": time.time(),
             "activity": True,
         }
+        if progress is not None:
+            record["progress"] = dict(progress)
         with self._watch_lock:
             current = self._activity.get(key)
             if current and current["status"] in {"upload_queued", "uploading", "verifying", "uncertain"} \
                     and status not in {"upload_queued", "uploading", "verifying", "uncertain"}:
                 return
             self._activity[key] = record
+
+    @staticmethod
+    def _progress(phase: str, completed: int = 0, total: int = 0) -> dict:
+        completed = max(0, min(completed, total))
+        return {"phase": phase, "completed": completed, "total": total,
+                "percent": round(completed / total * 100, 1)
+                if total > 0 and phase in {"hashing", "uploading"} else None}
+
+    def _progress_callback(self, config: dict, path: Path, status: str,
+                           message: str, phase: str, total: int):
+        last_reported = [None]
+
+        def report(completed, reported_total=None):
+            now = time.monotonic()
+            if (last_reported[0] is not None and now - last_reported[0] < 1
+                    and completed < total):
+                return
+            last_reported[0] = now
+            self._set_activity(config, str(path), status, message, total,
+                               progress=self._progress(phase, completed, total))
+
+        return report
 
     def _clear_activity(self, config_id: str, path: str, include_upload=False) -> None:
         with self._watch_lock:
@@ -761,6 +785,9 @@ class RapidUpload:
                     break
                 digest.update(chunk)
                 size += len(chunk)
+                progress = getattr(RapidUpload._HASH_CONTEXT, "progress", None)
+                if progress:
+                    progress(size)
         return digest.hexdigest().upper(), size
 
     @staticmethod
@@ -933,15 +960,17 @@ class RapidUpload:
         state = entry["state"]
         status = "upload_queued" if state == "queued" else "verifying" if state == "verify_queued" else state
         message = {
-            "queued": "等待独立普通上传队列；其他文件可继续秒传",
-            "uploading": "正在普通上传，不占用秒传通道",
+            "queued": "独立队列排队中；其他文件可继续秒传",
+            "uploading": "检查目标文件与上传凭据，不占用秒传通道",
             "verify_queued": "重启或上次结果不确定，等待只读复核，不重复上传",
-            "verifying": "正在复核网盘文件的名称、大小与 SHA1",
-            "uncertain": "上传结果待核实，保留源文件；立即扫描可再次只读复核",
+            "verifying": "核对网盘名称、大小与 SHA1",
+            "uncertain": "保留源文件；立即扫描可再次只读复核",
         }.get(state, state)
         if state == "queued" and entry.get("retry_at", 0) > time.time():
             message = entry.get("retry_reason") or "目标目录暂不可读，稍后自动复查；尚未提交普通上传"
-        self._set_activity(entry["config"], entry["path"], status, message, entry["size"])
+        phase = "preparing" if state == "uploading" else "verifying" if state == "verifying" else None
+        self._set_activity(entry["config"], entry["path"], status, message, entry["size"],
+                           progress=self._progress(phase) if phase else None)
 
     def _queue_upload(self, config, path, sha1, size, signature):
         key = self._upload_key(config, path)
@@ -1008,6 +1037,9 @@ class RapidUpload:
                 return False
 
     def _upload_original(self, path: Path, config: dict, client, entry):
+        self._set_activity(config, str(path), "uploading", "申请上传凭据，不占用秒传通道", entry["size"],
+                           progress=self._progress("preparing"))
+
         def initialize():
             with self._state_lock:
                 if self._stop.is_set():
@@ -1030,14 +1062,9 @@ class RapidUpload:
         with self._state_lock:
             entry["commit_started"] = False
             self._save_uploads()
-        last_progress = [0.0]
-
-        def progress(sent, total):
-            if time.monotonic() - last_progress[0] < 1 and sent < total:
-                return
-            last_progress[0] = time.monotonic()
-            self._set_activity(config, str(path), "uploading",
-                               f"普通上传 {sent / max(1, total):.1%}；其他文件可继续秒传", total)
+        progress = self._progress_callback(config, path, "uploading", "不占用秒传通道",
+                                           "uploading", entry["size"])
+        progress(0)
 
         def before_complete():
             if path.is_symlink() or not self._signature_matches(entry, self._file_signature(path.stat())):
@@ -1047,6 +1074,8 @@ class RapidUpload:
                     raise TransferStopped("插件已停止，未提交上传完成")
                 entry["commit_started"] = True
                 self._save_uploads()
+            self._set_activity(config, str(path), "uploading", "文件已发送，等待网盘确认", entry["size"],
+                               progress=self._progress("committing", entry["size"], entry["size"]))
 
         upload_oss(client, path, response, self._stop, config["upload_limit_mib"],
                    self._short_request, progress, before_complete)
@@ -1339,8 +1368,11 @@ class RapidUpload:
                         if not sha1:
                             cached_hash = None
                     if not cached_hash or not sha1:
-                        self._set_activity(config, str(path), "processing", "正在计算 SHA1", signature["size"])
+                        self._HASH_CONTEXT.progress = self._progress_callback(
+                            config, path, "processing", "正在计算 SHA1", "hashing", signature["size"])
+                        self._HASH_CONTEXT.progress(0)
                         sha1, size = self._sha1(path)
+                        self._HASH_CONTEXT.progress = None
                         after_signature = self._file_signature(path.stat())
                         if signature != after_signature or size != signature["size"]:
                             raise SourceChanged("文件在计算 SHA1 期间发生变化")
@@ -1355,7 +1387,8 @@ class RapidUpload:
                     for attempt in range(attempts):
                         try:
                             self._set_activity(config, str(path), "processing",
-                                               "正在提交 115 秒传请求", size)
+                                               "等待 115 返回秒传结果", size,
+                                               progress=self._progress("rapid"))
                             response = self._short_request(
                                 lambda: self._rapid_init(client, path, sha1, size, target))
                             break
@@ -1423,6 +1456,7 @@ class RapidUpload:
                     logger.warning("媒体增强 本地秒传失败：配置=%s 文件=%s 原因=%s：%s",
                                    config["name"], path.name, type(error).__name__, str(error)[:160])
                 finally:
+                    self._HASH_CONTEXT.progress = None
                     self._clear_activity(config_id, str(path))
             return {
                 "ok": not failed and not self._stop.is_set(),
@@ -1442,6 +1476,7 @@ class RapidUpload:
                 close()
             self._running = None
             self._HASH_CONTEXT.limit = 0
+            self._HASH_CONTEXT.progress = None
             self._HASH_CONTEXT.stop = threading.Event()
             self.clear_scan_queue(config_id)
             for path in source_files:

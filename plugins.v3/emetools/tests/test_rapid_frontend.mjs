@@ -5,6 +5,12 @@ import test from 'node:test'
 const source = readFileSync(new URL('../src/Workbench.vue', import.meta.url), 'utf8')
 const backend = readFileSync(new URL('../__init__.py', import.meta.url), 'utf8')
 
+function helper(name, dependencies = {}) {
+  const declaration = source.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n\\}`))?.[0]
+  assert.ok(declaration, `${name} is declared`)
+  return new Function(...Object.keys(dependencies), `${declaration}; return ${name}`)(...Object.values(dependencies))
+}
+
 test('local rapid upload is available from the shared sidebar and page', () => {
   assert.match(source, /key: 'rapid', title: '本地秒传'/)
   assert.match(source, /active === 'rapid'/)
@@ -83,4 +89,41 @@ test('rapid upload uses the shared 115 API and task coordinator', () => {
   const callback = backend.slice(backend.indexOf('def _run_rapid_realtime'), backend.indexOf('def _run_scheduled_serial'))
   assert.doesNotMatch(callback, /not config\.get\("realtime_enabled"\)/)
   assert.match(callback, /if not self\._enabled or not config:/)
+})
+
+test('current queue grows with actual rows without changing fixed historical pages', () => {
+  const queue = source.match(/<div class="eme-results eme-rapid-logs eme-rapid-queue">[\s\S]*?<\/nav>/)?.[0]
+  assert.ok(queue)
+  assert.match(queue, /v-for="item in rapidQueueItems"/)
+  assert.doesNotMatch(queue, /eme-rapid-history/)
+  assert.match(source, /\.eme-results\.eme-rapid-queue\{display:block;margin:0\}/)
+  assert.match(source, /\.eme-results\.eme-rapid-history\{display:grid;grid-template-rows:repeat\(6,88px\)\}/)
+  assert.match(queue, /<progress :value="item\.progress\.percent \?\? undefined" max="100"/)
+  assert.doesNotMatch(queue, /rapidStatusLabel\(item\.status\).*item\.message/)
+})
+
+test('activity descriptions remove duplicate status labels including old messages', () => {
+  const rapidStatusLabel = helper('rapidStatusLabel')
+  const message = helper('rapidActivityMessage', { rapidStatusLabel })
+  assert.equal(message({ status: 'uploading', message: '正在普通上传，不占用秒传通道' }),
+    '正在普通上传，不占用秒传通道')
+  assert.equal(message({ status: 'uploading', message: '不占用秒传通道' }),
+    '正在普通上传：不占用秒传通道')
+  assert.equal(message({ status: 'uploading', message: '' }), '正在普通上传')
+})
+
+test('progress identifies hash and transfer percentages without inventing server confirmation', () => {
+  const rapidFileSize = helper('rapidFileSize')
+  const label = helper('rapidProgressLabel', { rapidFileSize })
+  assert.equal(label({ progress: { phase: 'hashing', completed: 0, total: 1024, percent: 0 } }),
+    'SHA1 校验 0.0% · 0 B / 1 KB')
+  assert.equal(label({ progress: { phase: 'uploading', completed: 512, total: 1024, percent: 50 } }),
+    '文件传输 50.0% · 512 B / 1 KB')
+  assert.equal(label({ progress: { phase: 'rapid', percent: null } }), '115 秒传确认…')
+  assert.equal(label({ progress: { phase: 'committing', percent: null } }), '等待网盘确认…')
+  assert.equal(label({}), '')
+  const history = helper('rapidHistoryMessage')
+  assert.equal(history({ status: 'succeeded', message: '115 秒传成功' }), '115 秒传成功 · 100%')
+  assert.equal(history({ status: 'uploaded', message: '普通上传成功' }), '普通上传成功 · 100%')
+  assert.equal(history({ status: 'failed', message: '上传失败' }), '上传失败')
 })

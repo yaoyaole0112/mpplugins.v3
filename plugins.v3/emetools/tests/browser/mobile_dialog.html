@@ -13,12 +13,39 @@
 <script type="module">
   import { createApp } from 'vue'
   import Page from '../../src/Page.vue'
+  import AppPage from '../../src/AppPage.vue'
+  const query = new URLSearchParams(location.search)
+  const rapidCount = Number(query.get('rapid_count') || 0)
+  const rapidPhases = [
+    { status: 'uploading', message: '正在普通上传，不占用秒传通道', progress: { phase: 'uploading', completed: 700 * 1024 ** 2, total: 2800 * 1024 ** 2, percent: 25 } },
+    { status: 'processing', message: '正在计算 SHA1', progress: { phase: 'hashing', completed: 512, total: 1024, percent: 50 } },
+    { status: 'processing', message: '等待 115 确认秒传结果', progress: { phase: 'rapid', percent: null } },
+    { status: 'uploading', message: '文件已发送，等待网盘确认', progress: { phase: 'committing', percent: null } },
+    { status: 'verifying', message: '核对网盘大小与 SHA1', progress: { phase: 'verifying', percent: null } },
+    { status: 'queued', message: '等待处理' },
+  ]
+  const rapidState = {
+    configs: [], activity_total: rapidCount,
+    activity: Array.from({ length: rapidCount }, (_, index) => ({
+      config_id: 'rapid_1', config: '资源-分享', time: '2026-11-10 21:30:56',
+      name: `很长的测试文件名称.The.Great.Long.March.2026.S01E${index + 1}.1080p.WEB-DL.H264.AAC-UBWEB.mp4`,
+      path: `/media/资源/分享/下载/很长的剧集文件夹名称/episode-${index + 1}.mp4`, size: 2800 * 1024 ** 2,
+      ...rapidPhases[index % rapidPhases.length],
+    })),
+    logs: Array.from({ length: 6 }, (_, index) => ({
+      name: `已完成的测试文件${index + 1}.mkv`, path: `/media/资源/分享/下载/episode-${index + 1}.mkv`,
+      config: '资源-分享', time: '2026-11-10 21:29:03', size: 1024 ** 3,
+      status: index % 2 ? 'uploaded' : 'succeeded', message: index % 2 ? '普通上传成功' : '115 秒传成功',
+    })),
+    upload_queue: { uploading: 1, queued: Math.max(0, rapidCount - 1) },
+  }
   const channels = ['115网盘影视热更频道', '115网盘资源分享频道', '115网盘资源收藏']
   const scope = { enabled: true, channels, keywords: ['漫威'], blacklist: ['1080[Pp]', '720[Pp]'] }
   const config = { enabled: false, cron: '35 3 * * *', server_names: ['Q4'], library_names: [], skip_series_ids: [], episode_overrides: [], auto_cancel_mode: 'ended_or_aired' }
   const results = Array.from({ length: 9 }, (_, index) => ({ ServerName: 'Q4', LibraryName: '国产剧', SeriesName: `很长的测试剧集名称${index + 1}`, AiringStatus: '在播', SeasonFormatted: 'S1', SeasonNum: 1, MissingEpisodes: '11、12', TotalEpisodes: 24, TmdbId: String(100 + index) }))
   const api = {
     async get(path) {
+      if (path.endsWith('/rapid/status')) return rapidState
       if (path.endsWith('/monitor/status')) return { logged_in: true, sub: scope, kw: scope, hits: channels.map(channel => ({ time: '10-21 18:12:19', channel, matches: ['大展宏图'], delivery: '原消息转发' })) }
       if (path.endsWith('/missing/fill/status')) return { tasks: [], max_points: 4, busy: false }
       if (path.endsWith('/missing/status')) return { config, results, cancelled_subscriptions: [], scan_status: {}, last_scan_time: '2026-10-21 18:00:00' }
@@ -37,9 +64,13 @@
       throw new Error(`No writes permitted in layout fixture: ${path}`)
     },
   }
+  const sidebar = query.get('entry') === 'sidebar'
+  if (sidebar) {
+    document.body.innerHTML = '<div class="v-application"><main class="v-main"><div id="app"></div></main></div>'
+  }
   const host = document.querySelector('.v-overlay__content')
-  window.originalHostStyle = host.getAttribute('style')
-  window.fixtureApp = createApp(Page, { api, onClose: () => window.fixtureApp.unmount() })
+  window.originalHostStyle = host?.getAttribute('style') || null
+  window.fixtureApp = createApp(sidebar ? AppPage : Page, { api, onClose: () => window.fixtureApp.unmount() })
   window.fixtureApp.mount('#app')
   window.fixtureReady = true
 </script>

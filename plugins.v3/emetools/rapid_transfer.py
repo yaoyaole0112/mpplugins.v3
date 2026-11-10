@@ -140,8 +140,12 @@ def upload_oss(client, path, response, stop, limit_mib, request, progress, befor
 
                 def send_part():
                     stream.seek(offset)
+
+                    def part_progress(consumed, part_total):
+                        progress(offset + min(amount, max(0, consumed)), size)
+
                     return bucket.upload_part(object_name, upload_id, len(parts) + 1,
-                                              SizedFileAdapter(reader, amount))
+                                              SizedFileAdapter(reader, amount), progress_callback=part_progress)
 
                 result = retry_request(f"上传第{len(parts) + 1}分片", send_part)
                 parts.append(PartInfo(len(parts) + 1, result.etag))

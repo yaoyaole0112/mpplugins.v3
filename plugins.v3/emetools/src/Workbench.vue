@@ -423,10 +423,29 @@ function rapidStatusIcon(status) {
     succeeded: '✅', uploaded: '⬆️', unmatched: 'ℹ️', retrying: '🕒', failed: '⚠️' }[status] || '•'
 }
 function rapidStatusLabel(status) {
-  return { stabilizing: '等待文件写入完成', queued: '等待处理', processing: '正在秒传',
+  return { stabilizing: '等待文件写入完成', queued: '等待处理', processing: '秒传处理',
     upload_queued: '等待普通上传', verifying: '正在复核', uncertain: '结果待核实',
     uploading: '正在普通上传', succeeded: '秒传成功', uploaded: '普通上传成功',
     unmatched: '115 未命中', retrying: '等待重试', failed: '处理失败' }[status] || status || '处理中'
+}
+function rapidActivityMessage(item) {
+  const label = rapidStatusLabel(item.status)
+  const message = String(item.message || '').trim()
+  if (!message) return label
+  return message.startsWith(label) ? message : `${label}：${message}`
+}
+function rapidProgressLabel(item) {
+  const progress = item.progress
+  if (!progress) return ''
+  const phase = { hashing: 'SHA1 校验', uploading: '文件传输', rapid: '115 秒传确认',
+    preparing: '准备上传', committing: '等待网盘确认', verifying: '核实网盘结果' }[progress.phase] || '处理中'
+  if (progress.percent == null) return `${phase}…`
+  return `${phase} ${Number(progress.percent).toFixed(1)}% · ${rapidFileSize(progress.completed)} / ${rapidFileSize(progress.total)}`
+}
+function rapidHistoryMessage(item) {
+  const message = String(item.message || '')
+  return ['succeeded', 'uploaded'].includes(item.status) && !message.includes('100%')
+    ? `${message} · 100%` : message
 }
 function dropMediaOption(rule, rank) {
   const from = draggedMediaRank.value
@@ -1597,11 +1616,24 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
           <div class="eme-card-heading"><div><h3>秒传记录</h3><p>显示两个处理通道的队列、上传进度及最近 24 小时内最多 200 条结果；待上传任务跨重启保留，完成结果不确定时先复核，不自动重复上传。</p></div><button class="eme-button text" :disabled="busy || !rapid.logs.length" @click="rapidCommand('clear_logs')">清空记录</button></div>
           <p class="eme-hint">秒传处理：{{ rapid.running || '空闲' }} · 普通上传：{{ rapid.upload_queue.uploading || 0 }} · 待上传：{{ rapid.upload_queue.queued || 0 }} · 复核/待核实：{{ (rapid.upload_queue.verifying || 0) + (rapid.upload_queue.verify_queued || 0) + (rapid.upload_queue.uncertain || 0) }}</p>
           <div v-if="rapid.activity.length" class="eme-rapid-activity"><h4>当前队列 <span>{{ rapid.activity_total }} 项</span></h4>
-            <div class="eme-results eme-rapid-logs eme-rapid-history"><div v-for="item in rapidQueueItems" :key="`active-${item.config_id}-${item.path}`" class="eme-result"><span>{{ rapidStatusIcon(item.status) }}</span><div><strong :title="item.name">{{ item.name }}</strong><small :title="item.message">{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ rapidStatusLabel(item.status) }}：{{ item.message }}</small><small :title="item.path">{{ item.path }}</small></div></div></div>
+            <div class="eme-results eme-rapid-logs eme-rapid-queue">
+              <div v-for="item in rapidQueueItems" :key="`active-${item.config_id}-${item.path}`" class="eme-result">
+                <span>{{ rapidStatusIcon(item.status) }}</span>
+                <div>
+                  <strong :title="item.name">{{ item.name }}</strong>
+                  <small :title="rapidActivityMessage(item)">{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ rapidActivityMessage(item) }}</small>
+                  <small class="eme-rapid-path" :title="item.path">{{ item.path }}</small>
+                  <div v-if="item.progress" class="eme-rapid-progress">
+                    <progress :value="item.progress.percent ?? undefined" max="100" :aria-label="rapidProgressLabel(item)" />
+                    <small>{{ rapidProgressLabel(item) }}</small>
+                  </div>
+                </div>
+              </div>
+            </div>
             <nav v-if="rapidQueuePageCount > 1" class="eme-pagination" aria-label="上传队列分页"><button class="eme-button secondary" :disabled="rapidQueuePage <= 1" @click="rapidQueuePage--">上一页</button><span>第 {{ rapidQueuePage }} / {{ rapidQueuePageCount }} 页</span><button class="eme-button secondary" :disabled="rapidQueuePage >= rapidQueuePageCount" @click="rapidQueuePage++">下一页</button></nav>
             <small v-if="rapid.activity_total > rapid.activity.length">当前仅显示最近 {{ rapid.activity.length }} 项。</small>
           </div>
-          <div v-if="rapid.logs.length" class="eme-results eme-rapid-logs eme-rapid-history"><div v-for="(item, index) in rapidLogItems" :key="`${item.time}-${item.path}-${index}`" class="eme-result"><span>{{ rapidStatusIcon(item.status) }}</span><div><strong :title="item.name">{{ item.name }}</strong><small :title="item.message">{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ item.message }}</small><small :title="item.path">{{ item.path }}</small></div></div></div>
+          <div v-if="rapid.logs.length" class="eme-results eme-rapid-logs eme-rapid-history"><div v-for="(item, index) in rapidLogItems" :key="`${item.time}-${item.path}-${index}`" class="eme-result"><span>{{ rapidStatusIcon(item.status) }}</span><div><strong :title="item.name">{{ item.name }}</strong><small :title="rapidHistoryMessage(item)">{{ item.time }} · {{ item.config }} · {{ rapidFileSize(item.size) }} · {{ rapidHistoryMessage(item) }}</small><small :title="item.path">{{ item.path }}</small></div></div></div>
           <nav v-if="rapidLogsPageCount > 1" class="eme-pagination" aria-label="秒传记录分页"><button class="eme-button secondary" :disabled="rapidLogsPage <= 1" @click="rapidLogsPage--"><i class="mdi mdi-chevron-left" />上一页</button><span>第 {{ rapidLogsPage }} / {{ rapidLogsPageCount }} 页 · 共 {{ rapid.logs.length }} 条</span><button class="eme-button secondary" :disabled="rapidLogsPage >= rapidLogsPageCount" @click="rapidLogsPage++">下一页<i class="mdi mdi-chevron-right" /></button></nav>
           <p v-if="!rapid.logs.length && !rapid.activity.length" class="eme-hint">暂无秒传记录。</p>
         </section>
@@ -1920,6 +1952,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
 .eme-folder-input{display:flex;align-items:center;gap:8px}.eme-folder-input input{flex:1;min-width:0}.eme-folder-input .eme-button{flex:none}
 .eme-results.eme-rapid-logs{max-height:none;overflow:visible}.eme-rapid-logs .eme-result{align-items:flex-start}.eme-results.eme-rapid-history{display:grid;grid-template-rows:repeat(6,88px)}.eme-rapid-history .eme-result{box-sizing:border-box;height:88px;min-height:88px;align-items:center;overflow:hidden}.eme-rapid-history .eme-result>div{flex:1;min-width:0;overflow:hidden}.eme-rapid-history .eme-result strong,.eme-rapid-history .eme-result small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.eme-rapid-switches{display:flex;flex-wrap:wrap;align-items:center;gap:14px 28px;margin-top:16px}.eme-rapid-switches .eme-switch-label{margin:0;min-height:32px}
 .eme-rapid-activity{margin:12px 0 18px;padding:12px;border:1px solid rgba(var(--v-theme-primary),.3);border-radius:12px;background:rgba(var(--v-theme-primary),.07)}.eme-rapid-activity h4{display:flex;justify-content:space-between;gap:12px;margin:0 0 10px}.eme-rapid-activity>small{display:block;margin-top:8px}
+.eme-results.eme-rapid-queue{display:block;margin:0}.eme-rapid-queue .eme-result{min-height:88px;align-items:center}.eme-rapid-queue .eme-result>div{flex:1;min-width:0}.eme-rapid-queue .eme-result strong,.eme-rapid-queue .eme-rapid-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.eme-rapid-queue .eme-result small{line-height:1.4}.eme-rapid-progress{margin-top:8px}.eme-rapid-progress progress{display:block;width:100%;height:6px;border:0;border-radius:999px;overflow:hidden;accent-color:rgb(var(--v-theme-primary))}.eme-rapid-progress progress::-webkit-progress-bar{background:rgba(var(--v-theme-primary),.12);border-radius:999px}.eme-rapid-progress progress::-webkit-progress-value{background:rgb(var(--v-theme-primary));border-radius:999px}.eme-rapid-progress progress::-moz-progress-bar{background:rgb(var(--v-theme-primary));border-radius:999px}.eme-rapid-progress small{font-size:11px}
 .eme-local-file{display:flex;flex-direction:column;align-items:flex-start;gap:3px}.eme-local-file small{opacity:.62}
 @media(max-width:760px){.eme-rapid-config .eme-card-heading{gap:10px}.eme-folder-input{align-items:stretch;flex-direction:column}.eme-folder-input .eme-button{width:100%}.eme-rapid-switches{align-items:flex-start;flex-direction:column;gap:12px}}
 </style>

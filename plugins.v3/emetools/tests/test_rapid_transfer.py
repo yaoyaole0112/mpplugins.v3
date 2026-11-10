@@ -59,7 +59,7 @@ class RapidTransferTests(unittest.TestCase):
             bucket.init_multipart_upload.return_value.upload_id = "upload"
             consumed = []
 
-            def upload_part(_object, _upload, _number, data):
+            def upload_part(_object, _upload, _number, data, progress_callback=None):
                 chunks = []
                 while chunk := data.read(65536):
                     chunks.append(chunk)
@@ -132,7 +132,7 @@ class RapidTransferTests(unittest.TestCase):
         path, bucket, client, response, stop = self.upload_fixture()
         reads = []
 
-        def send_part(_object, _upload, number, data):
+        def send_part(_object, _upload, number, data, progress_callback=None):
             self.assertEqual(number, 1)
             if not reads:
                 reads.append(data.read(3))
@@ -172,7 +172,7 @@ class RapidTransferTests(unittest.TestCase):
         path.write_bytes(b"abcDEFghi")
         attempts = []
 
-        def send_part(_object, _upload, number, data):
+        def send_part(_object, _upload, number, data, progress_callback=None):
             payload = data.read()
             attempts.append((number, payload))
             if len(attempts) == 2:
@@ -244,3 +244,29 @@ class RapidTransferTests(unittest.TestCase):
         self.assertEqual(factory.call_args.args[1], "https://oss-cn-shenzhen.aliyuncs.com")
         self.assertEqual(bucket.upload_part.call_count, 2)
         bucket.complete_multipart_upload.assert_called_once()
+
+    def test_reports_in_part_bytes_and_retries_do_not_count_resent_bytes_twice(self):
+        from oss2.exceptions import RequestError
+
+        path, bucket, client, response, stop = self.upload_fixture()
+        path.write_bytes(b"abcdef")
+        attempts = []
+        progress = Mock()
+
+        def send_part(_object, _upload, number, data, progress_callback=None):
+            attempts.append(number)
+            progress_callback(1, 3)
+            if len(attempts) == 2:
+                raise RequestError(ConnectionError("secret"))
+            progress_callback(len(data.read()), 3)
+            return SimpleNamespace(etag="etag")
+
+        bucket.upload_part.side_effect = send_part
+        with patch("oss2.Bucket", return_value=bucket), patch("oss2.determine_part_size", return_value=3):
+            upload_oss(client, path, response, stop, 0, lambda callback: callback(), progress, Mock())
+        self.assertEqual(attempts, [1, 2, 2])
+        reported = [item.args for item in progress.call_args_list]
+        self.assertIn((1, 6), reported)
+        self.assertIn((4, 6), reported)
+        self.assertEqual(reported[-1], (6, 6))
+        self.assertTrue(all(completed <= total == 6 for completed, total in reported))
