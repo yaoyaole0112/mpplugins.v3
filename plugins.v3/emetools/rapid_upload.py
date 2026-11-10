@@ -14,7 +14,9 @@ from typing import Any
 
 from app.sdk.logging import logger
 from .record_history import recent_records
-from .rapid_transfer import LimitedReader, TransferStopped, UploadUncertain, upload_oss
+from .rapid_transfer import (
+    LimitedReader, SourceChanged, TransferStopped, UploadTransportError, UploadUncertain, upload_oss,
+)
 from .p115 import P115DirectoryUnavailable
 
 try:
@@ -298,6 +300,9 @@ class RapidUpload:
         with self._watch_lock:
             key = self._activity_key(config_id, path)
             current = self._activity.get(key)
+            if (current and current["status"] == "stabilizing"
+                    and path in self._pending_paths.get(config_id, {})):
+                return
             if include_upload or not current or current["status"] not in {
                     "upload_queued", "uploading", "verifying", "uncertain"}:
                 self._activity.pop(key, None)
@@ -334,6 +339,12 @@ class RapidUpload:
         config = next((item for item in self._configs if item["id"] == config_id), None)
         if not config or not config.get("realtime_enabled"):
             return
+        self._wait_for_stable_file(config, path)
+
+    def _wait_for_stable_file(self, config: dict, path: str, delay: float = 0) -> None:
+        if self._stop.is_set():
+            return
+        config_id = config["id"]
         candidate = Path(path)
         if candidate.is_symlink() or not candidate.is_file():
             return
@@ -350,9 +361,12 @@ class RapidUpload:
             except OSError:
                 return
             pending = self._pending_paths.setdefault(config_id, {})
-            pending[str(candidate)] = {"signature": signature, "stable_checks": 0}
+            not_before = max(pending.get(str(candidate), {}).get("not_before", 0),
+                             time.monotonic() + delay)
+            pending[str(candidate)] = {"signature": signature, "stable_checks": 0,
+                                       "not_before": not_before}
             self._set_activity(config, str(candidate), "stabilizing",
-                               "等待文件写入完成", stat.st_size)
+                               "文件变化，等待稳定后自动复检" if delay else "等待文件写入完成", stat.st_size)
             timer = threading.Timer(3.0, self._dispatch_realtime, args=(config_id,))
             timer.daemon = True
             self._watch_timers[config_id] = timer
@@ -376,7 +390,7 @@ class RapidUpload:
                     state.update(signature=signature, stable_checks=0)
                 else:
                     state["stable_checks"] += 1
-                    if state["stable_checks"] >= 2:
+                    if state["stable_checks"] >= 2 and time.monotonic() >= state.get("not_before", 0):
                         stable_paths.append(path_text)
                         config = next((item for item in self._configs if item["id"] == config_id), None)
                         if config:
@@ -926,7 +940,7 @@ class RapidUpload:
             "uncertain": "上传结果待核实，保留源文件；立即扫描可再次只读复核",
         }.get(state, state)
         if state == "queued" and entry.get("retry_at", 0) > time.time():
-            message = "目标目录暂不可读，稍后自动复查；尚未提交普通上传"
+            message = entry.get("retry_reason") or "目标目录暂不可读，稍后自动复查；尚未提交普通上传"
         self._set_activity(entry["config"], entry["path"], status, message, entry["size"])
 
     def _queue_upload(self, config, path, sha1, size, signature):
@@ -1027,7 +1041,7 @@ class RapidUpload:
 
         def before_complete():
             if path.is_symlink() or not self._signature_matches(entry, self._file_signature(path.stat())):
-                raise ValueError("源文件在上传过程中变化，未提交完成，保留源文件")
+                raise SourceChanged("源文件在上传过程中变化，未提交完成")
             with self._state_lock:
                 if self._stop.is_set():
                     raise TransferStopped("插件已停止，未提交上传完成")
@@ -1080,7 +1094,7 @@ class RapidUpload:
                     raise UploadUncertain("未确认网盘中存在完整文件，保留源文件；不自动重新上传")
             else:
                 if path.is_symlink() or not self._signature_matches(entry, self._file_signature(path.stat())):
-                    raise ValueError("待上传源文件已变化，未上传或移动；请重新扫描")
+                    raise SourceChanged("待上传源文件已变化，未上传或移动")
                 try:
                     exists = self._verify_upload(client, entry)
                 except UploadUncertain:
@@ -1136,10 +1150,28 @@ class RapidUpload:
                     self._save_uploads()
                     self._show_upload(entry)
                     status = "uncertain"
-                    message = f"普通上传结果待核实（{type(error).__name__}），源文件保留；立即扫描可只读复核"
+                    detail = str(error) if isinstance(error, UploadUncertain) else type(error).__name__
+                    message = f"普通上传结果待核实：{detail}；源文件保留，立即扫描可只读复核"
+                elif isinstance(error, SourceChanged):
+                    self._uploads.pop(key, None)
+                    self._save_uploads()
+                    self._clear_activity(config["id"], str(path), include_upload=True)
+                    self._wait_for_stable_file(config, str(path), delay=30)
+                    status = "stabilizing"
+                    message = f"{error}；保留源文件，等待稳定后自动复检"
+                elif (isinstance(error, UploadTransportError) and error.retryable
+                      and entry.get("upload_retries", 0) < min(config["retry_limit"], 2)):
+                    retries = entry.get("upload_retries", 0) + 1
+                    message = f"{error}；未提交完成，保留源文件，{60 * retries}秒后自动重试"
+                    entry.update(state="queued", upload_retries=retries, retry_at=time.time() + 60 * retries,
+                                 retry_reason=message)
+                    self._save_uploads()
+                    self._show_upload(entry)
+                    status = "retrying"
                 else:
                     status = "failed"
-                    message = f"普通上传失败（{type(error).__name__}），未提交上传完成"
+                    detail = str(error) if isinstance(error, UploadTransportError) else type(error).__name__
+                    message = f"普通上传失败：{detail}；未提交上传完成"
                     if (path.exists() and not path.is_symlink() and config.get("failure_directory")
                             and self._signature_matches(entry, self._file_signature(path.stat()))):
                         try:
@@ -1154,7 +1186,7 @@ class RapidUpload:
                     self._clear_activity(config["id"], str(path), include_upload=True)
                 self._append_log(config, path, status, message, entry["size"], entry["sha1"])
                 logger.warning("媒体增强 本地秒传普通上传未完成：配置=%s 文件=%s 状态=%s 原因=%s",
-                               config["name"], path.name, status, type(error).__name__)
+                               config["name"], path.name, status, message)
         finally:
             close = getattr(client, "close", None)
             if callable(close):
@@ -1256,6 +1288,7 @@ class RapidUpload:
         skipped: list[dict] = []
         unmatched: list[dict] = []
         failed: list[dict] = []
+        stabilizing: list[dict] = []
         upload_queued: list[dict] = []
         client = None
         try:
@@ -1266,10 +1299,18 @@ class RapidUpload:
                     break
                 size = 0
                 sha1 = ""
+                signature = None
                 self._set_activity(config, str(path), "processing", "正在检查文件状态与缓存")
                 try:
                     before = path.stat()
                     signature = self._file_signature(before)
+                    with self._watch_lock:
+                        waiting = self._pending_paths.get(config_id, {}).get(str(path))
+                        if waiting and time.monotonic() < waiting.get("not_before", 0):
+                            self._set_activity(config, str(path), "stabilizing", "等待文件稳定后自动复检",
+                                               signature["size"])
+                            stabilizing.append({"path": str(path), "name": path.name, "size": signature["size"]})
+                            continue
                     with self._state_lock:
                         pending = self._uploads.get(self._upload_key(config, path))
                         if pending:
@@ -1301,8 +1342,8 @@ class RapidUpload:
                         self._set_activity(config, str(path), "processing", "正在计算 SHA1", signature["size"])
                         sha1, size = self._sha1(path)
                         after_signature = self._file_signature(path.stat())
-                        if signature != after_signature:
-                            raise RuntimeError("文件在计算 SHA1 期间发生变化，已跳过")
+                        if signature != after_signature or size != signature["size"]:
+                            raise SourceChanged("文件在计算 SHA1 期间发生变化")
                         self._cache_hash(key, sha1, size, signature)
                     if (completed and completed.get("sha1") == sha1 and completed.get("size") == size
                             and completed.get("target") == config["target_folder_id"]):
@@ -1335,7 +1376,7 @@ class RapidUpload:
                                 upload_queued.append(item)
                                 if created:
                                     self._append_log(config, path, "upload_queued",
-                                                     "115 未命中，已加入独立普通上传队列", size, sha1)
+                                                     "115 未命中（正常结果），已加入独立普通上传队列", size, sha1)
                             except TransferStopped:
                                 raise
                             except Exception as error:
@@ -1358,11 +1399,18 @@ class RapidUpload:
                         path.unlink()
                 except TransferStopped:
                     break
+                except SourceChanged as error:
+                    message = f"{error}；保留源文件，等待稳定后自动复检"
+                    stabilizing.append({"path": str(path), "name": path.name, "size": size, "message": message})
+                    self._wait_for_stable_file(config, str(path), delay=30)
+                    self._append_log(config, path, "stabilizing", message, size)
+                    logger.info("媒体增强 本地秒传：配置=%s 文件=%s %s", config["name"], path.name, message)
                 except Exception as error:
                     message = f"{type(error).__name__}：{str(error)[:160]}"
                     moved = ""
                     try:
-                        if path.exists():
+                        if (signature is not None and path.exists() and not path.is_symlink()
+                                and self._signature_matches({"signature": signature}, self._file_signature(path.stat()))):
                             moved = self._move_failure(path, config)
                     except Exception as move_error:
                         message += f"；失败目录移动失败：{type(move_error).__name__}"
@@ -1381,10 +1429,11 @@ class RapidUpload:
                 "message": (
                     f"本轮检查 {len(source_files)} 个文件，成功 {len(succeeded)} 个，"
                     f"普通上传已排队 {len(upload_queued)} 个（独立执行），已处理跳过 {len(skipped)} 个，"
-                    f"未命中 {len(unmatched)} 个，失败 {len(failed)} 个"
+                    f"等待稳定 {len(stabilizing)} 个，未命中 {len(unmatched)} 个，失败 {len(failed)} 个"
                 ),
                 "total": len(source_files), "succeeded": succeeded, "skipped": skipped,
-                "uploaded": uploaded, "upload_queued": upload_queued, "unmatched": unmatched, "failed": failed,
+                "uploaded": uploaded, "upload_queued": upload_queued, "stabilizing": stabilizing,
+                "unmatched": unmatched, "failed": failed,
             }
         finally:
             self._flush_hash_cache()

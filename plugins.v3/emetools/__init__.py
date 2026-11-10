@@ -131,7 +131,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.78"
+    plugin_version = "2.10.79"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -2165,7 +2165,7 @@ class EmeTools(_PluginBase):
         if getattr(self, "_p115_stop", None) and self._p115_stop.is_set():
             return
         config = next((item for item in self._rapid.configs if item["id"] == config_id), None)
-        if not self._enabled or not config or not config.get("realtime_enabled"):
+        if not self._enabled or not config:
             return
         try:
             result = self._run_p115_task(

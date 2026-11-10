@@ -420,13 +420,13 @@ function rapidFileSize(value) {
 }
 function rapidStatusIcon(status) {
   return { stabilizing: '⏳', queued: '🕒', upload_queued: '🕒', verifying: '🔍', uncertain: '⚠️', processing: '⚡', uploading: '⬆️',
-    succeeded: '✅', uploaded: '⬆️', unmatched: 'ℹ️', failed: '⚠️' }[status] || '•'
+    succeeded: '✅', uploaded: '⬆️', unmatched: 'ℹ️', retrying: '🕒', failed: '⚠️' }[status] || '•'
 }
 function rapidStatusLabel(status) {
   return { stabilizing: '等待文件写入完成', queued: '等待处理', processing: '正在秒传',
     upload_queued: '等待普通上传', verifying: '正在复核', uncertain: '结果待核实',
     uploading: '正在普通上传', succeeded: '秒传成功', uploaded: '普通上传成功',
-    unmatched: '115 未命中', failed: '处理失败' }[status] || status || '处理中'
+    unmatched: '115 未命中', retrying: '等待重试', failed: '处理失败' }[status] || status || '处理中'
 }
 function dropMediaOption(rule, rank) {
   const from = draggedMediaRank.value

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from emetools.rapid_upload import RapidUpload, normalize_config, validate_configs
-from emetools.rapid_transfer import TransferStopped, UploadUncertain
+from emetools.rapid_transfer import SourceChanged, TransferStopped, UploadTransportError, UploadUncertain
 from emetools.p115 import P115DirectoryUnavailable, P115RequestGate
 
 
@@ -637,6 +637,132 @@ class RapidUploadTests(unittest.TestCase):
                 media.write_bytes(b"modified")
                 rapid.run("rapid_1")
             self.assertEqual(hash_file.call_count, 2)
+
+    def test_file_changed_during_hash_waits_without_moving_and_is_targeted_for_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123",
+                                       "failure_directory": str(root.parent / f"{root.name}-failed")})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+
+            def changed_hash(candidate):
+                candidate.write_bytes(b"more-video")
+                return "ABC", 5
+
+            with patch.object(rapid, "_p115_client", return_value=FakeClient({"status": 2})), \
+                    patch.object(rapid, "_sha1", side_effect=changed_hash) as hashing, \
+                    patch.object(rapid, "_move_failure") as move, \
+                    patch("emetools.rapid_upload.threading.Timer"), \
+                    patch.object(rapid, "_start_upload_worker"):
+                result = rapid.run("rapid_1")
+                again = rapid.run("rapid_1")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["failed"], [])
+            self.assertEqual(len(result["stabilizing"]), 1)
+            self.assertEqual(len(again["stabilizing"]), 1)
+            hashing.assert_called_once()
+            move.assert_not_called()
+            self.assertTrue(path.exists())
+            self.assertFalse(rapid._hash_cache)
+            self.assertEqual(rapid.status()["logs"][-1]["status"], "stabilizing")
+            self.assertEqual(rapid.status()["activity"][0]["status"], "stabilizing")
+            self.assertIn(str(path), rapid._pending_paths["rapid_1"])
+
+    def test_deferred_file_dispatches_only_after_stable_delay_even_without_monitoring(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+            with patch("emetools.rapid_upload.threading.Timer"), \
+                    patch("emetools.rapid_upload.time.monotonic", return_value=100), \
+                    patch.object(rapid, "_queue_stable_realtime_paths") as dispatch:
+                rapid._wait_for_stable_file(config, str(path), delay=30)
+                rapid._dispatch_realtime("rapid_1")
+                rapid._dispatch_realtime("rapid_1")
+                dispatch.assert_not_called()
+                with patch("emetools.rapid_upload.time.monotonic", return_value=131):
+                    rapid._dispatch_realtime("rapid_1")
+                dispatch.assert_called_once_with("rapid_1", [str(path)])
+
+    def test_changed_queued_upload_is_rehashed_and_never_moved_to_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+            with patch.object(rapid, "_start_upload_worker"):
+                rapid._queue_upload(config, path, "ABC", 5, rapid._file_signature(path.stat()))
+            key, entry = next(iter(rapid._uploads.items()))
+            path.write_bytes(b"changed")
+            with patch.object(rapid, "_p115_client", return_value=FakeClient({})), \
+                    patch.object(rapid, "_upload_original") as upload, \
+                    patch.object(rapid, "_move_failure") as move, \
+                    patch("emetools.rapid_upload.threading.Timer"):
+                rapid._process_upload(key, entry)
+            upload.assert_not_called()
+            move.assert_not_called()
+            self.assertFalse(rapid._uploads)
+            self.assertTrue(path.exists())
+            self.assertIn(str(path), rapid._pending_paths["rapid_1"])
+
+    def test_uncommitted_network_failure_is_retried_boundedly_without_moving_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123",
+                                       "failure_directory": str(Path(directory).parent / f"{path.parent.name}-failed")})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+            with patch.object(rapid, "_start_upload_worker"):
+                rapid._queue_upload(config, path, "ABC", 5, rapid._file_signature(path.stat()))
+            key, entry = next(iter(rapid._uploads.items()))
+            error = UploadTransportError("上传第1分片", TimeoutError("signed-secret"), retryable=True)
+            with patch.object(rapid, "_p115_client", return_value=FakeClient({})), \
+                    patch.object(rapid, "_verify_upload", return_value=False), \
+                    patch.object(rapid, "_upload_original", side_effect=error), \
+                    patch.object(rapid, "_move_failure") as move:
+                rapid._process_upload(key, entry)
+                self.assertEqual(entry["state"], "queued")
+                self.assertEqual(entry["upload_retries"], 1)
+                self.assertGreater(entry["retry_at"], time.time())
+                self.assertIn("上传第1分片", rapid.status()["logs"][-1]["message"])
+                self.assertEqual(rapid.status()["logs"][-1]["status"], "retrying")
+                rapid._process_upload(key, entry)
+                self.assertEqual(entry["upload_retries"], 2)
+                move.assert_not_called()
+                rapid._process_upload(key, entry)
+                move.assert_called_once()
+            self.assertFalse(rapid._uploads)
+            self.assertEqual(rapid.status()["logs"][-1]["status"], "failed")
+            self.assertTrue(path.exists())
+            self.assertNotIn("signed-secret", rapid.status()["logs"][-1]["message"])
+
+    def test_source_change_before_completion_aborts_without_moving(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode.mkv"
+            path.write_bytes(b"video")
+            config = normalize_config({"id": "rapid_1", "source_path": directory, "target_folder_id": "123"})
+            rapid = RapidUpload(FakeOwner(), {"configs": [config]})
+            self.addCleanup(rapid.close)
+            entry = {"config": config, "path": str(path), "size": 5, "sha1": "ABC",
+                     "signature": rapid._file_signature(path.stat()), "state": "uploading"}
+
+            def transfer(*args):
+                path.write_bytes(b"changed")
+                args[-1]()
+
+            with patch.object(rapid, "_rapid_init", return_value={"status": 1}), \
+                    patch("emetools.rapid_upload.upload_oss", side_effect=transfer), \
+                    self.assertRaises(SourceChanged):
+                rapid._upload_original(path, config, FakeClient({}), entry)
+            self.assertFalse(entry["commit_started"])
+            self.assertTrue(path.exists())
 
     def test_realtime_status_explains_missing_source_directory(self):
         config = normalize_config({"id": "rapid_1", "name": "电视剧", "realtime_enabled": True})
