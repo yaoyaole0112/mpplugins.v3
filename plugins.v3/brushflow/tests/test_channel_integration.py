@@ -90,6 +90,83 @@ class ChannelIntegrationTests(unittest.TestCase):
         )
         self.assertIsNone(self.select())
 
+    def prepare_phony_record(self):
+        self.plugin._channel_dedup_attributes = ["resolution", "effects"]
+        self.record = parse_channel_message(
+            "@channel", 9997, time.time(),
+            "影视：换母疑云\n季集：S01E05\n质量：1080p SDR H264\n"
+            "ed2k://|file|换母疑云(2026)(tmdbid=275139).S01E05.WEB-DL.1080p."
+            f"SDR.H264.8bit.DDP.5.1.24帧-RMGroup.mkv|1109637998|{'a' * 32}|/",
+        )
+        self.plugin._channel_dedup_state["records"] = [self.record]
+        self.plugin.chain.recognize_media.return_value = SimpleNamespace(
+            title="换母疑云", en_title="Phony", tmdb_id=275139, type="电视剧",
+        )
+        self.phony_path = "Phony.S01E05.2026.1080p.DSNP.WEB-DL.H.264.DDP5.1-HHWEB.mkv"
+        self.content = make_torrent([(self.phony_path, 1109643658)])
+
+    def test_unlabelled_sdr_resolves_identity_and_excludes_before_download(self):
+        self.prepare_phony_record()
+        downloader, selection = self.prepare_download()
+        self.torrent.title = "Phony S01 2026 1080p DSNP WEB-DL H.264 DDP5.1-HHWEB"
+        with patch("brushflow.logger") as log:
+            self.assertIsNone(self.plugin._BrushFlow__download(self.torrent))
+        downloader.add_torrent.assert_not_called()
+        selection.assert_not_called()
+        self.plugin.chain.recognize_media.assert_called_once()
+        self.assertTrue(any("SDR" in call.args[0] and "推断" in call.args[0] for call in log.info.call_args_list))
+
+    def test_site_description_and_labels_reach_candidate_comparison(self):
+        for field in ("description", "labels"):
+            with self.subTest(field=field):
+                self.prepare_phony_record()
+                self.content = make_torrent([(self.phony_path.replace("H.264", "H.265"), 1109643658)])
+                downloader, _ = self.prepare_download()
+                self.torrent.title = "Phony S01 2026 1080p WEB-DL H.265"
+                setattr(self.torrent, field, ["SDR"] if field == "labels" else "1080p SDR")
+                self.assertIsNone(self.plugin._BrushFlow__download(self.torrent))
+                downloader.add_torrent.assert_not_called()
+
+    def test_sdr_rule_keeps_different_effect_resolution_episode_or_identity(self):
+        self.prepare_phony_record()
+        for path in (
+            self.phony_path.replace("1080p", "720p"),
+            self.phony_path.replace("1080p", "1080p.HDR10"),
+            self.phony_path.replace("S01E05", "S01E06"),
+            self.phony_path.replace("Phony.", "Phony.(tmdbid=999)."),
+        ):
+            with self.subTest(path=path):
+                self.content = make_torrent([(path, 1109643658)])
+                self.assertIsNone(self.plugin._channel_dedup_file_selection(self.content, "Phony S01"))
+
+    def test_inferred_sdr_does_not_bypass_identity_validation(self):
+        self.prepare_phony_record()
+        for media in (
+            None,
+            SimpleNamespace(title="Different Show", tmdb_id=275139, type="电视剧"),
+        ):
+            with self.subTest(media=media):
+                self.plugin._channel_identity_cache.clear()
+                self.plugin.chain.recognize_media.return_value = media
+                self.assertIsNone(self.plugin._channel_dedup_file_selection(self.content, "Phony S01"))
+
+    def test_inferred_sdr_pack_excludes_only_published_episode(self):
+        self.prepare_phony_record()
+        next_episode = self.phony_path.replace("S01E05", "S01E06")
+        self.content = make_torrent([(self.phony_path, 1109643658), (next_episode, 1200000000)])
+        downloader, selection = self.prepare_download()
+        self.torrent.title = "Phony S01 2026 1080p DSNP WEB-DL H.264 DDP5.1-HHWEB"
+        self.assertEqual(self.plugin._BrushFlow__download(self.torrent), "a" * 40)
+        self.assertTrue(downloader.add_torrent.call_args.kwargs["is_paused"])
+        self.assertEqual(selection.call_args.args[2]["accepted"], {next_episode})
+
+    def test_missing_selected_attribute_logs_reason_and_does_not_guess(self):
+        self.plugin._channel_dedup_attributes = ["resolution", "fps"]
+        with patch("brushflow.logger") as log:
+            self.assertIsNone(self.select())
+        self.assertTrue(any("fps" in call.args[0] and "缺少" in call.args[0] for call in log.info.call_args_list))
+        self.plugin.chain.recognize_media.assert_not_called()
+
     def test_combined_episode_file_requires_all_episodes_to_match(self):
         self.content = make_torrent([("Show.S01E01-E02.1080p.H264.mkv", 1000)])
         self.assertIsNone(self.select())

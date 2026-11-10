@@ -247,7 +247,9 @@ def parse_torrent_files(content: bytes) -> list[dict]:
         return []
 
 
-def parse_candidate_file(path: str, size: Optional[int], title_hint: str = "") -> Optional[dict]:
+def parse_candidate_file(
+    path: str, size: Optional[int], title_hint: str = "", spec_hint: str = "",
+) -> Optional[dict]:
     filename = PurePosixPath(str(path or "")).name
     if "." not in filename or filename.rsplit(".", 1)[-1].lower() not in VIDEO_EXTENSIONS:
         return None
@@ -268,6 +270,24 @@ def parse_candidate_file(path: str, size: Optional[int], title_hint: str = "") -
         title_key = normalize_title(hinted_title)
     tmdb_id = _extract_tmdb_id(filename) or _extract_tmdb_id(title_hint)
     year_match = re.search(r"\b(?:19|20)\d{2}\b", filename)
+    specs = merge_specs(parse_specs(filename, size), merge_specs(parse_specs(title_hint), parse_specs(spec_hint)))
+    inferred_attributes = []
+    # Naming convention only, not a probe: limit implicit SDR to ordinary AVC WEB releases.
+    if (
+        specs["effects"] is None
+        and specs["resolution"] in {"1080p", "1080i", "720p", "720i", "576p", "576i", "540p", "540i", "480p", "480i"}
+        and specs["codec"] == "H.264"
+        and specs["source"] in {"WEB-DL", "WEBRip", "WEB"}
+        and not re.search(
+            r"HDR|HLG|DOVI|DOLBY[ ._-]*VISION|EDR|MAXPLUS|"
+            r"(?:^|[^A-Z0-9])(?:DV|PQ)(?:[^A-Z0-9]|$)|"
+            r"(?:10|12)[ ._-]*BIT|HI10P|HIGH[ ._-]*10|YUV\d+P(?:10|12)|"
+            r"(?:BT|REC)[ ._-]*2020|(?:SMPTE[ ._-]*)?(?:ST[ ._-]*)?2084",
+            f"{path} {title_hint} {spec_hint}", re.IGNORECASE,
+        )
+    ):
+        specs["effects"] = "SDR"
+        inferred_attributes.append("effects")
     return {
         "path": str(path),
         "title_key": title_key,
@@ -275,7 +295,8 @@ def parse_candidate_file(path: str, size: Optional[int], title_hint: str = "") -
         "year": int(year_match.group()) if year_match else None,
         "season": season,
         "episodes": sorted(set(episodes)),
-        "specs": merge_specs(parse_specs(filename, size), parse_specs(title_hint)),
+        "specs": specs,
+        "inferred_attributes": inferred_attributes,
     }
 
 

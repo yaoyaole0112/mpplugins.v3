@@ -254,7 +254,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.3.2"
+    plugin_version = "6.3.3"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -3080,6 +3080,7 @@ class BrushFlow(_PluginBase):
                 torrent_content,
                 torrent.title,
                 accepted_paths=recent_selection.get("accepted") if recent_selection else None,
+                spec_hint=" ".join([torrent.description or "", *(torrent.labels or [])]),
             )
             if dedup_selection and dedup_selection["excluded"]:
                 if recent_selection:
@@ -3318,8 +3319,9 @@ class BrushFlow(_PluginBase):
         torrent_content: Union[str, bytes],
         title: str,
         accepted_paths: Optional[Set[str]] = None,
+        spec_hint: str = "",
     ) -> Optional[dict]:
-        """逐集比较频道记录与种子内部媒体文件，未知信息一律放行。"""
+        """逐集比较频道记录与种子内部媒体文件；常规 AVC WEB 可推断 SDR，其余未知放行。"""
         if not isinstance(torrent_content, bytes) or not self._channel_dedup_attributes:
             return None
         with self._channel_state_lock:
@@ -3349,11 +3351,25 @@ class BrushFlow(_PluginBase):
             for number in record.get("episodes") or []:
                 episode_records.setdefault((record.get("season"), number), []).append(record)
         for item in considered:
-            candidate = parse_candidate_file(item["path"], item.get("size"), title)
+            candidate = parse_candidate_file(item["path"], item.get("size"), title, spec_hint=spec_hint)
             if not candidate:
                 continue
             if getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None):
                 continue
+            missing_attributes = [
+                key for key in attributes if candidate["specs"].get(key) is None
+            ]
+            if missing_attributes:
+                logger.info(
+                    f"频道同规格去重放行 {item['path']}：候选缺少勾选规格 "
+                    f"{', '.join(missing_attributes)}，无法确认同规格"
+                )
+                continue
+            if "effects" in attributes and "effects" in candidate["inferred_attributes"]:
+                logger.info(
+                    f"频道同规格去重规格推断 {item['path']}：未标动态范围的常规 "
+                    f"{candidate['specs']['resolution']} H.264 WEB 资源按 SDR 命名约定比较，非媒体实测"
+                )
             matched_records = []
             for episode in candidate["episodes"]:
                 one_episode = {**candidate, "episodes": [episode]}

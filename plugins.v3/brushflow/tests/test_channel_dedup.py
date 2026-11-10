@@ -112,6 +112,98 @@ ed2k://|file|PSYREN -决战游戏-(2026)(tmdbid=297903).S01E05.WEB-DL.1080p.SDR.
             "fps": 24.0, "size": 1024,
         })
 
+    def test_conventional_avc_web_candidate_without_effect_label_matches_sdr(self):
+        record = parse_channel_message(
+            "@ms20260601", 9997, 1,
+            "影视：换母疑云\n季集：S01E05\n质量：1080p SDR H264\n"
+            "ed2k://|file|换母疑云(2026)(tmdbid=275139).S01E05.WEB-DL.1080p."
+            f"SDR.H264.8bit.DDP.5.1.24帧-RMGroup.mkv|1109637998|{'a' * 32}|/",
+        )
+        candidate = parse_candidate_file(
+            "Phony.(tmdbid=275139).S01E05.2026.1080p.DSNP.WEB-DL.H.264.DDP5.1-HHWEB.mkv",
+            1109643658, "Phony S01 2026 1080p DSNP WEB-DL H.264 DDP5.1-HHWEB",
+        )
+        self.assertEqual(candidate["specs"]["effects"], "SDR")
+        self.assertEqual(candidate["inferred_attributes"], ["effects"])
+        self.assertTrue(same_release(candidate, record, ["resolution", "effects"]))
+
+    def test_screenshot_releases_match_despite_audio_spelling_and_size_difference(self):
+        first = "换母疑云(2026)(tmdbid=275139).S01E05.WEB-DL.1080p.SDR.H264.8bit.DDP.5.1.24帧-RMGroup.mkv"
+        second = first.replace("DDP.", "DD+.")
+        record = parse_channel_message(
+            "@ms20260601", 9997, 1794299719,
+            f"影视：换母疑云\n季集：S01E05\ned2k://|file|{first}|1109637998|{'a' * 32}|/",
+        )
+        candidate = parse_candidate_file(second, 1109643658)
+        self.assertTrue(same_release(candidate, record, ["resolution", "effects"]))
+        self.assertEqual(candidate["inferred_attributes"], [])
+
+    def test_unselected_size_codec_source_and_fps_do_not_affect_matching(self):
+        record = parse_channel_message("@channel", 1, 1, self.message)
+        candidate = parse_candidate_file(
+            "Different.(tmdbid=297903).S01E05.1080p.SDR.H265.BluRay.60FPS.mkv", 2000000000,
+        )
+        self.assertTrue(same_release(candidate, record, ["resolution", "effects"]))
+        for attribute in ("size", "codec", "source", "fps"):
+            with self.subTest(attribute=attribute):
+                self.assertFalse(same_release(candidate, record, ["resolution", "effects", attribute]))
+
+    def test_description_specs_fill_gaps_without_becoming_identity_or_overriding_filename(self):
+        candidate = parse_candidate_file(
+            "Show.S01E01.1080p.H265.WEB-DL.mkv", 1024, "Show S01",
+            spec_hint="Other Show (tmdbid=999) 2025 2160p SDR H264 BluRay 25FPS",
+        )
+        self.assertEqual(candidate["specs"], {
+            "resolution": "1080p", "effects": "SDR", "codec": "H.265", "source": "WEB-DL",
+            "fps": 25, "size": 1024,
+        })
+        self.assertEqual(candidate["inferred_attributes"], [])
+        self.assertEqual(candidate["title_key"], "show")
+        self.assertIsNone(candidate["tmdb_id"])
+        self.assertIsNone(candidate["year"])
+
+    def test_explicit_effect_labels_take_priority_over_sdr_inference(self):
+        for effect in ("HDR", "HDR10", "HDR10+", "DV", "HLG", "SDR"):
+            with self.subTest(effect=effect):
+                candidate = parse_candidate_file(
+                    f"Show.S01E01.1080p.H264.{effect}.WEB-DL.mkv", 1,
+                    spec_hint="SDR",
+                )
+                self.assertEqual(candidate["specs"]["effects"], effect)
+                self.assertEqual(candidate["inferred_attributes"], [])
+
+    def test_sdr_inference_requires_conventional_avc_web_specs(self):
+        for quality in (
+            "2160p.H264.WEB-DL", "1440p.H264.WEB-DL", "1080p.H265.WEB-DL",
+            "1080p.AV1.WEB-DL", "1080p.H264.BluRay", "1080p.WEB-DL",
+            "H264.WEB-DL", "1080p.H264",
+        ):
+            with self.subTest(quality=quality):
+                candidate = parse_candidate_file(f"Show.S01E01.{quality}.mkv", 1)
+                self.assertIsNone(candidate["specs"]["effects"])
+                self.assertEqual(candidate["inferred_attributes"], [])
+        for quality in ("1080p.H264.WEB-DL", "720p.x264.WEBRip", "480p.AVC.WEB"):
+            with self.subTest(quality=quality):
+                self.assertEqual(
+                    parse_candidate_file(f"Show.S01E01.{quality}.mkv", 1)["specs"]["effects"], "SDR",
+                )
+
+    def test_hdr_or_high_bit_depth_hints_block_sdr_inference(self):
+        for marker in (
+            "10bit", "10-bit", "10 bit", "Hi10P", "High10", "High 10",
+            "12bit", "12-bit", "HDRVivid", "HDR.Vivid", "HLG10", "DoVi8",
+            "BT.2020", "Rec2020", "PQ", "EDR", "MAXPLUS", "SMPTE.ST.2084",
+        ):
+            for location in ("filename", "title", "description"):
+                with self.subTest(marker=marker, location=location):
+                    candidate = parse_candidate_file(
+                        f"Show.S01E01.1080p.H264.WEB-DL.{marker if location == 'filename' else ''}.mkv",
+                        1, marker if location == "title" else "",
+                        spec_hint=marker if location == "description" else "",
+                    )
+                    self.assertNotEqual(candidate["specs"]["effects"], "SDR")
+                    self.assertEqual(candidate["inferred_attributes"], [])
+
     def test_plain_tmdb_id_is_only_used_on_tv_template(self):
         message = "影视：Show\n季集：S01E01\n质量：1080p H264\n类型：剧集\n评分：7.2 ｜ ID：297903"
         self.assertEqual(parse_channel_message("@channel", 1, 1, message)["tmdb_id"], 297903)
