@@ -128,6 +128,153 @@ class ChannelIntegrationTests(unittest.TestCase):
         self.assertNotIn("text", records[1])
         self.assertTrue(self.plugin._channel_dedup_state["last_poll_ok"])
         self.assertFalse(self.plugin._channel_dedup_lock.locked())
+        bridge.read_telegram_channel_messages.assert_called_once()
+
+    def install_bridge(self, result=None, side_effect=None):
+        bridge = type("Ed2kFolderWatcher", (), {})()
+        bridge.read_telegram_channel_messages = Mock(return_value=result, side_effect=side_effect)
+        patcher = patch("app.runtime.extensions.plugin.manager.PluginManager")
+        patcher.start().return_value.running_plugins = {"Ed2kFolderWatcher": bridge}
+        self.addCleanup(patcher.stop)
+        return bridge
+
+    def test_active_idle_and_resumed_activity_intervals(self):
+        now = time.time()
+        empty = {"messages": [], "cursors": {}, "errors": [], "processed_channels": ["@channel"]}
+        activity = {**empty, "cursors": {"@channel": 12}}
+        resumed = {**empty, "cursors": {"@channel": 13}}
+        bridge = self.install_bridge(side_effect=[activity, empty, empty, empty, resumed])
+        with patch("brushflow.time.time") as clock:
+            for elapsed in (0, 120, 240, 360):
+                clock.return_value = now + elapsed
+                self.plugin.poll_channel_messages()
+            state = self.plugin._channel_dedup_state
+            self.assertEqual(state["idle_polls"], 3)
+            self.assertEqual(state["poll_interval_seconds"], 300)
+            self.assertEqual(state["next_poll_at"], now + 660)
+            clock.return_value = now + 659
+            self.plugin.poll_channel_messages()
+            self.assertEqual(bridge.read_telegram_channel_messages.call_count, 4)
+            clock.return_value = now + 660
+            self.plugin.poll_channel_messages()
+        state = self.plugin._channel_dedup_state
+        self.assertEqual(state["cursors"]["@channel"], 13)
+        self.assertEqual(state["idle_polls"], 0)
+        self.assertEqual(state["poll_interval_seconds"], 120)
+        self.assertEqual(bridge.read_telegram_channel_messages.call_count, 5)
+
+    def test_no_network_or_database_write_before_persisted_deadline(self):
+        self.plugin._channel_dedup_state["next_poll_at"] = time.time() + 300
+        with patch("app.runtime.extensions.plugin.manager.PluginManager") as manager:
+            self.plugin.poll_channel_messages()
+        manager.assert_not_called()
+        self.plugin.save_data.assert_not_called()
+        self.assertFalse(self.plugin._channel_dedup_lock.locked())
+
+    def test_manual_sync_can_bypass_idle_deadline_but_not_thirty_second_cooldown(self):
+        now = time.time()
+        self.plugin._channel_dedup_state.update({"last_poll_at": now, "next_poll_at": now + 300})
+        bridge = self.install_bridge({"messages": [], "cursors": {}, "errors": []})
+        with patch("brushflow.time.time", return_value=now + 29):
+            self.plugin.poll_channel_messages(force=True)
+        bridge.read_telegram_channel_messages.assert_not_called()
+        with patch("brushflow.time.time", return_value=now + 30):
+            self.plugin.poll_channel_messages(force=True)
+            self.plugin.poll_channel_messages(force=True)
+        bridge.read_telegram_channel_messages.assert_called_once()
+
+    def test_manual_api_submits_forced_poll_and_reports_cooldown(self):
+        with patch("brushflow.ThreadHelper") as helper:
+            response = self.plugin.request_channel_dedup_poll()
+            self.assertTrue(response.success)
+            helper.return_value.submit.assert_called_once_with(self.plugin.poll_channel_messages, True)
+            helper.return_value.submit.reset_mock()
+            self.plugin._channel_dedup_state["last_poll_at"] = time.time()
+            response = self.plugin.request_channel_dedup_poll()
+            self.assertIn("刚完成", response.message)
+            helper.return_value.submit.assert_not_called()
+
+    def test_pending_channel_rotation_does_not_enter_idle_mode(self):
+        now = time.time()
+        self.plugin._channel_dedup_channels = ["@channel", "@second"]
+        self.plugin._channel_dedup_state["idle_polls"] = 2
+        bridge = self.install_bridge({
+            "messages": [], "cursors": {}, "errors": [], "processed_channels": ["@channel"],
+        })
+        with patch("brushflow.time.time", return_value=now):
+            self.plugin.poll_channel_messages()
+        self.assertEqual(self.plugin._channel_dedup_state["channel_offset"], 1)
+        self.assertEqual(self.plugin._channel_dedup_state["idle_polls"], 0)
+        self.assertEqual(self.plugin._channel_dedup_state["next_poll_at"], now + 120)
+        with patch("brushflow.time.time", return_value=now + 120):
+            self.plugin.poll_channel_messages()
+        self.assertEqual(bridge.read_telegram_channel_messages.call_args.args[0], ["@second", "@channel"])
+
+    def test_partial_failure_or_full_message_page_does_not_enter_idle_mode(self):
+        for result in (
+            {"messages": [], "errors": [{"channel": "@channel", "error": "TimeoutError"}]},
+            {"messages": [{"channel": "@channel"}] * 200, "errors": []},
+            {"messages": [], "errors": [], "processed_channels": []},
+        ):
+            with self.subTest(result_keys=list(result)):
+                self.plugin._channel_dedup_state.update({"idle_polls": 2, "next_poll_at": 0})
+                self.install_bridge(result)
+                self.plugin.poll_channel_messages()
+                self.assertEqual(self.plugin._channel_dedup_state["idle_polls"], 0)
+                self.assertEqual(self.plugin._channel_dedup_state["poll_interval_seconds"], 120)
+
+    def test_persisted_account_backoff_blocks_automatic_and_manual_sync_after_reload(self):
+        self.plugin._channel_dedup_retry_after = 0
+        self.plugin._channel_dedup_state["retry_at"] = time.time() + 600
+        with patch("app.runtime.extensions.plugin.manager.PluginManager") as manager:
+            self.plugin.poll_channel_messages()
+            self.plugin.poll_channel_messages(force=True)
+        manager.assert_not_called()
+        with patch("brushflow.ThreadHelper") as helper:
+            response = self.plugin.request_channel_dedup_poll()
+        self.assertIn("退避", response.message)
+        helper.return_value.submit.assert_not_called()
+
+    def test_settings_changes_preserve_account_backoff_and_existing_cursors(self):
+        deadline = time.time() + 600
+        self.plugin._channel_dedup_retry_after = time.monotonic() + 600
+        self.plugin._channel_dedup_state.update({"retry_at": deadline, "cursors": {"@channel": 12}})
+        self.plugin._save_config = Mock()
+        self.plugin._refresh_scheduler = Mock()
+        with patch("brushflow.ThreadHelper"):
+            self.plugin.update_channel_dedup_settings(ChannelDedupSettingsPayload(
+                enabled=True, channels=["@channel", "@second"],
+            ))
+        state = self.plugin._channel_dedup_state
+        self.assertEqual(state["retry_at"], deadline)
+        self.assertGreater(self.plugin._channel_dedup_retry_after, time.monotonic())
+        self.assertEqual(state["cursors"], {"@channel": 12})
+
+    def test_inflight_settings_change_still_persists_telegram_backoff(self):
+        error = ValueError("private details")
+        error.retry_after = 900
+
+        def fail_after_settings_change(*args):
+            self.plugin._channel_generation += 1
+            self.plugin._channel_dedup_state["channel_offset"] = 7
+            raise error
+
+        self.install_bridge(side_effect=fail_after_settings_change)
+        self.plugin.poll_channel_messages()
+        state = self.plugin._channel_dedup_state
+        self.assertGreaterEqual(state["retry_at"], time.time() + 899)
+        self.assertEqual(state["channel_offset"], 7)
+        self.assertEqual(state["records"], [self.record])
+        self.plugin.save_data.assert_called_once()
+
+    def test_channel_status_exposes_interval_and_next_deadline(self):
+        deadline = time.time() + 300
+        self.plugin._channel_dedup_state.update({
+            "poll_interval_seconds": 300, "next_poll_at": deadline, "retry_at": deadline + 100,
+        })
+        status = self.plugin._channel_dedup_payload()
+        self.assertEqual(status["poll_interval_seconds"], 300)
+        self.assertEqual(status["next_poll_at"], deadline + 100)
 
     def test_failed_poll_preserves_previous_records_and_retries_with_backoff(self):
         bridge = type("Ed2kFolderWatcher", (), {})()

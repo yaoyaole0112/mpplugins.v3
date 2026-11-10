@@ -254,7 +254,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.3.1"
+    plugin_version = "6.3.2"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -265,6 +265,10 @@ class BrushFlow(_PluginBase):
     MAX_RUN_HISTORY = 50
     GLOBAL_BRUSH_TAG = "刷流"
     TASK_DATA_NAMES = ("torrents", "archived", "unmanaged", "statistic", "runs")
+    CHANNEL_POLL_ACTIVE_SECONDS = 120
+    CHANNEL_POLL_IDLE_SECONDS = 300
+    CHANNEL_POLL_IDLE_THRESHOLD = 3
+    CHANNEL_POLL_MANUAL_COOLDOWN = 30
 
     def init_plugin(self, config: dict = None) -> None:
         """初始化全局开关、任务配置、运行锁和历史数据迁移"""
@@ -576,6 +580,7 @@ class BrushFlow(_PluginBase):
                     "name": "频道资源记录同步",
                     "trigger": "interval",
                     "func": self.poll_channel_messages,
+                    # Only check the persisted deadline here; Telegram reads run every 2 or 5 minutes.
                     "kwargs": {"minutes": 1},
                 }
             )
@@ -622,12 +627,18 @@ class BrushFlow(_PluginBase):
 
     def update_channel_dedup_settings(self, payload: ChannelDedupSettingsPayload) -> schemas.Response:
         with self._channel_state_lock:
+            restart_polling = payload.channels != self._channel_dedup_channels or (
+                payload.enabled and not self._channel_dedup_enabled
+            )
             self._channel_dedup_enabled = payload.enabled
             self._channel_dedup_channels = payload.channels
             self._channel_dedup_attributes = payload.attributes
             self._channel_dedup_size_tolerance_pct = payload.size_tolerance_pct
             self._channel_generation += 1
-            self._channel_dedup_retry_after = 0
+            if restart_polling:
+                self._channel_dedup_state["idle_polls"] = 0
+                self._channel_dedup_state["next_poll_at"] = 0
+                self._save_channel_dedup_state()
             self._prune_channel_dedup_records()
         self._save_config()
         self._refresh_scheduler()
@@ -640,14 +651,22 @@ class BrushFlow(_PluginBase):
             return schemas.Response(success=False, message="请先开启频道监听")
         if not self._channel_dedup_channels:
             return schemas.Response(success=False, message="请至少添加一个 Telegram 频道")
+        with self._channel_state_lock:
+            state = self._channel_dedup_state
+            if self._channel_dedup_lock.locked():
+                return schemas.Response(success=True, message="频道消息正在同步")
+            if time.monotonic() < self._channel_dedup_retry_after or time.time() < state.get("retry_at", 0):
+                return schemas.Response(success=True, message="账号或网络退避等待中，暂不重复同步")
+            if time.time() < (state.get("last_poll_at") or 0) + self.CHANNEL_POLL_MANUAL_COOLDOWN:
+                return schemas.Response(success=True, message="刚完成同步，请稍后再试")
         try:
-            ThreadHelper().submit(self.poll_channel_messages)
+            ThreadHelper().submit(self.poll_channel_messages, True)
         except Exception as err:
             logger.error(f"提交频道消息同步任务失败：{type(err).__name__}")
             return schemas.Response(success=False, message="提交频道同步失败")
         return schemas.Response(success=True, message="已提交频道消息同步")
 
-    def poll_channel_messages(self) -> None:
+    def poll_channel_messages(self, force: bool = False) -> None:
         """通过 ED2K 插件的受锁 Telethon Session 增量读取频道消息。"""
         if getattr(self, "_channel_stopping", False) or not self.get_state():
             return
@@ -659,12 +678,24 @@ class BrushFlow(_PluginBase):
             return
         try:
             with self._channel_state_lock:
+                if self._channel_stopping or not self._channel_dedup_enabled or not self._channel_dedup_channels:
+                    return
+                poll_started = time.time()
+                current_state = self._channel_dedup_state
+                if poll_started < current_state.get("retry_at", 0):
+                    return
+                if force:
+                    if poll_started < (current_state.get("last_poll_at") or 0) + self.CHANNEL_POLL_MANUAL_COOLDOWN:
+                        return
+                elif poll_started < current_state.get("next_poll_at", 0):
+                    return
                 self._prune_channel_dedup_records(save=False)
                 state = copy.deepcopy(self._channel_dedup_state)
                 channels = list(self._channel_dedup_channels)
                 offset = int(state.get("channel_offset") or 0) % len(channels)
                 channels = channels[offset:] + channels[:offset]
                 generation = self._channel_generation
+                previous_cursors = dict(state.get("cursors") or {})
             try:
                 from app.runtime.extensions.plugin.manager import PluginManager
 
@@ -703,7 +734,31 @@ class BrushFlow(_PluginBase):
                         int(state.get("cursors", {}).get(str(channel)) or 0), int(message_id or 0)
                     )
                 errors = result.get("errors") or []
-                processed_count = len(result.get("processed_channels") or channels)
+                processed_channels = result.get("processed_channels", channels)
+                processed_count = len(processed_channels)
+                has_new_messages = any(
+                    int(message_id or 0) > int(previous_cursors.get(channel) or 0)
+                    for channel, message_id in state.get("cursors", {}).items()
+                )
+                message_counts = {}
+                for message in result.get("messages") or []:
+                    channel = message.get("channel")
+                    message_counts[channel] = message_counts.get(channel, 0) + 1
+                needs_catchup = set(processed_channels) != set(channels) or any(
+                    count >= 200 for count in message_counts.values()
+                )
+                state["idle_polls"] = (
+                    int(state.get("idle_polls") or 0) + 1
+                    if not has_new_messages and not errors and not needs_catchup else 0
+                )
+                interval = (
+                    self.CHANNEL_POLL_IDLE_SECONDS
+                    if state["idle_polls"] >= self.CHANNEL_POLL_IDLE_THRESHOLD
+                    else self.CHANNEL_POLL_ACTIVE_SECONDS
+                )
+                state["poll_interval_seconds"] = interval
+                state["next_poll_at"] = poll_started + interval
+                state["retry_at"] = 0
                 state["channel_offset"] = (offset + processed_count) % len(channels)
                 state["records"] = records
                 state["last_poll_at"] = time.time()
@@ -722,7 +777,8 @@ class BrushFlow(_PluginBase):
                     logger.warning(f"频道资源记录同步部分失败：{state['last_error']}")
                 else:
                     logger.info(
-                        f"频道资源记录同步完成：新增 {parsed_count} 条结构化记录，保留 {len(state['records'])} 条"
+                        f"频道资源记录同步完成：新增 {parsed_count} 条结构化记录，"
+                        f"保留 {len(state['records'])} 条，下次约 {interval // 60} 分钟后同步"
                     )
             except Exception as err:
                 state["last_poll_at"] = time.time()
@@ -732,10 +788,22 @@ class BrushFlow(_PluginBase):
                     if isinstance(err, RuntimeError) else type(err).__name__
                 )
                 with self._channel_state_lock:
+                    retry_after = max(
+                        self.CHANNEL_POLL_ACTIVE_SECONDS,
+                        int(getattr(err, "retry_after", 120) or 120),
+                    )
+                    self._channel_dedup_retry_after = time.monotonic() + retry_after
+                    state["retry_at"] = time.time() + retry_after
+                    # Keep account backoff even if settings changed while the request was running.
                     if generation != self._channel_generation or self._channel_stopping:
+                        self._channel_dedup_state.update({
+                            "retry_at": state["retry_at"], "next_poll_at": state["retry_at"],
+                        })
+                        self._save_channel_dedup_state()
                         return
-                    retry_after = int(getattr(err, "retry_after", 60) or 60)
-                    self._channel_dedup_retry_after = time.monotonic() + max(60, min(retry_after, 86400))
+                    state["next_poll_at"] = state["retry_at"]
+                    state["idle_polls"] = 0
+                    state["poll_interval_seconds"] = retry_after
                     self._channel_dedup_state = state
                     self._save_channel_dedup_state()
                 logger.warning(f"频道资源记录同步失败：{state['last_error']}")
@@ -936,6 +1004,8 @@ class BrushFlow(_PluginBase):
                 "last_poll_at": state.get("last_poll_at"),
                 "last_poll_ok": state.get("last_poll_ok"),
                 "last_error": state.get("last_error") or "",
+                "poll_interval_seconds": state.get("poll_interval_seconds", self.CHANNEL_POLL_ACTIVE_SECONDS),
+                "next_poll_at": max(state.get("next_poll_at") or 0, state.get("retry_at") or 0) or None,
                 "syncing": self._channel_dedup_lock.locked(),
                 "record_count": len(state.get("records") or []),
             }

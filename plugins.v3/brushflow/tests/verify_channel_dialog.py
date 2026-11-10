@@ -35,6 +35,8 @@ async def verify(base_url, output, executable_path=None):
             await opener.click()
             dialog = page.get_by_role("dialog")
             await dialog.get_by_text("PSYREN 决战游戏", exact=True).wait_for()
+            await dialog.get_by_text("5 分钟", exact=True).wait_for()
+            await dialog.get_by_text("下次同步", exact=True).wait_for()
             await dialog.get_by_label("文件大小", exact=True).check()
             size = dialog.get_by_label("单集文件大小容差", exact=True)
             await size.fill("3")

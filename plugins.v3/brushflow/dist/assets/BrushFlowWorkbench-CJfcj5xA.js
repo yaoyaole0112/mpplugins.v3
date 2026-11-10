@@ -1538,8 +1538,9 @@ async function pollChannelDedup() {
   channelDedupSaving.value = true;
   channelDedupError.value = '';
   try {
-    unwrapResponse(await props.api.post(`${pluginBase.value}/channel-dedup/poll`, {}));
-    notify('已提交频道消息同步');
+    const response = await props.api.post(`${pluginBase.value}/channel-dedup/poll`, {});
+    unwrapResponse(response);
+    notify(response?.message || response?.data?.message || '已提交频道消息同步');
     if (channelRefreshTimer) window.clearTimeout(channelRefreshTimer);
     channelRefreshTimer = window.setTimeout(() => loadChannelDedup({ resetDraft: false }), 2500);
   } catch (err) {
@@ -2803,7 +2804,7 @@ return (_ctx, _cache) => {
                   : _createCommentVNode("", true),
                 _createVNode(_component_VDivider),
                 _createElementVNode("div", _hoisted_52, [
-                  _cache[94] || (_cache[94] = _createElementVNode("div", null, [
+                  _cache[96] || (_cache[96] = _createElementVNode("div", null, [
                     _createElementVNode("span", null, "账号来源"),
                     _createElementVNode("strong", null, "自动生成ED2K链接")
                   ], -1)),
@@ -2819,6 +2820,14 @@ return (_ctx, _cache) => {
                     _cache[92] || (_cache[92] = _createElementVNode("span", null, "最近同步", -1)),
                     _createElementVNode("strong", null, _toDisplayString(formatChannelTimestamp(channelDedup.value.last_poll_at)), 1)
                   ]),
+                  _createElementVNode("div", null, [
+                    _cache[93] || (_cache[93] = _createElementVNode("span", null, "同步间隔", -1)),
+                    _createElementVNode("strong", null, _toDisplayString(Math.ceil((channelDedup.value.poll_interval_seconds || 120) / 60)) + " 分钟", 1)
+                  ]),
+                  _createElementVNode("div", null, [
+                    _cache[94] || (_cache[94] = _createElementVNode("span", null, "下次同步", -1)),
+                    _createElementVNode("strong", null, _toDisplayString(channelDedup.value.enabled && channelDedup.value.next_poll_at ? formatChannelTimestamp(channelDedup.value.next_poll_at) : '-'), 1)
+                  ]),
                   _createVNode(_component_VBtn, {
                     "prepend-icon": "mdi-sync",
                     variant: "tonal",
@@ -2826,7 +2835,7 @@ return (_ctx, _cache) => {
                     disabled: !channelDedup.value.enabled || !channelDedup.value.channels?.length,
                     onClick: pollChannelDedup
                   }, {
-                    default: _withCtx(() => [...(_cache[93] || (_cache[93] = [
+                    default: _withCtx(() => [...(_cache[95] || (_cache[95] = [
                       _createTextVNode("立即同步", -1)
                     ]))]),
                     _: 1
@@ -2845,7 +2854,7 @@ return (_ctx, _cache) => {
                   })
                 ]),
                 _createElementVNode("div", _hoisted_53, [
-                  _cache[95] || (_cache[95] = _createElementVNode("div", { class: "text-subtitle-2" }, "最近 72 小时解析记录", -1)),
+                  _cache[97] || (_cache[97] = _createElementVNode("div", { class: "text-subtitle-2" }, "最近 72 小时解析记录", -1)),
                   (channelDedupLoading.value)
                     ? (_openBlock(), _createElementBlock("div", _hoisted_54, "正在读取…"))
                     : (!channelDedup.value.records?.length)
@@ -2879,7 +2888,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[24] || (_cache[24] = $event => (channelDedupDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[96] || (_cache[96] = [
+                  default: _withCtx(() => [...(_cache[98] || (_cache[98] = [
                     _createTextVNode("关闭", -1)
                   ]))]),
                   _: 1
@@ -2890,7 +2899,7 @@ return (_ctx, _cache) => {
                   loading: channelDedupSaving.value,
                   onClick: saveChannelDedup
                 }, {
-                  default: _withCtx(() => [...(_cache[97] || (_cache[97] = [
+                  default: _withCtx(() => [...(_cache[99] || (_cache[99] = [
                     _createTextVNode("保存设置", -1)
                   ]))]),
                   _: 1
@@ -2925,7 +2934,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[26] || (_cache[26] = $event => (deleteDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[98] || (_cache[98] = [
+                  default: _withCtx(() => [...(_cache[100] || (_cache[100] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -2936,7 +2945,7 @@ return (_ctx, _cache) => {
                   loading: saving.value,
                   onClick: confirmDeleteTask
                 }, {
-                  default: _withCtx(() => [...(_cache[99] || (_cache[99] = [
+                  default: _withCtx(() => [...(_cache[101] || (_cache[101] = [
                     _createTextVNode("删除", -1)
                   ]))]),
                   _: 1
@@ -2959,7 +2968,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_VCard, { title: "清除任务数据" }, {
           default: _withCtx(() => [
             _createVNode(_component_VCardText, null, {
-              default: _withCtx(() => [...(_cache[100] || (_cache[100] = [
+              default: _withCtx(() => [...(_cache[102] || (_cache[102] = [
                 _createTextVNode("将清除当前任务的统计、运行诊断、托管和归档记录，下载器内的种子与文件不会删除。", -1)
               ]))]),
               _: 1
@@ -2971,7 +2980,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[28] || (_cache[28] = $event => (clearDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[101] || (_cache[101] = [
+                  default: _withCtx(() => [...(_cache[103] || (_cache[103] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -2982,7 +2991,7 @@ return (_ctx, _cache) => {
                   loading: saving.value,
                   onClick: confirmClearTask
                 }, {
-                  default: _withCtx(() => [...(_cache[102] || (_cache[102] = [
+                  default: _withCtx(() => [...(_cache[104] || (_cache[104] = [
                     _createTextVNode("清除", -1)
                   ]))]),
                   _: 1
@@ -3001,6 +3010,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const BrushFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-b821f188"]]);
+const BrushFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-5982155c"]]);
 
 export { BrushFlowWorkbench as B };

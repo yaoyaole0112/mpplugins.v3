@@ -322,8 +322,9 @@ async function pollChannelDedup() {
   channelDedupSaving.value = true
   channelDedupError.value = ''
   try {
-    unwrapResponse(await props.api.post(`${pluginBase.value}/channel-dedup/poll`, {}))
-    notify('已提交频道消息同步')
+    const response = await props.api.post(`${pluginBase.value}/channel-dedup/poll`, {})
+    unwrapResponse(response)
+    notify(response?.message || response?.data?.message || '已提交频道消息同步')
     if (channelRefreshTimer) window.clearTimeout(channelRefreshTimer)
     channelRefreshTimer = window.setTimeout(() => loadChannelDedup({ resetDraft: false }), 2500)
   } catch (err) {
@@ -1025,6 +1026,8 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             <div><span>监听状态</span><strong>{{ channelDedup.syncing ? '同步中' : channelDedup.enabled ? '已启用' : '未启用' }}</strong></div>
             <div><span>结构化记录</span><strong>{{ channelDedup.record_count || 0 }}</strong></div>
             <div><span>最近同步</span><strong>{{ formatChannelTimestamp(channelDedup.last_poll_at) }}</strong></div>
+            <div><span>同步间隔</span><strong>{{ Math.ceil((channelDedup.poll_interval_seconds || 120) / 60) }} 分钟</strong></div>
+            <div><span>下次同步</span><strong>{{ channelDedup.enabled && channelDedup.next_poll_at ? formatChannelTimestamp(channelDedup.next_poll_at) : '-' }}</strong></div>
             <VBtn
               prepend-icon="mdi-sync"
               variant="tonal"
