@@ -48,7 +48,10 @@ from app.sdk.utilities import StringUtils
 
 from .models import BrushFlowSettingsPayload, BrushTaskPayload, BrushTaskStatePayload
 from .models import ChannelDedupSettingsPayload
-from .channel_dedup import normalize_title, parse_candidate_file, parse_channel_messages, parse_torrent_files, same_release, specs_match
+from .channel_dedup import (
+    normalize_title, parse_candidate_file, parse_channel_messages, parse_torrent_files,
+    repair_record_frame_rates, same_release, specs_match,
+)
 
 
 TASK_CONFIG_FIELDS = (
@@ -251,7 +254,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.3.0"
+    plugin_version = "6.3.1"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -304,6 +307,10 @@ class BrushFlow(_PluginBase):
             "cursors": {}, "records": [], "last_poll_at": None, "last_error": "", "last_poll_ok": None,
         }
         self._prune_channel_dedup_records()
+        repaired_frame_rates = repair_record_frame_rates(self._channel_dedup_state.get("records") or [])
+        if repaired_frame_rates:
+            self._save_channel_dedup_state()
+            logger.info(f"频道资源记录已按原文件名修正 {repaired_frame_rates} 条帧率，消息游标保持不变")
         self._enabled = bool(raw_config.get("enabled", False))
         self._show_sidebar_nav = bool(raw_config.get("show_sidebar_nav", True))
 

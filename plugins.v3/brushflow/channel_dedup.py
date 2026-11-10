@@ -111,7 +111,15 @@ def parse_specs(text: Any, size: Any = None) -> dict:
         if re.search(pattern, value):
             source = label
             break
-    fps_match = re.search(r"(?<!\d)(\d{1,2}(?:\.\d{1,3})?)\s*(?:FPS|帧|FRAME(?:S)?\b)", value)
+    # Dots also delimit filename fields: AAC.2.0.25FPS means 25 FPS, not 0.25.
+    fps_value = re.sub(
+        r"(?<![A-Z0-9])(?:AAC|DDP|DD\+?|(?:E[ ._-]*)?AC[ ._-]*3|"
+        r"DTS(?:[ ._-]*HD(?:[ ._-]*MA)?)?|TRUE[ ._-]*HD|L?PCM|FLAC|OPUS)"
+        r"[ ._-]*(?:(?:DOLBY|ATMOS)[ ._-]*)*\d\.\d(?!\d)",
+        " ",
+        value,
+    )
+    fps_match = re.search(r"(?<!\d)(\d{1,2}(?:\.\d{1,3})?)\s*(?:FPS|帧|FRAME(?:S)?\b)", fps_value)
     fps = None
     if fps_match:
         try:
@@ -126,6 +134,22 @@ def parse_specs(text: Any, size: Any = None) -> dict:
         "fps": fps,
         "size": parse_size(size),
     }
+
+
+def repair_record_frame_rates(records: Iterable[dict]) -> int:
+    """Repair persisted FPS from retained filenames without rereading Telegram."""
+    repaired = 0
+    for record in records:
+        if not isinstance(record, dict) or not record.get("file_key"):
+            continue
+        specs = record.get("specs")
+        if not isinstance(specs, dict):
+            continue
+        fps = parse_specs(record["file_key"])["fps"]
+        if fps is not None and fps != specs.get("fps"):
+            record["specs"] = {**specs, "fps": fps}
+            repaired += 1
+    return repaired
 
 
 def merge_specs(primary: dict, fallback: dict) -> dict:

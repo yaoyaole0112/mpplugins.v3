@@ -5,7 +5,9 @@ from brushflow.channel_dedup import (
     parse_channel_message,
     parse_channel_messages,
     parse_episode,
+    parse_specs,
     parse_torrent_files,
+    repair_record_frame_rates,
     same_release,
 )
 
@@ -132,6 +134,48 @@ ed2k://|file|PSYREN -决战游戏-(2026)(tmdbid=297903).S01E05.WEB-DL.1080p.SDR.
         record = parse_channel_message("@channel", 1, 1, self.message)
         candidate = parse_candidate_file("PSYREN 决战游戏.2025.S01E05.1080p.H264.mkv", 1)
         self.assertFalse(same_release(candidate, record, ["resolution"]))
+
+    def test_audio_channel_layout_does_not_become_part_of_frame_rate(self):
+        for audio in ("AAC2.0", "AAC.2.0", "DDP5.1", "DDP.5.1", "DD+5.1",
+                      "AC3.2.0", "E-AC-3.5.1", "EAC3.Dolby.5.1", "DTS-HD.MA.5.1",
+                      "TrueHD.Atmos.7.1", "TrueHD.Dolby.Atmos.7.1"):
+            for rate in (24, 25, 30, 50, 60):
+                with self.subTest(audio=audio, rate=rate):
+                    self.assertEqual(parse_specs(f"Show.S01E11.H264.{audio}.{rate}FPS.mkv")["fps"], rate)
+
+    def test_decimal_frame_rates_are_not_truncated_or_multiplied(self):
+        for rate in (0.25, 1.25, 23.976, 29.97, 59.94):
+            for prefix in ("", "AAC.2.0.", "DDP5.1."):
+                with self.subTest(rate=rate, prefix=prefix):
+                    self.assertEqual(parse_specs(f"{prefix}{rate}FPS")["fps"], rate)
+
+    def test_channel_post_and_candidate_use_correct_fps_after_audio_layout(self):
+        filename = "今天是太阳雨(2026)(tmdbid=307853).S01E11.WEB-DL.1080p.H264.8bit.AAC.2.0.25帧-RMGroup.mkv"
+        message = f"影视：今天是太阳雨\n季集：S01E11\n帧率：25FPS\ned2k://|file|{filename}|2226332870|{'a' * 32}|/"
+        record = parse_channel_message("@ms20260601", 42, 1, message)
+        candidate = parse_candidate_file(filename, 2226332870)
+        self.assertEqual(record["specs"]["fps"], 25)
+        self.assertEqual(candidate["specs"]["fps"], 25)
+        self.assertTrue(same_release(candidate, record, ["resolution", "codec", "source", "fps", "size"]))
+
+    def test_persisted_frame_rate_repair_is_idempotent_and_preserves_other_fields(self):
+        record = parse_channel_message("@channel", 1, 1, self.message)
+        record["file_key"] = "Show.S01E05.H264.AAC.2.0.25帧.mkv"
+        record["specs"]["fps"] = 0.25
+        original = {**record, "specs": {**record["specs"]}}
+        self.assertEqual(repair_record_frame_rates([record]), 1)
+        self.assertEqual(record["specs"]["fps"], 25)
+        self.assertEqual(record, {**original, "specs": {**original["specs"], "fps": 25}})
+        self.assertEqual(repair_record_frame_rates([record]), 0)
+
+    def test_persisted_repair_keeps_template_fps_when_filename_has_no_fps(self):
+        records = [
+            {"file_key": "Show.S01E01.H264.AAC2.0.mkv", "specs": {"fps": 25}},
+            {"file_key": "", "specs": {"fps": 25}},
+            {"file_key": "Show.S01E01.0.25FPS.mkv", "specs": {"fps": 0.25}},
+        ]
+        self.assertEqual(repair_record_frame_rates(records), 0)
+        self.assertEqual([record["specs"]["fps"] for record in records], [25, 25, 0.25])
 
 
 if __name__ == "__main__":
