@@ -60,6 +60,19 @@ test('local upload card precedes local monitoring and offers MP and direct modes
   assert.match(upload, /复制上传/)
   assert.match(upload, /只删除本地|仅删除本地/)
   assert.match(source, /request\('local-upload\/run'/)
+  assert.match(upload, /v-model.number="settings.local_upload_rate"/)
+  assert.match(upload, /默认8，0不限速/)
+})
+
+test('upload progress hides stale hash percent and local upload saves without cloud deletion', async () => {
+  const page = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
+  assert.match(page, /task\.progress_known !== false/)
+  assert.match(page, /暂未返回字节进度/)
+  assert.match(page, /task\.upload_speed/)
+  const panel = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
+  const save = panel.match(/async function saveSettings\(\) \{([\s\S]*?)\n\}/)?.[1]
+  assert.match(save, /if \(!settings\.delete_source \|\| !settings\.cloud_enabled\) settings\.cloud_delete_enabled = false/)
+  assert.match(panel, /本地计算上传只删除本地原文件/)
 })
 
 test('built federation entry resolves all public components and styles', async () => {

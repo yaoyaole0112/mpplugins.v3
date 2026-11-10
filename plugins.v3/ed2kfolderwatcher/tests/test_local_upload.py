@@ -17,6 +17,7 @@ class LocalUploadTests(unittest.TestCase):
         cls.module = existing.Ed2kTests.module
         cls.cloud_module = existing.Ed2kTests.cloud_module
         cls.upload_module = existing.Ed2kTests.upload_module
+        cls.adapter_module = existing.Ed2kTests.adapter_module
 
     setUp = existing.Ed2kTests.setUp
     create = existing.Ed2kTests.create
@@ -45,6 +46,9 @@ class LocalUploadTests(unittest.TestCase):
         storage_patch.start()
         self.addCleanup(storage_patch.stop)
         self.storage.oper.upload.side_effect = self.upload
+        upload_patch = patch.object(self.upload_module, "upload_with_digest", side_effect=lambda oper, target, path, *args: oper.upload(target, path, new_name=path.name))
+        upload_patch.start()
+        self.addCleanup(upload_patch.stop)
 
     def sample(self, name="movie(2026)(tmdbid=123).mkv"):
         path = self.create(name, b"test-upload-content")
@@ -84,6 +88,47 @@ class LocalUploadTests(unittest.TestCase):
         self.assertIn(record["link"], (self.root / "ed2k.txt").read_text())
         self.assertTrue(path.exists())
         self.assertFalse(self.plugin.recent_records()["items"][0]["upload_note"] == "")
+
+    def test_upload_stages_reset_hash_percent_and_expose_real_bytes(self):
+        self.configure()
+        path = self.sample()
+        self.plugin._local_active = {"path": str(path), "name": path.name, "size": 1000, "bytes_read": 1000}
+        self.plugin._upload_stage(path, "等待上传")
+        self.assertEqual(self.plugin._local_active["bytes_read"], 0)
+        self.assertFalse(self.plugin._local_active["progress_known"])
+        self.plugin._upload_progress(path, 25)
+        row = self.plugin._progress_snapshot()["items"][0]
+        self.assertEqual(row["phase"], "upload")
+        self.assertEqual(row["bytes_read"], 250)
+        self.assertTrue(row["progress_known"])
+        self.plugin._upload_stage(path, "校验115文件大小与SHA1")
+        self.assertFalse(self.plugin._local_active["progress_known"])
+        self.assertEqual(self.plugin._local_active["bytes_read"], 0)
+
+    def test_movie_upload_progress_overrides_completed_hash_progress(self):
+        self.configure()
+        path = self.sample()
+        self.plugin._local_active = {"path": str(path), "name": path.name, "size": 1000}
+        self.plugin._movie_hash_job = {"key": str(path), "done": True, "progress": {"bytes_read": 1000}}
+        self.plugin._upload_stage(path, "准备115上传")
+        rows = self.plugin._progress_snapshot()["items"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["stage"], "准备115上传")
+        self.plugin._movie_hash_job = None
+
+    def test_upload_checkpoint_does_not_overwrite_other_delivery_updates(self):
+        self.configure()
+        path = self.sample()
+        def during_upload(target, source, new_name):
+            records = self.records()
+            records[str(path)]["checkpoint_preserved"] = True
+            self.plugin._write_results(None, self.root / "data" / "records.json", records)
+            self.assertTrue(self.plugin._cloud_request_lock.acquire(blocking=False))
+            self.plugin._cloud_request_lock.release()
+            return self.remote
+        self.storage.oper.upload.side_effect = during_upload
+        self.plugin._process_file(path)
+        self.assertTrue(self.records()[str(path)]["checkpoint_preserved"])
 
     def test_upload_failure_keeps_local_and_does_not_repeat_ambiguous_upload(self):
         self.configure()

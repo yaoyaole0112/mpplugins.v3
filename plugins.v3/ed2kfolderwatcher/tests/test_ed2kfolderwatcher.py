@@ -31,10 +31,13 @@ class Ed2kTests(unittest.TestCase):
             spec.loader.exec_module(cls.module)
             cls.cloud_module = sys.modules["ed2k_test_plugin.cloud_storage"]
             cls.upload_module = sys.modules["ed2k_test_plugin.local_upload"]
+            cls.adapter_module = sys.modules["ed2k_test_plugin.upload_adapter"]
             cls.module.cloud_storage = cls.cloud_module
 
     def setUp(self):
-        module_patch = patch.dict(sys.modules, {"ed2k_test_plugin": self.module, "ed2k_test_plugin.cloud_storage": self.cloud_module})
+        module_patch = patch.dict(sys.modules, {"ed2k_test_plugin": self.module, "ed2k_test_plugin.cloud_storage": self.cloud_module,
+                                              "ed2k_test_plugin.local_upload": self.upload_module,
+                                              "ed2k_test_plugin.upload_adapter": self.adapter_module})
         module_patch.start()
         self.addCleanup(module_patch.stop)
         self.temporary = tempfile.TemporaryDirectory()

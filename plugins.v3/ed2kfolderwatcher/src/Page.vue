@@ -33,7 +33,8 @@ function formatTime(value) {
 }
 function formatBytes(value) {
   const bytes = Number(value) || 0
-  if (bytes < 1024 ** 2) return `${bytes} B`
+  if (bytes < 1024) return `${Math.round(bytes)} B`
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
   const unit = bytes < 1024 ** 3 ? 'MB' : 'GB'
   return `${(bytes / (unit === 'MB' ? 1024 ** 2 : 1024 ** 3)).toFixed(1)} ${unit}`
 }
@@ -175,9 +176,10 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
       <ol v-else class="progress-list">
         <li v-for="(task, index) in progress" :key="task.id || `${task.source}-${task.name}-${index}`" class="progress-item" :class="task.status">
           <div class="progress-heading"><span class="source-tag">{{ task.source }}</span><strong>{{ task.name }}</strong><span v-if="task.status === 'queued' && task.queue_position" class="queue-position">No.{{ task.queue_position }}</span><span class="progress-stage">{{ task.stage }}</span><button v-if="task.status === 'queued' && task.can_cancel" type="button" class="cancel-task" :disabled="!!cancelling || busy" @click="cancelTask(task)">{{ cancelling === task.id ? '取消中…' : '取消任务' }}</button></div>
-          <div v-if="task.status === 'active' && task.size" class="progress-track"><span :style="{ width: `${progressPercent(task)}%` }"></span></div>
+          <div v-if="task.status === 'active' && task.size && task.progress_known !== false" class="progress-track"><span :style="{ width: `${progressPercent(task)}%` }"></span></div>
           <p class="progress-detail">
-            <span v-if="task.status === 'active' && task.size">{{ formatBytes(task.bytes_read) }} / {{ formatBytes(task.size) }}（{{ progressPercent(task) }}%）</span>
+            <span v-if="task.status === 'active' && task.progress_known === false">文件大小：{{ formatBytes(task.size) }} · {{ task.stage }}（暂未返回字节进度）</span>
+            <span v-else-if="task.status === 'active' && task.size">{{ task.phase === 'upload' ? '已传输：' : '已读取：' }}{{ formatBytes(task.bytes_read) }} / {{ formatBytes(task.size) }}（{{ progressPercent(task) }}%）<span v-if="task.phase === 'upload' && task.upload_speed > 0"> · {{ formatBytes(task.upload_speed) }}/s</span></span>
             <span v-else-if="task.status === 'queued'">文件大小：{{ task.size === null || task.size === undefined ? '未知' : formatBytes(task.size) }}</span>
             <span v-else-if="task.status === 'active'">正在准备任务</span>
             <span v-else-if="task.status === 'failed' && task.error">{{ task.error }}</span>

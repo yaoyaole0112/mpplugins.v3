@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.20.0"
+    plugin_version = "1.20.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -394,6 +394,9 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         self._cloud_enabled = bool(config.get("cloud_enabled", False))
         self._cloud_scan_enabled = bool(config.get("cloud_scan_enabled", self._cloud_enabled))
         self._cloud_storage = str(config.get("cloud_storage") or "115网盘Plus").strip()
+        if not self._cloud_enabled or not self._delete_source:
+            self._cloud_delete_enabled = False
+            self._cloud_delete_scope = ""
         self._cloud_folder = str(config.get("cloud_folder") or "").strip()
         self._cloud_recursive = shared_recursive if isinstance(shared_recursive, bool) else bool(config.get("cloud_recursive", True))
         self._cloud_cron = str(config.get("cloud_cron") or DEFAULT_CRON).strip()
@@ -2254,7 +2257,8 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     def _update_local_hash_progress(self, path: Path, bytes_read: int, size: int) -> None:
         active = self._local_active
         if active and active.get("name") == path.name:
-            active.update(bytes_read=bytes_read, size=size, stage="正在计算 ED2K 哈希", updated_at=time.time())
+            active.update(bytes_read=bytes_read, size=size, phase="hash", progress_known=True,
+                          stage="正在计算 ED2K 哈希", updated_at=time.time())
         self._flush_due_groups()
 
     def _progress_snapshot(self) -> dict:
@@ -2269,9 +2273,10 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             movie_job = self._movie_hash_job
             movie_progress = dict(movie_job["progress"]) if movie_job else None
         items = []
-        if movie_progress:
+        uploading_movie = active and active.get("phase") == "upload" and movie_job and active.get("path") == movie_job["key"]
+        if movie_progress and not uploading_movie:
             items.append(movie_progress)
-        if active and (not movie_job or active.get("path") != movie_job["key"]):
+        if active and (not movie_job or active.get("path") != movie_job["key"] or uploading_movie):
             items.append({**active, "source": "本地", "status": "active"})
         if cloud_status.get("file"):
             items.append({
@@ -2557,6 +2562,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             field("VSelect", "local_upload_mode", "上传方式", items=[{"title": "使用现有MP整理上传（复制）", "value": "mp"}, {"title": "调用115插件直接上传（不整理）", "value": "direct"}]),
             field("VTextField", "local_upload_folder", "本地计算上传目录", hint="多个目录用英文逗号分隔；自动监控新增文件，包含子目录及过滤沿用通用设置。", persistent_hint=True),
             field("VTextField", "local_upload_target", "115上传目标目录（直传模式）", hint="单个115绝对路径；保留本地根目录内相对结构，同名异内容不覆盖。", persistent_hint=True),
+            field("VTextField", "local_upload_rate", "直传速度上限（MiB/s）", type="number", min=0, max=128, hint="默认8，0不限速；仅限制本插件直传，保持单文件分片上传。", persistent_hint=True),
             {"component": "VAlert", "props": {"type": "info"}, "text": "先计算本地ED2K与SHA1，再上传并核验后转发。MP模式不主动整理，须用复制上传并保留本地文件；直传复用115插件。完成后删源只删本地文件，上传后的网盘副本不自动删除。"},
             {"component": "VCardTitle", "text": "本地监控"},
             field("VTextField", "folder", "本地监控目录", placeholder="/downloads/complete,/media/movies", hint="容器内绝对路径，多个用英文逗号分隔，最多32个。", persistent_hint=True),
@@ -2583,4 +2589,4 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅用于带话题的超级群组。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "movie_series_parallel": self._movie_series_parallel, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared", "local_upload_enabled": False, "local_upload_mode": "mp", "local_upload_folder": "", "local_upload_target": ""}
+        ]}], {"enabled": False, "movie_series_parallel": self._movie_series_parallel, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared", "local_upload_enabled": False, "local_upload_mode": "mp", "local_upload_folder": "", "local_upload_target": "", "local_upload_rate": self._local_upload_rate}

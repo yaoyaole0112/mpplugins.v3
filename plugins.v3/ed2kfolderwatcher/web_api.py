@@ -57,10 +57,10 @@ def validate_settings(plugin, values):
         if name in BOOLEAN_FIELDS:
             if not isinstance(value, bool):
                 raise UserAccountError("开关配置格式不正确")
-        elif name in {"min_age", "cloud_read_timeout", "telegram_aggregate_window", "retry_limit"}:
-            lower, upper = (0, 86400) if name == "min_age" else ((30, 1800) if name == "cloud_read_timeout" else ((0, 10) if name == "retry_limit" else (0, 3600)))
+        elif name in {"min_age", "cloud_read_timeout", "telegram_aggregate_window", "retry_limit", "local_upload_rate"}:
+            lower, upper = (0, 128) if name == "local_upload_rate" else ((0, 86400) if name == "min_age" else ((30, 1800) if name == "cloud_read_timeout" else ((0, 10) if name == "retry_limit" else (0, 3600))))
             if isinstance(value, bool) or not str(value).isdigit() or not lower <= int(value) <= upper:
-                label = {"min_age": "文件稳定时间", "cloud_read_timeout": "网盘读取超时", "retry_limit": "自动重试次数", "telegram_aggregate_window": "聚合转发等待时间"}[name]
+                label = {"min_age": "文件稳定时间", "cloud_read_timeout": "网盘读取超时", "retry_limit": "自动重试次数", "telegram_aggregate_window": "聚合转发等待时间", "local_upload_rate": "直传速度上限"}[name]
                 raise UserAccountError(f"{label}必须为 {lower} 到 {upper} 的整数")
             value = int(value)
         else:
@@ -128,6 +128,8 @@ def validate_settings(plugin, values):
             raise UserAccountError(str(error)) from None
     result["onlyonce"] = False
     result["cloud_delete_scope"] = ""
+    if not result["delete_source"] or not result["cloud_enabled"]:
+        result["cloud_delete_enabled"] = False
     if result["cloud_delete_enabled"]:
         from .cloud_storage import CloudStorage, CloudError
         try:

@@ -372,7 +372,7 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(result["cloud_delete_scope"], "bound-scope")
             self.assertNotIn("confirm_cloud_delete", result)
             adapter.return_value.delete_prepared.assert_not_called()
-            for changed in ({"delete_source": False}, {"output_enabled": False}, {"cloud_enabled": False}, {"confirm_cloud_delete": "true"}, {"cloud_delete_scope": "forged"}):
+            for changed in ({"output_enabled": False}, {"confirm_cloud_delete": "true"}, {"cloud_delete_scope": "forged"}):
                 with self.subTest(changed=changed), self.assertRaises(web_api.UserAccountError):
                     web_api.validate_settings(self.plugin, {**values, **changed})
             adapter.return_value.delete_scope.side_effect = cloud_storage.CloudError("Account not available")
@@ -381,6 +381,29 @@ class WebApiTests(unittest.TestCase):
         result = web_api.validate_settings(self.plugin, {"cloud_delete_enabled": False})
         self.assertEqual(result["cloud_delete_scope"], "")
         self.assertFalse(result["cloud_delete_enabled"])
+
+    def test_local_upload_delete_does_not_require_cloud_monitoring_or_cloud_deletion(self):
+        from ed2k_api_test_package import cloud_storage
+        self.plugin._cloud_delete_enabled = True
+        with patch.object(cloud_storage, "CloudStorage") as adapter:
+            result = web_api.validate_settings(self.plugin, {
+                "delete_source": True, "cloud_enabled": False, "cloud_delete_enabled": True,
+                "local_upload_enabled": True, "local_upload_mode": "direct",
+                "local_upload_folder": "/media/completed", "local_upload_target": "/upload",
+            })
+            self.assertTrue(result["delete_source"])
+            self.assertFalse(result["cloud_delete_enabled"])
+            self.assertEqual(result["cloud_delete_scope"], "")
+            adapter.return_value.delete_scope.assert_not_called()
+            result = web_api.validate_settings(self.plugin, {"delete_source": False})
+            self.assertFalse(result["cloud_delete_enabled"])
+
+    def test_upload_rate_limit_validation(self):
+        for rate in (0, 8, 128, "16"):
+            self.assertEqual(web_api.validate_settings(self.plugin, {"local_upload_rate": rate})["local_upload_rate"], int(rate))
+        for rate in (-1, 129, True, "1.5", ""):
+            with self.subTest(rate=rate), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"local_upload_rate": rate})
 
     def test_cloud_validation_rejects_root_traversal_and_unknown_storage(self):
         from ed2k_api_test_package import cloud_storage

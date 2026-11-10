@@ -8,9 +8,10 @@ from pathlib import Path, PurePosixPath
 from app.log import logger
 
 from .cloud_storage import CloudError, CloudStorage, cloud_path, monitor_roots
+from .upload_adapter import upload_with_digest
 
 
-UPLOAD_FIELDS = ("local_upload_enabled", "local_upload_mode", "local_upload_folder", "local_upload_target")
+UPLOAD_FIELDS = ("local_upload_enabled", "local_upload_mode", "local_upload_folder", "local_upload_target", "local_upload_rate")
 
 
 def plain_item(value):
@@ -34,6 +35,7 @@ class LocalUploadMixin:
     _local_upload_mode = "mp"
     _local_upload_folder = ""
     _local_upload_target = ""
+    _local_upload_rate = 8
 
     def _init_local_upload(self, config):
         self._upload_receipt_lock = threading.Lock()
@@ -41,6 +43,10 @@ class LocalUploadMixin:
         self._local_upload_mode = str(config.get("local_upload_mode") or "mp")
         self._local_upload_folder = str(config.get("local_upload_folder") or "").strip()
         self._local_upload_target = str(config.get("local_upload_target") or "").strip()
+        try:
+            self._local_upload_rate = max(0, min(128, int(config.get("local_upload_rate", 8))))
+        except (ValueError, TypeError):
+            self._local_upload_rate = 8
         try:
             self._local_upload_folder = ",".join(monitor_roots(self._local_upload_folder))
             if self._local_upload_mode not in {"mp", "direct"}:
@@ -216,8 +222,7 @@ class LocalUploadMixin:
                 lookup = getattr(storage.oper, "get_item_strict", None)
                 if lookup is None:
                     raise CloudError("115插件缺少严格查询接口，请更新115插件；未上传")
-                if self._local_active:
-                    self._local_active["stage"] = "检查115上传目标"
+                self._upload_stage(path, "检查115上传目标")
                 try:
                     with self._cloud_request_lock:
                         existing = lookup(Path(destination))
@@ -232,15 +237,21 @@ class LocalUploadMixin:
                         raise InterruptedError("本地文件变化或插件停止，取消上传")
                     record.update(upload_attempted=True, upload_state="uploading", upload_note="调用115插件上传；不会覆盖同名异内容文件")
                     self._write_results(output, cache_path, records)
-                    if self._local_active:
-                        self._local_active["stage"] = "正在调用115插件上传"
+                    self._upload_stage(path, "准备115秒传／上传")
                     from app.schemas import FileItem
                     target = FileItem(storage="115网盘Plus", path=str(PurePosixPath(destination).parent), type="dir")
                     try:
-                        with self._cloud_request_lock:
-                            uploaded = storage.oper.upload(target, path, new_name=path.name)
+                        uploaded = upload_with_digest(
+                            storage.oper, target, path, record["local_sha1"], record["local_identity"],
+                            self._stopping, lambda percent: self._upload_progress(path, percent),
+                            self._flush_due_groups, self._local_upload_rate,
+                        )
+                    except CloudError:
+                        raise
                     except Exception as failure:
                         raise CloudError(f"115上传调用异常（{type(failure).__name__}），结果待确认，保留本地文件") from None
+                    records = json.loads(cache_path.read_text(encoding="utf-8"))
+                    record = records[key]
                     if not uploaded:
                         raise CloudError("115上传未返回成功回执，保留本地文件，后续先查询目标，不自动重复上传")
                     item = saved_item(uploaded)
@@ -248,8 +259,7 @@ class LocalUploadMixin:
                     raise CloudError("115上传回执路径与目标不一致，保留本地文件")
             record.update(upload_state="verifying", upload_note="校验115文件大小与SHA1")
             self._write_results(output, cache_path, records)
-            if self._local_active:
-                self._local_active["stage"] = "校验115文件大小与SHA1"
+            self._upload_stage(path, "校验115文件大小与SHA1")
             with self._cloud_request_lock:
                 item = self._verify_uploaded(storage, item, record)
             if self._stopping.is_set() or local_identity(path.stat()) != record["local_identity"]:
@@ -283,7 +293,28 @@ class LocalUploadMixin:
             raise CloudError("上传已确认，Telegram尚未全部投递成功；重试仅补发，不重复上传")
         if self._delete_source and (output is not None or self._telegram_enabled):
             self._delete_uploaded_local(path, record, output, cache_path, records)
-        self._clear_retry_failure(key)
+            self._clear_retry_failure(key)
+
+    def _upload_stage(self, path, stage):
+        active = self._local_active
+        if active and active.get("path") == str(path):
+            active.update(stage=stage, phase="upload", bytes_read=0, progress_known=False,
+                          upload_speed=0, updated_at=time.time())
+
+    def _upload_progress(self, path, percent):
+        active = self._local_active
+        if not active or active.get("path") != str(path):
+            return
+        if percent is None:
+            self._upload_stage(path, "等待115秒传／上传初始化")
+            return
+        now = time.time()
+        done = min(active["size"], int(active["size"] * percent / 100))
+        elapsed = now - active.get("updated_at", now)
+        speed = max(0, done - active.get("bytes_read", 0)) / elapsed if elapsed > 0 else 0
+        active.update(stage="正在上传至115" if percent < 100 else "传输完成，等待115提交确认",
+                      phase="upload", progress_known=True, bytes_read=done, upload_speed=speed,
+                      updated_at=now)
 
     def _delete_uploaded_local(self, path, record, output, cache_path, records):
         if not record.get("upload_verified") or self._stopping.is_set():
