@@ -11,7 +11,31 @@ from .cloud_storage import CloudError
 UPLOAD_GATE = threading.Lock()
 
 
-def upload_with_digest(oper, target, path, digest, identity, stopping, progress, checkpoint, rate_limit=8):
+class UploadNotStarted(CloudError):
+    pass
+
+
+def resolve_uploader(oper):
+    method = oper.upload
+    function = getattr(method, "__func__", method)
+    required = {"transfer_process", "global_vars", "Bucket"}
+    if isinstance(function, types.FunctionType):
+        if required <= function.__globals__.keys():
+            return function, None
+        patcher = function.__globals__.get("P115DiskPatcher")
+        helper = function.__globals__.get("P115DiskCore")
+        patched_class = getattr(patcher, "_patched_class", None)
+        if (function.__name__ == "_patch_upload" and isinstance(patcher, type)
+                and isinstance(helper, type) and isinstance(patched_class, type)
+                and isinstance(oper, patched_class) and getattr(patcher, "_active", False) is True
+                and getattr(patcher, "_patch_upload", None) is function):
+            enhanced = getattr(helper, "upload", None)
+            if isinstance(enhanced, types.FunctionType) and required <= enhanced.__globals__.keys():
+                return enhanced, helper
+    raise UploadNotStarted("115上传接口适配检查未通过，尚未发起上传；请更新自动生成ED2K链接插件")
+
+
+def upload_with_digest(oper, target, path, digest, identity, stopping, progress, checkpoint, rate_limit=8, on_start=None):
     from .local_upload import local_identity
     last_check = [0.0]
 
@@ -31,16 +55,31 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
     next_write = [None]
     try:
         check(force=True)
-        method = oper.upload
-        function = getattr(method, "__func__", None)
-        required = {"transfer_process", "global_vars", "Bucket"}
-        if not isinstance(function, types.FunctionType) or not required <= function.__globals__.keys():
-            raise CloudError("当前115上传接口不支持安全进度适配，请更新115网盘Plus；未发起上传")
+        function, helper = resolve_uploader(oper)
         bindings = dict(function.__globals__)
         original_stop = bindings["global_vars"]
         original_bucket = bindings["Bucket"]
         last_checkpoint = [0.0]
         last_progress = [0.0]
+        started = [False]
+
+        def begin_upload():
+            check(force=True)
+            if not started[0]:
+                if on_start is not None:
+                    on_start()
+                started[0] = True
+
+        def wait(seconds):
+            deadline = time.monotonic() + max(0, seconds)
+            while True:
+                check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                if stopping.wait(min(1, remaining)):
+                    raise InterruptedError("插件停止，取消115上传等待")
+                checkpoint()
 
         def report(percent, flush=True):
             check()
@@ -82,6 +121,8 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
                 def call(*args, **kwargs):
                     check()
                     kwargs.setdefault("timeout", 30)
+                    if name == "upload_file_init":
+                        begin_upload()
                     if name == "upload_file_init" and "read_range_bytes_or_hash" in kwargs:
                         kwargs["read_range_bytes_or_hash"] = range_hash
                     return value(*args, **kwargs)
@@ -131,6 +172,7 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
 
             def init_multipart_upload(self, key, *args, **kwargs):
                 check()
+                begin_upload()
                 result = self.bucket.init_multipart_upload(key, *args, **kwargs)
                 pending[(key, result.upload_id)] = self
                 return result
@@ -167,10 +209,12 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
                 pending.pop((key, upload_id), None)
                 return result
 
-        bindings.update(transfer_process=transfer_process, global_vars=StopProxy(), Bucket=BucketProxy)
+        bindings.update(transfer_process=transfer_process, global_vars=StopProxy(), Bucket=BucketProxy, sleep=wait)
         scoped = types.FunctionType(function.__code__, bindings, function.__name__, function.__defaults__, function.__closure__)
         scoped.__kwdefaults__ = function.__kwdefaults__
-        return scoped(OperProxy(), target, path, new_name=path.name)
+        proxy = OperProxy()
+        receiver = helper(p115_api=proxy) if helper is not None else proxy
+        return scoped(receiver, target, path, new_name=path.name)
     finally:
         for (key, upload_id), bucket in tuple(pending.items()):
             try:

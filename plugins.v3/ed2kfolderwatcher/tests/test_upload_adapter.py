@@ -154,9 +154,27 @@ class UploadAdapterTests(unittest.TestCase):
 
     def test_unsupported_uploader_fails_closed_without_global_patch(self):
         oper = types.SimpleNamespace(upload=Mock())
-        with self.assertRaisesRegex(self.adapter.CloudError, "安全进度"):
+        with self.assertRaisesRegex(self.adapter.UploadNotStarted, "尚未发起上传"):
             self.call(oper)
         oper.upload.assert_not_called()
+
+    def test_preflight_failure_never_marks_upload_started(self):
+        started = Mock()
+        with self.assertRaises(self.adapter.UploadNotStarted):
+            self.adapter.upload_with_digest(
+                types.SimpleNamespace(upload=Mock()), None, self.path, self.digest,
+                self.identity, self.stopping, Mock(), Mock(), 0, on_start=started,
+            )
+        started.assert_not_called()
+
+    def test_upload_marker_is_written_before_first_initialization_request(self):
+        started = Mock()
+        self.oper.client.upload_file_init.side_effect = lambda **kwargs: self.assertTrue(started.called)
+        self.adapter.upload_with_digest(
+            self.oper, None, self.path, self.digest, self.identity, self.stopping,
+            self.reported.append, self.checkpoint, 0, on_start=started,
+        )
+        started.assert_called_once()
 
     def test_rate_limit_wait_is_interruptible(self):
         self.stopping = Mock()
@@ -242,3 +260,74 @@ class UploadAdapterTests(unittest.TestCase):
         self.assertEqual(self.reported[-1], 100)
         self.raw_bucket.complete_multipart_upload.assert_called_once()
         self.raw_bucket.abort_multipart_upload.assert_not_called()
+
+    def test_installed_strm_static_upload_patch_offline_contract(self):
+        import ast
+        import __future__
+        from datetime import datetime, timezone
+        from time import perf_counter
+        root = Path("/app/app/plugins/p115strmhelper")
+        if not root.exists():
+            self.skipTest("Installed STRM upload patch is not available")
+        scope = {
+            "Path": Path, "global_vars": global_vars, "Bucket": Bucket,
+            "transfer_process": transfer_process, "logger": Mock(), "check_response": Mock(),
+            "StsAuth": Mock(), "determine_part_size": lambda *args, **kwargs: 10 * 1024 ** 2,
+            "SizedFileAdapter": lambda stream, size: stream, "PartInfo": lambda *args: args,
+            "b64encode_as_string": lambda value: value, "ServerError": RuntimeError,
+            "datetime": datetime, "timezone": timezone, "perf_counter": perf_counter,
+            "configer": types.SimpleNamespace(
+                machine_id="offline-test", notify=False, upload_module_skip_slow_upload=False,
+                get_config=lambda key: -1 if key == "upload_module_wait_timeout" else 0,
+            ),
+            "upload_notifier": Mock(), "P115Center": Mock(), "UploadInfo": Mock(),
+        }
+        source = root / "core/p115disk.py"
+        tree = ast.parse(source.read_text())
+        helper = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "P115DiskCore")
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source), "exec",
+                     flags=__future__.annotations.compiler_flag), scope)
+        wrapped_class = type("Wrapped115", (Fake115,), {})
+        patch_source = root / "patch/p115disk_upload.py"
+        tree = ast.parse(patch_source.read_text())
+        patcher = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "P115DiskPatcher")
+        globals_patch = {"P115DiskCore": scope["P115DiskCore"], "logger": Mock(), "P115API_AVAILABLE": True,
+                         "P115Api": wrapped_class, "configer": types.SimpleNamespace(upload_module_enhancement=True)}
+        exec(compile(ast.Module(body=[patcher], type_ignores=[]), str(patch_source), "exec",
+                     flags=__future__.annotations.compiler_flag), globals_patch)
+        patch_type = globals_patch["P115DiskPatcher"]
+        patch_type.enable()
+        self.addCleanup(patch_type.disable)
+        oper = wrapped_class()
+        oper.get_folder = Mock(return_value=types.SimpleNamespace(fileid="7"))
+        oper._id_cache = Mock()
+        oper._id_cache.get_id_by_dir.return_value = None
+        oper.get_item = Mock(return_value={"name": self.path.name})
+        oper._get_oss_token = Mock(return_value=("endpoint", "key", "secret", "token", datetime(2035, 1, 1, tzinfo=timezone.utc)))
+        oper._is_token_expiring = Mock(return_value=False)
+        oper.client.upload_file_init.return_value = {
+            "state": True, "reuse": False, "bucket": "bucket", "object": "key",
+            "callback": {"callback": "value", "callback_var": "variables"},
+        }
+        patched_method = wrapped_class.upload
+        result = self.adapter.upload_with_digest(
+            oper, types.SimpleNamespace(path="/upload"), self.path, self.digest,
+            self.identity, self.stopping, self.reported.append, self.checkpoint, 0,
+        )
+        self.assertEqual(result["name"], self.path.name)
+        self.assertFalse(oper.sha1_called)
+        self.assertEqual(oper.client.upload_file_init.call_args.kwargs["filesha1"], self.digest)
+        self.assertEqual(self.reported[-1], 100)
+        self.assertIs(wrapped_class.upload, patched_method)
+        self.assertTrue(patch_type._active)
+        self.raw_bucket.complete_multipart_upload.assert_called_once()
+        self.raw_bucket.abort_multipart_upload.assert_not_called()
+        scope["configer"].upload_module_skip_slow_upload = True
+        self.raw_bucket.reset_mock()
+        result = self.adapter.upload_with_digest(
+            oper, types.SimpleNamespace(path="/upload"), self.path, self.digest,
+            self.identity, self.stopping, self.reported.append, self.checkpoint, 0,
+        )
+        self.assertIsNone(result)
+        self.raw_bucket.init_multipart_upload.assert_not_called()
+        self.assertIs(wrapped_class.upload, patched_method)

@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.20.1"
+    plugin_version = "1.20.2"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -2502,6 +2502,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                               "source_type": record.get("source_type", "local"), "storage": record.get("storage", "local"),
                               "source_path": record.get("source_path", path),
                               "upload_state": record.get("upload_state", ""), "upload_note": record.get("upload_note", ""),
+                              "upload_first_error": record.get("upload_first_error", ""),
                               "upload_path": record.get("upload_cloud_item", {}).get("path", ""),
                               "deleted_at": record.get("deleted_at"), "cloud_delete_state": record.get("cloud_delete_state", ""), "cloud_delete_note": record.get("cloud_delete_note", "")})
             return {"ok": True, "items": items, "total": len(records), "limit": 100,

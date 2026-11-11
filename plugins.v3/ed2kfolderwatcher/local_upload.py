@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from app.log import logger
 
 from .cloud_storage import CloudError, CloudStorage, cloud_path, monitor_roots
-from .upload_adapter import upload_with_digest
+from .upload_adapter import UploadNotStarted, upload_with_digest
 
 
 UPLOAD_FIELDS = ("local_upload_enabled", "local_upload_mode", "local_upload_folder", "local_upload_target", "local_upload_rate")
@@ -88,6 +88,9 @@ class LocalUploadMixin:
         for source, record in records.items():
             if record.get("upload_mode") and not record.get("upload_verified") and self._upload_root_for(Path(source)):
                 record.pop("upload_attempted", None)
+                record.pop("upload_first_error", None)
+                record.pop("upload_first_error_at", None)
+                record.pop("upload_error_code", None)
                 record.update(upload_state="computed", upload_note="用户手动补扫：先核实目标，再决定是否重新上传")
         self._write_results(None, cache_path, records)
 
@@ -99,6 +102,10 @@ class LocalUploadMixin:
             records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
             record = records.get(str(path.resolve()))
             if record and record.get("upload_mode"):
+                if not record.get("upload_first_error"):
+                    record.update(upload_first_error=str(error), upload_first_error_at=time.time())
+                if isinstance(error, UploadNotStarted) and not record.get("upload_attempted"):
+                    record["upload_error_code"] = "not_started"
                 record.update(upload_state="failed", upload_note=str(error))
                 self._write_results(None, cache_path, records)
 
@@ -235,16 +242,24 @@ class LocalUploadMixin:
                         raise CloudError("上次上传结果未确认且目标未找到，保留本地文件；核实后可手动本地计算上传补扫重试")
                     if local_identity(path.stat()) != record["local_identity"] or self._stopping.is_set():
                         raise InterruptedError("本地文件变化或插件停止，取消上传")
-                    record.update(upload_attempted=True, upload_state="uploading", upload_note="调用115插件上传；不会覆盖同名异内容文件")
+                    record.update(upload_state="preparing", upload_note="检查115上传接口，尚未发起上传")
                     self._write_results(output, cache_path, records)
                     self._upload_stage(path, "准备115秒传／上传")
                     from app.schemas import FileItem
                     target = FileItem(storage="115网盘Plus", path=str(PurePosixPath(destination).parent), type="dir")
+                    def mark_started():
+                        nonlocal records, record
+                        records = json.loads(cache_path.read_text(encoding="utf-8"))
+                        record = records[key]
+                        record.update(upload_attempted=True, upload_state="uploading",
+                                      upload_note="调用115插件上传；不会覆盖同名异内容文件")
+                        record.pop("upload_error_code", None)
+                        self._write_results(output, cache_path, records)
                     try:
                         uploaded = upload_with_digest(
                             storage.oper, target, path, record["local_sha1"], record["local_identity"],
                             self._stopping, lambda percent: self._upload_progress(path, percent),
-                            self._flush_due_groups, self._local_upload_rate,
+                            self._flush_due_groups, self._local_upload_rate, on_start=mark_started,
                         )
                     except CloudError:
                         raise
@@ -268,6 +283,7 @@ class LocalUploadMixin:
             record.update(name=item["name"], link=ed2k_link(item["name"], digest, record["size"]),
                           upload_verified=True, upload_cloud_item=item, upload_state="verified",
                           upload_note="115大小与SHA1校验通过；使用本地计算结果，网盘副本不自动删除")
+            record.pop("upload_error_code", None)
             self._write_results(output, cache_path, records)
             logger.info(f"自动生成ED2K链接：115上传内容校验通过，复用本地ED2K：{item['name']}")
         else:

@@ -46,7 +46,11 @@ class LocalUploadTests(unittest.TestCase):
         storage_patch.start()
         self.addCleanup(storage_patch.stop)
         self.storage.oper.upload.side_effect = self.upload
-        upload_patch = patch.object(self.upload_module, "upload_with_digest", side_effect=lambda oper, target, path, *args: oper.upload(target, path, new_name=path.name))
+        def invoke(oper, target, path, *args, on_start=None):
+            if on_start:
+                on_start()
+            return oper.upload(target, path, new_name=path.name)
+        upload_patch = patch.object(self.upload_module, "upload_with_digest", side_effect=invoke)
         upload_patch.start()
         self.addCleanup(upload_patch.stop)
 
@@ -143,6 +147,45 @@ class LocalUploadTests(unittest.TestCase):
         self.storage.oper.get_item_strict.return_value = self.remote
         self.plugin._process_file(path)
         self.assertTrue(self.records()[str(path)]["upload_verified"])
+        self.storage.oper.upload.assert_called_once()
+
+    def test_preflight_rejection_does_not_poison_upload_attempt_or_hide_first_error(self):
+        self.configure()
+        path = self.sample()
+        error = self.upload_module.UploadNotStarted("上传适配检查未通过，尚未发起上传")
+        def reject(*args, **kwargs):
+            raise error
+        with patch.object(self.upload_module, "upload_with_digest", side_effect=reject) as attempt:
+            for index in range(2):
+                with self.assertRaises(self.upload_module.UploadNotStarted):
+                    self.plugin._process_file(path)
+                self.plugin._record_upload_error(path, error)
+            self.assertEqual(attempt.call_count, 2)
+        record = self.records()[str(path)]
+        self.assertNotIn("upload_attempted", record)
+        self.assertEqual(record["upload_error_code"], "not_started")
+        self.assertEqual(record["upload_first_error"], str(error))
+        self.assertTrue(path.exists())
+        self.storage.oper.upload.assert_not_called()
+        self.plugin._process_file(path)
+        self.assertTrue(self.records()[str(path)]["upload_verified"])
+        self.storage.oper.upload.assert_called_once()
+
+    def test_uncertain_failure_retains_first_cause_on_later_retries(self):
+        self.configure()
+        path = self.sample()
+        self.storage.oper.upload.side_effect = TimeoutError("sensitive details not exposed")
+        with self.assertRaises(self.cloud_module.CloudError) as initial:
+            self.plugin._process_file(path)
+        self.plugin._record_upload_error(path, initial.exception)
+        with self.assertRaisesRegex(self.cloud_module.CloudError, "上次上传结果未确认") as later:
+            self.plugin._process_file(path)
+        self.plugin._record_upload_error(path, later.exception)
+        record = self.records()[str(path)]
+        self.assertIn("TimeoutError", record["upload_first_error"])
+        self.assertNotIn("sensitive details", record["upload_first_error"])
+        self.assertTrue(record["upload_attempted"])
+        self.assertIn("上次上传结果未确认", record["upload_note"])
         self.storage.oper.upload.assert_called_once()
 
     def test_manual_retry_resets_ambiguous_flag_without_clearing_hash(self):

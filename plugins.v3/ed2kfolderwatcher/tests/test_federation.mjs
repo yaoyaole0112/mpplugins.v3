@@ -69,6 +69,7 @@ test('upload progress hides stale hash percent and local upload saves without cl
   assert.match(page, /task\.progress_known !== false/)
   assert.match(page, /暂未返回字节进度/)
   assert.match(page, /task\.upload_speed/)
+  assert.match(page, /首次失败：\{\{ item\.upload_first_error \}\}/)
   const panel = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
   const save = panel.match(/async function saveSettings\(\) \{([\s\S]*?)\n\}/)?.[1]
   assert.match(save, /if \(!settings\.delete_source \|\| !settings\.cloud_enabled\) settings\.cloud_delete_enabled = false/)
