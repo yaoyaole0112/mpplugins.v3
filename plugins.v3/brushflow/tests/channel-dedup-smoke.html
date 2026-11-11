@@ -28,6 +28,7 @@
   let settings = {
     enabled: true, channels: ['@example_channel'], attributes: ['resolution', 'effects', 'codec', 'source'],
     size_tolerance_pct: 5, record_count: 2, last_poll_at: Date.now() / 1000, last_error: '',
+    unknown_policy: 'exclude', identity_aliases: {},
     poll_interval_seconds: 300, next_poll_at: Date.now() / 1000 + 300,
     records: [1, 2].map(number => ({
       channel: '@example_channel', message_id: 42, file_key: `file-${number}`,
@@ -48,7 +49,10 @@
       window.brushflowRequests.push({ method: 'POST', path, body })
       if (path.endsWith('/channel-dedup/settings')) {
         if (window.brushflowFailSave) return { success: false, message: '模拟保存失败' }
-        settings = { ...settings, ...body, channels: body.channels.split('\n').filter(Boolean) }
+        const identity_aliases = Object.fromEntries((body.identity_aliases || '').split('\n').filter(Boolean)
+          .map(line => line.split('=').map(item => item.trim()))
+          .map(([name, id]) => [name, Number(id)]))
+        settings = { ...settings, ...body, identity_aliases, channels: body.channels.split('\n').filter(Boolean) }
         return { success: true, data: structuredClone(settings) }
       }
       return { success: true, message: '已提交' }

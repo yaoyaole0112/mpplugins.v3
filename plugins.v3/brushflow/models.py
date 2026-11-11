@@ -4,6 +4,7 @@ from typing import Literal, Optional
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .channel_dedup import normalize_title
 
 CHANNEL_DEDUP_ATTRIBUTES = {"resolution", "effects", "codec", "source", "fps", "size"}
 
@@ -269,6 +270,41 @@ class ChannelDedupSettingsPayload(BaseModel):
     channels: list[str] = Field(default_factory=list, max_length=50)
     attributes: list[str] = Field(default_factory=lambda: ["resolution", "effects", "codec", "source", "fps"])
     size_tolerance_pct: float = Field(5, ge=0, le=20)
+    unknown_policy: Literal["exclude", "allow"] = "exclude"
+    identity_aliases: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("identity_aliases", mode="before")
+    @classmethod
+    def validate_identity_aliases(cls, value):
+        if value is None or value == "":
+            return {}
+        if isinstance(value, str):
+            pairs = []
+            for line in value.splitlines():
+                if not line.strip():
+                    continue
+                match = re.fullmatch(r"\s*(.+?)\s*[=＝]\s*(\d+)\s*", line)
+                if not match:
+                    raise ValueError("别名绑定格式为：剧名别名 = TMDB剧集ID，每行一项")
+                pairs.append((match.group(1), match.group(2)))
+        elif isinstance(value, dict):
+            pairs = list(value.items())
+        else:
+            raise ValueError("别名绑定必须是文本或名称到TMDB剧集ID的字典")
+        if len(pairs) > 200:
+            raise ValueError("最多可配置200个剧名别名")
+        result, normalized = {}, {}
+        for raw_name, raw_id in pairs:
+            name = str(raw_name).strip()
+            key = normalize_title(name)
+            if not key or len(name) > 200 or isinstance(raw_id, bool) or not re.fullmatch(r"[1-9]\d*", str(raw_id)):
+                raise ValueError("别名不能为空且最多200字，TMDB剧集ID必须是正整数")
+            tmdb_id = int(raw_id)
+            if key in normalized and normalized[key] != tmdb_id:
+                raise ValueError("同一个规范化剧名别名不能绑定到不同TMDB剧集ID")
+            normalized[key] = tmdb_id
+            result[name] = tmdb_id
+        return result
 
     @field_validator("channels", mode="before")
     @classmethod

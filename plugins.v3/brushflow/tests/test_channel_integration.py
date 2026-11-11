@@ -39,6 +39,8 @@ class ChannelIntegrationTests(unittest.TestCase):
         self.plugin._channel_dedup_channels = ["@channel"]
         self.plugin._channel_dedup_attributes = ["resolution", "codec"]
         self.plugin._channel_dedup_size_tolerance_pct = 5
+        self.plugin._channel_dedup_unknown_policy = "allow"
+        self.plugin._channel_dedup_identity_aliases = {}
         self.record = parse_channel_message("@channel", 1, time.time(), "影视：Show\n季集：S01E01\n质量：1080p H264")
         self.plugin._channel_dedup_state = {
             "cursors": {}, "records": [self.record], "last_poll_at": None, "last_error": "",

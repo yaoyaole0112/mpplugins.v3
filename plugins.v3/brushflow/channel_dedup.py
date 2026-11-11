@@ -16,6 +16,54 @@ def normalize_title(value: Any) -> str:
     return "".join(character.casefold() for character in normalize("NFKC", str(value or "")) if character.isalnum())
 
 
+def filename_title_aliases(value: Any) -> set[str]:
+    """Keep title evidence that generic filename parsers may discard as bracketed tags."""
+    name = PurePosixPath(str(value or "").replace("\\", "/")).name
+    head = re.split(
+        r"(?i)(?:^|[ ._-])(?:S\s*\d{1,3}(?:\s*E\s*\d{1,4})?|E\d{1,4}|\d{1,3}x\d{1,4})(?!\d)",
+        name, maxsplit=1,
+    )[0]
+    head = re.split(r"(?<!\d)(?:19|20)\d{2}(?!\d)", head, maxsplit=1)[0]
+    aliases = set()
+    for bracketed in re.findall(r"\[([^]]+)\]|【([^】]+)】|\(([^)]+)\)", head):
+        text = next((part.strip() for part in bracketed if part.strip()), "")
+        if (
+            re.search(r"[\u3400-\u9fff]", text)
+            and not re.search(
+                r"字幕|中字|简繁|简体|繁体|国语|粤语|双语|内封|内嵌|高清|超清|"
+                r"^(?:韩剧|日剧|美剧|日漫|国漫|动画|合集|完结|全\d+集)$",
+                text,
+            )
+        ):
+            aliases.add(text)
+    plain = re.sub(r"\[[^]]*\]|【[^】]*】|\([^)]*\)", " ", head).strip(" ._-")
+    if plain:
+        aliases.add(plain)
+    return aliases
+
+
+def long_title_prefix_matches(name: str, aliases: Iterable[str]) -> bool:
+    """Allow long ASCII truncations only at an official alias's complete-word boundary."""
+    if not name.isascii():
+        return False
+    words = re.findall(r"[a-z0-9]+", name.casefold())
+    key = "".join(words)
+    if len(words) < 8 or len(key) < 40:
+        return False
+    for alias in aliases:
+        if not str(alias).isascii():
+            continue
+        tokens = re.findall(r"[a-z0-9]+", str(alias).casefold())
+        prefix = ""
+        for index, token in enumerate(tokens):
+            prefix += token
+            if prefix == key and index < len(tokens) - 1:
+                return True
+            if len(prefix) >= len(key):
+                break
+    return False
+
+
 def parse_episode(value: Any) -> tuple[Optional[int], list[int]]:
     text = str(value or "")
     match = re.search(r"(?i)(?:^|[^A-Z0-9])S\s*(\d{1,3})\s*E\s*(\d{1,4})(.*)", text)
@@ -291,6 +339,7 @@ def parse_candidate_file(
     return {
         "path": str(path),
         "title_key": title_key,
+        "title_keys": sorted(({title_key} | {normalize_title(name) for name in filename_title_aliases(filename)}) - {""}),
         "tmdb_id": tmdb_id,
         "year": int(year_match.group()) if year_match else None,
         "season": season,
@@ -340,7 +389,9 @@ def same_release(candidate: dict, record: dict, attributes: Iterable[str], size_
         if int(candidate_id) != int(record_id):
             return False
     else:
-        if not candidate.get("title_key") or candidate.get("title_key") != record.get("title_key"):
+        candidate_names = set(candidate.get("title_keys") or []) | {candidate.get("title_key")}
+        record_names = set(record.get("title_keys") or []) | {record.get("title_key")}
+        if not (candidate_names & record_names) - {None, ""}:
             return False
         if candidate.get("year") and record.get("year") and candidate["year"] != record["year"]:
             return False

@@ -49,7 +49,14 @@ const channelDedupLoading = ref(false)
 const channelDedupSaving = ref(false)
 const channelDedupError = ref('')
 const channelDedup = ref({ enabled: false, channels: [], attributes: [], records: [] })
-const channelDedupDraft = ref({ enabled: false, channels: '', attributes: [], size_tolerance_pct: 5 })
+const channelDedupDraft = ref({
+  enabled: false, channels: '', attributes: [], size_tolerance_pct: 5,
+  unknown_policy: 'exclude', identity_aliases: '',
+})
+const channelUnknownPolicies = [
+  { value: 'exclude', title: '排除不下载' },
+  { value: 'allow', title: '按未命中放行（兼容旧版）' },
+]
 const channelDedupAttributes = [
   { value: 'resolution', title: '分辨率' },
   { value: 'effects', title: '特效' },
@@ -283,6 +290,8 @@ async function loadChannelDedup({ resetDraft = true } = {}) {
         channels: (data?.channels || []).join('\n'),
         attributes: [...(data?.attributes || [])],
         size_tolerance_pct: Number(data?.size_tolerance_pct ?? 5),
+        unknown_policy: data?.unknown_policy || 'exclude',
+        identity_aliases: Object.entries(data?.identity_aliases || {}).map(([name, id]) => `${name} = ${id}`).join('\n'),
       }
     }
   } catch (err) {
@@ -306,6 +315,8 @@ async function saveChannelDedup() {
       channels: channelDedupDraft.value.channels,
       attributes: channelDedupDraft.value.attributes,
       size_tolerance_pct: channelDedupDraft.value.size_tolerance_pct,
+      unknown_policy: channelDedupDraft.value.unknown_policy,
+      identity_aliases: channelDedupDraft.value.identity_aliases,
     }))
     channelDedup.value = data || channelDedup.value
     await loadChannelDedup()
@@ -1019,6 +1030,22 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             hint="按种子内单个视频文件大小比较，不使用整包总大小"
             persistent-hint
             :disabled="!channelDedupDraft.enabled"
+          />
+          <VSelect
+            v-model="channelDedupDraft.unknown_policy"
+            :items="channelUnknownPolicies"
+            label="候选缺少勾选规格时"
+            :disabled="!channelDedupDraft.enabled || !channelDedupDraft.attributes.length"
+            hide-details
+          />
+          <VTextarea
+            v-model="channelDedupDraft.identity_aliases"
+            label="剧名别名绑定（可选）"
+            placeholder="剧名别名 = TMDB剧集ID"
+            rows="2"
+            auto-grow
+            :disabled="!channelDedupDraft.enabled"
+            hide-details
           />
           <VDivider />
           <div class="channel-dedup__status">

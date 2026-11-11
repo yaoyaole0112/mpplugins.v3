@@ -44,6 +44,26 @@ async def verify(base_url, output, executable_path=None):
             await page.wait_for_function("""window.brushflowRequests.some(item =>
                 item.method === 'POST' && item.path.endsWith('/settings')
                 && item.body.size_tolerance_pct === 3 && item.body.attributes.includes('size'))""")
+            policy = dialog.locator(".v-select").filter(
+                has_text="候选缺少勾选规格时"
+            ).locator(".v-field")
+            await policy.click()
+            await page.get_by_role("option", name="按未命中放行（兼容旧版）", exact=True).click()
+            aliases = dialog.get_by_label("剧名别名绑定（可选）", exact=True)
+            await aliases.fill("Short Roman Title = 313346")
+            for label in ("特效", "编码", "来源", "帧率", "文件大小"):
+                checkbox = dialog.get_by_label(label, exact=True)
+                if await checkbox.is_checked():
+                    await checkbox.uncheck()
+            await dialog.get_by_label("分辨率", exact=True).check()
+            await dialog.get_by_role("button", name="保存设置", exact=True).click()
+            await page.wait_for_function("""window.brushflowRequests.some(item =>
+                item.method === 'POST' && item.path.endsWith('/settings')
+                && item.body.attributes.length === 1 && item.body.attributes[0] === 'resolution'
+                && item.body.unknown_policy === 'allow'
+                && item.body.identity_aliases === 'Short Roman Title = 313346')""")
+            await aliases.wait_for()
+            assert await aliases.input_value() == "Short Roman Title = 313346"
             await dialog.get_by_role("button", name="立即同步", exact=True).click()
             await page.wait_for_function("""window.brushflowRequests.some(item =>
                 item.method === 'POST' && item.path.endsWith('/poll'))""")
