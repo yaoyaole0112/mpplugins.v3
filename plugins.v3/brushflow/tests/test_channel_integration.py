@@ -30,6 +30,11 @@ class ChannelIntegrationTests(unittest.TestCase):
         self.plugin._channel_state_lock = threading.RLock()
         self.plugin._channel_dedup_retry_after = 0
         self.plugin._channel_identity_cache = {}
+        self.plugin._inflight_lock = threading.RLock()
+        self.plugin._inflight_entries = {}
+        self.plugin._inflight_checked_at = {}
+        self.plugin._inflight_legacy_checked = {}
+        self.plugin._inflight_task_snapshot = (0, [])
         self.plugin._channel_dedup_enabled = True
         self.plugin._channel_dedup_channels = ["@channel"]
         self.plugin._channel_dedup_attributes = ["resolution", "codec"]
@@ -408,7 +413,9 @@ class ChannelIntegrationTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         patcher = patch("brushflow.DownloaderHelper")
-        patcher.start().return_value.is_downloader.side_effect = lambda kind, **kwargs: kind == "qbittorrent"
+        helper = patcher.start().return_value
+        helper.is_downloader.side_effect = lambda kind, **kwargs: kind == "qbittorrent"
+        helper.get_service.return_value = SimpleNamespace(instance=downloader)
         self.addCleanup(patcher.stop)
         return downloader, self.plugin._select_recent_episode_files
 

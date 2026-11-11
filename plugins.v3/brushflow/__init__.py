@@ -254,7 +254,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.3.3"
+    plugin_version = "6.3.4"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -269,6 +269,8 @@ class BrushFlow(_PluginBase):
     CHANNEL_POLL_IDLE_SECONDS = 300
     CHANNEL_POLL_IDLE_THRESHOLD = 3
     CHANNEL_POLL_MANUAL_COOLDOWN = 30
+    INFLIGHT_QUERY_SECONDS = 30
+    INFLIGHT_ADD_GRACE_SECONDS = 300
 
     def init_plugin(self, config: dict = None) -> None:
         """初始化全局开关、任务配置、运行锁和历史数据迁移"""
@@ -291,6 +293,13 @@ class BrushFlow(_PluginBase):
         self._channel_identity_cache = {}
         self._channel_generation = 0
         self._channel_stopping = False
+        self._inflight_lock = getattr(self, "_inflight_lock", threading.RLock())
+        with self._inflight_lock:
+            inflight = self.get_data("channel_dedup_inflight") or {}
+            self._inflight_entries = inflight if isinstance(inflight, dict) else {}
+            self._inflight_checked_at = {}
+            self._inflight_legacy_checked = {}
+            self._inflight_task_snapshot = (0, [])
         try:
             channel_config = ChannelDedupSettingsPayload.model_validate({
                 "enabled": raw_config.get("channel_dedup_enabled", False),
@@ -3013,8 +3022,6 @@ class BrushFlow(_PluginBase):
         if not task or not torrent.enclosure:
             logger.error(f"获取种子下载链接失败：{torrent.title}")
             return None
-        up_speed = int(task.up_speed) if task.up_speed else None
-        down_speed = int(task.dl_speed) if task.dl_speed else None
         torrent_content: Union[str, bytes] = torrent.enclosure
         proxies = settings.PROXY if torrent.site_proxy else None
         cookies = torrent.site_cookie
@@ -3094,6 +3101,24 @@ class BrushFlow(_PluginBase):
                     return None
                 else:
                     recent_selection = {"accepted": dedup_selection["remaining_paths"]}
+        with self._inflight_download_scope(
+            torrent_content, torrent, task, expected_hash, recent_selection
+        ) as reservation:
+            if reservation["blocked"]:
+                return None
+            result = self._add_prechecked_torrent(
+                torrent_content, cookies, task, downloader, service, expected_hash, reservation["selection"], torrent.title
+            )
+            reservation["added"] = bool(result)
+            return result
+
+    def _add_prechecked_torrent(
+        self, torrent_content: Union[str, bytes], cookies: Optional[str], task: BrushTaskConfig,
+        downloader: Any, service: ServiceInfo, expected_hash: str, recent_selection: Optional[dict], title: str,
+    ) -> Optional[str]:
+        """在去重及占位完成后保留原下载器添加、暂停选集和失败清理流程。"""
+        up_speed = int(task.up_speed) if task.up_speed else None
+        down_speed = int(task.dl_speed) if task.dl_speed else None
         downloader_helper = DownloaderHelper()
         if downloader_helper.is_downloader("qbittorrent", service=service):
             up_limit = up_speed * 1024 if up_speed else None
@@ -3111,7 +3136,7 @@ class BrushFlow(_PluginBase):
             )
             added, added_hashes = self._qb_add_result(add_result)
             if not added:
-                logger.warning(f"刷流任务 [{task.name}] 添加种子失败：{torrent.title}，不再等待 Hash")
+                logger.warning(f"刷流任务 [{task.name}] 添加种子失败：{title}，不再等待 Hash")
                 return None
             torrent_hash = (
                 expected_hash if expected_hash in added_hashes
@@ -3121,7 +3146,7 @@ class BrushFlow(_PluginBase):
                 logger.error(f"刷流任务 [{task.name}] 获取种子 Hash 失败")
                 return torrent_hash
             if str(torrent_hash).lower() != expected_hash:
-                logger.error(f"刷流任务 [{task.name}] 添加结果 Hash 与种子不一致，停止处理：{torrent.title}")
+                logger.error(f"刷流任务 [{task.name}] 添加结果 Hash 与种子不一致，停止处理：{title}")
                 return None
             if recent_selection and not self._select_recent_episode_files(
                 downloader, torrent_hash, recent_selection, "qbittorrent", task.name
@@ -3162,6 +3187,208 @@ class BrushFlow(_PluginBase):
                 )
             return added_torrent.hashString
         return None
+
+    def _save_inflight_entries(self) -> None:
+        self.save_data("channel_dedup_inflight", self._inflight_entries)
+
+    @staticmethod
+    def _inflight_key(downloader_name: str, torrent_hash: str) -> str:
+        return json.dumps([downloader_name, torrent_hash.lower()], ensure_ascii=False)
+
+    @staticmethod
+    def _inflight_title_keys(title: str) -> Set[str]:
+        meta = MetaInfo(str(title).rsplit("/", 1)[-1])
+        return {
+            normalize_title(getattr(meta, field, None)) for field in ("cn_name", "en_name", "name")
+        } - {""}
+
+    def _reconcile_inflight_entries(self) -> None:
+        """批量核验持久化占位；查询失败保留，确认不存在才释放。调用者持有入队锁。"""
+        now = time.time()
+        grouped: Dict[str, List[Tuple[str, dict]]] = {}
+        for key, entry in self._inflight_entries.items():
+            grouped.setdefault(entry["downloader"], []).append((key, entry))
+        changed = False
+        for name, entries in grouped.items():
+            if now - self._inflight_checked_at.get(name, 0) < self.INFLIGHT_QUERY_SECONDS:
+                continue
+            self._inflight_checked_at[name] = now
+            try:
+                service = DownloaderHelper().get_service(name=name)
+                if not service or not service.instance:
+                    continue
+                torrents, error = service.instance.get_torrents(ids=[entry["hash"] for _, entry in entries])
+                if error:
+                    continue
+                hashes = {
+                    str(item.get("hash") if isinstance(item, dict) else getattr(item, "hashString", "")).lower()
+                    for item in torrents or []
+                }
+                for key, entry in entries:
+                    if entry["hash"] in hashes:
+                        if entry.get("status") != "queued" or not entry.get("confirmed_at"):
+                            entry["status"] = "queued"
+                            entry["confirmed_at"] = now
+                            changed = True
+                    elif (
+                        entry.get("confirmed_at")
+                        or now - entry.get("created_at", now) >= self.INFLIGHT_ADD_GRACE_SECONDS
+                    ):
+                        self._inflight_entries.pop(key, None)
+                        changed = True
+            except Exception as err:
+                logger.warning(f"已入队同规格去重核验下载器 [{name}] 失败，保留占位：{type(err).__name__}")
+        if changed:
+            self._save_inflight_entries()
+
+    def _backfill_inflight_entries(self, candidates: List[dict]) -> None:
+        """只对同名的历史 BrushFlow 任务读取实际已选文件，不把整包标题当作已下载全集。"""
+        now = time.time()
+        snapshot_at, tasks = self._inflight_task_snapshot
+        if now - snapshot_at >= self.INFLIGHT_QUERY_SECONDS:
+            tasks = []
+            for task in getattr(self, "_task_configs", {}).values():
+                for torrent_hash, row in (self._get_task_data(task.id, "torrents") or {}).items():
+                    if not row.get("deleted"):
+                        title = row.get("title") or ""
+                        header = parse_candidate_file(title + ".mkv", row.get("size"))
+                        tasks.append((
+                            task.downloader, torrent_hash.lower(), row, self._inflight_title_keys(title),
+                            header.get("tmdb_id") if header else None,
+                        ))
+            self._inflight_task_snapshot = (now, tasks)
+        candidate_names = set().union(*(self._inflight_title_keys(row["path"]) for row in candidates))
+        candidate_ids = {row["tmdb_id"] for row in candidates if row.get("tmdb_id")}
+        changed = False
+        for name, torrent_hash, row, names, tmdb_id in tasks:
+            key = self._inflight_key(name, torrent_hash)
+            if key in self._inflight_entries or now - self._inflight_legacy_checked.get(key, 0) < 60:
+                continue
+            title = row.get("title") or ""
+            if not (candidate_names & names or tmdb_id and tmdb_id in candidate_ids):
+                continue
+            self._inflight_legacy_checked[key] = now
+            try:
+                service = DownloaderHelper().get_service(name=name)
+                if not service or not service.instance:
+                    continue
+                files = service.instance.get_files(torrent_hash)
+                if not files:
+                    continue
+                records = []
+                for item in files:
+                    if isinstance(item, dict):
+                        # Missing selection information must not imply that an entire pack was selected.
+                        wanted = item.get("priority", 0) > 0
+                        path, size = item.get("name"), item.get("size")
+                    else:
+                        wanted = getattr(item, "selected", False) is True
+                        path, size = getattr(item, "name", ""), getattr(item, "size", None)
+                    if not wanted:
+                        continue
+                    candidate = parse_candidate_file(path, size, title, spec_hint=row.get("description") or "")
+                    if candidate and not getattr(MetaInfo(path.rsplit("/", 1)[-1]), "episode_group", None):
+                        records.append(candidate)
+                if records:
+                    self._inflight_entries[key] = {
+                        "downloader": name, "hash": torrent_hash, "task_name": row.get("task_name") or "",
+                        "created_at": now, "confirmed_at": now, "status": "queued", "records": records,
+                    }
+                    changed = True
+            except Exception as err:
+                logger.warning(f"已入队同规格去重补查文件失败：{torrent_hash}（{type(err).__name__}）")
+        if changed:
+            self._save_inflight_entries()
+
+    @contextmanager
+    def _inflight_download_scope(
+        self, content: Union[str, bytes], torrent: TorrentInfo, task: BrushTaskConfig,
+        expected_hash: str, selection: Optional[dict],
+    ) -> Iterator[dict]:
+        """匹配和持久化占位原子化；添加及选集完成后提交，失败核实后回滚。"""
+        outcome = {"blocked": False, "selection": selection, "added": False}
+        if not (
+            getattr(self, "_channel_dedup_enabled", False)
+            and getattr(self, "_channel_dedup_attributes", []) and isinstance(content, bytes)
+        ):
+            yield outcome
+            return
+        files = parse_torrent_files(content)
+        if not files:
+            yield outcome
+            return
+        spec_hint = " ".join([torrent.description or "", *(torrent.labels or [])])
+        accepted = selection.get("accepted") if selection else None
+        candidates = []
+        for item in files:
+            if accepted is not None and item["path"] not in accepted:
+                continue
+            candidate = parse_candidate_file(item["path"], item.get("size"), torrent.title, spec_hint=spec_hint)
+            if candidate and not getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None):
+                candidates.append(candidate)
+        if not candidates:
+            yield outcome
+            return
+        key = self._inflight_key(task.downloader, expected_hash)
+        token = uuid.uuid4().hex
+        with self._inflight_lock:
+            self._reconcile_inflight_entries()
+            self._backfill_inflight_entries(candidates)
+            if key in self._inflight_entries:
+                logger.info(f"已入队同规格去重排除种子 {torrent.title}：相同 Hash 已占位或已入队")
+                outcome["blocked"] = True
+            records = [
+                {**record, "channel": f"{entry.get('task_name') or entry['downloader']} / {entry['hash'][:12]}"}
+                for entry in self._inflight_entries.values() for record in entry.get("records") or []
+            ]
+            duplicate = self._channel_dedup_file_selection(
+                content, torrent.title, accepted_paths=accepted, spec_hint=spec_hint,
+                records_override=records, match_source="已入队同规格去重",
+            ) if records and not outcome["blocked"] else None
+            if duplicate:
+                remaining = (set(accepted) - duplicate["excluded"]) if accepted is not None else duplicate["remaining_paths"]
+                if (
+                    accepted is not None and not remaining
+                    or duplicate["matched_video_count"] >= duplicate["video_count"]
+                ):
+                    logger.info(f"已入队同规格去重排除种子 {torrent.title}：符合条件的视频均已有入队任务，无需等待频道发布")
+                    outcome["blocked"] = True
+                else:
+                    outcome["selection"] = {**(selection or {}), "accepted": remaining}
+                candidates = [row for row in candidates if row["path"] not in duplicate["excluded"]]
+            if not outcome["blocked"]:
+                self._inflight_entries[key] = {
+                    "downloader": task.downloader, "hash": expected_hash, "task_name": task.name,
+                    "created_at": time.time(), "status": "reserved", "token": token, "records": candidates,
+                }
+                self._save_inflight_entries()
+        if outcome["blocked"]:
+            yield outcome
+            return
+        try:
+            yield outcome
+        finally:
+            with self._inflight_lock:
+                entry = self._inflight_entries.get(key)
+                if entry and entry.get("token") == token:
+                    if outcome["added"]:
+                        entry["status"] = "queued"
+                        self._save_inflight_entries()
+                    else:
+                        # A timeout/ambiguous add may still have created a task. Never free it blindly.
+                        try:
+                            service = DownloaderHelper().get_service(name=task.downloader)
+                            if service and service.instance:
+                                existing, error = service.instance.get_torrents(ids=[expected_hash])
+                                if not error:
+                                    if existing:
+                                        entry["status"] = "queued"
+                                        entry["confirmed_at"] = time.time()
+                                    else:
+                                        self._inflight_entries.pop(key, None)
+                                    self._save_inflight_entries()
+                        except Exception as err:
+                            logger.warning(f"已入队同规格去重添加结果待核验，暂留占位：{type(err).__name__}")
 
     @staticmethod
     def _qb_add_result(result: Any) -> Tuple[bool, List[str]]:
@@ -3320,20 +3547,25 @@ class BrushFlow(_PluginBase):
         title: str,
         accepted_paths: Optional[Set[str]] = None,
         spec_hint: str = "",
+        records_override: Optional[List[dict]] = None,
+        match_source: str = "频道同规格去重",
     ) -> Optional[dict]:
-        """逐集比较频道记录与种子内部媒体文件；常规 AVC WEB 可推断 SDR，其余未知放行。"""
+        """逐集比较频道或入队记录；常规 AVC WEB 可推断 SDR，其余未知放行。"""
         if not isinstance(torrent_content, bytes) or not self._channel_dedup_attributes:
             return None
         with self._channel_state_lock:
-            self._prune_channel_dedup_records()
-            records = list(self._channel_dedup_state.get("records") or [])
+            if records_override is None:
+                self._prune_channel_dedup_records()
+            records = list(
+                self._channel_dedup_state.get("records") or []
+            ) if records_override is None else records_override
             attributes = list(self._channel_dedup_attributes)
             tolerance = self._channel_dedup_size_tolerance_pct
         if not records:
             return None
         files = parse_torrent_files(torrent_content)
         if not files:
-            logger.info(f"频道同规格去重跳过 {title}：无法读取种子内逐文件大小与路径，按未命中放行")
+            logger.info(f"{match_source}跳过 {title}：无法读取种子内逐文件大小与路径，按未命中放行")
             return None
         selected_keys = {
             str(path).replace("\\", "/").casefold() for path in accepted_paths or []
@@ -3361,13 +3593,13 @@ class BrushFlow(_PluginBase):
             ]
             if missing_attributes:
                 logger.info(
-                    f"频道同规格去重放行 {item['path']}：候选缺少勾选规格 "
+                    f"{match_source}放行 {item['path']}：候选缺少勾选规格 "
                     f"{', '.join(missing_attributes)}，无法确认同规格"
                 )
                 continue
             if "effects" in attributes and "effects" in candidate["inferred_attributes"]:
                 logger.info(
-                    f"频道同规格去重规格推断 {item['path']}：未标动态范围的常规 "
+                    f"{match_source}规格推断 {item['path']}：未标动态范围的常规 "
                     f"{candidate['specs']['resolution']} H.264 WEB 资源按 SDR 命名约定比较，非媒体实测"
                 )
             matched_records = []
@@ -3397,8 +3629,8 @@ class BrushFlow(_PluginBase):
                 matched_from = sorted({record.get("channel", "") for record in matched_records if record})
                 episode_text = ",".join(f"E{number:02d}" for number in candidate["episodes"])
                 logger.info(
-                    f"频道同规格去重命中 {item['path']}：S{candidate['season']:02d}{episode_text}；"
-                    f"频道 {', '.join(matched_from)}；匹配规格 "
+                    f"{match_source}命中 {item['path']}：S{candidate['season']:02d}{episode_text}；"
+                    f"{'频道' if records_override is None else '已有任务'} {', '.join(matched_from)}；匹配规格 "
                     f"{', '.join(f'{key}={candidate['specs'].get(key)}' for key in attributes)}"
                 )
         if not excluded:
