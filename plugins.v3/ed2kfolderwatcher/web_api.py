@@ -18,8 +18,9 @@ from .local_upload import UPLOAD_FIELDS
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
                  "min_age", "min_file_size", "local_delete_source", "cloud_delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
                  "telegram_chat_id", "telegram_thread_id", "telegram_aggregate", "telegram_aggregate_window", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
-                 "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source", "retry_limit", "movie_series_parallel") + UPLOAD_FIELDS
-BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "local_delete_source", "local_upload_delete_source", "local_upload_delete_cloud_copy", "cloud_delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled", "movie_series_parallel", "local_upload_enabled"}
+                 "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source", "retry_limit", "movie_series_parallel",
+                 "ordinary_upload_telegram_enabled", "ordinary_upload_telegram_targets", "ordinary_upload_telegram_thread_id") + UPLOAD_FIELDS
+BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "local_delete_source", "local_upload_delete_source", "local_upload_delete_cloud_copy", "cloud_delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled", "movie_series_parallel", "local_upload_enabled", "ordinary_upload_telegram_enabled"}
 
 
 def settings_snapshot(plugin, config=None):
@@ -64,7 +65,7 @@ def validate_settings(plugin, values):
                 raise UserAccountError(f"{label}必须为 {lower} 到 {upper} 的整数")
             value = int(value)
         else:
-            if not isinstance(value, str) or len(value) > (32768 if name in {"folder", "cloud_folder", "local_upload_folder"} else 4096):
+            if not isinstance(value, str) or len(value) > (32768 if name in {"folder", "cloud_folder", "local_upload_folder", "ordinary_upload_telegram_targets"} else 4096):
                 raise UserAccountError("配置文本格式不正确或过长")
             value = value.strip()
         result[name] = value
@@ -108,6 +109,10 @@ def validate_settings(plugin, values):
         raise UserAccountError("定时补扫计划格式无效") from None
     if result["telegram_thread_id"] and (not result["telegram_thread_id"].isdigit() or int(result["telegram_thread_id"]) <= 0):
         raise UserAccountError("话题线程 ID 必须为正整数或留空")
+    if result["ordinary_upload_telegram_thread_id"] and (
+            not result["ordinary_upload_telegram_thread_id"].isdigit()
+            or int(result["ordinary_upload_telegram_thread_id"]) <= 0):
+        raise UserAccountError("普通上传转发话题线程 ID 必须为正整数或留空")
     result["telegram_token"] = plugin._telegram_token
     if result["cloud_enabled"]:
         from .cloud_storage import SUPPORTED_STORAGES, available_storages, CloudError
@@ -126,6 +131,16 @@ def validate_settings(plugin, values):
             telegram_targets(result["telegram_chat_id"], result["telegram_thread_id"])
         except ValueError as error:
             raise UserAccountError(str(error)) from None
+    if result["ordinary_upload_telegram_enabled"] or result["ordinary_upload_telegram_targets"]:
+        try:
+            telegram_targets(
+                result["ordinary_upload_telegram_targets"],
+                result["ordinary_upload_telegram_thread_id"],
+            )
+        except ValueError as error:
+            raise UserAccountError(f"普通上传专用Telegram目标无效：{error}") from None
+    if result["ordinary_upload_telegram_enabled"] and not result["ordinary_upload_telegram_targets"]:
+        raise UserAccountError("请填写普通上传专用Telegram接收目标，或关闭该转发开关")
     result["onlyonce"] = False
     result["cloud_delete_scope"] = ""
     result["local_upload_cloud_delete_scope"] = ""

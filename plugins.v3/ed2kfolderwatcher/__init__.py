@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.21.5"
+    plugin_version = "1.21.6"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -254,6 +254,9 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     _telegram_token = ""
     _telegram_chat_id = ""
     _telegram_thread_id = ""
+    _ordinary_upload_telegram_enabled = False
+    _ordinary_upload_telegram_targets = ""
+    _ordinary_upload_telegram_thread_id = ""
     _telegram_retry_after = 0
     _telegram_user_last_send = 0
     _monitor_enabled = True
@@ -393,6 +396,9 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         self._telegram_token = str(config.get("telegram_token") or "").strip()
         self._telegram_chat_id = str(config.get("telegram_chat_id") or "").strip()
         self._telegram_thread_id = str(config.get("telegram_thread_id") or "").strip()
+        self._ordinary_upload_telegram_enabled = config.get("ordinary_upload_telegram_enabled") is True
+        self._ordinary_upload_telegram_targets = str(config.get("ordinary_upload_telegram_targets") or "").strip()
+        self._ordinary_upload_telegram_thread_id = str(config.get("ordinary_upload_telegram_thread_id") or "").strip()
         self._telegram_retry_after = 0
         self._telegram_target_retry = {}
         self._telegram_user_last_send = 0
@@ -1907,6 +1913,35 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         from .telegram_targets import telegram_targets
         return telegram_targets(self._telegram_chat_id, self._telegram_thread_id)
 
+    def _ordinary_upload_telegram_targets_list(self):
+        from .telegram_targets import telegram_targets
+        return telegram_targets(
+            self._ordinary_upload_telegram_targets, self._ordinary_upload_telegram_thread_id,
+        )
+
+    def _ordinary_upload_telegram_target_key(self) -> str:
+        keys = sorted(self._telegram_delivery_key(*target) for target in self._ordinary_upload_telegram_targets_list())
+        return hashlib.sha256("|".join(keys).encode("utf-8")).hexdigest()
+
+    def _notify_ordinary_upload_record(self, record: dict, checkpoint=None) -> None:
+        targets = self._ordinary_upload_telegram_targets_list()
+        if not targets:
+            return
+        deliveries = record.setdefault("ordinary_upload_telegram_deliveries", {})
+        target_key = self._ordinary_upload_telegram_target_key()
+        for target in targets:
+            delivery_key = self._telegram_delivery_key(*target)
+            if deliveries.get(delivery_key):
+                continue
+            if self._send_telegram_user(Path(record.get("name") or "普通上传链接"), record["link"], target=target):
+                deliveries[delivery_key] = True
+                if checkpoint is not None:
+                    checkpoint()
+        record["ordinary_upload_telegram_sent"] = all(
+            deliveries.get(self._telegram_delivery_key(*target)) for target in targets
+        )
+        record["ordinary_upload_telegram_target"] = target_key if record["ordinary_upload_telegram_sent"] else ""
+
     def _telegram_delivery_key(self, destination: str, thread_id) -> str:
         from .user_account import TelegramUserAccount
         identity = TelegramUserAccount(Path(self.get_data_path())).identity()
@@ -2581,6 +2616,9 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                               "source_path": record.get("source_path", path),
                               "upload_state": record.get("upload_state", ""), "upload_note": record.get("upload_note", ""),
                               "upload_mode": record.get("upload_mode", ""),
+                              "upload_kind": record.get("upload_kind", ""),
+                              "ordinary_upload_telegram_sent": record.get("ordinary_upload_telegram_sent", False),
+                              "ordinary_upload_telegram_enabled": self._ordinary_upload_telegram_enabled,
                               "telegram_sent": record.get("telegram_sent", False),
                               "workflow_status": workflow_status,
                               "upload_first_error": record.get("upload_first_error", ""),
@@ -2625,7 +2663,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             self._web_login = None
 
     def _save_config(self) -> None:
-        fields = ("enabled", "movie_series_parallel", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "local_delete_source", "cloud_delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_aggregate", "telegram_aggregate_window", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
+        fields = ("enabled", "movie_series_parallel", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "local_delete_source", "cloud_delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_aggregate", "telegram_aggregate_window", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "ordinary_upload_telegram_enabled", "ordinary_upload_telegram_targets", "ordinary_upload_telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
         config = {name: getattr(self, f"_{name}") for name in fields + UPLOAD_FIELDS + ("retry_limit",)}
         config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce,
                       cloud_delete_scope=self._cloud_delete_scope,
@@ -2685,5 +2723,9 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-5"}, "text": "仅使用个人账号发送，可在插件页面完成授权；请使用可信网络或 HTTPS。"},
             field("VTextarea", "telegram_chat_id", "Telegram 接收目标（多个）", rows=1, placeholder="每行一个 @用户名、数字 Chat ID 或公开 t.me 链接", hint="支持换行、逗号或分号分隔；指定群组话题可填 @群组|话题ID，最多50个目标。", persistent_hint=True),
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅用于带话题的超级群组。", persistent_hint=True),
+            {"component": "VCardTitle", "text": "FUCK孤本"},
+            field("VSwitch", "ordinary_upload_telegram_enabled", "普通上传完成后独立转发"),
+            field("VTextarea", "ordinary_upload_telegram_targets", "普通上传专用接收目标（多个）", rows=1, placeholder="@孤本接收机器人, @频道用户名", hint="仅对本插件未命中秒传、实际普通上传并核验成功的文件发送；与上方ED2K自动转发目标相互独立。", persistent_hint=True),
+            field("VTextField", "ordinary_upload_telegram_thread_id", "默认话题线程 ID（可选）", placeholder="不使用默认话题时留空", hint="指定单个目标话题可在目标后加 |话题ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "movie_series_parallel": self._movie_series_parallel, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "local_delete_source": False, "local_upload_delete_source": False, "local_upload_delete_cloud_copy": False, "cloud_delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared", "local_upload_enabled": False, "local_upload_mode": "mp", "local_upload_folder": "", "local_upload_target": "", "local_upload_rate": self._local_upload_rate}
+        ]}], {"enabled": False, "movie_series_parallel": self._movie_series_parallel, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "local_delete_source": False, "local_upload_delete_source": False, "local_upload_delete_cloud_copy": False, "cloud_delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "ordinary_upload_telegram_enabled": False, "ordinary_upload_telegram_targets": "", "ordinary_upload_telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared", "local_upload_enabled": False, "local_upload_mode": "mp", "local_upload_folder": "", "local_upload_target": "", "local_upload_rate": self._local_upload_rate}

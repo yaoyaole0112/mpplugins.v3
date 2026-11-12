@@ -72,6 +72,15 @@ test('local upload card precedes local monitoring and offers MP and direct modes
   assert.equal(upload.includes('v-if="settings.local_upload_mode === \'direct\'" class="fields"'), false)
 })
 
+test('ordinary-upload forwarding has an independent Telegram target and hides storage paths', async () => {
+  const panel = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
+  const page = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
+  assert.match(panel, /<h3>FUCK孤本<\/h3>/)
+  assert.match(panel, /ordinary_upload_telegram_targets/)
+  assert.match(panel, /普通上传专用接收目标/)
+  assert.equal(page.includes('v-if="item.upload_path"'), false)
+})
+
 test('upload progress and independent delete settings are exposed', async () => {
   const page = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
   assert.match(page, /task\.progress_known !== false/)

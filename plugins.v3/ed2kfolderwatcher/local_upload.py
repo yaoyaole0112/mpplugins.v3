@@ -394,7 +394,10 @@ class LocalUploadMixin:
             record.update(upload_scope=scope, upload_mode=self._local_upload_mode, upload_state="computed", upload_verified=False)
             record.pop("upload_cloud_item", None)
             record.pop("upload_attempted", None)
+            record.pop("upload_kind", None)
             record.update(telegram_sent=False, telegram_target="", telegram_deliveries={})
+            record.update(ordinary_upload_telegram_sent=False, ordinary_upload_telegram_target="",
+                          ordinary_upload_telegram_deliveries={})
         if not record.get("upload_verified"):
             if self._local_upload_mode == "mp":
                 item = receipt["item"]
@@ -421,6 +424,47 @@ class LocalUploadMixin:
                     self._upload_stage(path, "准备115秒传／上传")
                     from app.schemas import FileItem
                     target = FileItem(storage="115网盘Plus", path=str(PurePosixPath(destination).parent), type="dir")
+                    instant_reused = [False]
+
+                    def recheck_instant_upload():
+                        self._upload_stage(path, "上传通道空闲，重新检查115秒传")
+                        try:
+                            with self._cloud_request_lock:
+                                folder_item = lookup(Path(PurePosixPath(destination).parent.as_posix()))
+                            folder_item = saved_item(folder_item)
+                            folder_id = str(folder_item.get("fileid") or "")
+                            if folder_item.get("type") != "dir" or not re.fullmatch(r"[1-9][0-9]{0,63}", folder_id):
+                                record.update(rapid_check="unavailable",
+                                              upload_note="上传前无法确认目标目录；继续按普通上传检查")
+                                self._write_results(output, cache_path, records)
+                                return None
+                            record.update(rapid_check_started=True, upload_state="checking_instant",
+                                          upload_note="已取得115上传通道，最后复查秒传")
+                            self._write_results(output, cache_path, records)
+                            with self._cloud_request_lock:
+                                hit = instant_upload_check(
+                                    storage.oper, path, record["local_sha1"], record["size"], folder_id,
+                                )
+                            record.update(rapid_check="hit" if hit is True else "miss" if hit is False else "unavailable")
+                            record.pop("rapid_check_started", None)
+                            self._write_results(output, cache_path, records)
+                            if hit is not True:
+                                return None
+                            with self._cloud_request_lock:
+                                instant_item = lookup(Path(destination))
+                            if not instant_item:
+                                raise CloudError("上传前复查已命中115秒传，但目标文件暂不可见；等待重试核验，不启动普通上传")
+                            instant_reused[0] = True
+                            return instant_item
+                        except CloudError:
+                            raise
+                        except Exception as failure:
+                            record.update(rapid_check="unavailable", upload_note=f"上传前秒传复查不可用（{type(failure).__name__}）；继续普通上传")
+                            record.pop("rapid_check_started", None)
+                            self._write_results(output, cache_path, records)
+                            logger.warning(f"自动生成ED2K链接：上传前秒传复查不可用，继续普通上传：{path.name}（{type(failure).__name__}）")
+                            return None
+
                     def mark_started():
                         nonlocal records, record
                         records = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -434,6 +478,7 @@ class LocalUploadMixin:
                             storage.oper, target, path, record["local_sha1"], record["local_identity"],
                             self._stopping, lambda percent: self._upload_progress(path, percent),
                             self._flush_due_groups, self._local_upload_rate, on_start=mark_started,
+                            before_upload=recheck_instant_upload,
                         )
                     except CloudError:
                         raise
@@ -443,6 +488,7 @@ class LocalUploadMixin:
                     record = records[key]
                     if not uploaded:
                         raise CloudError("115上传未返回成功回执，保留本地文件，后续先查询目标，不自动重复上传")
+                    record["upload_kind"] = "instant" if instant_reused[0] else "ordinary"
                     item = saved_item(uploaded)
                 if cloud_path(item.get("path")) != destination:
                     raise CloudError("115上传回执路径与目标不一致，保留本地文件")
@@ -466,6 +512,16 @@ class LocalUploadMixin:
         else:
             with self._cloud_request_lock:
                 self._verify_uploaded(storage, record["upload_cloud_item"], record)
+        ordinary_forward_required = (
+            self._ordinary_upload_telegram_enabled and record.get("upload_kind") == "ordinary"
+        )
+        if ordinary_forward_required:
+            self._notify_ordinary_upload_record(
+                record, checkpoint=lambda: self._write_results(output, cache_path, records),
+            )
+            self._write_results(output, cache_path, records)
+            if not record.get("ordinary_upload_telegram_sent"):
+                raise CloudError("115普通上传及内容校验已确认，独立普通上传Telegram目标尚未全部投递成功；重试仅补发，不重新上传")
         if self._telegram_aggregate and self._active_batch_id in self._batches:
             with self._condition:
                 batch = self._batches[self._active_batch_id]
@@ -481,14 +537,21 @@ class LocalUploadMixin:
         else:
             self._notify_record(Path(record["name"]), record, checkpoint=lambda: self._write_results(output, cache_path, records))
         self._write_results(output, cache_path, records)
-        delivered = not self._telegram_enabled or record.get("telegram_sent")
+        delivered = (
+            (not self._telegram_enabled or record.get("telegram_sent"))
+            and (not ordinary_forward_required or record.get("ordinary_upload_telegram_sent"))
+        )
         if not delivered:
+            if ordinary_forward_required and not record.get("ordinary_upload_telegram_sent"):
+                raise CloudError("115普通上传及内容校验已确认，独立普通上传Telegram目标尚未全部投递成功；重试仅补发，不重新上传")
             if self._local_upload_mode == "mp":
                 raise CloudError("MP整理上传及网盘内容校验已确认，Telegram尚未全部投递成功；重试仅补发，不重新上传")
             raise CloudError("115上传已确认，Telegram尚未全部投递成功；重试仅补发，不重复上传")
         if self._local_upload_delete_cloud_copy and not record.get("upload_cloud_copy_deleted"):
             self._delete_uploaded_cloud_copy(record, output, cache_path, records)
-        if self._local_upload_delete_source and (output is not None or self._telegram_enabled):
+        if self._local_upload_delete_source and (
+                output is not None or self._telegram_enabled
+                or (ordinary_forward_required and record.get("ordinary_upload_telegram_sent"))):
             self._delete_uploaded_local(path, record, output, cache_path, records)
             self._clear_retry_failure(key)
 

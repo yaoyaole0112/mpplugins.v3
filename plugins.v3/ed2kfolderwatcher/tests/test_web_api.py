@@ -122,6 +122,20 @@ class WebApiTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, {"telegram_enabled": True, "telegram_chat_id": value})
 
+    def test_ordinary_upload_telegram_targets_are_independent_and_validated(self):
+        result = web_api.validate_settings(self.plugin, {
+            "ordinary_upload_telegram_enabled": True,
+            "ordinary_upload_telegram_targets": "@private\n@another|456",
+        })
+        self.assertEqual(result["ordinary_upload_telegram_targets"], "@private\n@another|456")
+        for values in (
+            {"ordinary_upload_telegram_enabled": True},
+            {"ordinary_upload_telegram_targets": "bad target"},
+            {"ordinary_upload_telegram_thread_id": "-2"},
+        ):
+            with self.subTest(values=values), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, values)
+
     def test_aggregate_window_validation_and_snapshot(self):
         result = web_api.validate_settings(self.plugin, {"telegram_aggregate_window": "900"})
         self.assertEqual(result["telegram_aggregate_window"], 900)

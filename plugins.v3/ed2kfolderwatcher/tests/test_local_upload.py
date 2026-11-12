@@ -46,7 +46,11 @@ class LocalUploadTests(unittest.TestCase):
         storage_patch.start()
         self.addCleanup(storage_patch.stop)
         self.storage.oper.upload.side_effect = self.upload
-        def invoke(oper, target, path, *args, on_start=None):
+        def invoke(oper, target, path, *args, on_start=None, before_upload=None):
+            if before_upload:
+                instant_item = before_upload()
+                if instant_item is not None:
+                    return instant_item
             if on_start:
                 on_start()
             return oper.upload(target, path, new_name=path.name)
@@ -101,6 +105,38 @@ class LocalUploadTests(unittest.TestCase):
         self.assertIn(record["link"], (self.root / "ed2k.txt").read_text())
         self.assertTrue(path.exists())
         self.assertFalse(self.plugin.recent_records()["items"][0]["upload_note"] == "")
+
+    def test_upload_channel_rechecks_instant_upload_before_ordinary_transfer(self):
+        self.configure()
+        path = self.sample()
+        folder = {
+            "storage": "115网盘Plus", "fileid": "555", "type": "dir",
+            "name": "upload", "path": "/upload",
+        }
+        self.storage.oper.get_item_strict.side_effect = lambda target: (
+            folder if str(target) == "/upload" else dict(self.remote)
+        )
+        with patch.object(self.upload_module, "instant_upload_check", return_value=True) as check, \
+                patch.object(self.plugin, "_send_telegram", return_value=True):
+            self.plugin._process_file(path)
+        record = self.records()[str(path.resolve())]
+        self.assertTrue(record["upload_verified"])
+        self.assertEqual(record["upload_kind"], "instant")
+        self.storage.oper.upload.assert_not_called()
+        self.assertGreaterEqual(check.call_count, 1)
+
+    def test_ordinary_upload_uses_its_separate_telegram_destinations(self):
+        self.configure(
+            ordinary_upload_telegram_enabled=True,
+            ordinary_upload_telegram_targets="@private_receiver",
+        )
+        path = self.sample()
+        with patch.object(self.plugin, "_send_telegram_user", return_value=True) as send:
+            self.plugin._process_file(path)
+        record = self.records()[str(path.resolve())]
+        self.assertEqual(record["upload_kind"], "ordinary")
+        self.assertTrue(record["ordinary_upload_telegram_sent"])
+        self.assertEqual(send.call_args.kwargs["target"], ("@private_receiver", None))
 
     def test_upload_stages_reset_hash_percent_and_expose_real_bytes(self):
         self.configure()

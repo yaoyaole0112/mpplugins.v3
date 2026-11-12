@@ -14,14 +14,14 @@ const error = ref('')
 const notice = ref('')
 const confirmation = ref('')
 let confirmationResolver
-const settings = reactive({ movie_series_parallel: true, telegram_mode: 'user', telegram_aggregate_window: 600, retry_limit: 3, cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared', local_upload_enabled: false, local_upload_mode: 'mp', local_upload_folder: '', local_upload_target: '', local_upload_rate: 8, local_upload_delete_source: false, local_upload_delete_cloud_copy: false, local_delete_source: false, cloud_delete_source: false, cloud_delete_enabled: false })
+const settings = reactive({ movie_series_parallel: true, telegram_mode: 'user', telegram_aggregate_window: 600, ordinary_upload_telegram_enabled: false, ordinary_upload_telegram_targets: '', ordinary_upload_telegram_thread_id: '', retry_limit: 3, cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared', local_upload_enabled: false, local_upload_mode: 'mp', local_upload_folder: '', local_upload_target: '', local_upload_rate: 8, local_upload_delete_source: false, local_upload_delete_cloud_copy: false, local_delete_source: false, cloud_delete_source: false, cloud_delete_enabled: false })
 const cloud = reactive({ storages: [], folders: [], browsing: '', scanning: false, pending: 0, file: '', bytes_read: 0, size: 0, error: '' })
 const account = reactive({ api_id: '', api_hash: '', phone: '', code: '', password: '' })
 const auth = reactive({ logged_in: false, pending: false, password_required: false, api_hash_configured: false, expires_in: 0, retry_in: 0 })
 let timer
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || saving.value || !loaded.value)
-const configFields = ['enabled', 'movie_series_parallel', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'retry_limit', 'local_delete_source', 'local_upload_delete_source', 'local_upload_delete_cloud_copy', 'delete_small_files', 'cloud_delete_source', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source', 'local_upload_enabled', 'local_upload_mode', 'local_upload_folder', 'local_upload_target', 'local_upload_rate']
+const configFields = ['enabled', 'movie_series_parallel', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'retry_limit', 'local_delete_source', 'local_upload_delete_source', 'local_upload_delete_cloud_copy', 'delete_small_files', 'cloud_delete_source', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'ordinary_upload_telegram_enabled', 'ordinary_upload_telegram_targets', 'ordinary_upload_telegram_thread_id', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source', 'local_upload_enabled', 'local_upload_mode', 'local_upload_folder', 'local_upload_target', 'local_upload_rate']
 const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size_gb', label: '生成链接最小文件大小（GB）', type: 'number', step: 'any', placeholder: '例如0.5、1、1.5（GB）', hint: '小于此值不生成、不转发；留空或0不限，单位GB。' }]
 watch([() => settings.cloud_delete_source, () => settings.local_upload_delete_cloud_copy], () => {
   settings.cloud_delete_enabled = settings.cloud_delete_source || settings.local_upload_delete_cloud_copy
@@ -265,6 +265,13 @@ onUnmounted(() => {
       <div class="fields telegram-targets"><label>接收目标（支持多个）<textarea v-model="settings.telegram_chat_id" :disabled="disabled" rows="1" placeholder="@接收机器人, @频道用户名, -1001234567890" /><small>支持用户名、Chat ID或 t.me 链接，最多50个；逗号、分号或换行分隔。</small><small>指定话题：@群组用户名|123。</small></label><label>默认话题线程 ID（可选）<input v-model="settings.telegram_thread_id" :disabled="disabled" placeholder="普通私聊、频道留空"><small>用于未单独指定话题的目标。</small></label></div>
       <p>逐个发送，间隔至少3秒；聚合时同剧同季链接换行合并，全部目标成功后才删源。</p>
       <p>使用个人账号发送，仅发送链接。修改目标后请保存设置。</p>
+    </article>
+
+    <article class="card">
+      <h3>FUCK孤本</h3>
+      <label class="switch"><input v-model="settings.ordinary_upload_telegram_enabled" type="checkbox" :disabled="disabled">普通上传完成后独立转发</label>
+      <p>仅当插件未命中115秒传、实际普通上传并完成大小与SHA1核验后，才发送该文件链接；与上方接收目标及开关独立。复用已授权的 Telegram 个人账号。</p>
+      <div class="fields telegram-targets"><label>普通上传专用接收目标（多个）<textarea v-model="settings.ordinary_upload_telegram_targets" :disabled="disabled" rows="1" placeholder="@孤本接收机器人, @频道用户名, -1001234567890" /><small>支持用户名、Chat ID或 t.me 链接，最多50个；逗号、分号或换行分隔。</small><small>指定话题：@群组用户名|123。</small></label><label>默认话题线程 ID（可选）<input v-model="settings.ordinary_upload_telegram_thread_id" :disabled="disabled" placeholder="普通私聊、频道留空"><small>用于未单独指定话题的目标。</small></label></div>
     </article>
 
     <article class="card" data-testid="telegram-account">

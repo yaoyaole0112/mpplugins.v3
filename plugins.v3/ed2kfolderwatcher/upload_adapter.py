@@ -91,7 +91,8 @@ def resolve_uploader(oper):
     raise UploadNotStarted("115上传接口适配检查未通过，尚未发起上传；请更新自动生成ED2K链接插件")
 
 
-def upload_with_digest(oper, target, path, digest, identity, stopping, progress, checkpoint, rate_limit=8, on_start=None):
+def upload_with_digest(oper, target, path, digest, identity, stopping, progress, checkpoint, rate_limit=8, on_start=None,
+                      before_upload=None):
     from .local_upload import local_identity
     last_check = [0.0]
 
@@ -111,6 +112,10 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
     next_write = [None]
     try:
         check(force=True)
+        if before_upload is not None:
+            existing = before_upload()
+            if existing is not None:
+                return existing
         function, helper = resolve_uploader(oper)
         bindings = dict(function.__globals__)
         original_stop = bindings["global_vars"]
