@@ -12,7 +12,9 @@ const items = ref([])
 const progress = ref([])
 const failedTasks = ref([])
 const total = ref(0)
-const deleteEnabled = ref(false)
+const localDeleteEnabled = ref(false)
+const localUploadDeleteEnabled = ref(false)
+const cloudDeleteSourceEnabled = ref(false)
 const cloudDeleteEnabled = ref(false)
 const workerAlive = ref(false)
 const busy = ref(false)
@@ -27,6 +29,15 @@ const copyFailedId = ref('')
 let timer
 let disposed = false
 const statuses = { deleted: '已删除源文件', retained: '未删除源文件', delete_failed: '删除失败，源文件保留', delete_uncertain: '删除结果未确认', unknown: '历史记录：删源状态未记录' }
+const workflowLabels = {
+  link_ready: 'ED2K计算完成，输出就绪',
+  computed_waiting_upload: 'ED2K已计算，等待上传115',
+  upload_queued: 'ED2K已计算，排队等待115上传',
+  waiting_mp: 'ED2K已计算，等待MP复制上传',
+  upload_active: 'ED2K已计算，正在秒传／上传／核验',
+  upload_verified: 'ED2K已计算，115已确认秒传／上传',
+  upload_failed: 'ED2K已计算，但115上传失败；源文件保留',
+}
 
 function formatTime(value) {
   return value ? new Date(value * 1000).toLocaleString() : '历史记录：生成时间未记录'
@@ -122,7 +133,9 @@ async function refresh() {
     progress.value = data.progress || []
     failedTasks.value = data.failed_tasks || []
     total.value = data.total || 0
-    deleteEnabled.value = !!data.delete_source_enabled
+    localDeleteEnabled.value = !!data.local_delete_source_enabled
+    localUploadDeleteEnabled.value = !!data.local_upload_delete_source_enabled
+    cloudDeleteSourceEnabled.value = !!data.cloud_delete_source_enabled
     cloudDeleteEnabled.value = !!data.cloud_delete_enabled
     workerAlive.value = !!data.worker_alive
     loaded.value = true
@@ -166,16 +179,16 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
       <div class="records-actions"><button type="button" :disabled="busy" @click="refresh">刷新记录</button><button type="button" @click="openSettings">设置</button><button type="button" @click="emit('close')">关闭</button></div>
     </header>
     <p class="help">每 5 秒刷新进度与记录；点击有效 ED2K 链接即可复制。“手动删除源文件”需确认并校验内容，不会自动执行。点击右上角“设置”进入配置页。</p>
-    <p class="policy">当前删源开关：{{ deleteEnabled ? '开启（所选输出成功后才删除）' : '关闭（保留源文件）' }}；115网盘另行授权：{{ cloudDeleteEnabled ? '已授权（仍受账号、目录、SHA1与输出条件约束）' : '未授权，保留网盘文件' }}。每条状态以处理时的实际记录为准，不代表源文件之后未被其他程序移动或删除。</p>
+    <p class="policy">删源设置独立：本地监控{{ localDeleteEnabled ? '开启' : '关闭' }} · 本地计算上传{{ localUploadDeleteEnabled ? '开启' : '关闭' }} · 网盘监控{{ cloudDeleteSourceEnabled ? '开启' : '关闭' }}；115授权{{ cloudDeleteEnabled ? '已开启' : '未开启' }}。每条状态以处理时记录为准。</p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <section class="progress-section" aria-live="polite">
       <h3>正在处理与等待队列 <span class="worker-status" :class="workerAlive ? 'worker-on' : 'worker-off'">{{ workerAlive ? '工作线程运行中' : '工作线程未运行' }}</span></h3>
-      <p class="progress-detail">已就绪任务按入队先后处理；本地／网盘共用计算位，双路模式允许电影与剧集各一路。取消后同一文件不再自动加入。</p>
+      <p class="progress-detail">本地／网盘队列表示 ED2K 尚未计算；“本地上传”队列表示 ED2K 已完成、正在等待或执行115上传。下方记录会明确标记计算完成、上传失败或115已核验。</p>
       <p v-if="!progress.length" class="progress-empty">当前没有本地或网盘文件等待处理。</p>
       <ol v-else class="progress-list">
         <li v-for="(task, index) in progress" :key="task.id || `${task.source}-${task.name}-${index}`" class="progress-item" :class="task.status">
-          <div class="progress-heading"><span class="source-tag">{{ task.source }}</span><strong>{{ task.name }}</strong><span v-if="task.status === 'queued' && task.queue_position" class="queue-position">No.{{ task.queue_position }}</span><span class="progress-stage">{{ task.stage }}</span><button v-if="task.status === 'queued' && task.can_cancel" type="button" class="cancel-task" :disabled="!!cancelling || busy" @click="cancelTask(task)">{{ cancelling === task.id ? '取消中…' : '取消任务' }}</button></div>
+          <div class="progress-heading"><span class="source-tag">{{ task.source }}</span><strong>{{ task.name }}</strong><span v-if="task.status === 'queued' && task.queue_position" class="queue-position">{{ task.source === '本地上传' ? '上传 No.' : 'No.' }}{{ task.queue_position }}</span><span class="progress-stage">{{ task.stage }}</span><button v-if="task.status === 'queued' && task.can_cancel" type="button" class="cancel-task" :disabled="!!cancelling || busy" @click="cancelTask(task)">{{ cancelling === task.id ? '取消中…' : '取消任务' }}</button></div>
           <div v-if="task.status === 'active' && task.size && task.progress_known !== false" class="progress-track"><span :style="{ width: `${progressPercent(task)}%` }"></span></div>
           <p class="progress-detail">
             <span v-if="task.status === 'active' && task.progress_known === false">文件大小：{{ formatBytes(task.size) }} · {{ task.stage }}（暂未返回字节进度）</span>
@@ -193,7 +206,8 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
       <li v-for="(item, index) in items" :key="`${item.link}-${index}`" class="record">
         <div class="record-heading"><h3>{{ item.name }}</h3><div class="record-actions"><button v-if="item.can_delete && item.source_status !== 'deleted'" type="button" class="delete-source" :disabled="!!deleting" @click="deleteSource(item)">{{ deleting === item.id ? '校验删除中…' : '手动删除源文件' }}</button><span class="source-status" :class="item.source_status">{{ statuses[item.source_status] || statuses.unknown }}</span></div></div>
         <p class="record-time">文件大小：{{ item.size === null || item.size === undefined ? '未知' : formatBytes(item.size) }} · 生成时间：{{ formatTime(item.generated_at) }}<span v-if="item.deleted_at"> · 删除时间：{{ formatTime(item.deleted_at) }}</span><span v-if="item.source_type === 'cloud'"> · 网盘：{{ item.storage }}<span v-if="item.cloud_delete_note"> · {{ item.cloud_delete_note }}</span><span v-else>（未记录自动删除）</span></span></p>
-        <p v-if="item.upload_state" class="record-time">本地计算上传：{{ item.upload_note || item.upload_state }}<span v-if="item.upload_path"> · {{ item.upload_path }}</span></p>
+        <p v-if="item.upload_state" class="workflow-state" :class="item.workflow_status">{{ workflowLabels[item.workflow_status] || '本地计算上传：处理中' }}<span v-if="item.upload_note"> · {{ item.upload_note }}</span><span v-if="item.upload_path"> · {{ item.upload_path }}</span></p>
+        <p v-if="item.upload_cloud_delete_note" class="record-time">网盘副本：{{ item.upload_cloud_delete_note }}</p>
         <p v-if="item.upload_state === 'failed' && item.upload_first_error && item.upload_first_error !== item.upload_note" class="record-time">首次失败：{{ item.upload_first_error }}</p>
         <p v-if="item.link_valid === false" class="error">{{ item.link_error || '链接无效，需要完整源文件重新生成' }}</p>
         <pre v-if="item.link_valid === false">{{ item.link }}</pre><button v-else type="button" class="copy-link" title="点击复制 ED2K 链接" @click="copyLink(item, $event)">{{ item.link }}</button>
@@ -218,7 +232,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
 .cancel-task{flex:none;padding:5px 8px;font-size:12px;white-space:nowrap;color:#df7b7b;background:rgba(220,60,60,.13)}@media(max-width:650px){.progress-heading{flex-wrap:wrap}.progress-heading strong{flex-basis:calc(100% - 60px)}.progress-stage{margin-left:auto}}
 .copy-feedback{height:20px;min-height:20px;font-size:12px;line-height:20px;overflow-wrap:anywhere;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .progress-section{flex:none;margin-top:14px;padding:14px 16px;border:1px solid rgba(var(--v-theme-on-surface),.16);border-radius:12px}.progress-section h3{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:16px}.worker-status,.source-tag,.queue-position{flex:none;border-radius:7px;padding:4px 8px;font-size:12px;background:rgba(var(--v-theme-on-surface),.08)}.worker-on{color:#57b985}.worker-off{color:#df7b7b}.progress-empty,.progress-detail{font-size:13px;margin:6px 0;color:rgba(var(--v-theme-on-surface),.68)}.progress-list{list-style:none;padding:0;margin:8px 0 0}.progress-item{padding:9px 0;border-top:1px solid rgba(var(--v-theme-on-surface),.1)}.progress-item.failed .progress-detail{color:#df7b7b;overflow-wrap:anywhere}.progress-heading{display:flex;align-items:center;gap:8px;min-width:0}.progress-heading strong{min-width:0;overflow-wrap:anywhere;flex:1}.progress-stage{font-size:12px;color:rgba(var(--v-theme-on-surface),.65);text-align:right}.progress-track{height:6px;margin:8px 0 4px;background:rgba(var(--v-theme-on-surface),.1);border-radius:6px;overflow:hidden}.progress-track span{display:block;height:100%;background:rgb(var(--v-theme-primary));transition:width .2s ease}
-.copy-link{display:block;width:100%;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font-family:monospace;font-size:13px;background:transparent;padding:6px 0;color:inherit}.copy-link:hover{text-decoration:underline}.record-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-left:auto}.record-actions .delete-source,.record-actions .source-status{display:inline-flex;align-items:center;justify-content:center;min-width:120px;height:32px;padding:6px 10px;font-size:13px;line-height:20px;white-space:nowrap;box-sizing:border-box}.delete-source{background:rgba(220,60,60,.13);color:#df7b7b}.notice{color:#57b985}.records-actions{flex-wrap:wrap}
+.copy-link{display:block;width:100%;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font-family:monospace;font-size:13px;background:transparent;padding:6px 0;color:inherit}.copy-link:hover{text-decoration:underline}.record-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-left:auto}.record-actions .delete-source,.record-actions .source-status{display:inline-flex;align-items:center;justify-content:center;min-width:120px;height:32px;padding:6px 10px;font-size:13px;line-height:20px;white-space:nowrap;box-sizing:border-box}.delete-source{background:rgba(220,60,60,.13);color:#df7b7b}.notice{color:#57b985}.records-actions{flex-wrap:wrap}.workflow-state{font-size:13px;font-weight:600;margin:7px 0;padding:7px 10px;border-radius:7px;background:rgba(var(--v-theme-on-surface),.06)}.upload_queued,.computed_waiting_upload,.waiting_mp{color:#dba34b}.upload_active{color:rgb(var(--v-theme-primary))}.upload_verified{color:#57b985}.upload_failed{color:#df7b7b}
 .failed-section{flex:none;margin-top:14px;padding:14px 16px;border:1px solid rgba(220,60,60,.3);border-radius:12px}.failed-section h3{display:flex;align-items:center;gap:10px;font-size:16px;color:#df7b7b}.failed-hint{font-size:13px;margin:6px 0;color:rgba(var(--v-theme-on-surface),.68)}.failed-list{list-style:none;padding:0;margin:8px 0 0}.failed-item{padding:9px 0;border-top:1px solid rgba(var(--v-theme-on-surface),.1)}.failed-count{flex:none;font-size:12px;color:#df7b7b}.failed-detail{font-size:13px;margin:5px 0 0;color:rgba(var(--v-theme-on-surface),.68)}.failed-reason{color:#df7b7b;overflow-wrap:anywhere}
 .records-page{display:flex;flex-direction:column;box-sizing:border-box;width:100%;padding:20px;max-width:1220px;margin:auto;max-height:none;overflow:visible;color:rgb(var(--v-theme-on-surface));font-size:15px}.records-header,.record-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.records-actions{display:flex;gap:12px;margin-left:auto}h2,h3{margin:0}h2{font-size:24px}h3{font-size:17px;overflow-wrap:anywhere;flex:1;min-width:160px}p{line-height:1.7;margin:12px 0;color:rgba(var(--v-theme-on-surface),.7)}button{font:inherit;border:0;border-radius:9px;padding:12px 18px;cursor:pointer;background:rgba(var(--v-theme-primary),.13);color:rgb(var(--v-theme-primary))}button:disabled{opacity:.5;cursor:not-allowed}.policy,.help{padding:8px 12px;background:rgba(var(--v-theme-on-surface),.04);border-radius:10px}.records-list{flex:none;min-height:0;list-style:none;padding:0 8px 0 0;margin:12px 0 0;overflow:visible;scrollbar-gutter:auto;scrollbar-width:thin;scrollbar-color:rgba(var(--v-theme-on-surface),.3) transparent}.records-list:focus-visible{outline:2px solid rgb(var(--v-theme-primary));outline-offset:2px}.records-list::-webkit-scrollbar{width:6px}.records-list::-webkit-scrollbar-thumb{background:rgba(var(--v-theme-on-surface),.3);border-radius:6px}.record:last-child{margin-bottom:0}.record{padding:12px 16px;margin-bottom:10px;border:1px solid rgba(var(--v-theme-on-surface),.16);border-radius:12px}.source-status{font-size:13px;border-radius:7px;padding:6px 10px;background:rgba(var(--v-theme-on-surface),.08)}.deleted{background:rgba(220,150,60,.15);color:#dba34b}.retained{background:rgba(60,180,110,.13);color:#57b985}.delete_failed,.delete_uncertain,.error{color:#df7b7b}.unknown{color:rgba(var(--v-theme-on-surface),.6)}.record-time{font-size:13px;margin:6px 0;line-height:1.5}.empty{text-align:center;padding:40px 10px}summary{cursor:pointer;color:rgb(var(--v-theme-primary))}pre{white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font-size:13px;margin:14px 0 0}@media(max-width:650px){.records-page{padding:14px}.record{padding:12px}.records-actions{width:100%;justify-content:flex-end}}
 </style>

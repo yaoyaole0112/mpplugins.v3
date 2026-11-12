@@ -14,17 +14,21 @@ const error = ref('')
 const notice = ref('')
 const confirmation = ref('')
 let confirmationResolver
-const settings = reactive({ movie_series_parallel: true, telegram_mode: 'user', telegram_aggregate_window: 600, retry_limit: 3, cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared', local_upload_enabled: false, local_upload_mode: 'mp', local_upload_folder: '', local_upload_target: '', local_upload_rate: 8 })
+const settings = reactive({ movie_series_parallel: true, telegram_mode: 'user', telegram_aggregate_window: 600, retry_limit: 3, cloud_enabled: false, cloud_scan_enabled: false, cloud_storage: '115网盘Plus', cloud_folder: '', cloud_recursive: true, cloud_cron: '*/10 * * * *', cloud_read_timeout: 300, cloud_monitor_enabled: false, cloud_life_source: 'shared', local_upload_enabled: false, local_upload_mode: 'mp', local_upload_folder: '', local_upload_target: '', local_upload_rate: 8, local_upload_delete_source: false, local_upload_delete_cloud_copy: false, local_delete_source: false, cloud_delete_source: false, cloud_delete_enabled: false })
 const cloud = reactive({ storages: [], folders: [], browsing: '', scanning: false, pending: 0, file: '', bytes_read: 0, size: 0, error: '' })
 const account = reactive({ api_id: '', api_hash: '', phone: '', code: '', password: '' })
 const auth = reactive({ logged_in: false, pending: false, password_required: false, api_hash_configured: false, expires_in: 0, retry_in: 0 })
 let timer
 const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || saving.value || !loaded.value)
-const configFields = ['enabled', 'movie_series_parallel', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'retry_limit', 'delete_source', 'delete_small_files', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source', 'local_upload_enabled', 'local_upload_mode', 'local_upload_folder', 'local_upload_target', 'local_upload_rate']
+const configFields = ['enabled', 'movie_series_parallel', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'retry_limit', 'local_delete_source', 'local_upload_delete_source', 'local_upload_delete_cloud_copy', 'delete_small_files', 'cloud_delete_source', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source', 'local_upload_enabled', 'local_upload_mode', 'local_upload_folder', 'local_upload_target', 'local_upload_rate']
 const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size_gb', label: '生成链接最小文件大小（GB）', type: 'number', step: 'any', placeholder: '例如0.5、1、1.5（GB）', hint: '小于此值不生成、不转发；留空或0不限，单位GB。' }]
-watch(() => [settings.delete_source, settings.cloud_enabled, settings.cloud_storage], () => {
-  if (!settings.delete_source || !settings.cloud_enabled || settings.cloud_storage !== '115网盘Plus') settings.cloud_delete_enabled = false
+watch(() => settings.cloud_storage, () => {
+  if (settings.cloud_storage !== '115网盘Plus') {
+    settings.cloud_delete_enabled = false
+    settings.cloud_delete_source = false
+    settings.local_upload_delete_cloud_copy = false
+  }
 })
 
 function unpack(response) {
@@ -86,7 +90,7 @@ async function browseCloud(path = cloudRoots()[0] || '/') {
   })
 }
 async function runCloud() {
-  if (!await askConfirmation('将按已保存的全部网盘目录增量读取完整文件内容，会消耗下载流量。启用并授权完成后删源时，符合条件的新记录可能删除源文件，确定继续？')) return
+  if (!await askConfirmation(`将按已保存的全部网盘目录增量读取完整文件内容，会消耗下载流量。${settings.cloud_delete_source && settings.cloud_delete_enabled ? '符合条件的文件在输出成功后可能删除。' : ''}确定继续？`)) return
   await work(async () => {
     const result = await request('cloud/run', {})
     if (!result.ok) throw new Error(result.message || '网盘扫描失败')
@@ -95,7 +99,7 @@ async function runCloud() {
   })
 }
 async function runLocal() {
-  if ((settings.delete_source || settings.delete_small_files) &&
+  if ((settings.local_delete_source || settings.delete_small_files) &&
       !await askConfirmation('当前启用了本地删源设置。本次只扫描已保存的本地监控目录；符合条件的文件可能在生成或补发后删除，低于阈值的文件也可能直接删除。确定继续？')) return
   await work(async () => {
     const result = await request('local/run', {})
@@ -104,7 +108,7 @@ async function runLocal() {
   })
 }
 async function runUpload() {
-  if (!await askConfirmation('将扫描已保存的本地计算上传目录。直传模式会调用115上传；已确认的上传不重复，未确认的上传会先查目标再允许重试。启用删源时，校验和输出全部成功后只删除本地源文件。确定继续？')) return
+  if (!await askConfirmation(`将扫描已保存的本地计算上传目录。直传模式会调用115上传；慢速普通上传将进入独立队列。${settings.local_upload_delete_source ? '输出成功后删除本地源文件。' : ''}${settings.local_upload_delete_cloud_copy ? '输出成功后按115授权删除网盘副本。' : ''}确定继续？`)) return
   await work(async () => {
     const result = await request('local-upload/run', {})
     if (!result.ok) throw new Error(result.message || '本地计算上传扫描失败')
@@ -114,10 +118,8 @@ async function runUpload() {
 async function saveSettings() {
   if (typeof settings.include_subdirectories !== 'boolean') { error.value = '原本地与网盘子目录设置不一致，请先明确选择是否包含子目录，再保存'; return }
   error.value = notice.value = ''
-  if (!settings.delete_source || !settings.cloud_enabled) settings.cloud_delete_enabled = false
-  if (settings.cloud_delete_enabled) {
-    if (!settings.delete_source || !settings.cloud_enabled || settings.cloud_storage !== '115网盘Plus') { error.value = '网盘删源仅支持115网盘Plus，请同时开启完成后删除源文件与网盘增量生成；CloudDrive仍只读'; return }
-  }
+  if (settings.cloud_delete_source && !settings.cloud_delete_enabled) { error.value = '开启网盘监控删源前，请先启用单独授权115网盘删源'; return }
+  if (settings.local_upload_delete_cloud_copy && !settings.cloud_delete_enabled) { error.value = '删除本地上传后的网盘副本前，请先启用单独授权115网盘删源'; return }
   if (saving.value) return
   saving.value = true
   error.value = notice.value = ''
@@ -200,10 +202,6 @@ onUnmounted(() => {
       <h3>通用设置</h3>
       <div class="switches"><label class="switch"><input v-model="settings.enabled" type="checkbox" :disabled="disabled">启用插件</label><label class="switch"><input v-model="settings.output_enabled" type="checkbox" :disabled="disabled">生成本地 TXT</label><label class="switch"><input v-model="settings.include_subdirectories" :indeterminate="settings.include_subdirectories === null" type="checkbox" :disabled="disabled">包含子目录</label><label class="switch"><input v-model="settings.movie_series_parallel" type="checkbox" :disabled="disabled">电影/剧集两路并发</label></div>
       <p v-if="settings.include_subdirectories === null" class="warning">本地与网盘的子目录设置不一致，请选择后保存。</p>
-      <div class="switches"><label class="switch"><input v-model="settings.delete_source" type="checkbox" :disabled="disabled" @change="settings.delete_source || (settings.cloud_delete_enabled = false)">完成后删除源文件</label><label class="switch"><input v-model="settings.cloud_delete_enabled" type="checkbox" :disabled="disabled || !settings.delete_source || !settings.cloud_enabled || settings.cloud_storage !== '115网盘Plus'">单独授权115网盘删源（默认关闭）</label></div>
-      <p v-if="!settings.cloud_enabled" class="help">本地计算上传只删除本地原文件，无需网盘删源授权；网盘监控关闭时不保留该授权。</p>
-      <p v-if="settings.delete_source" class="warning">仅在输出全部成功且文件未变化后删除；115还需单独授权，CloudDrive只读。TG发送不代表接收方已备份。</p>
-      <p v-if="settings.cloud_delete_enabled" class="warning">此开关即为115删源授权；保存时绑定当前账号与目录范围。历史记录不追删，结果不明会暂停。</p>
       <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :step="field.step" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label></div>
       <div class="fields"><label>失败后自动重试次数<input v-model.number="settings.retry_limit" type="number" min="0" max="10" step="1" :disabled="disabled"><small>0 表示不自动重试；最多10次，不含首次处理。可用增量补扫手动重试。</small></label><label>文件稳定等待秒数<input v-model="settings.min_age" type="number" min="0" :disabled="disabled"><small>文件停止变化后等待时间，请监控完成目录。</small></label></div>
       <div class="fields"><label class="full-width">TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；留空自动选择路径。关闭后不删除已有文件。</small></label></div>
@@ -213,6 +211,7 @@ onUnmounted(() => {
     <article class="card" data-testid="local-upload">
       <h3>本地计算，上传115</h3>
       <div class="switches"><label class="switch"><input v-model="settings.local_upload_enabled" type="checkbox" :disabled="disabled">启用本地计算上传115</label></div>
+      <div class="switches"><label class="switch"><input v-model="settings.local_upload_delete_source" type="checkbox" :disabled="disabled || !settings.local_upload_enabled">输出成功后删除本地原文件</label><label class="switch"><input v-model="settings.local_upload_delete_cloud_copy" type="checkbox" :disabled="disabled || !settings.local_upload_enabled || settings.local_upload_mode !== 'direct' || !settings.cloud_delete_enabled">网盘副本删除</label></div>
       <div class="fields">
         <label>上传方式<select v-model="settings.local_upload_mode" :disabled="disabled || !settings.local_upload_enabled"><option value="mp">使用现有MP整理上传（复制）</option><option value="direct">调用115插件直接上传（不整理）</option></select><small>先计算本地ED2K与SHA1；115大小与SHA1一致后才输出、转发。</small></label>
         <label>本地计算上传目录<input v-model="settings.local_upload_folder" class="monitor-roots" :disabled="disabled || !settings.local_upload_enabled" placeholder="/downloads/complete"><small>多个用英文逗号分隔；自动监控新增文件，每10分钟补漏。沿用通用过滤与子目录设置。</small></label>
@@ -220,13 +219,14 @@ onUnmounted(() => {
       <div v-if="settings.local_upload_mode === 'direct'" class="fields"><label class="full-width">115上传目标目录<input v-model="settings.local_upload_target" :disabled="disabled || !settings.local_upload_enabled" placeholder="/影视资源/本地上传"><small>保留本地根目录内相对结构；缺少目录由115插件创建，同名异内容不覆盖。</small></label></div>
       <p v-else class="warning">不会主动发起MP整理，请沿用现有复制上传流程，并保留本地文件到计算完成。MP可独立上传，但需收到启用后的整理完成事件；移动上传或其他工具上传不适用。</p>
       <div v-if="settings.local_upload_mode === 'direct'" class="fields"><label>直传速度上限（MiB/s）<input v-model.number="settings.local_upload_rate" type="number" min="0" max="128" step="1" :disabled="disabled || !settings.local_upload_enabled"><small>默认8，0不限速；仅限制本插件直传，始终单文件分片上传，不影响MP整理。</small></label></div>
-      <p>开启后先扫描目录内现有文件，随后增量处理。完成后删除源文件仅删除本地原文件；此流程的115副本受保护，不自动删网盘副本。</p>
+      <p>计算与普通上传分离：慢速大文件占用独立上传通道，后续文件仍可继续计算及检查秒传。</p>
       <div class="actions"><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.local_upload_enabled" @click="runUpload">立即本地计算／上传／补发</button></div>
     </article>
 
     <article class="card" data-testid="local-source">
       <h3>本地监控</h3>
       <div class="switches"><label class="switch"><input v-model="settings.monitor_enabled" type="checkbox" :disabled="disabled">实时监控文件</label><label class="switch"><input v-model="settings.scan_enabled" type="checkbox" :disabled="disabled">本地定时增量补扫</label></div>
+      <label class="switch"><input v-model="settings.local_delete_source" type="checkbox" :disabled="disabled">输出成功后删除本地源文件</label>
       <div class="fields"><label>本地监控目录<input v-model="settings.folder" class="monitor-roots" :disabled="disabled" placeholder="/media/movies,/media/tv"><small>容器内绝对路径，多个用英文逗号分隔，最多32个。</small></label><label>本地补扫计划<input v-model="settings.cron" :disabled="disabled || !settings.scan_enabled" placeholder="*/10 * * * *"><small>默认关闭，用于补漏。</small></label></div>
       <label class="switch"><input v-model="settings.delete_small_files" type="checkbox" :disabled="disabled">低于阈值文件自动删源</label>
       <p class="warning" v-if="settings.delete_small_files">低于阈值的非空本地文件会在稳定等待后直接删除，不生成、不转发，且不可恢复；空文件和网盘文件不处理。</p>
@@ -235,9 +235,11 @@ onUnmounted(() => {
 
     <article class="card" data-testid="cloud-source">
       <h3>网盘监控</h3>
-      <p>无需挂载网盘；通过存储插件分块读取，不保存完整临时文件。并发遵循通用设置，115删源需单独授权，CloudDrive只读。</p>
-      <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_monitor_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">115生活事件监控（近实时）</label><label class="switch"><input v-model="settings.cloud_scan_enabled" type="checkbox" :disabled="disabled">网盘定时增量补扫</label></div>
-      <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''; if (settings.cloud_storage !== '115网盘Plus') { settings.cloud_monitor_enabled = false; settings.cloud_delete_enabled = false }"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储' }}</small></label><label>网盘监控目录<input v-model="settings.cloud_folder" class="monitor-roots" :disabled="disabled" placeholder="/电影,/电视剧"><small>同一存储内的绝对路径，多个用英文逗号分隔，最多32个。</small></label><label>网盘补扫计划<input v-model.trim="settings.cloud_cron" :disabled="disabled || !settings.cloud_scan_enabled" placeholder="*/10 * * * *"><small>开启定时补扫后生效，默认每10分钟。</small></label><label>网盘读取超时（秒）<input v-model="settings.cloud_read_timeout" type="number" min="30" max="1800" :disabled="disabled"><small>单次网络读取等待上限，默认300秒。</small></label><label v-if="settings.cloud_monitor_enabled">115生活事件来源<select v-model="settings.cloud_life_source" :disabled="disabled"><option value="shared">复用115插件监听（不额外请求生活接口）</option><option value="direct">独立轮询（每分钟一次生活接口）</option></select><small>复用模式需115插件监听和账号一致。</small></label></div>
+      <p>无需挂载网盘；通过存储插件分块读取，不保存完整临时文件。并发遵循通用设置，CloudDrive只读。</p>
+      <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled" @change="settings.cloud_enabled || (settings.cloud_delete_source = false)">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_monitor_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">115生活事件监控（近实时）</label><label class="switch"><input v-model="settings.cloud_scan_enabled" type="checkbox" :disabled="disabled">网盘定时增量补扫</label></div>
+      <div class="switches"><label class="switch"><input v-model="settings.cloud_delete_source" type="checkbox" :disabled="disabled || !settings.cloud_enabled || settings.cloud_storage !== '115网盘Plus'">输出成功后删除网盘源文件</label><label class="switch"><input v-model="settings.cloud_delete_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">单独授权115网盘删源</label></div>
+      <p v-if="settings.cloud_delete_enabled" class="warning">授权绑定当前账号及已配置目录范围；更改范围需重新保存授权。网盘副本删除也使用此授权。</p>
+      <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''; if (settings.cloud_storage !== '115网盘Plus') { settings.cloud_monitor_enabled = false; settings.cloud_delete_enabled = false; settings.cloud_delete_source = false; settings.local_upload_delete_cloud_copy = false }"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储' }}</small></label><label>网盘监控目录<input v-model="settings.cloud_folder" class="monitor-roots" :disabled="disabled" placeholder="/电影,/电视剧"><small>同一存储内的绝对路径，多个用英文逗号分隔，最多32个。</small></label><label>网盘补扫计划<input v-model.trim="settings.cloud_cron" :disabled="disabled || !settings.cloud_scan_enabled" placeholder="*/10 * * * *"><small>开启定时补扫后生效，默认每10分钟。</small></label><label>网盘读取超时（秒）<input v-model="settings.cloud_read_timeout" type="number" min="30" max="1800" :disabled="disabled"><small>单次网络读取等待上限，默认300秒。</small></label><label v-if="settings.cloud_monitor_enabled">115生活事件来源<select v-model="settings.cloud_life_source" :disabled="disabled"><option value="shared">复用115插件监听（不额外请求生活接口）</option><option value="direct">独立轮询（每分钟一次生活接口）</option></select><small>复用模式需115插件监听和账号一致。</small></label></div>
       <p v-if="settings.cloud_monitor_enabled">只将事件对应且位于监控目录内的单个文件加入队列，不扫描或补算目录中的已有文件；每个事件最多复查10次。</p>
       <div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud()">浏览网盘目录</button><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.cloud_enabled" @click="runCloud">立即网盘增量扫描／补发</button><button type="button" class="secondary" :disabled="disabled" @click="work(refreshCloud)">刷新网盘进度</button></div>
       <div v-if="cloud.browsing" class="cloud-browser"><p>当前浏览：{{ cloud.browsing }}</p><div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud(cloud.browsing.split('/').slice(0, -1).join('/') || '/')">上一级</button><button type="button" :disabled="disabled" @click="addCloudRoot">添加此目录</button></div><div class="cloud-folders"><button v-for="folder in cloud.folders" :key="folder.path" type="button" class="secondary" :disabled="disabled" @click="browseCloud(folder.path)">{{ folder.name }}</button><small v-if="!cloud.folders.length">此目录下没有子目录。</small></div></div>

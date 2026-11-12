@@ -107,6 +107,23 @@ class UploadAdapterTests(unittest.TestCase):
             self.stopping, self.reported.append, self.checkpoint, rate,
         )
 
+    def test_instant_upload_check_uses_cached_sha1_and_validates_sample_range(self):
+        self.oper.client.upload_file_init.return_value = {"data": {"status": 2}}
+        result = self.adapter.instant_upload_check(
+            self.oper, self.path, self.digest, self.identity[0], "123",
+        )
+        self.assertTrue(result)
+        arguments = self.oper.client.upload_file_init.call_args.args
+        self.assertEqual(arguments[:3], (self.path.name, self.digest, self.identity[0]))
+        self.assertEqual(arguments[5], "U_1_123")
+        self.assertEqual(arguments[4]("2-8"), hashlib.sha1(self.path.read_bytes()[2:9]).hexdigest().upper())
+
+    def test_instant_upload_check_reports_normal_miss_for_independent_queue(self):
+        self.oper.client.upload_file_init.return_value = {"status": 1}
+        self.assertFalse(self.adapter.instant_upload_check(
+            self.oper, self.path, self.digest, self.identity[0], "123",
+        ))
+
     def test_cached_digest_real_progress_and_no_global_mutation(self):
         result = self.call()
         self.assertTrue(result)

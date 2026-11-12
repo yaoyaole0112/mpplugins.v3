@@ -3,6 +3,8 @@ import math
 import threading
 import time
 import types
+import re
+import hashlib
 from pathlib import Path
 
 from .cloud_storage import CloudError
@@ -13,6 +15,60 @@ UPLOAD_GATE = threading.Lock()
 
 class UploadNotStarted(CloudError):
     pass
+
+
+def instant_upload_check(oper, path, digest, size, target_id):
+    if not re.fullmatch(r"[1-9][0-9]{0,63}", str(target_id or "")):
+        return None
+    client = oper.client
+    upload_file_init = getattr(client, "upload_file_init", None)
+
+    def read_range(value):
+        match = re.search(r"(?<!\d)(\d+)\s*[-:]\s*(\d+)(?!\d)", str(value or ""))
+        if match:
+            start, end = map(int, match.groups())
+        else:
+            start, end = 0, min(size, 1024 * 1024) - 1
+        if not 0 <= start <= end < size or end - start > 1024 * 1024:
+            raise CloudError("115秒传抽样校验范围超出文件")
+        checksum = hashlib.sha1()
+        remaining = end - start + 1
+        with Path(path).open("rb") as source:
+            source.seek(start)
+            while remaining:
+                chunk = source.read(min(256 * 1024, remaining))
+                if not chunk:
+                    raise OSError("115秒传抽样校验时本地文件不完整")
+                checksum.update(chunk)
+                remaining -= len(chunk)
+        return checksum.hexdigest().upper()
+
+    if callable(upload_file_init):
+        response = upload_file_init(
+            Path(path).name, digest, size, "", read_range, f"U_1_{target_id}", timeout=30
+        )
+    else:
+        upload_init = getattr(client, "upload_init", None)
+        if not callable(upload_init):
+            return None
+        response = upload_init(
+            {"filename": Path(path).name, "filesize": size, "fileid": digest,
+             "target": f"U_1_{target_id}"},
+            read_range_bytes_or_hash=read_range, timeout=30,
+        )
+    if not isinstance(response, dict):
+        raise CloudError("115秒传接口返回了无效响应")
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    status = response.get("status", data.get("status"))
+    try:
+        status = int(status or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if response.get("reuse") or data.get("reuse") or status == 2:
+        return True
+    if status == 1:
+        return False
+    raise CloudError(f"115秒传检查未完成（返回状态 {status}），保留本地文件")
 
 
 def resolve_uploader(oper):

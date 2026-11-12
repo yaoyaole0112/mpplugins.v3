@@ -8,10 +8,14 @@ from pathlib import Path, PurePosixPath
 from app.log import logger
 
 from .cloud_storage import CloudError, CloudStorage, cloud_path, monitor_roots
-from .upload_adapter import UploadNotStarted, upload_with_digest
+from .upload_adapter import UploadNotStarted, instant_upload_check, upload_with_digest
 
 
-UPLOAD_FIELDS = ("local_upload_enabled", "local_upload_mode", "local_upload_folder", "local_upload_target", "local_upload_rate")
+UPLOAD_FIELDS = (
+    "local_upload_enabled", "local_upload_mode", "local_upload_folder",
+    "local_upload_target", "local_upload_rate", "local_upload_delete_source",
+    "local_upload_delete_cloud_copy",
+)
 
 
 def plain_item(value):
@@ -36,6 +40,8 @@ class LocalUploadMixin:
     _local_upload_folder = ""
     _local_upload_target = ""
     _local_upload_rate = 8
+    _local_upload_delete_source = False
+    _local_upload_delete_cloud_copy = False
 
     def _init_local_upload(self, config):
         self._upload_receipt_lock = threading.Lock()
@@ -43,6 +49,8 @@ class LocalUploadMixin:
         self._local_upload_mode = str(config.get("local_upload_mode") or "mp")
         self._local_upload_folder = str(config.get("local_upload_folder") or "").strip()
         self._local_upload_target = str(config.get("local_upload_target") or "").strip()
+        self._local_upload_delete_source = config.get("local_upload_delete_source") is True
+        self._local_upload_delete_cloud_copy = config.get("local_upload_delete_cloud_copy") is True
         try:
             self._local_upload_rate = max(0, min(128, int(config.get("local_upload_rate", 8))))
         except (ValueError, TypeError):
@@ -59,6 +67,8 @@ class LocalUploadMixin:
                 raise ValueError("请指定115上传目标目录")
             if self._local_upload_enabled:
                 self._upload_receipts()
+                self._load_local_upload_queue()
+                self._start_local_upload_worker()
         except ValueError as failure:
             self._enabled = False
             logger.error(f"自动生成ED2K链接：本地计算上传配置或回执无效，已停止插件：{failure}")
@@ -83,6 +93,132 @@ class LocalUploadMixin:
         if not isinstance(receipts, dict) or any(not isinstance(value, dict) for value in receipts.values()):
             raise ValueError("本地上传回执文件损坏，请检查local_upload_receipts.json")
         return receipts
+
+    def _local_upload_queue_path(self):
+        return Path(self.get_data_path()) / "local_upload_queue.json"
+
+    def _load_local_upload_queue(self):
+        try:
+            queue = json.loads(self._local_upload_queue_path().read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            queue = {}
+        except (OSError, ValueError):
+            raise ValueError("本地115上传队列文件损坏，请检查local_upload_queue.json")
+        if not isinstance(queue, dict) or any(
+            not isinstance(item, dict) or not isinstance(item.get("identity"), list)
+            or not isinstance(item.get("path"), str) for item in queue.values()
+        ):
+            raise ValueError("本地115上传队列格式错误，请检查local_upload_queue.json")
+        with self._local_upload_queue_lock:
+            self._local_upload_queue = queue
+
+    def _save_local_upload_queue(self):
+        self._atomic_write(
+            self._local_upload_queue_path(),
+            json.dumps(self._local_upload_queue, ensure_ascii=False),
+        )
+
+    def _start_local_upload_worker(self):
+        if not self._enabled or not self._local_upload_enabled or self._stopping.is_set():
+            return
+        with self._local_upload_queue_lock:
+            self._local_upload_queue_wake.set()
+            if self._local_upload_worker and self._local_upload_worker.is_alive():
+                return
+            self._local_upload_worker = threading.Thread(
+                target=self._drain_local_upload_queue,
+                name="ed2k-normal-upload",
+                daemon=True,
+            )
+            self._local_upload_worker.start()
+
+    def _queue_local_upload(self, path, identity):
+        key = str(path.resolve())
+        with self._local_upload_queue_lock:
+            current = self._local_upload_queue.get(key)
+            if current and current.get("identity") == list(identity):
+                return
+            self._local_upload_queue[key] = {
+                "path": key, "identity": list(identity), "queued_at": time.time(),
+                "retry_at": 0, "attempts": 0,
+            }
+            try:
+                self._save_local_upload_queue()
+            except Exception:
+                self._local_upload_queue.pop(key, None)
+                raise
+            self._local_upload_queue_wake.set()
+        self._start_local_upload_worker()
+
+    def _remove_local_upload_queue(self, key):
+        with self._local_upload_queue_lock:
+            self._local_upload_queue.pop(key, None)
+            self._save_local_upload_queue()
+
+    def _drain_local_upload_queue(self):
+        while not self._stopping.is_set():
+            now = time.time()
+            with self._local_upload_queue_lock:
+                candidate = next(
+                    ((key, item) for key, item in self._local_upload_queue.items()
+                     if item.get("retry_at", 0) <= now),
+                    None,
+                )
+                next_retry = min(
+                    (item.get("retry_at", 0) for item in self._local_upload_queue.values()
+                     if item.get("retry_at", 0) > now),
+                    default=now + 5,
+                )
+            if candidate is None:
+                self._local_upload_queue_wake.wait(max(0.2, min(5, next_retry - now)))
+                self._local_upload_queue_wake.clear()
+                continue
+            key, item = candidate
+            path = Path(item["path"])
+            try:
+                stat = path.stat()
+                if local_identity(stat) != item["identity"] or not self._eligible(path):
+                    self._remove_local_upload_queue(key)
+                    continue
+                self._upload_active = {
+                    "path": str(path), "name": path.name, "size": stat.st_size,
+                    "bytes_read": 0, "phase": "upload", "progress_known": False,
+                    "stage": "等待115秒传／普通上传通道", "started_at": time.time(),
+                }
+                output, cache_path = self._paths()[1:]
+                output = output if self._output_enabled else None
+                self._process_local_upload(path, stat, output, cache_path, upload_worker=True)
+                self._remove_local_upload_queue(key)
+            except InterruptedError:
+                if self._stopping.is_set():
+                    break
+                self._remove_local_upload_queue(key)
+            except Exception as failure:
+                try:
+                    self._record_upload_error(path, failure)
+                    with self._local_upload_queue_lock:
+                        current = self._local_upload_queue.get(key)
+                        if current:
+                            attempts = int(current.get("attempts", 0)) + 1
+                            if attempts <= self._retry_limit:
+                                delay = min(3600, 60 * 2 ** min(attempts - 1, 5))
+                                current.update(attempts=attempts, retry_at=time.time() + delay)
+                                records_path = self._paths()[2]
+                                records = json.loads(records_path.read_text(encoding="utf-8")) if records_path.exists() else {}
+                                record = records.get(key)
+                                if record:
+                                    record.update(upload_state="queued",
+                                                  upload_note=f"{failure}；{delay}秒后在独立上传队列重试")
+                                    self._write_results(None, records_path, records)
+                                self._save_local_upload_queue()
+                                self._local_upload_queue_wake.set()
+                            else:
+                                self._local_upload_queue.pop(key, None)
+                                self._save_local_upload_queue()
+                except Exception:
+                    logger.exception("自动生成ED2K链接：更新独立115上传队列失败")
+            finally:
+                self._upload_active = None
 
     def _reset_upload_attempts(self, cache_path, records):
         for source, record in records.items():
@@ -202,11 +338,31 @@ class LocalUploadMixin:
             logger.info(f"自动生成ED2K链接：本地ED2K与SHA1计算完成，等待上传校验：{path.name}")
         return record, records
 
-    def _process_local_upload(self, path, stat, output, cache_path):
+    def _process_local_upload(self, path, stat, output, cache_path, upload_worker=False):
         from . import ed2k_link
         key = str(path.resolve())
         records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
         record, records = self._prepare_local_upload(path, stat, records, key, output, cache_path)
+        if not upload_worker:
+            if self._local_upload_mode == "mp":
+                with self._upload_receipt_lock:
+                    receipt = self._upload_receipts().get(key)
+                if not receipt or receipt.get("identity") != local_identity(stat):
+                    record.update(upload_state="waiting_mp", upload_note="等待MP复制上传完成；本插件不会主动发起整理")
+                    self._write_results(output, cache_path, records)
+                    self._clear_retry_failure(key)
+                    return
+            elif not record.get("upload_verified") and not record.get("upload_attempted"):
+                self._try_local_instant_upload(path, record, output, cache_path, records)
+                records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else records
+                record = records.get(key, record)
+            record.update(
+                upload_state="upload_queued",
+                upload_note=record.get("upload_note") or "ED2K已计算；等待独立115上传通道（先检查秒传，未命中再普通上传）",
+            )
+            self._write_results(output, cache_path, records)
+            self._queue_local_upload(path, record["local_identity"])
+            return
         storage = CloudStorage("115网盘Plus")
         scope = self._upload_scope(storage)
         if record.get("upload_scope") != scope:
@@ -282,7 +438,10 @@ class LocalUploadMixin:
             digest = record["link"].split("|")[4]
             record.update(name=item["name"], link=ed2k_link(item["name"], digest, record["size"]),
                           upload_verified=True, upload_cloud_item=item, upload_state="verified",
-                          upload_note="115大小与SHA1校验通过；使用本地计算结果，网盘副本不自动删除")
+                          upload_note="115大小与SHA1校验通过；链接复用本地计算结果")
+            if (self._local_upload_delete_cloud_copy and self._cloud_delete_enabled
+                    and self._local_upload_cloud_delete_scope):
+                record["upload_cloud_delete_scope"] = self._local_upload_cloud_delete_scope
             record.pop("upload_error_code", None)
             self._write_results(output, cache_path, records)
             logger.info(f"自动生成ED2K链接：115上传内容校验通过，复用本地ED2K：{item['name']}")
@@ -307,18 +466,102 @@ class LocalUploadMixin:
         delivered = not self._telegram_enabled or record.get("telegram_sent")
         if not delivered:
             raise CloudError("上传已确认，Telegram尚未全部投递成功；重试仅补发，不重复上传")
-        if self._delete_source and (output is not None or self._telegram_enabled):
+        if self._local_upload_delete_cloud_copy and not record.get("upload_cloud_copy_deleted"):
+            self._delete_uploaded_cloud_copy(record, output, cache_path, records)
+        if self._local_upload_delete_source and (output is not None or self._telegram_enabled):
             self._delete_uploaded_local(path, record, output, cache_path, records)
             self._clear_retry_failure(key)
 
+    def _delete_uploaded_cloud_copy(self, record, output, cache_path, records):
+        if record.get("upload_cloud_delete_state") == "uncertain":
+            raise CloudError("115网盘副本删除结果未确认；不会自动重发删除请求，请先到网盘核实")
+        if not self._cloud_delete_enabled or not self._local_upload_cloud_delete_scope:
+            raise CloudError("未授权删除115网盘副本，已保留")
+        scope = record.get("upload_cloud_delete_scope")
+        if not scope or scope != self._local_upload_cloud_delete_scope:
+            raise CloudError("上传时未记录匹配的网盘删源授权；保留115副本")
+        storage = CloudStorage("115网盘Plus")
+        if storage.delete_scope(self._local_upload_target, True) != scope:
+            raise CloudError("115账号或上传目标目录授权已变化，保留网盘副本")
+        item = record.get("upload_cloud_item") or {}
+        with self._cloud_request_lock:
+            current = storage.prepare_delete(
+                item, record.get("local_sha1"), self._local_upload_target, True, scope,
+            )
+        record.update(upload_cloud_delete_state="inflight",
+                      upload_cloud_delete_note="已复核上传副本身份与SHA1，等待115删除确认")
+        self._write_results(output, cache_path, records)
+        try:
+            with self._cloud_request_lock:
+                deleted = storage.delete_prepared(
+                    current, self._local_upload_target, True, scope, self._stopping,
+                )
+        except Exception:
+            record.update(upload_cloud_delete_state="uncertain",
+                          upload_cloud_delete_note="115副本删除结果未确认；不会自动重发删除请求")
+            self._write_results(output, cache_path, records)
+            raise CloudError("115网盘副本删除结果未确认；请先到网盘核实，未自动重试") from None
+        if deleted is not True:
+            record.update(upload_cloud_delete_state="uncertain",
+                          upload_cloud_delete_note="115未确认副本删除成功；不会自动重发删除请求")
+            self._write_results(output, cache_path, records)
+            raise CloudError("115网盘副本删除未确认，已停止自动重试")
+        record.update(upload_cloud_copy_deleted=True, upload_cloud_delete_state="deleted",
+                      upload_cloud_delete_note="115已确认上传副本删除")
+        record.pop("delete_failed", None)
+        self._write_results(output, cache_path, records)
+
+    def _try_local_instant_upload(self, path, record, output, cache_path, records):
+        key = str(path.resolve())
+        try:
+            destination = self._upload_destination(path)
+            storage = CloudStorage("115网盘Plus")
+            lookup = getattr(storage.oper, "get_item_strict", None)
+            if lookup is None:
+                return
+            parent = PurePosixPath(destination).parent.as_posix()
+            with self._cloud_request_lock:
+                folder = lookup(Path(parent))
+            folder = saved_item(folder)
+            if not folder or folder.get("type") != "dir":
+                return
+            folder_id = str(folder.get("fileid") or "")
+            if not re.fullmatch(r"[1-9][0-9]{0,63}", folder_id):
+                return
+            record.update(rapid_check_started=True, upload_state="checking_instant",
+                          upload_note="快速检查115秒传；未命中将转入独立普通上传队列")
+            self._write_results(output, cache_path, records)
+            self._upload_stage(path, "快速检查115秒传")
+            with self._cloud_request_lock:
+                hit = instant_upload_check(
+                    storage.oper, path, record["local_sha1"],
+                    record["size"], folder_id,
+                )
+            record.update(rapid_check="hit" if hit is True else "miss" if hit is False else "unavailable")
+            record.pop("rapid_check_started", None)
+            record["upload_note"] = (
+                "115快速秒传命中；等待独立核验与链接输出" if hit is True
+                else "115未命中秒传；已转入独立普通上传队列" if hit is False
+                else "秒传接口不可用；转入独立上传通道检查"
+            )
+            self._write_results(output, cache_path, records)
+            logger.info(f"自动生成ED2K链接：本地文件秒传预检查完成（{'命中' if hit else '未命中' if hit is False else '不可用'}）：{path.name}")
+        except Exception as failure:
+            record.update(rapid_check="uncertain", upload_note=f"秒传预检查未确认（{type(failure).__name__}）；转入独立上传通道只读核验")
+            record.pop("rapid_check_started", None)
+            self._write_results(output, cache_path, records)
+            logger.warning(f"自动生成ED2K链接：秒传预检查未确认，转入上传通道核验：{path.name}（{type(failure).__name__}）")
+
     def _upload_stage(self, path, stage):
-        active = self._local_active
+        active = next((item for item in (self._upload_active, self._local_active)
+                       if item and item.get("path") == str(path)), None)
         if active and active.get("path") == str(path):
             active.update(stage=stage, phase="upload", bytes_read=0, progress_known=False,
                           upload_speed=0, updated_at=time.time())
 
     def _upload_progress(self, path, percent):
-        active = self._local_active
+        active = next((item for item in (self._upload_active, self._local_active)
+                       if item and item.get("path") == str(path)), None)
         if not active or active.get("path") != str(path):
             return
         if percent is None:

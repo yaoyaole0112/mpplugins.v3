@@ -53,6 +53,15 @@ class LocalUploadTests(unittest.TestCase):
         upload_patch = patch.object(self.upload_module, "upload_with_digest", side_effect=invoke)
         upload_patch.start()
         self.addCleanup(upload_patch.stop)
+        def run_upload_inline(path, identity):
+            stat = path.stat()
+            output, cache_path = self.plugin._paths()[1:]
+            output = output if self.plugin._output_enabled else None
+            return self.plugin._process_local_upload(
+                path, stat, output, cache_path, upload_worker=True,
+            )
+        self.real_upload_queue = self.plugin._queue_local_upload
+        self.plugin._queue_local_upload = run_upload_inline
 
     def sample(self, name="movie(2026)(tmdbid=123).mkv"):
         path = self.create(name, b"test-upload-content")
@@ -108,6 +117,39 @@ class LocalUploadTests(unittest.TestCase):
         self.plugin._upload_stage(path, "校验115文件大小与SHA1")
         self.assertFalse(self.plugin._local_active["progress_known"])
         self.assertEqual(self.plugin._local_active["bytes_read"], 0)
+
+    def test_slow_upload_does_not_block_hashing_and_queueing_next_file(self):
+        self.configure()
+        self.plugin._enabled = True
+        first = self.sample("first.mkv")
+        second = self.sample("second.mkv")
+        upload_started = threading.Event()
+        release_upload = threading.Event()
+
+        def slow_upload(*args, on_start=None, **kwargs):
+            if on_start:
+                on_start()
+            upload_started.set()
+            release_upload.wait(5)
+            return dict(self.remote)
+
+        self.plugin._queue_local_upload = self.real_upload_queue
+        with patch.object(self.upload_module, "upload_with_digest", side_effect=slow_upload), \
+                patch.object(self.plugin, "_try_local_instant_upload", return_value=None):
+            try:
+                self.plugin._process_file(first)
+                self.assertTrue(upload_started.wait(3))
+                self.plugin._process_file(second)
+                records = self.records()
+                self.assertIn(str(second.resolve()), records)
+                self.assertEqual(records[str(second.resolve())]["upload_state"], "upload_queued")
+                self.assertIn(str(second.resolve()), self.plugin._local_upload_queue)
+            finally:
+                self.plugin._stopping.set()
+                self.plugin._local_upload_queue_wake.set()
+                release_upload.set()
+                if self.plugin._local_upload_worker:
+                    self.plugin._local_upload_worker.join(5)
 
     def test_movie_upload_progress_overrides_completed_hash_progress(self):
         self.configure()
@@ -201,7 +243,7 @@ class LocalUploadTests(unittest.TestCase):
         self.assertNotIn("upload_attempted", record)
 
     def test_same_name_different_content_is_not_overwritten_or_forwarded(self):
-        self.configure(delete_source=True, telegram_enabled=True, telegram_chat_id="@receiver")
+        self.configure(local_upload_delete_source=True, telegram_enabled=True, telegram_chat_id="@receiver")
         path = self.sample()
         self.storage.oper.get_item_strict.return_value = self.remote
         self.storage.file_sha1.return_value = "b" * 40
@@ -216,7 +258,7 @@ class LocalUploadTests(unittest.TestCase):
         self.assertFalse(self.plugin.recent_records()["items"][0]["can_delete"])
 
     def test_mp_waits_for_receipt_and_uses_cloud_name(self):
-        self.configure(mode="mp", delete_source=True, telegram_enabled=True, telegram_chat_id="@receiver")
+        self.configure(mode="mp", local_upload_delete_source=True, telegram_enabled=True, telegram_chat_id="@receiver")
         path = self.sample()
         self.plugin._process_file(path)
         self.assertEqual(self.records()[str(path)]["upload_state"], "waiting_mp")
@@ -271,7 +313,7 @@ class LocalUploadTests(unittest.TestCase):
         self.plugin._process_file(path)
         records = self.records()
         self.assertTrue(self.plugin._skip_uploaded_cloud(self.storage, self.remote, records))
-        self.plugin._delete_source = True
+        self.plugin._local_upload_delete_source = True
         self.plugin._cloud_delete_enabled = True
         self.plugin._maybe_delete_cloud_source(self.storage, self.remote, {}, None, self.root / "data" / "records.json", records, self.plugin._stopping)
         self.storage.delete_prepared.assert_not_called()
@@ -282,8 +324,48 @@ class LocalUploadTests(unittest.TestCase):
             self.plugin._process_cloud_file(self.remote)
         self.storage.delete_prepared.assert_not_called()
 
+    def test_uploaded_cloud_copy_delete_requires_scope_and_marks_confirmed_result(self):
+        self.configure()
+        self.sample()
+        self.plugin._local_upload_delete_cloud_copy = True
+        self.plugin._cloud_delete_enabled = True
+        self.plugin._local_upload_cloud_delete_scope = "bound-upload-scope"
+        self.plugin._local_upload_target = "/upload"
+        self.storage.delete_scope.return_value = "bound-upload-scope"
+        self.storage.prepare_delete.return_value = self.remote
+        self.storage.delete_prepared.return_value = True
+        record = {
+            "upload_cloud_item": dict(self.remote),
+            "local_sha1": self.sha1,
+            "upload_cloud_delete_scope": "bound-upload-scope",
+        }
+        cache = self.root / "data" / "records.json"
+        self.plugin._delete_uploaded_cloud_copy(record, None, cache, {str(self.root): record})
+        self.assertTrue(record["upload_cloud_copy_deleted"])
+        self.assertEqual(record["upload_cloud_delete_state"], "deleted")
+        self.storage.prepare_delete.assert_called_once()
+        self.storage.delete_prepared.assert_called_once()
+
+    def test_uploaded_cloud_copy_delete_refuses_scope_mismatch_without_request(self):
+        self.configure()
+        self.sample()
+        self.plugin._local_upload_delete_cloud_copy = True
+        self.plugin._cloud_delete_enabled = True
+        self.plugin._local_upload_cloud_delete_scope = "current-scope"
+        self.plugin._local_upload_target = "/upload"
+        self.storage.delete_scope.return_value = "changed-scope"
+        record = {
+            "upload_cloud_item": dict(self.remote),
+            "local_sha1": self.sha1,
+            "upload_cloud_delete_scope": "current-scope",
+        }
+        with self.assertRaisesRegex(self.cloud_module.CloudError, "授权已变化"):
+            self.plugin._delete_uploaded_cloud_copy(record, None, self.root / "data" / "records.json", {str(self.root): record})
+        self.storage.prepare_delete.assert_not_called()
+        self.storage.delete_prepared.assert_not_called()
+
     def test_telegram_failure_never_reuploads_and_keeps_source(self):
-        self.configure(delete_source=True, telegram_enabled=True, telegram_chat_id="@receiver")
+        self.configure(local_upload_delete_source=True, telegram_enabled=True, telegram_chat_id="@receiver")
         path = self.sample()
         with patch.object(self.plugin, "_send_telegram", return_value=False):
             with self.assertRaises(self.cloud_module.CloudError):
@@ -295,7 +377,7 @@ class LocalUploadTests(unittest.TestCase):
         self.assertFalse(path.exists())
 
     def test_source_change_during_upload_is_not_forwarded_or_deleted(self):
-        self.configure(delete_source=True, telegram_enabled=True, telegram_chat_id="@receiver")
+        self.configure(local_upload_delete_source=True, telegram_enabled=True, telegram_chat_id="@receiver")
         path = self.sample()
         def changed(*args, **kwargs):
             path.write_bytes(b"changed after local hash")
@@ -349,7 +431,7 @@ class LocalUploadTests(unittest.TestCase):
         self.configure()
         path = self.sample()
         self.plugin._process_file(path)
-        self.plugin._delete_source = True
+        self.plugin._local_upload_delete_source = True
         self.storage.fresh.side_effect = self.cloud_module.CloudError("cloud disappeared")
         with self.assertRaises(self.cloud_module.CloudError), patch.object(self.plugin, "_send_telegram") as send:
             self.plugin._process_file(path)
@@ -388,7 +470,7 @@ class LocalUploadTests(unittest.TestCase):
         self.plugin._process_file(path)
         self.plugin._local_upload_enabled = False
         self.plugin._folder = str(self.folder)
-        self.plugin._delete_source = True
+        self.plugin._local_upload_delete_source = True
         self.plugin._telegram_enabled = True
         self.plugin._process_file(path)
         self.assertTrue(path.exists())

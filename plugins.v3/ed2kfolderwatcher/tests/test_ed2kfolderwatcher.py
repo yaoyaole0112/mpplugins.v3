@@ -82,15 +82,22 @@ class Ed2kTests(unittest.TestCase):
             self.assertIs(defaults["movie_series_parallel"], enabled)
             models = [entry.get("props", {}).get("model") for entry in form[0]["content"]]
             for name in ("enabled", "output_enabled", "include_subdirectories", "movie_series_parallel"):
-                self.assertLess(models.index(name), models.index("delete_source"))
+                self.assertLess(models.index(name), models.index("local_delete_source"))
         self.plugin.init_plugin({"folder": str(self.folder)})
         self.assertTrue(self.plugin._movie_series_parallel)
+
+    def test_legacy_unified_delete_switch_does_not_enable_independent_deletion(self):
+        self.plugin.init_plugin({"folder": str(self.folder), "delete_source": True})
+        self.assertFalse(self.plugin._local_delete_source)
+        self.assertFalse(self.plugin._local_upload_delete_source)
+        self.assertFalse(self.plugin._local_upload_delete_cloud_copy)
+        self.assertFalse(self.plugin._cloud_delete_source)
 
     def test_parallel_disabled_serializes_all_local_and_cloud_combinations(self):
         for index, (movie_cloud, episode_cloud) in enumerate(((False, False), (True, True), (True, False), (False, True))):
             with self.subTest(movie_cloud=movie_cloud, episode_cloud=episode_cloud):
                 movie, episode, storage = self.start_cloud_worker(movie_series_parallel=False)
-                self.plugin._delete_source = False
+                self.plugin._local_delete_source = False
                 self.plugin._telegram_enabled = False
                 movie_name = f"电影(2026)(tmdbid={1000 + index}).mkv"
                 episode_name = f"show{index}.S01E01.mkv"
@@ -873,7 +880,7 @@ class Ed2kTests(unittest.TestCase):
 
     def test_later_cloud_show_does_not_overtake_waiting_episodes(self):
         movie, template, storage = self.start_cloud_worker(movie_series_parallel=False)
-        self.plugin._delete_source = False
+        self.plugin._local_delete_source = False
         self.plugin._telegram_enabled = False
         names = [f"玫瑰战争.S01E{episode:02}.mkv" for episode in range(1, 6)]
         names.extend(f"嫁金钗.S01E{episode:02}.mkv" for episode in range(1, 3))
@@ -1008,7 +1015,7 @@ class Ed2kTests(unittest.TestCase):
 
     def test_pending_or_exhausted_sibling_does_not_block_ready_link_or_delete(self):
         batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         self.plugin._retry_limit = 0
         stat = paths[1].stat()
         self.plugin._retry_failure(str(paths[1]), "local", [stat.st_size, stat.st_mtime_ns, stat.st_ino],
@@ -1106,7 +1113,7 @@ class Ed2kTests(unittest.TestCase):
 
     def test_partial_telegram_failure_remains_bounded_and_never_deletes_source(self):
         batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         self.plugin._retry_limit = 0
         batch["group_flush_at"][group_key] = time.monotonic() - 1
         with patch.object(self.plugin, "_send_telegram", return_value=False) as send:
@@ -1367,7 +1374,7 @@ class Ed2kTests(unittest.TestCase):
         path = second / "file.bin"
         path.write_bytes(b"world")
         self.plugin._folder = f"{self.folder}\n{second}"
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         self.plugin._process_file(path)
         self.assertFalse(path.exists())
         outside = self.root / "outside.bin"
@@ -1438,7 +1445,7 @@ class Ed2kTests(unittest.TestCase):
         self.plugin._cloud_enabled = True
         self.plugin._cloud_storage = "115网盘Plus"
         self.plugin._cloud_folder = "/cloud-test"
-        self.plugin._delete_source = True
+        self.plugin._cloud_delete_source = True
         self.plugin._output_enabled = False
         item = {"storage": "115网盘Plus", "fileid": "123", "type": "file", "name": "云端.mkv", "path": "/cloud-test/云端.mkv", "size": 5, "modify_time": 1, "pickcode": "pick"}
         from ed2k_test_plugin import cloud_storage
@@ -1481,7 +1488,7 @@ class Ed2kTests(unittest.TestCase):
         before = self.records()
         self.plugin._min_file_size = "6B"
         self.plugin._telegram_enabled = True
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         with patch.object(self.module, "ed2k_hash") as hashing, patch.object(self.plugin, "_notify_record") as notify, patch.object(self.plugin, "_unlink_source") as unlink:
             self.plugin._process_file(path)
         hashing.assert_not_called()
@@ -1502,7 +1509,7 @@ class Ed2kTests(unittest.TestCase):
     def cloud_delete_fixture(self):
         item, storage = self.cloud_fixture()
         self.plugin._output_enabled = True
-        self.plugin._delete_source = True
+        self.plugin._cloud_delete_source = True
         self.plugin._cloud_delete_enabled = True
         self.plugin._cloud_delete_scope = "authorized-scope"
         storage.delete_scope.return_value = "authorized-scope"
@@ -1525,7 +1532,7 @@ class Ed2kTests(unittest.TestCase):
         self.assertFalse(self.plugin.recent_records()["items"][0]["can_delete"])
 
     def test_cloud_delete_needs_outputs_and_dedicated_opt_in(self):
-        for flag in ("_cloud_delete_enabled", "_delete_source", "_output_enabled"):
+        for flag in ("_cloud_delete_enabled", "_cloud_delete_source", "_output_enabled"):
             with self.subTest(flag=flag):
                 item, storage = self.cloud_delete_fixture()
                 self.plugin._min_age = 0
@@ -1540,7 +1547,7 @@ class Ed2kTests(unittest.TestCase):
         item, storage = self.cloud_fixture()
         with patch.object(self.cloud_module, "hash_remote", return_value="a" * 32):
             self.plugin._process_cloud_file(item)
-        self.plugin._delete_source = True
+        self.plugin._cloud_delete_source = True
         self.plugin._cloud_delete_enabled = True
         self.plugin._cloud_delete_scope = "authorized-scope"
         self.plugin._output_enabled = True
@@ -2245,7 +2252,7 @@ class Ed2kTests(unittest.TestCase):
 
     def test_empty_file_never_hashes_sends_or_deletes(self):
         path = self.create(data=b"")
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         self.plugin._telegram_enabled = True
         with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("hashed")), patch.object(self.plugin, "_send_telegram", side_effect=AssertionError("sent")):
             self.plugin._process_file(path)
@@ -2275,7 +2282,7 @@ class Ed2kTests(unittest.TestCase):
 
     def test_invalid_empty_hash_not_published_or_deleted(self):
         path = self.create()
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         with patch.object(self.module, "ed2k_hash", return_value=self.module.EMPTY_MD4), patch.object(self.plugin, "_send_telegram", side_effect=AssertionError("sent")):
             self.plugin._process_file(path)
         self.assertTrue(path.exists())
@@ -2417,7 +2424,7 @@ class Ed2kTests(unittest.TestCase):
         alias = self.root / "alias"
         alias.symlink_to(self.folder, target_is_directory=True)
         self.plugin._folder = str(alias)
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         path = self.create()
         self.plugin._process_file(alias / path.name)
         self.assertFalse(path.exists())
@@ -2492,7 +2499,7 @@ class Ed2kTests(unittest.TestCase):
         path = self.create()
         self.plugin._telegram_enabled = True
         self.plugin._telegram_chat_id = "@first\n@second"
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         with patch.object(self.plugin, "_send_telegram", side_effect=[True, False]):
             self.plugin._process_file(path)
         self.assertTrue(path.exists())
@@ -2752,13 +2759,13 @@ class Ed2kTests(unittest.TestCase):
 
     def test_safety_no_destination_no_delete(self):
         self.plugin._output_enabled = False
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         path = self.create()
         self.plugin._process_file(path)
         self.assertTrue(path.exists())
 
     def test_delete_only_after_success(self):
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         path = self.create()
         self.plugin._process_file(path)
         self.assertFalse(path.exists())
@@ -2838,7 +2845,7 @@ class Ed2kTests(unittest.TestCase):
         self.assertEqual(cache.read_text(), "invalid json")
 
     def test_delete_failure_recorded_and_retry_success(self):
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         path = self.create()
         with patch.object(self.plugin, "_unlink_source", side_effect=PermissionError("denied")):
             with self.assertRaises(PermissionError):
@@ -2853,13 +2860,13 @@ class Ed2kTests(unittest.TestCase):
         path = self.create()
         self.plugin._process_file(path)
         generated = self.records()[str(path)]["generated_at"]
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         self.plugin._process_file(path)
         self.assertEqual(self.records()[str(path)]["generated_at"], generated)
 
     def test_write_failure_preserves_source_and_cache(self):
         path = self.create()
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         original = self.plugin._atomic_write
 
         def fail_txt(target, text):
@@ -2877,7 +2884,7 @@ class Ed2kTests(unittest.TestCase):
         path = self.create()
         self.plugin._telegram_enabled = True
         self.plugin._telegram_chat_id = "@receiver"
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
         with patch.object(self.plugin, "_send_telegram", return_value=False):
             self.plugin._process_file(path)
         self.assertTrue(path.exists())
@@ -2890,7 +2897,7 @@ class Ed2kTests(unittest.TestCase):
         path = self.create()
         self.plugin._telegram_enabled = True
         self.plugin._telegram_chat_id = "@receiver"
-        self.plugin._delete_source = True
+        self.plugin._local_delete_source = True
 
         def change(*args):
             path.write_bytes(b"replacement content")

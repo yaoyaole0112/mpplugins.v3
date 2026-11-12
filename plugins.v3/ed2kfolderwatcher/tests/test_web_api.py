@@ -216,10 +216,9 @@ class WebApiTests(unittest.TestCase):
         self.plugin.delete_source.assert_called_once_with("a" * 64)
 
     def test_manual_delete_requires_authentication(self):
-        from app.api.dependencies.auth import get_current_active_user
         def unauthenticated():
             raise HTTPException(status_code=401, detail="Not authenticated")
-        self.app.dependency_overrides[get_current_active_user] = unauthenticated
+        self.app.dependency_overrides[web_api.get_current_active_superuser] = unauthenticated
         result = self.client.post("/records/delete-source", json={"id": "a" * 64, "confirm": True})
         self.assertIn(result.status_code, (401, 403))
         self.plugin.delete_source.assert_not_called()
@@ -232,8 +231,7 @@ class WebApiTests(unittest.TestCase):
             self.assertIs(dependency.dependency, web_api.get_current_active_superuser)
 
     def test_non_admin_forbidden(self):
-        from app.api.dependencies.auth import get_current_active_user
-        self.app.dependency_overrides[get_current_active_user] = lambda: types.SimpleNamespace(is_superuser=False)
+        self.app.dependency_overrides[web_api.get_current_active_superuser] = lambda: types.SimpleNamespace(is_superuser=False)
         for route in self.routes:
             response = self.client.request(route["methods"][0], route["path"])
             self.assertEqual(response.status_code, 403, response.text)
@@ -365,7 +363,7 @@ class WebApiTests(unittest.TestCase):
 
     def test_cloud_delete_opt_in_binds_scope_without_save_confirmation(self):
         from ed2k_api_test_package import cloud_storage
-        values = {"cloud_enabled": True, "cloud_storage": "115网盘Plus", "cloud_folder": "/test", "cloud_cron": "*/10 * * * *", "cloud_delete_enabled": True, "delete_source": True, "output_enabled": True}
+        values = {"cloud_enabled": True, "cloud_storage": "115网盘Plus", "cloud_folder": "/test", "cloud_cron": "*/10 * * * *", "cloud_delete_enabled": True, "cloud_delete_source": True, "output_enabled": True}
         with patch.object(cloud_storage, "available_storages", return_value=[{"type": "115网盘Plus"}]), patch.object(cloud_storage, "CloudStorage") as adapter:
             adapter.return_value.delete_scope.return_value = "bound-scope"
             result = web_api.validate_settings(self.plugin, values)
@@ -387,16 +385,50 @@ class WebApiTests(unittest.TestCase):
         self.plugin._cloud_delete_enabled = True
         with patch.object(cloud_storage, "CloudStorage") as adapter:
             result = web_api.validate_settings(self.plugin, {
-                "delete_source": True, "cloud_enabled": False, "cloud_delete_enabled": True,
+                "local_upload_delete_source": True, "cloud_enabled": False, "cloud_delete_enabled": True,
                 "local_upload_enabled": True, "local_upload_mode": "direct",
                 "local_upload_folder": "/media/completed", "local_upload_target": "/upload",
             })
-            self.assertTrue(result["delete_source"])
+            self.assertTrue(result["local_upload_delete_source"])
             self.assertFalse(result["cloud_delete_enabled"])
             self.assertEqual(result["cloud_delete_scope"], "")
             adapter.return_value.delete_scope.assert_not_called()
-            result = web_api.validate_settings(self.plugin, {"delete_source": False})
+            result = web_api.validate_settings(self.plugin, {"cloud_delete_enabled": False})
             self.assertFalse(result["cloud_delete_enabled"])
+
+    def test_uploaded_cloud_copy_delete_uses_monitor_card_authorization_without_monitoring(self):
+        from ed2k_api_test_package import cloud_storage
+        values = {
+            "cloud_enabled": False, "cloud_storage": "115网盘Plus",
+            "cloud_delete_enabled": True, "local_upload_enabled": True,
+            "local_upload_mode": "direct", "local_upload_folder": "/media/completed",
+            "local_upload_target": "/upload", "local_upload_delete_cloud_copy": True,
+            "output_enabled": True,
+        }
+        with patch.object(cloud_storage, "CloudStorage") as adapter:
+            adapter.return_value.delete_scope.return_value = "upload-target-scope"
+            result = web_api.validate_settings(self.plugin, values)
+        self.assertTrue(result["cloud_delete_enabled"])
+        self.assertTrue(result["local_upload_delete_cloud_copy"])
+        self.assertEqual(result["cloud_delete_scope"], "")
+        self.assertEqual(result["local_upload_cloud_delete_scope"], "upload-target-scope")
+        adapter.return_value.delete_scope.assert_called_once_with("/upload", True)
+
+    def test_uploaded_cloud_copy_delete_requires_115_scope_and_direct_upload(self):
+        from ed2k_api_test_package import cloud_storage
+        values = {
+            "cloud_enabled": False, "cloud_storage": "115网盘Plus",
+            "cloud_delete_enabled": False, "local_upload_enabled": True,
+            "local_upload_mode": "direct", "local_upload_folder": "/media/completed",
+            "local_upload_target": "/upload", "local_upload_delete_cloud_copy": True,
+            "output_enabled": True,
+        }
+        with patch.object(cloud_storage, "CloudStorage"):
+            with self.assertRaisesRegex(web_api.UserAccountError, "单独授权"):
+                web_api.validate_settings(self.plugin, values)
+            values.update(cloud_delete_enabled=True, local_upload_mode="mp")
+            with self.assertRaisesRegex(web_api.UserAccountError, "直接上传模式"):
+                web_api.validate_settings(self.plugin, values)
 
     def test_upload_rate_limit_validation(self):
         for rate in (0, 8, 128, "16"):

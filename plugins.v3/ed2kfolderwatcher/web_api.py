@@ -16,10 +16,10 @@ from .local_upload import UPLOAD_FIELDS
 
 
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
-                 "min_age", "min_file_size", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
+                 "min_age", "min_file_size", "local_delete_source", "cloud_delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
                  "telegram_chat_id", "telegram_thread_id", "telegram_aggregate", "telegram_aggregate_window", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
                  "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source", "retry_limit", "movie_series_parallel") + UPLOAD_FIELDS
-BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled", "movie_series_parallel", "local_upload_enabled"}
+BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "local_delete_source", "local_upload_delete_source", "local_upload_delete_cloud_copy", "cloud_delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled", "movie_series_parallel", "local_upload_enabled"}
 
 
 def settings_snapshot(plugin, config=None):
@@ -128,16 +128,33 @@ def validate_settings(plugin, values):
             raise UserAccountError(str(error)) from None
     result["onlyonce"] = False
     result["cloud_delete_scope"] = ""
-    if not result["delete_source"] or not result["cloud_enabled"]:
+    result["local_upload_cloud_delete_scope"] = ""
+    if not result["cloud_enabled"]:
+        result["cloud_delete_source"] = False
+        if not result["local_upload_delete_cloud_copy"]:
+            result["cloud_delete_enabled"] = False
+    if result["cloud_storage"] != "115网盘Plus":
+        result["cloud_delete_source"] = False
         result["cloud_delete_enabled"] = False
+    if result["cloud_delete_source"] and not result["cloud_delete_enabled"]:
+        raise UserAccountError("请在网盘监控中单独授权115网盘删源后再启用自动删除")
+    if result["local_upload_delete_cloud_copy"] and not result["cloud_delete_enabled"]:
+        raise UserAccountError("删除本地计算上传后的115网盘副本，需要在网盘监控中单独授权")
     if result["cloud_delete_enabled"]:
         from .cloud_storage import CloudStorage, CloudError
         try:
-            if not result["delete_source"] or not result["cloud_enabled"]:
-                raise CloudError("请先开启完成后删除源文件与网盘增量生成")
             if not result["output_enabled"] and not result["telegram_enabled"]:
                 raise CloudError("请至少开启TXT或Telegram一种输出后再授权网盘删源")
-            result["cloud_delete_scope"] = CloudStorage(result["cloud_storage"]).delete_scope(result["cloud_folder"], result["cloud_recursive"])
+            if result["cloud_enabled"] and result["cloud_folder"]:
+                result["cloud_delete_scope"] = CloudStorage(result["cloud_storage"]).delete_scope(result["cloud_folder"], result["cloud_recursive"])
+            if result["local_upload_delete_cloud_copy"]:
+                if not result["local_upload_enabled"] or result["local_upload_mode"] != "direct" or not result["local_upload_target"]:
+                    raise CloudError("删除上传副本仅支持已配置目标目录的直接上传模式")
+                result["local_upload_cloud_delete_scope"] = CloudStorage(result["cloud_storage"]).delete_scope(result["local_upload_target"], True)
+            if result["cloud_delete_source"] and not result["cloud_delete_scope"]:
+                raise CloudError("启用网盘监控删源前，请先启用网盘监控并填写监控目录")
+            if not result["cloud_delete_scope"] and not result["local_upload_cloud_delete_scope"]:
+                raise CloudError("请先配置网盘监控目录或本地上传目标目录")
         except CloudError as failure:
             raise UserAccountError(str(failure)) from None
         except Exception as failure:
