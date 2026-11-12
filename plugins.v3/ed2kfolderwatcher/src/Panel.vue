@@ -23,6 +23,9 @@ const base = computed(() => `plugin/${props.pluginId}`)
 const disabled = computed(() => busy.value || saving.value || !loaded.value)
 const configFields = ['enabled', 'movie_series_parallel', 'folder', 'include_subdirectories', 'monitor_enabled', 'output_enabled', 'output', 'extensions', 'min_age', 'min_file_size_gb', 'retry_limit', 'local_delete_source', 'local_upload_delete_source', 'local_upload_delete_cloud_copy', 'delete_small_files', 'cloud_delete_source', 'cloud_delete_enabled', 'scan_enabled', 'cron', 'telegram_enabled', 'telegram_mode', 'telegram_chat_id', 'telegram_thread_id', 'telegram_aggregate', 'telegram_aggregate_window', 'cloud_enabled', 'cloud_scan_enabled', 'cloud_storage', 'cloud_folder', 'cloud_cron', 'cloud_read_timeout', 'cloud_monitor_enabled', 'cloud_life_source', 'local_upload_enabled', 'local_upload_mode', 'local_upload_folder', 'local_upload_target', 'local_upload_rate']
 const textFields = [{ key: 'extensions', label: '扩展名过滤', hint: '留空处理全部文件，例如 mkv,mp4' }, { key: 'min_file_size_gb', label: '生成链接最小文件大小（GB）', type: 'number', step: 'any', placeholder: '例如0.5、1、1.5（GB）', hint: '小于此值不生成、不转发；留空或0不限，单位GB。' }]
+watch([() => settings.cloud_delete_source, () => settings.local_upload_delete_cloud_copy], () => {
+  settings.cloud_delete_enabled = settings.cloud_delete_source || settings.local_upload_delete_cloud_copy
+})
 watch(() => settings.cloud_storage, () => {
   if (settings.cloud_storage !== '115网盘Plus') {
     settings.cloud_delete_enabled = false
@@ -119,13 +122,13 @@ async function runUpload() {
 async function saveSettings() {
   if (typeof settings.include_subdirectories !== 'boolean') { error.value = '原本地与网盘子目录设置不一致，请先明确选择是否包含子目录，再保存'; return }
   error.value = notice.value = ''
-  if (settings.cloud_delete_source && !settings.cloud_delete_enabled) { error.value = '开启网盘监控删源前，请先启用单独授权115网盘删源'; return }
-  if (settings.local_upload_delete_cloud_copy && !settings.cloud_delete_enabled) { error.value = '删除本地上传后的网盘副本前，请先启用单独授权115网盘删源'; return }
   if (saving.value) return
   saving.value = true
   error.value = notice.value = ''
   try {
-    const result = await request('settings', Object.fromEntries(configFields.map(key => [key, settings[key] ?? ''])))
+    const values = Object.fromEntries(configFields.map(key => [key, settings[key] ?? '']))
+    values.cloud_delete_enabled = settings.cloud_delete_source || settings.local_upload_delete_cloud_copy
+    const result = await request('settings', values)
     applySettings(result)
     notice.value = result.message
   } catch (failure) {
@@ -211,7 +214,7 @@ onUnmounted(() => {
 
     <article class="card" data-testid="local-upload">
       <h3>本地计算，上传115</h3>
-      <div class="switches"><label class="switch"><input v-model="settings.local_upload_enabled" type="checkbox" :disabled="disabled">启用本地计算上传115</label><label class="switch"><input v-model="settings.local_upload_delete_source" type="checkbox" :disabled="disabled || !settings.local_upload_enabled">输出成功后删除本地原文件</label><label v-if="settings.local_upload_mode === 'direct'" class="switch"><input v-model="settings.local_upload_delete_cloud_copy" type="checkbox" :disabled="disabled || !settings.local_upload_enabled || !settings.cloud_delete_enabled">网盘副本删除</label></div>
+      <div class="switches"><label class="switch"><input v-model="settings.local_upload_enabled" type="checkbox" :disabled="disabled">启用本地计算上传115</label><label class="switch"><input v-model="settings.local_upload_delete_source" type="checkbox" :disabled="disabled || !settings.local_upload_enabled">输出成功后删除本地原文件</label><label v-if="settings.local_upload_mode === 'direct'" class="switch"><input v-model="settings.local_upload_delete_cloud_copy" type="checkbox" :disabled="disabled || !settings.local_upload_enabled">网盘副本删除</label></div>
       <div class="fields">
         <label>上传方式<select v-model="settings.local_upload_mode" :disabled="disabled || !settings.local_upload_enabled"><option value="mp">使用现有MP整理上传（复制）</option><option value="direct">调用115插件直接上传（不整理）</option></select><small>{{ settings.local_upload_mode === 'mp' ? 'MP上传成功后才本地计算；大小与SHA1核验一致后输出、转发。' : '先计算本地ED2K与SHA1；115大小与SHA1一致后才输出、转发。' }}</small></label>
         <label>本地计算上传目录<input v-model="settings.local_upload_folder" class="monitor-roots" :disabled="disabled || !settings.local_upload_enabled" placeholder="/downloads/complete"><small>{{ settings.local_upload_mode === 'mp' ? '填写MP本地资源目录，多个用英文逗号分隔；仅接收上传成功回执，不监控新增文件。' : '多个用英文逗号分隔；自动监控新增文件，每10分钟补漏。' }}沿用通用过滤与子目录设置。</small></label>
@@ -235,8 +238,8 @@ onUnmounted(() => {
     <article class="card" data-testid="cloud-source">
       <h3>网盘监控</h3>
       <p>无需挂载网盘；通过存储插件分块读取，不保存完整临时文件。并发遵循通用设置，CloudDrive只读。</p>
-      <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled" @change="settings.cloud_enabled || (settings.cloud_delete_source = false)">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_monitor_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">115生活事件监控（近实时）</label><label class="switch"><input v-model="settings.cloud_scan_enabled" type="checkbox" :disabled="disabled">网盘定时增量补扫</label><label class="switch"><input v-model="settings.cloud_delete_source" type="checkbox" :disabled="disabled || !settings.cloud_enabled || settings.cloud_storage !== '115网盘Plus'">输出成功后删除网盘源文件</label><label class="switch"><input v-model="settings.cloud_delete_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">单独授权115网盘删源</label></div>
-      <p v-if="settings.cloud_delete_enabled" class="warning">授权绑定当前账号及已配置目录范围；更改范围需重新保存授权。网盘副本删除也使用此授权。</p>
+      <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled" @change="settings.cloud_enabled || (settings.cloud_delete_source = false)">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_monitor_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">115生活事件监控（近实时）</label><label class="switch"><input v-model="settings.cloud_scan_enabled" type="checkbox" :disabled="disabled">网盘定时增量补扫</label><label class="switch"><input v-model="settings.cloud_delete_source" type="checkbox" :disabled="disabled || !settings.cloud_enabled || settings.cloud_storage !== '115网盘Plus'">输出成功后删除网盘源文件</label></div>
+      <p v-if="settings.cloud_delete_source" class="warning">开启后将使用当前115账号，并把授权限定在已配置监控目录和子目录范围；关闭此开关即撤销删源授权。CloudDrive始终只读。</p>
       <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''; if (settings.cloud_storage !== '115网盘Plus') { settings.cloud_monitor_enabled = false; settings.cloud_delete_enabled = false; settings.cloud_delete_source = false; settings.local_upload_delete_cloud_copy = false }"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储' }}</small></label><label>网盘监控目录<input v-model="settings.cloud_folder" class="monitor-roots" :disabled="disabled" placeholder="/电影,/电视剧"><small>同一存储内的绝对路径，多个用英文逗号分隔，最多32个。</small></label><label>网盘补扫计划<input v-model.trim="settings.cloud_cron" :disabled="disabled || !settings.cloud_scan_enabled" placeholder="*/10 * * * *"><small>开启定时补扫后生效，默认每10分钟。</small></label><label>网盘读取超时（秒）<input v-model="settings.cloud_read_timeout" type="number" min="30" max="1800" :disabled="disabled"><small>单次网络读取等待上限，默认300秒。</small></label><label v-if="settings.cloud_monitor_enabled">115生活事件来源<select v-model="settings.cloud_life_source" :disabled="disabled"><option value="shared">复用115插件监听（不额外请求生活接口）</option><option value="direct">独立轮询（每分钟一次生活接口）</option></select><small>复用模式需115插件监听和账号一致。</small></label></div>
       <p v-if="settings.cloud_monitor_enabled">只将事件对应且位于监控目录内的单个文件加入队列，不扫描或补算目录中的已有文件；每个事件最多复查10次。</p>
       <div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud()">浏览网盘目录</button><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.cloud_enabled" @click="runCloud">立即网盘增量扫描／补发</button><button type="button" class="secondary" :disabled="disabled" @click="work(refreshCloud)">刷新网盘进度</button></div>

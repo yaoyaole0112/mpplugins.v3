@@ -15,7 +15,6 @@ const total = ref(0)
 const localDeleteEnabled = ref(false)
 const localUploadDeleteEnabled = ref(false)
 const cloudDeleteSourceEnabled = ref(false)
-const cloudDeleteEnabled = ref(false)
 const workerAlive = ref(false)
 const busy = ref(false)
 const error = ref('')
@@ -136,7 +135,6 @@ async function refresh() {
     localDeleteEnabled.value = !!data.local_delete_source_enabled
     localUploadDeleteEnabled.value = !!data.local_upload_delete_source_enabled
     cloudDeleteSourceEnabled.value = !!data.cloud_delete_source_enabled
-    cloudDeleteEnabled.value = !!data.cloud_delete_enabled
     workerAlive.value = !!data.worker_alive
     loaded.value = true
     error.value = ''
@@ -179,7 +177,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
       <div class="records-actions"><button type="button" :disabled="busy" @click="refresh">刷新记录</button><button type="button" @click="openSettings">设置</button><button type="button" @click="emit('close')">关闭</button></div>
     </header>
     <p class="help">每 5 秒刷新进度与记录；点击有效 ED2K 链接即可复制。“手动删除源文件”需确认并校验内容，不会自动执行。点击右上角“设置”进入配置页。</p>
-    <p class="policy">删源设置独立：本地监控{{ localDeleteEnabled ? '开启' : '关闭' }} · 本地计算上传{{ localUploadDeleteEnabled ? '开启' : '关闭' }} · 网盘监控{{ cloudDeleteSourceEnabled ? '开启' : '关闭' }}；115授权{{ cloudDeleteEnabled ? '已开启' : '未开启' }}。每条状态以处理时记录为准。</p>
+    <p class="policy">删源设置独立：本地监控{{ localDeleteEnabled ? '开启' : '关闭' }} · 本地计算上传{{ localUploadDeleteEnabled ? '开启' : '关闭' }} · 网盘监控{{ cloudDeleteSourceEnabled ? '开启' : '关闭' }}。每条状态以处理时记录为准。</p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <section class="progress-section" aria-live="polite">

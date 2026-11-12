@@ -93,6 +93,10 @@ class Ed2kTests(unittest.TestCase):
         self.assertFalse(self.plugin._local_upload_delete_cloud_copy)
         self.assertFalse(self.plugin._cloud_delete_source)
 
+    def test_legacy_standalone_cloud_authorization_does_not_enable_deletion(self):
+        self.plugin.init_plugin({"cloud_delete_enabled": True, "cloud_delete_source": False})
+        self.assertFalse(self.plugin._cloud_delete_enabled)
+
     def test_parallel_disabled_serializes_all_local_and_cloud_combinations(self):
         for index, (movie_cloud, episode_cloud) in enumerate(((False, False), (True, True), (True, False), (False, True))):
             with self.subTest(movie_cloud=movie_cloud, episode_cloud=episode_cloud):

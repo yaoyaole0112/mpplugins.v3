@@ -77,14 +77,15 @@ test('upload progress and independent delete settings are exposed', async () => 
   const panel = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
   const save = panel.match(/async function saveSettings\(\) \{([\s\S]*?)\n\}/)?.[1]
   assert.match(save, /settings\.local_upload_delete_cloud_copy/)
-  assert.match(panel, /单独授权115网盘删源/)
   assert.match(panel, /输出成功后删除网盘源文件/)
   const common = panel.split('data-testid="common-settings"')[1].split('</article>')[0]
   assert.equal(common.includes('完成后删除源文件'), false)
   const upload = panel.split('data-testid="local-upload"')[1].split('</article>')[0]
   const cloud = panel.split('data-testid="cloud-source"')[1].split('</article>')[0]
   assert.match(upload, /网盘副本删除/)
-  assert.match(cloud, /单独授权115网盘删源/)
+  assert.equal(cloud.includes('单独授权115网盘删源'), false)
+  assert.match(cloud, /开启后将使用当前115账号，并把授权限定在已配置监控目录和子目录范围/)
+  assert.match(save, /values\.cloud_delete_enabled = settings\.cloud_delete_source \|\| settings\.local_upload_delete_cloud_copy/)
   assert.equal(cloud.includes('（默认关闭）'), false)
 })
 

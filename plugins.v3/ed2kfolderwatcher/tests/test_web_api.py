@@ -385,12 +385,13 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("未上传文件不计算", result["message"])
         self.plugin.scan.assert_called_once_with(True, True)
 
-    def test_cloud_delete_opt_in_binds_scope_without_save_confirmation(self):
+    def test_cloud_delete_source_also_authorizes_and_binds_scope(self):
         from ed2k_api_test_package import cloud_storage
-        values = {"cloud_enabled": True, "cloud_storage": "115网盘Plus", "cloud_folder": "/test", "cloud_cron": "*/10 * * * *", "cloud_delete_enabled": True, "cloud_delete_source": True, "output_enabled": True}
+        values = {"cloud_enabled": True, "cloud_storage": "115网盘Plus", "cloud_folder": "/test", "cloud_cron": "*/10 * * * *", "cloud_delete_source": True, "output_enabled": True}
         with patch.object(cloud_storage, "available_storages", return_value=[{"type": "115网盘Plus"}]), patch.object(cloud_storage, "CloudStorage") as adapter:
             adapter.return_value.delete_scope.return_value = "bound-scope"
             result = web_api.validate_settings(self.plugin, values)
+            self.assertTrue(result["cloud_delete_enabled"])
             self.assertEqual(result["cloud_delete_scope"], "bound-scope")
             self.assertNotIn("confirm_cloud_delete", result)
             adapter.return_value.delete_prepared.assert_not_called()
@@ -403,13 +404,15 @@ class WebApiTests(unittest.TestCase):
         result = web_api.validate_settings(self.plugin, {"cloud_delete_enabled": False})
         self.assertEqual(result["cloud_delete_scope"], "")
         self.assertFalse(result["cloud_delete_enabled"])
+        result = web_api.validate_settings(self.plugin, {"cloud_delete_enabled": True})
+        self.assertFalse(result["cloud_delete_enabled"])
 
     def test_local_upload_delete_does_not_require_cloud_monitoring_or_cloud_deletion(self):
         from ed2k_api_test_package import cloud_storage
         self.plugin._cloud_delete_enabled = True
         with patch.object(cloud_storage, "CloudStorage") as adapter:
             result = web_api.validate_settings(self.plugin, {
-                "local_upload_delete_source": True, "cloud_enabled": False, "cloud_delete_enabled": True,
+                "local_upload_delete_source": True, "cloud_enabled": False,
                 "local_upload_enabled": True, "local_upload_mode": "direct",
                 "local_upload_folder": "/media/completed", "local_upload_target": "/upload",
             })
@@ -424,7 +427,7 @@ class WebApiTests(unittest.TestCase):
         from ed2k_api_test_package import cloud_storage
         values = {
             "cloud_enabled": False, "cloud_storage": "115网盘Plus",
-            "cloud_delete_enabled": True, "local_upload_enabled": True,
+            "local_upload_enabled": True,
             "local_upload_mode": "direct", "local_upload_folder": "/media/completed",
             "local_upload_target": "/upload", "local_upload_delete_cloud_copy": True,
             "output_enabled": True,
@@ -442,15 +445,16 @@ class WebApiTests(unittest.TestCase):
         from ed2k_api_test_package import cloud_storage
         values = {
             "cloud_enabled": False, "cloud_storage": "115网盘Plus",
-            "cloud_delete_enabled": False, "local_upload_enabled": True,
+            "local_upload_enabled": True,
             "local_upload_mode": "direct", "local_upload_folder": "/media/completed",
             "local_upload_target": "/upload", "local_upload_delete_cloud_copy": True,
             "output_enabled": True,
         }
-        with patch.object(cloud_storage, "CloudStorage"):
-            with self.assertRaisesRegex(web_api.UserAccountError, "单独授权"):
-                web_api.validate_settings(self.plugin, values)
-            values.update(cloud_delete_enabled=True, local_upload_mode="mp")
+        with patch.object(cloud_storage, "CloudStorage") as adapter:
+            adapter.return_value.delete_scope.return_value = "upload-scope"
+            result = web_api.validate_settings(self.plugin, values)
+            self.assertTrue(result["cloud_delete_enabled"])
+            values.update(local_upload_mode="mp")
             with self.assertRaisesRegex(web_api.UserAccountError, "直接上传模式"):
                 web_api.validate_settings(self.plugin, values)
 

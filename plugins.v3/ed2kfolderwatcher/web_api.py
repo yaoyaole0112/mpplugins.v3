@@ -131,20 +131,18 @@ def validate_settings(plugin, values):
     result["local_upload_cloud_delete_scope"] = ""
     if not result["cloud_enabled"]:
         result["cloud_delete_source"] = False
-        if not result["local_upload_delete_cloud_copy"]:
-            result["cloud_delete_enabled"] = False
     if result["cloud_storage"] != "115网盘Plus":
         result["cloud_delete_source"] = False
-        result["cloud_delete_enabled"] = False
-    if result["cloud_delete_source"] and not result["cloud_delete_enabled"]:
-        raise UserAccountError("请在网盘监控中单独授权115网盘删源后再启用自动删除")
-    if result["local_upload_delete_cloud_copy"] and not result["cloud_delete_enabled"]:
-        raise UserAccountError("删除本地计算上传后的115网盘副本，需要在网盘监控中单独授权")
+        if result["local_upload_delete_cloud_copy"]:
+            raise UserAccountError("网盘副本删除仅支持115网盘")
+    result["cloud_delete_enabled"] = bool(
+        result["cloud_delete_source"] or result["local_upload_delete_cloud_copy"]
+    )
     if result["cloud_delete_enabled"]:
         from .cloud_storage import CloudStorage, CloudError
         try:
             if not result["output_enabled"] and not result["telegram_enabled"]:
-                raise CloudError("请至少开启TXT或Telegram一种输出后再授权网盘删源")
+                raise CloudError("请至少开启TXT或Telegram一种输出后再启用网盘删源")
             if result["cloud_enabled"] and result["cloud_folder"]:
                 result["cloud_delete_scope"] = CloudStorage(result["cloud_storage"]).delete_scope(result["cloud_folder"], result["cloud_recursive"])
             if result["local_upload_delete_cloud_copy"]:
@@ -152,13 +150,13 @@ def validate_settings(plugin, values):
                     raise CloudError("删除上传副本仅支持已配置目标目录的直接上传模式")
                 result["local_upload_cloud_delete_scope"] = CloudStorage(result["cloud_storage"]).delete_scope(result["local_upload_target"], True)
             if result["cloud_delete_source"] and not result["cloud_delete_scope"]:
-                raise CloudError("启用网盘监控删源前，请先启用网盘监控并填写监控目录")
+                raise CloudError("启用网盘监控删源前，请先启用网盘监控并填写目录")
             if not result["cloud_delete_scope"] and not result["local_upload_cloud_delete_scope"]:
                 raise CloudError("请先配置网盘监控目录或本地上传目标目录")
         except CloudError as failure:
             raise UserAccountError(str(failure)) from None
         except Exception as failure:
-            raise UserAccountError(f"115网盘删源授权校验失败（{type(failure).__name__}），未启用删除") from None
+            raise UserAccountError(f"115网盘删源范围校验失败（{type(failure).__name__}），未启用删除") from None
     return result
 
 

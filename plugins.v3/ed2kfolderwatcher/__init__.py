@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.21.3"
+    plugin_version = "1.21.4"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -377,7 +377,9 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         self._local_delete_source = config.get("local_delete_source") is True
         self._local_upload_delete_source = config.get("local_upload_delete_source") is True
         self._cloud_delete_source = config.get("cloud_delete_source") is True
-        self._cloud_delete_enabled = config.get("cloud_delete_enabled") is True
+        self._cloud_delete_enabled = (
+            self._cloud_delete_source or config.get("local_upload_delete_cloud_copy") is True
+        )
         self._cloud_delete_scope = str(config.get("cloud_delete_scope") or "")
         self._local_upload_cloud_delete_scope = str(config.get("local_upload_cloud_delete_scope") or "")
         self._delete_small_files = bool(config.get("delete_small_files", False))
@@ -413,8 +415,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         elif not self._cloud_enabled:
             self._cloud_delete_scope = ""
             self._cloud_delete_source = False
-            if not config.get("local_upload_delete_cloud_copy"):
-                self._cloud_delete_enabled = False
+            self._cloud_delete_enabled = config.get("local_upload_delete_cloud_copy") is True
         self._cloud_folder = str(config.get("cloud_folder") or "").strip()
         self._cloud_recursive = shared_recursive if isinstance(shared_recursive, bool) else bool(config.get("cloud_recursive", True))
         self._cloud_cron = str(config.get("cloud_cron") or DEFAULT_CRON).strip()
@@ -2667,8 +2668,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             field("VTextField", "cron", "本地补扫计划", hint="默认每 10 分钟：*/10 * * * *", persistent_hint=True),
             {"component": "VCardTitle", "text": "网盘监控"},
             field("VSwitch", "cloud_enabled", "启用网盘增量生成"),
-            field("VSwitch", "cloud_delete_source", "输出成功后删除网盘源文件", hint="仅网盘监控生效；需115删源授权；CloudDrive只读。", persistent_hint=True),
-            field("VSwitch", "cloud_delete_enabled", "单独授权115网盘删源", hint="授权绑定当前账号、监控目录及子目录范围；范围变化后需重新授权。", persistent_hint=True),
+            field("VSwitch", "cloud_delete_source", "输出成功后删除网盘源文件", hint="仅网盘监控生效；开启后即授权当前115账号及所选目录范围；CloudDrive只读。", persistent_hint=True),
             field("VSelect", "cloud_storage", "网盘存储", items=[{"title": "115网盘Plus", "value": "115网盘Plus"}, {"title": "CloudDrive储存", "value": "CloudDrive储存"}]),
             field("VTextField", "cloud_folder", "网盘监控目录", placeholder="/电影,/电视剧", hint="同一存储内的绝对路径，多个用英文逗号分隔，最多32个。", persistent_hint=True),
             field("VSwitch", "cloud_monitor_enabled", "115生活事件监控（近实时）", hint="仅处理开启后的新增事件，不扫描已有文件；每分钟检查。", persistent_hint=True),
