@@ -255,7 +255,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.3.5"
+    plugin_version = "6.3.6"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -3779,18 +3779,31 @@ class BrushFlow(_PluginBase):
         identity = None
         try:
             media = self.chain.recognize_media(meta=meta)
+            evidence_names = set(raw_names)
+            # A bracketed season label is not part of the series title, but its season must agree.
+            for name in raw_names:
+                suffix = re.search(r"[ ._-]*第\s*[0-9零〇一二两三四五六七八九十百]+\s*季$", name)
+                if not suffix or not getattr(meta, "begin_season", None):
+                    continue
+                season_meta = MetaInfo(name)
+                base = name[:suffix.start()].strip()
+                if (base and season_meta.begin_season == meta.begin_season
+                        and not season_meta.end_season):
+                    evidence_names.remove(name)
+                    evidence_names.add(base)
+            evidence_keys = {normalize_title(name) for name in evidence_names} - {""}
             raw_aliases = {
                 str(getattr(media, field, "") or "")
                 for field in ("title", "en_title", "original_title", "original_name", "hk_title", "tw_title", "sg_title")
             } | {str(name) for name in getattr(media, "names", []) or []}
             aliases = {normalize_title(name) for name in raw_aliases} - {""}
-            chinese_names = {normalize_title(name) for name in raw_names if re.search(r"[\u3400-\u9fff]", name)}
+            chinese_names = {normalize_title(name) for name in evidence_names if re.search(r"[\u3400-\u9fff]", name)}
             chinese_aliases = {normalize_title(name) for name in raw_aliases if re.search(r"[\u3400-\u9fff]", name)}
             year, media_year = str(meta.year or ""), str(getattr(media, "year", "") or "")
             first_season = getattr(meta, "begin_season", None) in (None, 1)
             year_conflict = first_season and year and media_year and year != media_year
             chinese_conflict = chinese_names and chinese_aliases and not chinese_names.intersection(chinese_aliases)
-            exact = bool(names.intersection(aliases))
+            exact = bool(evidence_keys.intersection(aliases))
             truncated = bool(
                 not exact and year and year == media_year
                 and any(long_title_prefix_matches(name, raw_aliases) for name in raw_names)
@@ -3800,6 +3813,15 @@ class BrushFlow(_PluginBase):
                 identity = int(raw_id) if raw_id else None
                 if identity and truncated:
                     logger.info(f"频道同规格去重确认长标题截断别名 {path}：完整词边界及年份一致，TMDB {identity}")
+            if not identity:
+                reason = (
+                    "识别为电影" if self._is_movie(media) else
+                    "首季年份不一致" if year_conflict else
+                    "中文剧名证据不一致" if chinese_conflict else
+                    "剧名与官方别名不匹配" if not (exact or truncated) else
+                    "识别结果缺少TMDB ID"
+                )
+                logger.info(f"频道同规格去重无法确认剧集身份 {path}：{reason}，按未命中放行")
         except Exception as err:
             logger.info(f"频道同规格去重无法确认剧集身份 {path}：{type(err).__name__}，按未命中放行")
         with self._channel_state_lock:

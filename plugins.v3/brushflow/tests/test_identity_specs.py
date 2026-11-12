@@ -276,6 +276,69 @@ class IdentitySettingsTests(unittest.TestCase):
         self.assertEqual(saved["channel_dedup_identity_aliases"], {"Show": 123})
 
 
+class SeasonTitleEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        integration.ChannelIntegrationTests.setUp(self)
+        self.plugin._channel_dedup_attributes = ["resolution"]
+        self.plugin._channel_dedup_channels = ["@ms20260601"]
+        self.record.update({
+            "channel": "@ms20260601", "title": "茜茜皇后", "title_key": "茜茜皇后",
+            "tmdb_id": 131488, "year": 2022, "season": 3, "episodes": [4],
+            "specs": {"resolution": "1080p", "effects": None, "codec": "H.264",
+                      "source": "WEB-DL", "fps": 24, "size": 2242148366},
+        })
+        self.plugin.chain.recognize_media.return_value = SimpleNamespace(
+            type="电视剧", title="茜茜皇后", en_title="The Empress",
+            original_title="Die Kaiserin", names=["茜茜皇后", "The Empress"],
+            year="2022", tmdb_id=131488,
+        )
+
+    def path(self, prefix="[茜茜皇后 第三季].", season="S03"):
+        return f"{prefix}The.Empress.2026.{season}E04.1080p.NF.WEB-DL.H264.DDP5.1.Atmos-UBWEB.mkv"
+
+    def select(self, path):
+        return self.plugin._channel_dedup_file_selection(
+            integration.make_torrent([(path, 2242142161)]), "The Empress 2026 S03 Complete 1080p"
+        )
+
+    def test_resolution_only_replay_ignores_audio_size_effects_and_later_season_year(self):
+        for prefix in ("", "[茜茜皇后 第三季].", "[茜茜皇后 第3季]."):
+            with self.subTest(prefix=prefix):
+                result = self.select(self.path(prefix))
+                self.assertIsNotNone(result)
+                self.assertEqual(result["matched_video_count"], 1)
+
+    def test_season_title_match_blocks_before_downloader_add_without_inflight_help(self):
+        self.content = integration.make_torrent([(self.path(), 2242142161)])
+        downloader, _ = integration.ChannelIntegrationTests.prepare_download(self)
+        self.assertIsNone(self.plugin._BrushFlow__download(self.torrent))
+        downloader.add_torrent.assert_not_called()
+
+    def test_different_season_suffix_is_not_silently_discarded(self):
+        self.assertIsNone(self.select(self.path("[茜茜皇后 第四季].")))
+
+    def test_suffix_with_extra_title_text_is_not_discarded(self):
+        self.assertIsNone(self.select(self.path("[茜茜皇后 第三季 续篇].")))
+
+    def test_wrong_chinese_base_cannot_be_overridden_by_english_match(self):
+        self.assertIsNone(self.select(self.path("[华灯起 第三季].")))
+
+    def test_different_season_or_episode_is_not_duplicate(self):
+        self.assertIsNone(self.select(self.path(season="S04")))
+        self.assertIsNone(self.select(self.path().replace("E04", "E05")))
+
+    def test_different_resolution_is_not_duplicate(self):
+        self.assertIsNone(self.select(self.path().replace("1080p", "2160p")))
+
+    def test_season_suffix_alias_binding_still_works_without_recognition(self):
+        self.plugin._channel_dedup_identity_aliases = {"茜茜皇后 第三季": 131488}
+        self.assertIsNotNone(self.select(self.path()))
+        self.plugin.chain.recognize_media.assert_not_called()
+
+    def test_explicit_conflicting_id_still_wins_over_season_title(self):
+        self.assertIsNone(self.select(self.path().replace("S03E04", "(tmdbid=999).S03E04")))
+
+
 class QueueSelectedSpecsTests(unittest.TestCase):
     def setUp(self):
         inflight.InflightDedupTests.setUp(self)
