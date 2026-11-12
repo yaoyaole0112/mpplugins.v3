@@ -88,6 +88,15 @@ test('upload progress and independent delete settings are exposed', async () => 
   assert.equal(cloud.includes('（默认关闭）'), false)
 })
 
+test('MP upload mode explains receipt-driven calculation and recovery', async () => {
+  const source = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
+  const upload = source.split('data-testid="local-upload"')[1].split('</article>')[0]
+  assert.match(upload, /MP上传成功后才本地计算/)
+  assert.match(upload, /不监控新增文件/)
+  assert.match(upload, /每10分钟仅补扫已保存的成功回执/)
+  assert.match(upload, /立即回执补扫／补发/)
+})
+
 test('built federation entry resolves all public components and styles', async () => {
   const source = await readFile(entryUrl, 'utf8')
   assert.equal(source.includes('${__federation_expose_'), false)

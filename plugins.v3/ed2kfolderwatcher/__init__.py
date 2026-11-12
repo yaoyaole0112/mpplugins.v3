@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.21.1"
+    plugin_version = "1.21.2"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -459,7 +459,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             self.scan()
             if self._cloud_enabled:
                 self.queue_cloud_scan()
-        if self._enabled and ((self._folder and self._monitor_enabled) or self._local_upload_enabled):
+        if self._enabled and ((self._folder and self._monitor_enabled) or (self._local_upload_enabled and self._local_upload_mode == "direct")):
             self._start_monitor()
         if self._enabled and self._local_upload_enabled:
             self.scan(upload_only=True)
@@ -581,7 +581,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         folders = []
         if not upload_only and (not watching or self._monitor_enabled):
             folders.extend(monitor_roots(self._folder))
-        if self._local_upload_enabled:
+        if self._local_upload_enabled and (not watching or self._local_upload_mode == "direct"):
             folders.extend(monitor_roots(self._local_upload_folder))
         roots = [Path(root) for root in folders]
         unique = {}
@@ -1091,6 +1091,8 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             if not self._eligible(path):
                 return
             stat = path.stat()
+            if self._local_upload_mode == "mp" and self._upload_root_for(path) and self._mp_upload_receipt(path, stat) is None:
+                return
             signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
             with self._condition:
                 if self._task_cancelled(str(path), signature):
@@ -2163,6 +2165,8 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             folder, output, cache_path = self._paths()
             output = output if self._output_enabled else None
             stat = path.stat()
+            if self._local_upload_mode == "mp" and self._upload_root_for(path) and self._mp_upload_receipt(path, stat) is None:
+                return
             if self._task_cancelled(str(path), (stat.st_size, stat.st_mtime_ns, stat.st_ino)):
                 return
             if stat.st_size <= 0:
@@ -2310,7 +2314,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             items.append({
                 "id": hashlib.sha256(key.encode()).hexdigest(), "name": Path(key).name,
                 "size": entry.get("identity", [None])[0], "bytes_read": 0,
-                "stage": "等待独立115普通上传通道", "source": "本地上传",
+                "stage": "MP上传已完成，等待内容核验" if self._local_upload_mode == "mp" else "等待独立115普通上传通道", "source": "本地上传",
                 "status": "queued", "queue_position": position, "can_cancel": False,
             })
         if cloud_status.get("file"):
@@ -2390,7 +2394,16 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             if self._output_enabled:
                 self._write_results(output, cache_path, records)
         batch_id = self._new_batch("local-scan")
-        for folder in self._local_roots(upload_only=upload_only):
+        mp_upload = self._local_upload_enabled and self._local_upload_mode == "mp"
+        if mp_upload:
+            from .cloud_storage import monitor_roots
+            folders = [] if upload_only else [Path(root) for root in monitor_roots(self._folder)]
+            with self._upload_receipt_lock:
+                receipt_sources = list(self._upload_receipts())
+        else:
+            folders = self._local_roots(upload_only=upload_only)
+            receipt_sources = []
+        for folder in folders:
             if not folder.is_dir():
                 logger.warning(f"自动生成ED2K链接：目录不存在：{folder}")
                 continue
@@ -2398,8 +2411,17 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 if self._stopping.is_set():
                     return
                 self._queue_event(path, batch_id=batch_id)
+        for source in sorted(receipt_sources, key=filename_order):
+            if self._stopping.is_set():
+                return
+            path = Path(source)
+            if path.is_absolute() and self._upload_root_for(path):
+                self._queue_event(path, batch_id=batch_id)
         self._seal_batch(batch_id)
-        logger.info("自动生成ED2K链接：本地增量补扫已入队，已有链接不会重复计算")
+        if mp_upload and upload_only:
+            logger.info("自动生成ED2K链接：仅补扫已有MP上传成功回执的文件；未上传文件不计算")
+        else:
+            logger.info("自动生成ED2K链接：本地增量补扫已入队，已有链接不会重复计算")
 
     def get_service(self) -> List[Dict[str, Any]]:
         if not self._enabled:
@@ -2408,7 +2430,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         if self._folder and self._scan_enabled:
             services.append({"id": "Ed2kFolderWatcher", "name": "扫描本地文件夹并生成 ED2K", "trigger": CronTrigger.from_crontab(self._cron), "func": self.scan})
         if self._local_upload_enabled:
-            services.append({"id": "Ed2kFolderWatcherUpload", "name": "本地计算上传增量补扫", "trigger": CronTrigger.from_crontab(DEFAULT_CRON), "func": lambda: self.scan(upload_only=True)})
+            services.append({"id": "Ed2kFolderWatcherUpload", "name": "MP上传成功回执补扫" if self._local_upload_mode == "mp" else "本地计算上传增量补扫", "trigger": CronTrigger.from_crontab(DEFAULT_CRON), "func": lambda: self.scan(upload_only=True)})
         if self._cloud_enabled:
             if self._cloud_scan_enabled:
                 services.append({"id": "Ed2kFolderWatcherCloud", "name": "网盘定时增量补扫", "trigger": CronTrigger.from_crontab(self._cloud_cron), "func": self.queue_cloud_scan})

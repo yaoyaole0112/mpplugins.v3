@@ -260,10 +260,11 @@ class LocalUploadTests(unittest.TestCase):
     def test_mp_waits_for_receipt_and_uses_cloud_name(self):
         self.configure(mode="mp", local_upload_delete_source=True, telegram_enabled=True, telegram_chat_id="@receiver")
         path = self.sample()
-        self.plugin._process_file(path)
-        self.assertEqual(self.records()[str(path)]["upload_state"], "waiting_mp")
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("must wait for MP upload")):
+            self.plugin._process_file(path)
+        self.assertFalse((self.root / "data" / "records.json").exists())
         self.assertTrue(path.exists())
-        self.assertEqual((self.root / "ed2k.txt").read_text(), "")
+        self.assertFalse((self.root / "ed2k.txt").exists())
         self.remote.update(name="整理后的电影.mkv", path="/电影/整理后的电影.mkv")
         self.plugin._enabled = True
         self.plugin._on_local_upload_transfer(self.event(path))
@@ -285,6 +286,23 @@ class LocalUploadTests(unittest.TestCase):
         self.assertTrue(self.records()[str(path)]["upload_verified"])
         self.storage.oper.upload.assert_not_called()
 
+    def test_mp_computed_record_waits_for_verification_not_another_upload(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        with patch.object(self.plugin, "_queue_local_upload") as queue:
+            self.plugin._process_file(path)
+        record = self.records()[str(path)]
+        self.assertEqual(record["upload_state"], "verifying")
+        self.assertIn("MP复制上传已完成", record["upload_note"])
+        self.assertIn("等待115内容核验", record["upload_note"])
+        self.assertFalse(record.get("upload_verified"))
+        queue.assert_called_once_with(path, record["local_identity"])
+        self.storage.oper.upload.assert_not_called()
+        self.storage.file_sha1.assert_not_called()
+        self.assertEqual((self.root / "ed2k.txt").read_text(), "")
+
     def test_unrelated_mp_events_are_ignored(self):
         self.configure(mode="mp")
         path = self.sample()
@@ -303,8 +321,82 @@ class LocalUploadTests(unittest.TestCase):
         self.plugin._on_local_upload_transfer(self.event(path))
         path.write_bytes(b"replaced local content")
         self.sha1 = hashlib.sha1(path.read_bytes()).hexdigest()
-        self.plugin._process_file(path)
-        self.assertEqual(self.records()[str(path)]["upload_state"], "waiting_mp")
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("stale MP receipt")):
+            self.plugin._process_file(path)
+            self.plugin._pending.clear()
+            self.plugin._queue_event(path, delay=0)
+        self.assertFalse(self.plugin._pending)
+        self.assertFalse((self.root / "data" / "records.json").exists())
+        self.storage.file_sha1.assert_not_called()
+
+    def test_mp_mode_does_not_watch_upload_source_directories(self):
+        self.configure(mode="mp")
+        self.assertEqual(self.plugin._local_roots(watching=True), [])
+        with patch.object(self.module, "Observer") as observer:
+            self.plugin._start_monitor()
+        observer.assert_not_called()
+
+    def test_mp_startup_does_not_watch_scan_or_hash_unuploaded_files(self):
+        self.create("not-uploaded.mkv", b"not uploaded")
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("no upload receipt")), \
+                patch.object(self.plugin, "_iter_files", side_effect=AssertionError("must not scan source")), \
+                patch.object(self.plugin, "_start_monitor") as monitor:
+            self.configure(mode="mp", enabled=True)
+        monitor.assert_not_called()
+        self.assertFalse(self.plugin._pending)
+        self.assertEqual(self.records(), {})
+
+    def test_mp_scan_only_recovers_success_receipts_without_walking_source(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        ignored = self.create("not-uploaded.mkv", b"not uploaded")
+        with patch.object(self.plugin, "_iter_files", side_effect=AssertionError("must not walk MP source")):
+            self.plugin.scan(retry_failed=True, upload_only=True)
+        self.assertFalse(self.plugin._pending)
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        self.plugin._pending.clear()
+        with patch.object(self.plugin, "_iter_files", side_effect=AssertionError("must only use MP receipts")):
+            self.plugin.scan(upload_only=True)
+        self.assertIn(str(path), self.plugin._pending)
+        self.assertNotIn(str(ignored), self.plugin._pending)
+
+    def test_mp_upload_scope_overrides_overlapping_local_monitor_without_receipt(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        self.plugin._folder = str(self.folder)
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("unuploaded file")):
+            self.plugin._queue_event(path, delay=0)
+            self.plugin.scan()
+            self.plugin._process_file(path)
+        self.assertFalse(self.plugin._pending)
+        self.assertEqual(self.records(), {})
+
+    def test_mp_mode_does_not_block_other_local_monitor_directories(self):
+        self.configure(mode="mp")
+        self.sample()
+        regular = self.root / "regular"
+        regular.mkdir()
+        path = regular / "normal.mkv"
+        path.write_bytes(b"normal")
+        self.plugin._folder = str(regular)
+        self.plugin._queue_event(path, delay=0)
+        self.assertIn(str(path), self.plugin._pending)
+        self.assertEqual(self.plugin._local_roots(watching=True), [regular])
+
+    def test_mp_upload_worker_rejects_missing_or_invalid_receipts_before_hashing(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        output, cache = self.plugin._paths()[1:]
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("must not hash before upload")):
+            self.plugin._process_local_upload(path, path.stat(), output, cache, upload_worker=True)
+            self.plugin._enabled = True
+            for changes in ({"size": 1}, {"fileid": "0"}, {"path": "relative"}, {"storage": "local"}):
+                self.plugin._on_local_upload_transfer(self.event(path, {**self.remote, **changes}))
+                self.plugin._process_local_upload(path, path.stat(), output, cache, upload_worker=True)
+        self.assertFalse(self.plugin._pending)
+        self.assertFalse(cache.exists())
+        self.storage.oper.upload.assert_not_called()
         self.storage.file_sha1.assert_not_called()
 
     def test_uploaded_cloud_is_not_rehashed_or_deleted_by_cloud_monitor(self):
@@ -467,7 +559,8 @@ class LocalUploadTests(unittest.TestCase):
     def test_disable_upload_module_does_not_publish_unverified_local_record(self):
         self.configure(mode="mp")
         path = self.sample()
-        self.plugin._process_file(path)
+        output, cache = self.plugin._paths()[1:]
+        self.plugin._prepare_local_upload(path, path.stat(), {}, str(path), output, cache)
         self.plugin._local_upload_enabled = False
         self.plugin._folder = str(self.folder)
         self.plugin._local_upload_delete_source = True

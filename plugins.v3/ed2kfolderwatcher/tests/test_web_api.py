@@ -372,6 +372,19 @@ class WebApiTests(unittest.TestCase):
         self.assertTrue(self.client.post("/local-upload/run").json()["ok"])
         self.plugin.scan.assert_called_once_with(True, True)
 
+    def test_mp_upload_endpoint_reports_receipt_only_recovery(self):
+        self.authorize()
+        self.plugin._enabled = True
+        self.plugin._local_upload_enabled = True
+        self.plugin._local_upload_mode = "mp"
+        self.plugin._worker = Mock()
+        self.plugin._worker.is_alive.return_value = True
+        result = self.client.post("/local-upload/run").json()
+        self.assertTrue(result["ok"])
+        self.assertIn("MP上传成功回执", result["message"])
+        self.assertIn("未上传文件不计算", result["message"])
+        self.plugin.scan.assert_called_once_with(True, True)
+
     def test_cloud_delete_opt_in_binds_scope_without_save_confirmation(self):
         from ed2k_api_test_package import cloud_storage
         values = {"cloud_enabled": True, "cloud_storage": "115网盘Plus", "cloud_folder": "/test", "cloud_cron": "*/10 * * * *", "cloud_delete_enabled": True, "cloud_delete_source": True, "output_enabled": True}

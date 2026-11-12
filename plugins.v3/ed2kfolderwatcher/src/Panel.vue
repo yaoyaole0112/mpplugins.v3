@@ -108,7 +108,8 @@ async function runLocal() {
   })
 }
 async function runUpload() {
-  if (!await askConfirmation(`将扫描已保存的本地计算上传目录。直传模式会调用115上传；慢速普通上传将进入独立队列。${settings.local_upload_delete_source ? '输出成功后删除本地源文件。' : ''}${settings.local_upload_delete_cloud_copy ? '输出成功后按115授权删除网盘副本。' : ''}确定继续？`)) return
+  const scope = settings.local_upload_mode === 'mp' ? '仅补扫已有MP上传成功回执的文件；未上传文件不计算，不主动整理。' : '将扫描已保存的本地计算上传目录，调用115上传；慢速普通上传进入独立队列。'
+  if (!await askConfirmation(`${scope}${settings.local_upload_delete_source ? '输出成功后删除本地源文件。' : ''}${settings.local_upload_delete_cloud_copy ? '输出成功后按115授权删除网盘副本。' : ''}确定继续？`)) return
   await work(async () => {
     const result = await request('local-upload/run', {})
     if (!result.ok) throw new Error(result.message || '本地计算上传扫描失败')
@@ -213,14 +214,14 @@ onUnmounted(() => {
       <div class="switches"><label class="switch"><input v-model="settings.local_upload_enabled" type="checkbox" :disabled="disabled">启用本地计算上传115</label></div>
       <div class="switches"><label class="switch"><input v-model="settings.local_upload_delete_source" type="checkbox" :disabled="disabled || !settings.local_upload_enabled">输出成功后删除本地原文件</label><label class="switch"><input v-model="settings.local_upload_delete_cloud_copy" type="checkbox" :disabled="disabled || !settings.local_upload_enabled || settings.local_upload_mode !== 'direct' || !settings.cloud_delete_enabled">网盘副本删除</label></div>
       <div class="fields">
-        <label>上传方式<select v-model="settings.local_upload_mode" :disabled="disabled || !settings.local_upload_enabled"><option value="mp">使用现有MP整理上传（复制）</option><option value="direct">调用115插件直接上传（不整理）</option></select><small>先计算本地ED2K与SHA1；115大小与SHA1一致后才输出、转发。</small></label>
-        <label>本地计算上传目录<input v-model="settings.local_upload_folder" class="monitor-roots" :disabled="disabled || !settings.local_upload_enabled" placeholder="/downloads/complete"><small>多个用英文逗号分隔；自动监控新增文件，每10分钟补漏。沿用通用过滤与子目录设置。</small></label>
+        <label>上传方式<select v-model="settings.local_upload_mode" :disabled="disabled || !settings.local_upload_enabled"><option value="mp">使用现有MP整理上传（复制）</option><option value="direct">调用115插件直接上传（不整理）</option></select><small>{{ settings.local_upload_mode === 'mp' ? 'MP上传成功后才本地计算；大小与SHA1核验一致后输出、转发。' : '先计算本地ED2K与SHA1；115大小与SHA1一致后才输出、转发。' }}</small></label>
+        <label>本地计算上传目录<input v-model="settings.local_upload_folder" class="monitor-roots" :disabled="disabled || !settings.local_upload_enabled" placeholder="/downloads/complete"><small>{{ settings.local_upload_mode === 'mp' ? '填写MP本地资源目录，多个用英文逗号分隔；仅接收上传成功回执，不监控新增文件。' : '多个用英文逗号分隔；自动监控新增文件，每10分钟补漏。' }}沿用通用过滤与子目录设置。</small></label>
       </div>
       <div v-if="settings.local_upload_mode === 'direct'" class="fields"><label class="full-width">115上传目标目录<input v-model="settings.local_upload_target" :disabled="disabled || !settings.local_upload_enabled" placeholder="/影视资源/本地上传"><small>保留本地根目录内相对结构；缺少目录由115插件创建，同名异内容不覆盖。</small></label></div>
-      <p v-else class="warning">不会主动发起MP整理，请沿用现有复制上传流程，并保留本地文件到计算完成。MP可独立上传，但需收到启用后的整理完成事件；移动上传或其他工具上传不适用。</p>
+      <p v-else class="warning">仅收到MP复制上传成功事件后才计算，不主动整理。请保留本地文件；每10分钟仅补扫已保存的成功回执，历史未接收回执的文件不计算。</p>
       <div v-if="settings.local_upload_mode === 'direct'" class="fields"><label>直传速度上限（MiB/s）<input v-model.number="settings.local_upload_rate" type="number" min="0" max="128" step="1" :disabled="disabled || !settings.local_upload_enabled"><small>默认8，0不限速；仅限制本插件直传，始终单文件分片上传，不影响MP整理。</small></label></div>
-      <p>计算与普通上传分离：慢速大文件占用独立上传通道，后续文件仍可继续计算及检查秒传。</p>
-      <div class="actions"><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.local_upload_enabled" @click="runUpload">立即本地计算／上传／补发</button></div>
+      <p v-if="settings.local_upload_mode === 'direct'">计算与普通上传分离：慢速大文件占用独立上传通道，后续文件仍可继续计算及检查秒传。</p>
+      <div class="actions"><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.local_upload_enabled" @click="runUpload">{{ settings.local_upload_mode === 'mp' ? '立即回执补扫／补发' : '立即本地计算／上传／补发' }}</button></div>
     </article>
 
     <article class="card" data-testid="local-source">

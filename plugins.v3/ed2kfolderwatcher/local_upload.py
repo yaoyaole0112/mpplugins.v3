@@ -94,6 +94,22 @@ class LocalUploadMixin:
             raise ValueError("本地上传回执文件损坏，请检查local_upload_receipts.json")
         return receipts
 
+    def _mp_upload_receipt(self, path, stat):
+        with self._upload_receipt_lock:
+            receipt = self._upload_receipts().get(str(path.resolve()))
+        if not receipt or receipt.get("identity") != local_identity(stat):
+            return None
+        item = receipt.get("item")
+        if not isinstance(item, dict) or item.get("storage") != "115网盘Plus" or item.get("type") != "file":
+            return None
+        if not re.fullmatch(r"[1-9][0-9]{0,63}", str(item.get("fileid") or "")) or item.get("size") != stat.st_size:
+            return None
+        try:
+            cloud_path(item.get("path"))
+        except ValueError:
+            return None
+        return receipt
+
     def _local_upload_queue_path(self):
         return Path(self.get_data_path()) / "local_upload_queue.json"
 
@@ -183,7 +199,7 @@ class LocalUploadMixin:
                 self._upload_active = {
                     "path": str(path), "name": path.name, "size": stat.st_size,
                     "bytes_read": 0, "phase": "upload", "progress_known": False,
-                    "stage": "等待115秒传／普通上传通道", "started_at": time.time(),
+                    "stage": "MP上传已完成，等待内容核验" if self._local_upload_mode == "mp" else "等待115秒传／普通上传通道", "started_at": time.time(),
                 }
                 output, cache_path = self._paths()[1:]
                 output = output if self._output_enabled else None
@@ -227,7 +243,11 @@ class LocalUploadMixin:
                 record.pop("upload_first_error", None)
                 record.pop("upload_first_error_at", None)
                 record.pop("upload_error_code", None)
-                record.update(upload_state="computed", upload_note="用户手动补扫：先核实目标，再决定是否重新上传")
+                record.update(upload_state="computed", upload_note=(
+                    "用户手动补扫：仅处理已有MP上传成功回执的文件"
+                    if self._local_upload_mode == "mp"
+                    else "用户手动补扫：先核实目标，再决定是否重新上传"
+                ))
         self._write_results(None, cache_path, records)
 
     def _record_upload_error(self, path, error):
@@ -341,24 +361,25 @@ class LocalUploadMixin:
     def _process_local_upload(self, path, stat, output, cache_path, upload_worker=False):
         from . import ed2k_link
         key = str(path.resolve())
+        receipt = None
+        if self._local_upload_mode == "mp":
+            receipt = self._mp_upload_receipt(path, stat)
+            if receipt is None:
+                return
         records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
         record, records = self._prepare_local_upload(path, stat, records, key, output, cache_path)
         if not upload_worker:
-            if self._local_upload_mode == "mp":
-                with self._upload_receipt_lock:
-                    receipt = self._upload_receipts().get(key)
-                if not receipt or receipt.get("identity") != local_identity(stat):
-                    record.update(upload_state="waiting_mp", upload_note="等待MP复制上传完成；本插件不会主动发起整理")
-                    self._write_results(output, cache_path, records)
-                    self._clear_retry_failure(key)
-                    return
-            elif not record.get("upload_verified") and not record.get("upload_attempted"):
+            if self._local_upload_mode != "mp" and not record.get("upload_verified") and not record.get("upload_attempted"):
                 self._try_local_instant_upload(path, record, output, cache_path, records)
                 records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else records
                 record = records.get(key, record)
             record.update(
-                upload_state="upload_queued",
-                upload_note=record.get("upload_note") or "ED2K已计算；等待独立115上传通道（先检查秒传，未命中再普通上传）",
+                upload_state="verifying" if self._local_upload_mode == "mp" else "upload_queued",
+                upload_note=(
+                    "MP复制上传已完成，本地ED2K已计算；等待115内容核验"
+                    if self._local_upload_mode == "mp"
+                    else record.get("upload_note") or "ED2K已计算；等待独立115上传通道（先检查秒传，未命中再普通上传）"
+                ),
             )
             self._write_results(output, cache_path, records)
             self._queue_local_upload(path, record["local_identity"])
@@ -372,13 +393,6 @@ class LocalUploadMixin:
             record.update(telegram_sent=False, telegram_target="", telegram_deliveries={})
         if not record.get("upload_verified"):
             if self._local_upload_mode == "mp":
-                with self._upload_receipt_lock:
-                    receipt = self._upload_receipts().get(key)
-                if not receipt or receipt.get("identity") != local_identity(stat):
-                    record.update(upload_state="waiting_mp", upload_note="等待MP复制上传完成；本插件不会主动发起整理")
-                    self._write_results(output, cache_path, records)
-                    self._clear_retry_failure(key)
-                    return
                 item = receipt["item"]
             else:
                 destination = self._upload_destination(path)

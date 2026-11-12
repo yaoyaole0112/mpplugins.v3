@@ -220,6 +220,8 @@ def build_routes(plugin):
         if plugin._worker is None or not plugin._worker.is_alive():
             return response({"ok": False, "message": "工作线程未运行，请重新保存设置"})
         await asyncio.to_thread(plugin.scan, True, True)
+        if plugin._local_upload_mode == "mp":
+            return response({"ok": True, "message": "MP上传成功回执补扫已入队；未上传文件不计算，不会主动发起整理"})
         return response({"ok": True, "message": "本地计算上传增量补扫已入队；先核对115目标，未确认的上传允许再次尝试"})
 
     async def cloud_browse(request: Request, principal=Depends(get_current_active_superuser)):
