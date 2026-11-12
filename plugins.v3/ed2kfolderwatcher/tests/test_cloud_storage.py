@@ -74,6 +74,7 @@ class CloudStorageTests(unittest.TestCase):
         storage = object.__new__(cloud.CloudStorage)
         storage.storage = "115网盘Plus"
         storage.oper = Mock()
+        storage.oper.get_item_strict = None
         storage.oper.client.user_id = 321
         item = {"storage": "115网盘Plus", "fileid": "123", "type": "file", "name": "a.mkv", "path": "/test/a.mkv", "size": 5, "modify_time": 1}
         storage.list = Mock(return_value=[item])

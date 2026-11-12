@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.21.0"
+    plugin_version = "1.21.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -833,7 +833,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 self._clear_retry_failure(key)
             if context["kind"] == "cloud":
                 self._maybe_delete_cloud_source(context["storage"], context["item"], record, output, cache_path, records, self._stopping)
-            elif self._local_upload_delete_source and (output is not None or self._telegram_enabled):
+            elif (self._local_upload_delete_source if record.get("upload_mode") else self._local_delete_source) and (output is not None or self._telegram_enabled):
                 path = context["path"]
                 try:
                     if record.get("upload_mode"):

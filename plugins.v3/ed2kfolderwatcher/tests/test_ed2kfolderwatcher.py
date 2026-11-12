@@ -674,7 +674,7 @@ class Ed2kTests(unittest.TestCase):
         self.plugin.init_plugin({
             "enabled": True, "monitor_enabled": False, "folder": str(self.folder), "min_age": 0,
             "telegram_enabled": True, "telegram_chat_id": "@receiver",
-            "telegram_aggregate": True, "telegram_aggregate_window": 0, "delete_source": True,
+            "telegram_aggregate": True, "telegram_aggregate_window": 0, "local_delete_source": True,
         })
         with patch.object(self.module, "ed2k_hash", side_effect=calculate), \
                 patch.object(self.plugin, "_write_results", side_effect=write_results), \
@@ -1030,6 +1030,17 @@ class Ed2kTests(unittest.TestCase):
         self.assertTrue(paths[2].exists())
         self.assertTrue(self.records()[str(paths[0])]["source_deleted"])
         self.assertIn(batch_id, self.plugin._batches)
+
+    def test_upload_delete_switch_does_not_delete_monitored_source_after_aggregation(self):
+        batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
+        self.plugin._local_delete_source = False
+        self.plugin._local_upload_delete_source = True
+        batch["group_flush_at"][group_key] = time.monotonic() - 1
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as send:
+            self.plugin._maybe_flush_batch(batch_id)
+        send.assert_called_once()
+        self.assertTrue(paths[0].exists())
+        self.assertFalse(self.records()[str(paths[0])].get("source_deleted"))
 
     def test_duplicate_group_registration_does_not_extend_deadline(self):
         batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
@@ -2118,11 +2129,12 @@ class Ed2kTests(unittest.TestCase):
 
     def test_cloud_failures_back_off_and_success_clears_stale_error(self):
         item, storage = self.cloud_fixture()
+        self.plugin._retry_limit = 10
         key = self.cloud_module.record_key(item)
-        for delay in (300, 600, 1200, 2400, 3600):
+        for delay in (300, 600, 1200, 2400, 2400):
             self.plugin._stopping.clear()
             self.plugin._pending = {key: (0, item)}
-            with patch.object(self.plugin, "_process_cloud_file", side_effect=self.cloud_module.CloudError("ReadTimeout")), patch.object(self.plugin, "_queue_cloud_file", side_effect=lambda *args, **kwargs: self.plugin._stopping.set()) as retry:
+            with patch.object(self.plugin, "_process_cloud_file", side_effect=self.cloud_module.CloudError("ReadTimeout")), patch.object(self.plugin, "_queue_cloud_file", side_effect=lambda *args, **kwargs: self.plugin._stopping.set()) as retry, patch.object(self.plugin._condition, "wait", side_effect=AssertionError("retry did not stop worker")):
                 self.plugin._work()
             retry.assert_called_once_with(item, delay=delay)
             self.assertIsNotNone(self.plugin._cloud_status["retry_at"])

@@ -1,5 +1,23 @@
 # 自动生成ED2K链接
 
+## 发布版本同步与测试修正（v1.21.1）
+
+- 同步市场清单、Python插件及前端包版本，修复仅推送代码但市场版本未更新、无法提示升级的问题。
+- Web API测试隔离模拟MoviePilot认证依赖，检查未登录和权限不足时拒绝执行插件操作；测试不连接真实115或Telegram。
+- 修复聚合发送后的本地删源开关串用：本地监控和本地计算上传分别按各自开关执行，不互相授权删除。
+- 包含下方v1.21.0的独立上传队列和分来源删源设置；升级后请重新检查各模块的独立删源开关。
+
+开发验证请在独立Python虚拟环境安装`requirements-test.txt`，不要向正在运行的MoviePilot安装测试依赖。在本插件目录执行：
+
+```sh
+python -m pip install -r requirements-test.txt
+python -m unittest discover -s tests -p 'test_*.py'
+npm ci
+npm run build
+npm run test:build
+node --test tests/test_ios_webview_detection.mjs
+```
+
 ## 独立秒传与上传队列、来源删源开关（v1.21.0）
 
 - 本地ED2K/SHA1计算完成后先快速调用115秒传校验；秒传命中后仍需严格复核目标路径、大小及SHA1。未命中或目标目录尚未就绪的文件进入可恢复的普通上传队列。

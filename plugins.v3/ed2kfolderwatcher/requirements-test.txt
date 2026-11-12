@@ -1,0 +1,10 @@
+-r requirements.txt
+APScheduler>=3.10,<4
+fastapi>=0.115,<1
+httpx>=0.27,<1
+pycryptodome>=3.20,<5
+pytest>=8,<10
+requests>=2.31,<3
+SQLAlchemy>=2,<3
+urllib3-future>=2,<3
+watchdog>=4,<7

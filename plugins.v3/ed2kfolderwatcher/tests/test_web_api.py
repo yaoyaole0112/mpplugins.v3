@@ -22,9 +22,17 @@ class WebApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         global web_api
+        def unauthenticated():
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        modules = {name: types.ModuleType(name) for name in (
+            "app", "app.api", "app.api.dependencies", "app.api.dependencies.auth", "app.log",
+        )}
+        modules["app.api.dependencies.auth"].get_current_active_superuser = unauthenticated
+        modules["app.log"].logger = Mock()
         spec = importlib.util.spec_from_file_location(f"{PACKAGE}.web_api", ROOT / "web_api.py")
         web_api = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(web_api)
+        with patch.dict(sys.modules, modules):
+            spec.loader.exec_module(web_api)
 
     def setUp(self):
         self.plugin = Mock()
@@ -231,10 +239,13 @@ class WebApiTests(unittest.TestCase):
             self.assertIs(dependency.dependency, web_api.get_current_active_superuser)
 
     def test_non_admin_forbidden(self):
-        self.app.dependency_overrides[web_api.get_current_active_superuser] = lambda: types.SimpleNamespace(is_superuser=False)
+        def forbidden():
+            raise HTTPException(status_code=403, detail="Not enough permissions")
+        self.app.dependency_overrides[web_api.get_current_active_superuser] = forbidden
         for route in self.routes:
             response = self.client.request(route["methods"][0], route["path"])
             self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.plugin.mock_calls, [])
 
     def test_settings_hide_token_and_no_cache(self):
         self.authorize()
