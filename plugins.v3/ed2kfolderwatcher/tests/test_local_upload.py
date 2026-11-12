@@ -303,6 +303,19 @@ class LocalUploadTests(unittest.TestCase):
         self.storage.file_sha1.assert_not_called()
         self.assertEqual((self.root / "ed2k.txt").read_text(), "")
 
+    def test_mp_telegram_failure_is_reported_as_rebroadcast_not_upload_retry(self):
+        self.configure(mode="mp", telegram_enabled=True, telegram_chat_id="@receiver")
+        path = self.sample()
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        output, cache = self.plugin._paths()[1:]
+        with patch.object(self.plugin, "_queue_local_upload"), patch.object(self.plugin, "_send_telegram", return_value=False):
+            self.plugin._process_local_upload(path, path.stat(), output, cache)
+            with self.assertRaisesRegex(self.cloud_module.CloudError, "MP整理上传及网盘内容校验已确认，Telegram尚未全部投递成功；重试仅补发，不重新上传"):
+                self.plugin._process_local_upload(path, path.stat(), output, cache, upload_worker=True)
+        self.storage.oper.upload.assert_not_called()
+        self.assertTrue(self.records()[str(path)]["upload_verified"])
+
     def test_unrelated_mp_events_are_ignored(self):
         self.configure(mode="mp")
         path = self.sample()

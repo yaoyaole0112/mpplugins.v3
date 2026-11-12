@@ -73,7 +73,7 @@ test('upload progress and independent delete settings are exposed', async () => 
   assert.match(page, /task\.upload_speed/)
   assert.match(page, /首次失败：\{\{ item\.upload_first_error \}\}/)
   assert.match(page, /本地／网盘队列表示 ED2K 尚未计算/)
-  assert.match(page, /upload_verified: 'ED2K已计算，115已确认秒传／上传'/)
+  assert.match(page, /upload_verified: 'ED2K已计算，115内容已确认'/)
   const panel = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
   const save = panel.match(/async function saveSettings\(\) \{([\s\S]*?)\n\}/)?.[1]
   assert.match(save, /settings\.local_upload_delete_cloud_copy/)
@@ -93,8 +93,18 @@ test('MP upload mode explains receipt-driven calculation and recovery', async ()
   const upload = source.split('data-testid="local-upload"')[1].split('</article>')[0]
   assert.match(upload, /MP上传成功后才本地计算/)
   assert.match(upload, /不监控新增文件/)
-  assert.match(upload, /每10分钟仅补扫已保存的成功回执/)
-  assert.match(upload, /立即回执补扫／补发/)
+  assert.match(upload, /本插件不发起MP整理或115上传/)
+  assert.match(upload, /v-if="settings\.local_upload_mode === 'direct'" class="actions"/)
+  assert.equal(upload.includes('立即回执补扫'), false)
+  for (const selector of ['data-testid="local-upload"', 'data-testid="local-source"', 'data-testid="cloud-source"']) {
+    const card = source.split(selector)[1].split('</article>')[0]
+    const switches = card.match(/<div class="switches">([\s\S]*?)<\/div>/)?.[1] || ''
+    assert.ok((switches.match(/class="switch"/g) || []).length >= 3, selector)
+  }
+  const page = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
+  assert.match(page, /MP回执后处理/)
+  assert.match(page, /MP整理上传成功，ED2K已计算并校验/)
+  assert.match(page, /item\.upload_mode === 'mp'/)
 })
 
 test('built federation entry resolves all public components and styles', async () => {

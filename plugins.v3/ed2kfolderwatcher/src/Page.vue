@@ -35,7 +35,7 @@ const workflowLabels = {
   upload_queued: 'ED2K已计算，排队等待115上传',
   waiting_mp: 'ED2K已计算，等待MP复制上传',
   upload_active: 'ED2K已计算，正在秒传／上传／核验',
-  upload_verified: 'ED2K已计算，115已确认秒传／上传',
+  upload_verified: 'ED2K已计算，115内容已确认',
   upload_failed: 'ED2K已计算，但115上传失败；源文件保留',
 }
 
@@ -184,7 +184,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <section class="progress-section" aria-live="polite">
       <h3>正在处理与等待队列 <span class="worker-status" :class="workerAlive ? 'worker-on' : 'worker-off'">{{ workerAlive ? '工作线程运行中' : '工作线程未运行' }}</span></h3>
-      <p class="progress-detail">本地／网盘队列表示 ED2K 尚未计算；“本地上传”队列表示 ED2K 已完成、正在等待或执行115上传。下方记录会明确标记计算完成、上传失败或115已核验。</p>
+      <p class="progress-detail">本地／网盘队列表示 ED2K 尚未计算；“本地上传”队列表示 ED2K 已完成、正在等待或执行115直传；“MP回执后处理”表示 MP 已整理上传，插件正在核验网盘副本或投递链接。</p>
       <p v-if="!progress.length" class="progress-empty">当前没有本地或网盘文件等待处理。</p>
       <ol v-else class="progress-list">
         <li v-for="(task, index) in progress" :key="task.id || `${task.source}-${task.name}-${index}`" class="progress-item" :class="task.status">
@@ -206,7 +206,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
       <li v-for="(item, index) in items" :key="`${item.link}-${index}`" class="record">
         <div class="record-heading"><h3>{{ item.name }}</h3><div class="record-actions"><button v-if="item.can_delete && item.source_status !== 'deleted'" type="button" class="delete-source" :disabled="!!deleting" @click="deleteSource(item)">{{ deleting === item.id ? '校验删除中…' : '手动删除源文件' }}</button><span class="source-status" :class="item.source_status">{{ statuses[item.source_status] || statuses.unknown }}</span></div></div>
         <p class="record-time">文件大小：{{ item.size === null || item.size === undefined ? '未知' : formatBytes(item.size) }} · 生成时间：{{ formatTime(item.generated_at) }}<span v-if="item.deleted_at"> · 删除时间：{{ formatTime(item.deleted_at) }}</span><span v-if="item.source_type === 'cloud'"> · 网盘：{{ item.storage }}<span v-if="item.cloud_delete_note"> · {{ item.cloud_delete_note }}</span><span v-else>（未记录自动删除）</span></span></p>
-        <p v-if="item.upload_state" class="workflow-state" :class="item.workflow_status">{{ workflowLabels[item.workflow_status] || '本地计算上传：处理中' }}<span v-if="item.upload_note"> · {{ item.upload_note }}</span><span v-if="item.upload_path"> · {{ item.upload_path }}</span></p>
+        <p v-if="item.upload_state" class="workflow-state" :class="item.workflow_status">{{ item.upload_mode === 'mp' && item.workflow_status === 'upload_verified' ? 'MP整理上传成功，ED2K已计算并校验' : workflowLabels[item.workflow_status] || (item.upload_mode === 'mp' ? 'MP回执后处理中' : '本地计算上传：处理中') }}<span v-if="item.upload_note"> · {{ item.upload_note }}</span><span v-if="item.upload_path"> · {{ item.upload_path }}</span></p>
         <p v-if="item.upload_cloud_delete_note" class="record-time">网盘副本：{{ item.upload_cloud_delete_note }}</p>
         <p v-if="item.upload_state === 'failed' && item.upload_first_error && item.upload_first_error !== item.upload_note" class="record-time">首次失败：{{ item.upload_first_error }}</p>
         <p v-if="item.link_valid === false" class="error">{{ item.link_error || '链接无效，需要完整源文件重新生成' }}</p>

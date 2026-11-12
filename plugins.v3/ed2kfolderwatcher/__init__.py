@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.21.2"
+    plugin_version = "1.21.3"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -2302,7 +2302,11 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         if active and (not movie_job or active.get("path") != movie_job["key"] or uploading_movie):
             items.append({**active, "source": "本地", "status": "active"})
         if upload_active:
-            items.append({**upload_active, "source": "本地上传", "status": "active"})
+            items.append({
+                **upload_active,
+                "source": "MP回执后处理" if self._local_upload_mode == "mp" else "本地上传",
+                "status": "active",
+            })
         with self._local_upload_queue_lock:
             upload_queue = sorted(
                 self._local_upload_queue.items(),
@@ -2314,7 +2318,8 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             items.append({
                 "id": hashlib.sha256(key.encode()).hexdigest(), "name": Path(key).name,
                 "size": entry.get("identity", [None])[0], "bytes_read": 0,
-                "stage": "MP上传已完成，等待内容核验" if self._local_upload_mode == "mp" else "等待独立115普通上传通道", "source": "本地上传",
+                "stage": "等待115内容核验／链接投递" if self._local_upload_mode == "mp" else "等待独立115普通上传通道",
+                "source": "MP回执后处理" if self._local_upload_mode == "mp" else "本地上传",
                 "status": "queued", "queue_position": position, "can_cancel": False,
             })
         if cloud_status.get("file"):
@@ -2574,6 +2579,8 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                               "source_type": record.get("source_type", "local"), "storage": record.get("storage", "local"),
                               "source_path": record.get("source_path", path),
                               "upload_state": record.get("upload_state", ""), "upload_note": record.get("upload_note", ""),
+                              "upload_mode": record.get("upload_mode", ""),
+                              "telegram_sent": record.get("telegram_sent", False),
                               "workflow_status": workflow_status,
                               "upload_first_error": record.get("upload_first_error", ""),
                               "upload_path": record.get("upload_cloud_item", {}).get("path", ""),

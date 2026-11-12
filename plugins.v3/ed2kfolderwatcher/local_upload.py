@@ -223,8 +223,12 @@ class LocalUploadMixin:
                                 records = json.loads(records_path.read_text(encoding="utf-8")) if records_path.exists() else {}
                                 record = records.get(key)
                                 if record:
-                                    record.update(upload_state="queued",
-                                                  upload_note=f"{failure}；{delay}秒后在独立上传队列重试")
+                                    retry_note = (
+                                        f"{failure}；{delay}秒后重试Telegram投递，不会重新上传"
+                                        if self._local_upload_mode == "mp"
+                                        else f"{failure}；{delay}秒后在独立上传队列重试"
+                                    )
+                                    record.update(upload_state="queued", upload_note=retry_note)
                                     self._write_results(None, records_path, records)
                                 self._save_local_upload_queue()
                                 self._local_upload_queue_wake.set()
@@ -479,7 +483,9 @@ class LocalUploadMixin:
         self._write_results(output, cache_path, records)
         delivered = not self._telegram_enabled or record.get("telegram_sent")
         if not delivered:
-            raise CloudError("上传已确认，Telegram尚未全部投递成功；重试仅补发，不重复上传")
+            if self._local_upload_mode == "mp":
+                raise CloudError("MP整理上传及网盘内容校验已确认，Telegram尚未全部投递成功；重试仅补发，不重新上传")
+            raise CloudError("115上传已确认，Telegram尚未全部投递成功；重试仅补发，不重复上传")
         if self._local_upload_delete_cloud_copy and not record.get("upload_cloud_copy_deleted"):
             self._delete_uploaded_cloud_copy(record, output, cache_path, records)
         if self._local_upload_delete_source and (output is not None or self._telegram_enabled):
