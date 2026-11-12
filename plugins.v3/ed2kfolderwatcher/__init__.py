@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.21.7"
+    plugin_version = "1.21.8"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -2725,7 +2725,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             field("VTextField", "telegram_thread_id", "Telegram 话题线程 ID", placeholder="普通私聊、群组、频道留空", hint="仅用于带话题的超级群组。", persistent_hint=True),
             {"component": "VCardTitle", "text": "FUCK孤本"},
             field("VSwitch", "ordinary_upload_telegram_enabled", "普通上传完成后独立转发"),
-            field("VTextarea", "ordinary_upload_telegram_targets", "普通上传专用接收目标（多个）", rows=1, placeholder="@孤本接收机器人, @频道用户名", hint="仅对本插件未命中秒传、实际普通上传并核验成功的文件发送；与上方ED2K自动转发目标相互独立。", persistent_hint=True),
+            field("VTextarea", "ordinary_upload_telegram_targets", "普通上传专用接收目标（多个）", rows=1, placeholder="@孤本接收机器人, @频道用户名", hint="仅对已确认普通上传且核验成功的文件发送；MP模式依据115插件上传回执判断，回执缺失时不发送。", persistent_hint=True),
             field("VTextField", "ordinary_upload_telegram_thread_id", "默认话题线程 ID（可选）", placeholder="不使用默认话题时留空", hint="指定单个目标话题可在目标后加 |话题ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
         ]}], {"enabled": False, "movie_series_parallel": self._movie_series_parallel, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "local_delete_source": False, "local_upload_delete_source": False, "local_upload_delete_cloud_copy": False, "cloud_delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "ordinary_upload_telegram_enabled": False, "ordinary_upload_telegram_targets": "", "ordinary_upload_telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared", "local_upload_enabled": False, "local_upload_mode": "mp", "local_upload_folder": "", "local_upload_target": "", "local_upload_rate": self._local_upload_rate}

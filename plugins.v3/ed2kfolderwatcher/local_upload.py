@@ -287,10 +287,38 @@ class LocalUploadMixin:
             if not self._eligible(path):
                 logger.warning(f"自动生成ED2K链接：MP上传完成但本地文件已移走或不符合过滤条件：{path.name}；此模式请使用复制上传并保留本地文件")
                 return
-            receipt = {"item": target, "identity": local_identity(path.stat()), "received_at": time.time()}
+            identity = local_identity(path.stat())
+            upload_kind = None
+            try:
+                from app.plugins.p115disk.upload_receipts import consume_upload_result
+
+                result = consume_upload_result(path, identity, target)
+                if result:
+                    upload_kind = result.get("upload_kind")
+            except Exception as failure:
+                logger.warning(
+                    f"自动生成ED2K链接：无法读取115上传类型回执；FUCK孤本转发将跳过："
+                    f"{path.name}（{type(failure).__name__}）"
+                )
+            receipt = {
+                "item": target,
+                "identity": identity,
+                "upload_kind": upload_kind if upload_kind in {"instant", "ordinary"} else "unknown",
+                "received_at": time.time(),
+            }
             with self._upload_receipt_lock:
                 receipts = self._upload_receipts()
-                receipts[str(path.resolve())] = receipt
+                receipt_key = str(path.resolve())
+                previous = receipts.get(receipt_key)
+                if (
+                    previous
+                    and previous.get("identity") == identity
+                    and saved_item(previous.get("item")) == target
+                    and previous.get("upload_kind") in {"instant", "ordinary"}
+                    and receipt["upload_kind"] == "unknown"
+                ):
+                    receipt["upload_kind"] = previous["upload_kind"]
+                receipts[receipt_key] = receipt
                 self._atomic_write(Path(self.get_data_path()) / "local_upload_receipts.json", json.dumps(receipts, ensure_ascii=False))
             self._queue_event(path)
         except (OSError, ValueError):
@@ -372,6 +400,13 @@ class LocalUploadMixin:
                 return
         records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
         record, records = self._prepare_local_upload(path, stat, records, key, output, cache_path)
+        if self._local_upload_mode == "mp" and receipt:
+            record["upload_kind"] = (
+                receipt.get("upload_kind")
+                if receipt.get("upload_kind") in {"instant", "ordinary"}
+                else "unknown"
+            )
+            self._write_results(output, cache_path, records)
         if not upload_worker:
             if self._local_upload_mode != "mp" and not record.get("upload_verified") and not record.get("upload_attempted"):
                 self._try_local_instant_upload(path, record, output, cache_path, records)
@@ -490,6 +525,15 @@ class LocalUploadMixin:
                         raise CloudError("115上传未返回成功回执，保留本地文件，后续先查询目标，不自动重复上传")
                     record["upload_kind"] = "instant" if instant_reused[0] else "ordinary"
                     item = saved_item(uploaded)
+                    try:
+                        from app.plugins.p115disk.upload_receipts import consume_upload_result
+
+                        consume_upload_result(path, record["local_identity"], item)
+                    except Exception as failure:
+                        logger.debug(
+                            f"自动生成ED2K链接：清理直传类型回执失败：{path.name} "
+                            f"({type(failure).__name__})"
+                        )
                 if cloud_path(item.get("path")) != destination:
                     raise CloudError("115上传回执路径与目标不一致，保留本地文件")
             record.update(upload_state="verifying", upload_note="校验115文件大小与SHA1")

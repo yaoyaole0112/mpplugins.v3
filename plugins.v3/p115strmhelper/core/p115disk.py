@@ -261,7 +261,15 @@ class P115DiskCore:
                         file_size=file_size,
                         elapsed_time=elapsed_time,
                     )
-                    return self._p115_api.get_item(target_path)
+                    uploaded_item = self._p115_api.get_item(target_path)
+                    if uploaded_item:
+                        try:
+                            from app.plugins.p115disk.upload_receipts import record_upload_result
+
+                            record_upload_result(local_path, uploaded_item, "instant")
+                        except Exception as error:
+                            logger.warning(f"【P115Disk】保存ED2K上传类型回执失败: {error}")
+                    return uploaded_item
 
                 # 判断是等待秒传还是直接上传
                 upload_module_skip_upload_wait_size = int(
@@ -535,7 +543,15 @@ class P115DiskCore:
                     target_name,
                     int(elapsed_time),
                 )
-                return self._p115_api.get_item(target_path)
+                uploaded_item = self._p115_api.get_item(target_path)
+                if uploaded_item:
+                    try:
+                        from app.plugins.p115disk.upload_receipts import record_upload_result
+
+                        record_upload_result(local_path, uploaded_item, "ordinary")
+                    except Exception as error:
+                        logger.warning(f"【P115Disk】保存ED2K上传类型回执失败: {error}")
+                return uploaded_item
             else:
                 logger.error(
                     f"【P115Disk】{target_name} 上传失败，状态码: {result.status}"

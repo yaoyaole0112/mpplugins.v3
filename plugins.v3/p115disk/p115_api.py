@@ -1062,7 +1062,15 @@ class P115Api:
             if init_resp.get("reuse"):
                 logger.info(f"【P115Disk】{target_name} 秒传成功")
                 progress_callback(100)
-                return self.get_item(target_path)
+                uploaded_item = self.get_item(target_path)
+                if uploaded_item:
+                    try:
+                        from .upload_receipts import record_upload_result
+
+                        record_upload_result(local_path, uploaded_item, "instant")
+                    except Exception as error:
+                        logger.warn(f"【P115Disk】保存ED2K上传类型回执失败: {error}")
+                return uploaded_item
 
             logger.debug(f"【P115Disk】上传初始化结果: {init_resp}")
 
@@ -1227,7 +1235,15 @@ class P115Api:
 
             if result.status == 200:
                 logger.info(f"【P115Disk】{target_name} 上传成功")
-                return self.get_item(target_path)
+                uploaded_item = self.get_item(target_path)
+                if uploaded_item:
+                    try:
+                        from .upload_receipts import record_upload_result
+
+                        record_upload_result(local_path, uploaded_item, "ordinary")
+                    except Exception as error:
+                        logger.warn(f"【P115Disk】保存ED2K上传类型回执失败: {error}")
+                return uploaded_item
             else:
                 logger.error(
                     f"【P115Disk】{target_name} 上传失败，状态码: {result.status}"
