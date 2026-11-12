@@ -269,7 +269,7 @@ onUnmounted(() => {
 
     <article class="card">
       <h3>FUCK孤本</h3>
-      <label class="switch"><input v-model="settings.ordinary_upload_telegram_enabled" type="checkbox" :disabled="disabled">普通上传完成后独立转发</label>
+      <div class="switches"><label class="switch"><input v-model="settings.ordinary_upload_telegram_enabled" type="checkbox" :disabled="disabled">普通上传完成后独立转发</label></div>
       <p>仅当插件未命中115秒传、实际普通上传并完成大小与SHA1核验后，才发送该文件链接；与上方接收目标及开关独立。复用已授权的 Telegram 个人账号。</p>
       <div class="fields telegram-targets"><label>普通上传专用接收目标（多个）<textarea v-model="settings.ordinary_upload_telegram_targets" :disabled="disabled" rows="1" placeholder="@孤本接收机器人, @频道用户名, -1001234567890" /><small>支持用户名、Chat ID或 t.me 链接，最多50个；逗号、分号或换行分隔。</small><small>指定话题：@群组用户名|123。</small></label><label>默认话题线程 ID（可选）<input v-model="settings.ordinary_upload_telegram_thread_id" :disabled="disabled" placeholder="普通私聊、频道留空"><small>用于未单独指定话题的目标。</small></label></div>
     </article>

@@ -76,6 +76,7 @@ test('ordinary-upload forwarding has an independent Telegram target and hides st
   const panel = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
   const page = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
   assert.match(panel, /<h3>FUCK孤本<\/h3>/)
+  assert.match(panel, /<h3>FUCK孤本<\/h3>[\s\S]*?<div class="switches"><label class="switch"><input v-model="settings\.ordinary_upload_telegram_enabled"/)
   assert.match(panel, /ordinary_upload_telegram_targets/)
   assert.match(panel, /普通上传专用接收目标/)
   assert.equal(page.includes('v-if="item.upload_path"'), false)
