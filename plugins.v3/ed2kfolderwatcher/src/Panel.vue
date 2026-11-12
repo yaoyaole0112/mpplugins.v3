@@ -208,7 +208,7 @@ onUnmounted(() => {
       <p v-if="settings.include_subdirectories === null" class="warning">本地与网盘的子目录设置不一致，请选择后保存。</p>
       <div class="fields"><label v-for="field in textFields" :key="field.key">{{ field.label }}<input v-model="settings[field.key]" :type="field.type || 'text'" :step="field.step" :min="field.type === 'number' ? 0 : undefined" :placeholder="field.placeholder" :disabled="disabled"><small>{{ field.hint }}</small></label></div>
       <div class="fields"><label>失败后自动重试次数<input v-model.number="settings.retry_limit" type="number" min="0" max="10" step="1" :disabled="disabled"><small>0 表示不自动重试；最多10次，不含首次处理。可用增量补扫手动重试。</small></label><label>文件稳定等待秒数<input v-model="settings.min_age" type="number" min="0" :disabled="disabled"><small>文件停止变化后等待时间，请监控完成目录。</small></label></div>
-      <div class="fields"><label class="full-width">TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；留空自动选择路径。关闭后不删除已有文件。</small></label></div>
+      <div class="fields"><label>TXT 输出路径<input v-model="settings.output" :disabled="disabled || !settings.output_enabled" placeholder="留空自动选择 ed2k.txt 路径"><small>本地与网盘链接合并输出；留空自动选择路径。关闭后不删除已有文件。</small></label></div>
       <p>本地与网盘共用计算位：{{ settings.movie_series_parallel ? '电影与剧集最多两路，同类仍单路。' : '所有文件单路计算。' }}</p>
     </article>
 
@@ -217,11 +217,11 @@ onUnmounted(() => {
       <div class="switches"><label class="switch"><input v-model="settings.local_upload_enabled" type="checkbox" :disabled="disabled">启用本地计算上传115</label><label class="switch"><input v-model="settings.local_upload_delete_source" type="checkbox" :disabled="disabled || !settings.local_upload_enabled">输出成功后删除本地原文件</label><label v-if="settings.local_upload_mode === 'direct'" class="switch"><input v-model="settings.local_upload_delete_cloud_copy" type="checkbox" :disabled="disabled || !settings.local_upload_enabled">网盘副本删除</label></div>
       <div class="fields">
         <label>上传方式<select v-model="settings.local_upload_mode" :disabled="disabled || !settings.local_upload_enabled"><option value="mp">使用现有MP整理上传（复制）</option><option value="direct">调用115插件直接上传（不整理）</option></select><small>{{ settings.local_upload_mode === 'mp' ? 'MP上传成功后才本地计算；大小与SHA1核验一致后输出、转发。' : '先计算本地ED2K与SHA1；115大小与SHA1一致后才输出、转发。' }}</small></label>
+        <label v-if="settings.local_upload_mode === 'direct'">直传速度上限（MiB/s）<input v-model.number="settings.local_upload_rate" type="number" min="0" max="128" step="1" :disabled="disabled || !settings.local_upload_enabled"><small>默认8，0不限速；仅限制本插件直传，始终单文件分片上传，不影响MP整理。</small></label>
         <label>本地计算上传目录<input v-model="settings.local_upload_folder" class="monitor-roots" :disabled="disabled || !settings.local_upload_enabled" placeholder="/downloads/complete"><small>{{ settings.local_upload_mode === 'mp' ? '填写MP本地资源目录，多个用英文逗号分隔；仅接收上传成功回执，不监控新增文件。' : '多个用英文逗号分隔；自动监控新增文件，每10分钟补漏。' }}沿用通用过滤与子目录设置。</small></label>
+        <label v-if="settings.local_upload_mode === 'direct'">115上传目标目录<input v-model="settings.local_upload_target" :disabled="disabled || !settings.local_upload_enabled" placeholder="/影视资源/本地上传"><small>保留本地根目录内相对结构；缺少目录由115插件创建，同名异内容不覆盖。</small></label>
       </div>
-      <div v-if="settings.local_upload_mode === 'direct'" class="fields"><label class="full-width">115上传目标目录<input v-model="settings.local_upload_target" :disabled="disabled || !settings.local_upload_enabled" placeholder="/影视资源/本地上传"><small>保留本地根目录内相对结构；缺少目录由115插件创建，同名异内容不覆盖。</small></label></div>
-      <p v-else class="warning">MP按原有目录监控规则整理并复制上传；本插件不发起MP整理或115上传，只在收到MP成功回执后计算、核验并输出／转发。保留本地文件以完成计算及校验。</p>
-      <div v-if="settings.local_upload_mode === 'direct'" class="fields"><label>直传速度上限（MiB/s）<input v-model.number="settings.local_upload_rate" type="number" min="0" max="128" step="1" :disabled="disabled || !settings.local_upload_enabled"><small>默认8，0不限速；仅限制本插件直传，始终单文件分片上传，不影响MP整理。</small></label></div>
+      <p v-if="settings.local_upload_mode === 'mp'" class="warning">MP按原有目录监控规则整理并复制上传；本插件不发起MP整理或115上传，只在收到MP成功回执后计算、核验并输出／转发。保留本地文件以完成计算及校验。</p>
       <p v-if="settings.local_upload_mode === 'direct'">计算与普通上传分离：慢速大文件占用独立上传通道，后续文件仍可继续计算及检查秒传。</p>
       <div v-if="settings.local_upload_mode === 'direct'" class="actions"><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.local_upload_enabled" @click="runUpload">立即本地计算／上传／补发</button></div>
     </article>

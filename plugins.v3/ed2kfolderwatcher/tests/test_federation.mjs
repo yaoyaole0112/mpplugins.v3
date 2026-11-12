@@ -43,7 +43,7 @@ test('common settings put toggles before deletion and pair inputs without an emp
   assert.match(common, /电影\/剧集两路并发/)
   assert.match(source, /const configFields = \[[^\n]*'movie_series_parallel'/)
   assert.match(common, /v-model.number="settings.retry_limit"[\s\S]*?v-model="settings.min_age"[\s\S]*?<\/div>/)
-  assert.match(common, /<label class="full-width">TXT 输出路径/)
+  assert.match(common, /<label>TXT 输出路径/)
   assert.match(source, /\.fields \.full-width\{grid-column:1 \/ -1\}/)
   assert.equal(source.includes('共用一个计算线程'), false)
 })
@@ -64,6 +64,12 @@ test('local upload card precedes local monitoring and offers MP and direct modes
   assert.match(source, /request\('local-upload\/run'/)
   assert.match(upload, /v-model.number="settings.local_upload_rate"/)
   assert.match(upload, /默认8，0不限速/)
+  const fields = upload.split('<div class="fields">')[1].split('</div>')[0]
+  const positions = ['上传方式', '直传速度上限（MiB/s）', '本地计算上传目录', '115上传目标目录'].map(label => fields.indexOf(label))
+  assert.ok(positions.every(position => position >= 0))
+  assert.deepEqual(positions, [...positions].sort((left, right) => left - right))
+  assert.equal(fields.includes('115上传目标目录<input class="full-width"'), false)
+  assert.equal(upload.includes('v-if="settings.local_upload_mode === \'direct\'" class="fields"'), false)
 })
 
 test('upload progress and independent delete settings are exposed', async () => {
