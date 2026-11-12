@@ -48,6 +48,7 @@ from app.sdk.utilities import StringUtils
 
 from .models import BrushFlowSettingsPayload, BrushTaskPayload, BrushTaskStatePayload
 from .models import ChannelDedupSettingsPayload
+from .active_dedup import download_complete, download_files, download_state, paths_agree
 from .channel_dedup import (
     filename_title_aliases, long_title_prefix_matches, normalize_title,
     parse_candidate_file, parse_channel_messages, parse_torrent_files,
@@ -255,7 +256,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.3.6"
+    plugin_version = "6.3.7"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -280,6 +281,11 @@ class BrushFlow(_PluginBase):
             self._channel_stopping = True
             with old_poll_lock:
                 pass
+        old_cancel_lock = getattr(self, "_channel_cancel_lock", None)
+        if old_cancel_lock:
+            self._channel_stopping = True
+            with old_cancel_lock:
+                pass
         raw_config = config or {}
         self._task_context = threading.local()
         self._task_locks: Dict[str, threading.Lock] = {}
@@ -289,6 +295,8 @@ class BrushFlow(_PluginBase):
         self._runtime: Dict[str, dict] = {}
         self._subscribe_infos: Dict[str, List[str]] = {}
         self._channel_dedup_lock = threading.Lock()
+        self._channel_cancel_lock = threading.Lock()
+        self._channel_cancel_offset = 0
         self._channel_state_lock = threading.RLock()
         self._channel_dedup_retry_after = 0
         self._channel_identity_cache = {}
@@ -305,6 +313,7 @@ class BrushFlow(_PluginBase):
         try:
             channel_config = ChannelDedupSettingsPayload.model_validate({
                 "enabled": raw_config.get("channel_dedup_enabled", False),
+                "cancel_downloading": raw_config.get("channel_dedup_cancel_downloading", False),
                 "channels": raw_config.get("channel_dedup_channels", []),
                 "attributes": raw_config.get(
                     "channel_dedup_attributes", ["resolution", "effects", "codec", "source", "fps"]
@@ -317,6 +326,7 @@ class BrushFlow(_PluginBase):
             channel_config = ChannelDedupSettingsPayload()
             logger.warning(f"频道去重配置无效，已使用默认值：{err}")
         self._channel_dedup_enabled = channel_config.enabled
+        self._channel_dedup_cancel_downloading = channel_config.cancel_downloading
         self._channel_dedup_channels = channel_config.channels
         self._channel_dedup_attributes = channel_config.attributes
         self._channel_dedup_size_tolerance_pct = channel_config.size_tolerance_pct
@@ -599,6 +609,12 @@ class BrushFlow(_PluginBase):
                     "kwargs": {"minutes": 1},
                 }
             )
+            if getattr(self, "_channel_dedup_cancel_downloading", False):
+                services.append({
+                    "id": "ChannelDedupCancel", "name": "下载中频道重复检查",
+                    "trigger": "interval", "func": self.cancel_channel_duplicates,
+                    "kwargs": {"minutes": 1},
+                })
         return services
 
     def stop_service(self) -> None:
@@ -607,6 +623,10 @@ class BrushFlow(_PluginBase):
         poll_lock = getattr(self, "_channel_dedup_lock", None)
         if poll_lock:
             with poll_lock:
+                pass
+        cancel_lock = getattr(self, "_channel_cancel_lock", None)
+        if cancel_lock:
+            with cancel_lock:
                 pass
         with getattr(self, "_runtime_lock", threading.Lock()):
             for runtime in getattr(self, "_runtime", {}).values():
@@ -646,6 +666,7 @@ class BrushFlow(_PluginBase):
                 payload.enabled and not self._channel_dedup_enabled
             )
             self._channel_dedup_enabled = payload.enabled
+            self._channel_dedup_cancel_downloading = payload.cancel_downloading
             self._channel_dedup_channels = payload.channels
             self._channel_dedup_attributes = payload.attributes
             self._channel_dedup_size_tolerance_pct = payload.size_tolerance_pct
@@ -973,6 +994,7 @@ class BrushFlow(_PluginBase):
             "enabled": bool(getattr(self, "_enabled", False)),
             "show_sidebar_nav": bool(getattr(self, "_show_sidebar_nav", True)),
             "channel_dedup_enabled": bool(getattr(self, "_channel_dedup_enabled", False)),
+            "channel_dedup_cancel_downloading": bool(getattr(self, "_channel_dedup_cancel_downloading", False)),
             "channel_dedup_channels": list(getattr(self, "_channel_dedup_channels", [])),
             "channel_dedup_attributes": list(getattr(self, "_channel_dedup_attributes", [])),
             "channel_dedup_size_tolerance_pct": getattr(self, "_channel_dedup_size_tolerance_pct", 5),
@@ -1018,6 +1040,7 @@ class BrushFlow(_PluginBase):
             state = self._channel_dedup_state
             payload = {
                 "enabled": self._channel_dedup_enabled,
+                "cancel_downloading": bool(getattr(self, "_channel_dedup_cancel_downloading", False)),
                 "channels": list(self._channel_dedup_channels),
                 "attributes": list(self._channel_dedup_attributes),
                 "size_tolerance_pct": self._channel_dedup_size_tolerance_pct,
@@ -3205,6 +3228,334 @@ class BrushFlow(_PluginBase):
     def _save_inflight_entries(self) -> None:
         self.save_data("channel_dedup_inflight", self._inflight_entries)
 
+    def _channel_cancel_settings(self) -> str:
+        with self._channel_state_lock:
+            return json.dumps([
+                self._channel_dedup_enabled, getattr(self, "_channel_dedup_cancel_downloading", False),
+                self._channel_dedup_channels, self._channel_dedup_attributes,
+                self._channel_dedup_size_tolerance_pct, self._channel_dedup_identity_aliases,
+            ], sort_keys=True, ensure_ascii=False)
+
+    def cancel_channel_duplicates(self) -> None:
+        """Only mutate exclusively managed, unfinished downloads using published channel evidence."""
+        if (not self.get_state() or getattr(self, "_channel_stopping", False)
+                or not getattr(self, "_channel_dedup_enabled", False)
+                or not getattr(self, "_channel_dedup_cancel_downloading", False)
+                or not self._channel_dedup_attributes or not self._channel_dedup_channels):
+            return
+        if not self._channel_cancel_lock.acquire(blocking=False):
+            return
+        locks = []
+        brush_locked = False
+        try:
+            # No waiting while holding brush/task locks: busy tasks are retried on the next tick.
+            if not self._brush_lock.acquire(blocking=False):
+                return
+            brush_locked = True
+            available = set()
+            for task_id in sorted(self._task_configs):
+                lock = self._task_locks.setdefault(task_id, threading.Lock())
+                if not lock.acquire(blocking=False):
+                    continue
+                locks.append(lock)
+                available.add(task_id)
+            with self._channel_state_lock:
+                self._prune_channel_dedup_records()
+                records = copy.deepcopy(self._channel_dedup_state.get("records") or [])
+                attributes = list(self._channel_dedup_attributes)
+                tolerance = self._channel_dedup_size_tolerance_pct
+                signature, generation = self._channel_cancel_settings(), self._channel_generation
+            episodes = {}
+            for record in records:
+                for number in record.get("episodes") or []:
+                    episodes.setdefault((record.get("season"), number), []).append(record)
+            task_data, owners = {}, {}
+            for task in self._task_configs.values():
+                task_data[task.id] = self._get_task_data(task.id, "torrents") or {}
+                for torrent_hash, row in task_data[task.id].items():
+                    if not row.get("deleted"):
+                        owners.setdefault((task.downloader, torrent_hash.lower()), []).append((task, row))
+            eligible = [
+                (name, torrent_hash, entries[0][0], entries[0][1])
+                for (name, torrent_hash), entries in owners.items()
+                if len(entries) == 1 and entries[0][0].enabled and entries[0][0].id in available
+                and entries[0][1].get("hit_and_run") is False and not entries[0][0].site_hr_active
+                and (records or entries[0][1].get("channel_dedup_cancel_pending"))
+                and (not download_complete(entries[0][1], "qbittorrent")
+                     or entries[0][1].get("channel_dedup_cancel_pending"))
+            ]
+            if not eligible:
+                return
+            offset = self._channel_cancel_offset % len(eligible)
+            batch = (eligible[offset:] + eligible[:offset])[:50]
+            self._channel_cancel_offset = (offset + len(batch)) % len(eligible)
+            grouped = {}
+            for name, torrent_hash, task, row in batch:
+                grouped.setdefault(name, []).append((torrent_hash, task, row))
+            for name, entries in grouped.items():
+                helper = DownloaderHelper()
+                service = helper.get_service(name=name)
+                if not service or not service.instance:
+                    continue
+                kind = next((value for value in ("qbittorrent", "transmission")
+                             if helper.is_downloader(value, service=service)), None)
+                if not kind:
+                    continue
+                downloader = service.instance
+                try:
+                    torrents, error = downloader.get_torrents(ids=[item[0] for item in entries])
+                    if error:
+                        continue
+                    live = {self._channel_live_hash(item, kind): item for item in torrents or []}
+                    for torrent_hash, task, row in entries:
+                        if not self._channel_cancel_current(generation, signature):
+                            return
+                        pending = row.get("channel_dedup_cancel_pending") or {}
+                        if torrent_hash not in live:
+                            if pending.get("phase") == "removing":
+                                self._finish_channel_cancel(task, torrent_hash, row, task_data[task.id], removed=True)
+                            continue
+                        torrent = live[torrent_hash]
+                        if not self._channel_cancel_owned(torrent, kind, task):
+                            continue
+                        try:
+                            self._cancel_published_files(
+                                downloader, kind, torrent_hash, torrent, task, row, task_data[task.id],
+                                episodes, attributes, tolerance, signature, generation,
+                            )
+                        except Exception as err:
+                            if row.get("channel_dedup_cancel_pending"):
+                                row["channel_dedup_cancel_error"] = type(err).__name__
+                                self._save_task_data(task.id, "torrents", task_data[task.id])
+                            logger.warning(f"下载中频道去重 [{task.name}] {torrent_hash} 处理失败，保留任务与文件：{type(err).__name__}")
+                except Exception as err:
+                    logger.warning(f"下载中频道去重核验下载器 [{name}] 失败：{type(err).__name__}")
+        finally:
+            for lock in reversed(locks):
+                lock.release()
+            if brush_locked:
+                self._brush_lock.release()
+            self._channel_cancel_lock.release()
+
+    @staticmethod
+    def _channel_live_hash(torrent: Any, kind: str) -> str:
+        value = torrent.get("hash", "") if kind == "qbittorrent" else getattr(torrent, "hashString", "")
+        return str(value).lower()
+
+    def _channel_cancel_owned(self, torrent: Any, kind: str, task: BrushTaskConfig) -> bool:
+        tags = (str(torrent.get("tags") or "").split(",") if kind == "qbittorrent"
+                else getattr(torrent, "labels", None) or [])
+        tags = {str(tag).strip() for tag in tags}
+        excluded = {tag.strip() for tag in (task.delete_except_tags or "").split(",") if tag.strip()}
+        owners = [other for other in self._task_configs.values()
+                  if other.downloader == task.downloader and other.brush_tag in tags]
+        return (task.enabled and self._task_configs.get(task.id) is task
+                and task.brush_tag in tags and not excluded.intersection(tags)
+                and len(owners) == 1 and owners[0].id == task.id)
+
+    def _channel_cancel_current(self, generation: int, signature: str) -> bool:
+        return (not self._channel_stopping and self.get_state()
+                and self._channel_generation == generation and self._channel_cancel_settings() == signature)
+
+    def _published_file_matches(self, files: List[dict], task: BrushTaskConfig, torrent_hash: str,
+                                row: dict, episodes: dict, attributes: List[str], tolerance: float) -> dict:
+        with self._inflight_lock:
+            self._refresh_inflight_identity_bindings()
+            queued = copy.deepcopy(self._inflight_entries.get(
+                self._inflight_key(task.downloader, torrent_hash), {}
+            ).get("records") or [])
+        matches = {}
+        with self._channel_state_lock:
+            bindings = {normalize_title(name): int(value)
+                        for name, value in self._channel_dedup_identity_aliases.items()}
+        for item in files:
+            if not item["wanted"] or item["complete"]:
+                continue
+            candidate = parse_candidate_file(item["path"], item["size"], row.get("title") or "",
+                                             spec_hint=row.get("description") or "")
+            if not candidate or getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None):
+                continue
+            evidence = [record for record in queued if paths_agree(record.get("path"), item["path"])
+                        and record.get("season") == candidate["season"]
+                        and record.get("episodes") == candidate["episodes"]
+                        and (record.get("specs") or {}).get("size") == item["size"]]
+            if not candidate.get("tmdb_id") and len(evidence) == 1:
+                candidate["tmdb_id"] = evidence[0].get("tmdb_id")
+            bound_ids = {bindings[name] for name in candidate.get("title_keys") or [] if name in bindings}
+            if not candidate.get("tmdb_id") and bound_ids:
+                if len(bound_ids) != 1:
+                    continue
+                candidate["tmdb_id"] = bound_ids.pop()
+            found = self._match_channel_candidate(candidate, episodes, attributes, tolerance, row.get("title") or "")
+            if found and all(found):
+                matches[item["path"]] = found
+        return matches
+
+    def _cancel_published_files(self, downloader: Any, kind: str, torrent_hash: str, torrent: Any,
+                                task: BrushTaskConfig, row: dict, task_data: dict, episodes: dict,
+                                attributes: List[str], tolerance: float, signature: str, generation: int) -> None:
+        state = download_state(torrent, kind)
+        pending = row.get("channel_dedup_cancel_pending") or {}
+        if pending and pending.get("settings") != signature:
+            logger.warning(f"下载中频道去重 [{task.name}] {torrent_hash} 上次处理后设置已改变，保留当前状态待人工检查")
+            return
+        completed = download_complete(torrent, kind)
+        if not state and not (pending and completed):
+            return
+        files = download_files(downloader.get_files(torrent_hash), kind)
+        if not files:
+            return
+        previous = set(pending.get("paths") or [])
+        # Recover a verified selection after a process exit or an ambiguous API response.
+        deselected = {item["path"] for item in files if not item["wanted"]}
+        applied = previous & deselected if pending.get("phase") == "selecting" else set()
+        if applied and (previous.issubset(applied) or completed):
+            if not self._channel_cancel_current(generation, signature):
+                return
+            pending["paths"] = sorted(applied)
+            self._save_task_data(task.id, "torrents", task_data)
+            if pending.get("resume") and (state == "paused" or completed) and not downloader.start_torrents(torrent_hash):
+                return
+            self._finish_channel_cancel(task, torrent_hash, row, task_data, removed=False)
+            return
+        if completed:
+            self._abandon_channel_cancel(downloader, torrent_hash, task, row, task_data, signature, generation)
+            return
+        matches = self._published_file_matches(files, task, torrent_hash, row, episodes, attributes, tolerance)
+        if not self._channel_cancel_current(generation, signature):
+            return
+        if not matches:
+            if applied:
+                pending["paths"] = sorted(applied)
+                self._save_task_data(task.id, "torrents", task_data)
+                if pending.get("resume") and state == "paused" and not downloader.start_torrents(torrent_hash):
+                    return
+                self._finish_channel_cancel(task, torrent_hash, row, task_data, removed=False)
+            elif pending:
+                self._abandon_channel_cancel(downloader, torrent_hash, task, row, task_data, signature, generation)
+            return
+        row["channel_dedup_cancel_pending"] = pending = {
+            "phase": "selecting" if applied else "prepared", "paths": sorted(applied | set(matches)), "settings": signature,
+            "resume": pending.get("resume", state == "running"), "at": time.time(),
+        }
+        self._save_task_data(task.id, "torrents", task_data)
+        if not self._channel_cancel_current(generation, signature):
+            return
+        if not downloader.stop_torrents(torrent_hash):
+            return
+        paused = None
+        for attempt in range(3):
+            current, error = downloader.get_torrents(ids=[torrent_hash])
+            if error or len(current or []) != 1:
+                return
+            paused = current[0]
+            if self._channel_live_hash(paused, kind) != torrent_hash:
+                return
+            if download_complete(paused, kind):
+                self._abandon_channel_cancel(downloader, torrent_hash, task, row, task_data, signature, generation)
+                return
+            if download_state(paused, kind) == "paused":
+                break
+            if attempt < 2:
+                time.sleep(0.15)
+        else:
+            logger.warning(f"下载中频道去重 [{task.name}] {torrent_hash} 未确认暂停或已完成，不执行取消")
+            return
+        if (not self._channel_cancel_owned(paused, kind, task)
+                or not self._channel_cancel_current(generation, signature)):
+            return
+        paused_files = download_files(downloader.get_files(torrent_hash), kind)
+        if not paused_files or {(item["id"], item["path"], item["size"]) for item in files} != {
+            (item["id"], item["path"], item["size"]) for item in paused_files
+        }:
+            return
+        matches = self._published_file_matches(paused_files, task, torrent_hash, row, episodes, attributes, tolerance)
+        if not self._channel_cancel_current(generation, signature):
+            return
+        if not matches:
+            if applied:
+                pending["paths"] = sorted(applied)
+                pending["phase"] = "selecting"
+                self._save_task_data(task.id, "torrents", task_data)
+                if pending.get("resume") and not downloader.start_torrents(torrent_hash):
+                    return
+                self._finish_channel_cancel(task, torrent_hash, row, task_data, removed=False)
+            else:
+                self._abandon_channel_cancel(downloader, torrent_hash, task, row, task_data, signature, generation)
+            return
+        targets = [item for item in paused_files if item["path"] in matches]
+        remaining = [item for item in paused_files if item["wanted"] and self._video_file(item["path"])
+                     and item["path"] not in matches]
+        pending.update({"paths": sorted(applied | set(matches)), "phase": "selecting" if remaining else "removing"})
+        self._save_task_data(task.id, "torrents", task_data)
+        for item in targets:
+            matched = matches[item["path"]]
+            logger.info(
+                f"下载中频道去重命中 [{task.name}] {item['path']}；频道消息 "
+                f"{', '.join(sorted({str(record.get('channel')) + '/' + str(record.get('message_id')) for record in matched}))}；"
+                f"匹配规格 {', '.join(attributes)}；仅取消未完成文件，保留本地数据"
+            )
+        if not self._channel_cancel_current(generation, signature) or not task.enabled:
+            return
+        if not remaining:
+            if not downloader.delete_torrents(ids=torrent_hash, delete_file=False):
+                return
+            current, error = downloader.get_torrents(ids=[torrent_hash])
+            if not error and not current:
+                self._finish_channel_cancel(task, torrent_hash, row, task_data, removed=True)
+            return
+        ids = [item["id"] for item in targets]
+        ok = (downloader.set_files(torrent_hash=torrent_hash, file_ids=ids, priority=0)
+              if kind == "qbittorrent" else downloader.set_unwanted_files(torrent_hash, ids))
+        if not ok:
+            return
+        verified = download_files(downloader.get_files(torrent_hash), kind)
+        if not verified or {(item["id"], item["path"], item["size"], item["wanted"]) for item in verified} != {
+            (item["id"], item["path"], item["size"], False if item["path"] in matches else item["wanted"])
+            for item in paused_files
+        }:
+            logger.warning(f"下载中频道去重 [{task.name}] {torrent_hash} 未确认逐文件取消结果，保持暂停待核验")
+            return
+        if not self._channel_cancel_current(generation, signature):
+            return
+        if pending["resume"] and not downloader.start_torrents(torrent_hash):
+            return
+        self._finish_channel_cancel(task, torrent_hash, row, task_data, removed=False)
+
+    def _abandon_channel_cancel(self, downloader: Any, torrent_hash: str, task: BrushTaskConfig,
+                                row: dict, task_data: dict, signature: str, generation: int) -> None:
+        if not self._channel_cancel_current(generation, signature):
+            return
+        pending = row.get("channel_dedup_cancel_pending") or {}
+        if pending.get("resume") and not downloader.start_torrents(torrent_hash):
+            return
+        row.pop("channel_dedup_cancel_pending", None)
+        self._save_task_data(task.id, "torrents", task_data)
+        logger.info(f"下载中频道去重 [{task.name}] {torrent_hash} 暂停复核发现已完成或无可取消文件，保留任务")
+
+    def _finish_channel_cancel(self, task: BrushTaskConfig, torrent_hash: str, row: dict,
+                               task_data: dict, removed: bool) -> None:
+        pending = row.pop("channel_dedup_cancel_pending", {})
+        paths = pending.get("paths") or []
+        row.pop("channel_dedup_cancel_error", None)
+        history = list(row.get("channel_dedup_cancelled_files") or [])
+        row["channel_dedup_cancelled_files"] = (history + [{"path": path, "at": time.time()} for path in paths])[-100:]
+        if removed:
+            row.update({"deleted": True, "deleted_time": time.time(), "delete_reason": "下载中频道同规格重复（保留文件）"})
+        self._save_task_data(task.id, "torrents", task_data)
+        with self._inflight_lock:
+            key = self._inflight_key(task.downloader, torrent_hash)
+            if removed:
+                self._inflight_entries.pop(key, None)
+            elif key in self._inflight_entries:
+                records = self._inflight_entries[key].get("records") or []
+                self._inflight_entries[key]["records"] = [
+                    record for record in records if not any(paths_agree(record.get("path"), path) for path in paths)
+                ]
+            self._save_inflight_entries()
+        self._recalculate_statistics(task.id)
+        logger.info(f"下载中频道去重 [{task.name}] {torrent_hash}：{'已移除未完成任务' if removed else '已取消重复分集'} {len(paths)} 个文件，本地文件保留")
+
     def _cache_inflight_file_identity(self, candidate: dict, title: str) -> None:
         """Persist only explicit bindings or identities already verified in the local cache."""
         if candidate.get("tmdb_id"):
@@ -3683,27 +4034,7 @@ class BrushFlow(_PluginBase):
                     f"{match_source}规格推断 {item['path']}：未标动态范围的常规 "
                     f"{candidate['specs']['resolution']} H.264 WEB 资源按 SDR 命名约定比较，非媒体实测"
                 )
-            matched_records = []
-            for episode in candidate["episodes"]:
-                one_episode = {**candidate, "episodes": [episode]}
-                plausible = [
-                    record for record in episode_records.get((candidate["season"], episode), [])
-                    if specs_match(one_episode, record, attributes, tolerance)
-                    and ("size" not in attributes or set(candidate["episodes"]) == set(record.get("episodes") or []))
-                ]
-                matched_record = next(
-                    (record for record in plausible if same_release(one_episode, record, attributes, tolerance)), None
-                )
-                if not matched_record and any(record.get("tmdb_id") for record in plausible) and not candidate.get("tmdb_id"):
-                    identity = self._channel_candidate_tmdb_identity(item["path"], title)
-                    if identity:
-                        candidate["tmdb_id"] = identity
-                        one_episode["tmdb_id"] = identity
-                        matched_record = next(
-                            (record for record in plausible if same_release(one_episode, record, attributes, tolerance)),
-                            None,
-                        )
-                matched_records.append(matched_record)
+            matched_records = self._match_channel_candidate(candidate, episode_records, attributes, tolerance, title)
             if matched_records and all(matched_records):
                 excluded.add(item["path"])
                 matched_count += 1
@@ -3726,6 +4057,26 @@ class BrushFlow(_PluginBase):
             "matched_video_count": matched_count,
             "missing_spec_count": missing_count,
         }
+
+    def _match_channel_candidate(self, candidate: dict, episode_records: dict,
+                                 attributes: List[str], tolerance: float, title: str) -> List[Optional[dict]]:
+        """One identity/spec contract for pre-add filtering and unfinished-file cancellation."""
+        matches = []
+        for episode in candidate["episodes"]:
+            one_episode = {**candidate, "episodes": [episode]}
+            plausible = [
+                record for record in episode_records.get((candidate["season"], episode), [])
+                if specs_match(one_episode, record, attributes, tolerance)
+                and ("size" not in attributes or set(candidate["episodes"]) == set(record.get("episodes") or []))
+            ]
+            match = next((row for row in plausible if same_release(one_episode, row, attributes, tolerance)), None)
+            if not match and any(row.get("tmdb_id") for row in plausible) and not candidate.get("tmdb_id"):
+                identity = self._channel_candidate_tmdb_identity(candidate["path"], title)
+                if identity:
+                    candidate["tmdb_id"] = one_episode["tmdb_id"] = identity
+                    match = next((row for row in plausible if same_release(one_episode, row, attributes, tolerance)), None)
+            matches.append(match)
+        return matches
 
     @staticmethod
     def _dedup_exclusion_summary(selection: dict) -> str:

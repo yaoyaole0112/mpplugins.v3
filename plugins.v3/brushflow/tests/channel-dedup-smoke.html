@@ -28,7 +28,7 @@
   let settings = {
     enabled: true, channels: ['@example_channel'], attributes: ['resolution', 'effects', 'codec', 'source'],
     size_tolerance_pct: 5, record_count: 2, last_poll_at: Date.now() / 1000, last_error: '',
-    unknown_policy: 'exclude', identity_aliases: {},
+    unknown_policy: 'exclude', identity_aliases: {}, cancel_downloading: false,
     poll_interval_seconds: 300, next_poll_at: Date.now() / 1000 + 300,
     records: [1, 2].map(number => ({
       channel: '@example_channel', message_id: 42, file_key: `file-${number}`,

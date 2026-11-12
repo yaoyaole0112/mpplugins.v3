@@ -51,7 +51,7 @@ const channelDedupError = ref('')
 const channelDedup = ref({ enabled: false, channels: [], attributes: [], records: [] })
 const channelDedupDraft = ref({
   enabled: false, channels: '', attributes: [], size_tolerance_pct: 5,
-  unknown_policy: 'exclude', identity_aliases: '',
+  unknown_policy: 'exclude', identity_aliases: '', cancel_downloading: false,
 })
 const channelUnknownPolicies = [
   { value: 'exclude', title: '排除不下载' },
@@ -287,6 +287,7 @@ async function loadChannelDedup({ resetDraft = true } = {}) {
     if (resetDraft) {
       channelDedupDraft.value = {
         enabled: Boolean(data?.enabled),
+        cancel_downloading: Boolean(data?.cancel_downloading),
         channels: (data?.channels || []).join('\n'),
         attributes: [...(data?.attributes || [])],
         size_tolerance_pct: Number(data?.size_tolerance_pct ?? 5),
@@ -312,6 +313,7 @@ async function saveChannelDedup() {
   try {
     const data = unwrapResponse(await props.api.post(`${pluginBase.value}/channel-dedup/settings`, {
       enabled: channelDedupDraft.value.enabled,
+      cancel_downloading: channelDedupDraft.value.cancel_downloading,
       channels: channelDedupDraft.value.channels,
       attributes: channelDedupDraft.value.attributes,
       size_tolerance_pct: channelDedupDraft.value.size_tolerance_pct,
@@ -1037,6 +1039,14 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             label="候选缺少勾选规格时"
             :disabled="!channelDedupDraft.enabled || !channelDedupDraft.attributes.length"
             hide-details
+          />
+          <VSwitch
+            v-model="channelDedupDraft.cancel_downloading"
+            label="取消下载中的频道重复资源"
+            color="primary"
+            hide-details
+            inset
+            :disabled="!channelDedupDraft.enabled || !channelDedupDraft.attributes.length"
           />
           <VTextarea
             v-model="channelDedupDraft.identity_aliases"

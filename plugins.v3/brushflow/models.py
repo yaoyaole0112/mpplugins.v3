@@ -268,6 +268,7 @@ class ChannelDedupSettingsPayload(BaseModel):
 
     enabled: bool = False
     channels: list[str] = Field(default_factory=list, max_length=50)
+    cancel_downloading: bool = False
     attributes: list[str] = Field(default_factory=lambda: ["resolution", "effects", "codec", "source", "fps"])
     size_tolerance_pct: float = Field(5, ge=0, le=20)
     unknown_policy: Literal["exclude", "allow"] = "exclude"
