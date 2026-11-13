@@ -58,6 +58,14 @@ class Fake115:
         self.bucket = bucket
 
 
+class Instant115(Fake115):
+    def upload(self, target, local_path, new_name=None):
+        response = self.client.upload_file_init(filesha1=self._calc_sha1(local_path))
+        if not response.get("reuse"):
+            response = self.client.upload_file_init(filesha1=self._calc_sha1(local_path))
+        return {"path": "/upload/" + new_name} if response.get("reuse") else None
+
+
 class UploadAdapterTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -139,6 +147,57 @@ class UploadAdapterTests(unittest.TestCase):
         self.assertIs(Fake115.upload.__globals__["global_vars"], global_vars)
         self.assertIs(Fake115.upload.__globals__["Bucket"], Bucket)
         self.raw_bucket.abort_multipart_upload.assert_not_called()
+
+    def test_actual_instant_hit_after_initial_miss_is_not_ordinary(self):
+        oper = Instant115()
+        oper.client.upload_file_init.side_effect = [
+            {"state": True, "reuse": False}, {"state": True, "reuse": True},
+        ]
+        result_kind = Mock()
+        result = self.adapter.upload_with_digest(
+            oper, None, self.path, self.digest, self.identity, self.stopping,
+            self.reported.append, self.checkpoint, 0, on_result=result_kind,
+        )
+        self.assertTrue(result)
+        result_kind.assert_called_once_with("instant")
+        self.assertEqual(oper.client.upload_file_init.call_count, 2)
+        self.raw_bucket.init_multipart_upload.assert_not_called()
+
+    def test_ordinary_kind_requires_successful_multipart_completion(self):
+        result_kind = Mock()
+        self.adapter.upload_with_digest(
+            self.oper, None, self.path, self.digest, self.identity, self.stopping,
+            self.reported.append, self.checkpoint, 0, on_result=result_kind,
+        )
+        result_kind.assert_called_once_with("ordinary")
+        self.oper.fail_part = True
+        result_kind.reset_mock()
+        with self.assertRaises(TimeoutError):
+            self.adapter.upload_with_digest(
+                self.oper, None, self.path, self.digest, self.identity, self.stopping,
+                self.reported.append, self.checkpoint, 0, on_result=result_kind,
+            )
+        result_kind.assert_not_called()
+
+    def test_missing_successful_upload_evidence_stays_unknown(self):
+        self.raw_bucket.complete_multipart_upload.return_value = types.SimpleNamespace(status=500)
+        result_kind = Mock()
+        self.adapter.upload_with_digest(
+            self.oper, None, self.path, self.digest, self.identity, self.stopping,
+            self.reported.append, self.checkpoint, 0, on_result=result_kind,
+        )
+        result_kind.assert_called_once_with("unknown")
+
+    def test_missing_successful_file_receipt_does_not_report_kind(self):
+        oper = Instant115()
+        oper.client.upload_file_init.return_value = {"state": True, "reuse": False}
+        result_kind = Mock()
+        result = self.adapter.upload_with_digest(
+            oper, None, self.path, self.digest, self.identity, self.stopping,
+            self.reported.append, self.checkpoint, 0, on_result=result_kind,
+        )
+        self.assertIsNone(result)
+        result_kind.assert_not_called()
 
     def test_failure_aborts_only_incomplete_multipart_and_releases_gate(self):
         self.oper.fail_part = True

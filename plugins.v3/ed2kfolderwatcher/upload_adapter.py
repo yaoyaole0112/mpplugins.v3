@@ -92,7 +92,7 @@ def resolve_uploader(oper):
 
 
 def upload_with_digest(oper, target, path, digest, identity, stopping, progress, checkpoint, rate_limit=8, on_start=None,
-                      before_upload=None):
+                      before_upload=None, on_result=None):
     from .local_upload import local_identity
     last_check = [0.0]
 
@@ -109,6 +109,7 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
         check()
     pending = {}
     confirmed = [0]
+    upload_kind = ["unknown"]
     next_write = [None]
     try:
         check(force=True)
@@ -186,7 +187,14 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
                         begin_upload()
                     if name == "upload_file_init" and "read_range_bytes_or_hash" in kwargs:
                         kwargs["read_range_bytes_or_hash"] = range_hash
-                    return value(*args, **kwargs)
+                    response = value(*args, **kwargs)
+                    if name == "upload_file_init":
+                        upload_kind[0] = (
+                            "instant" if isinstance(response, dict)
+                            and response.get("state") is not False and response.get("reuse") is True
+                            else "unknown"
+                        )
+                    return response
                 return call
 
         def range_hash(value):
@@ -263,6 +271,7 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
                 result = self.bucket.complete_multipart_upload(key, upload_id, *args, **kwargs)
                 if result.status == 200:
                     pending.pop((key, upload_id), None)
+                    upload_kind[0] = "ordinary"
                 return result
 
             def abort_multipart_upload(self, key, upload_id):
@@ -275,7 +284,10 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
         scoped.__kwdefaults__ = function.__kwdefaults__
         proxy = OperProxy()
         receiver = helper(p115_api=proxy) if helper is not None else proxy
-        return scoped(receiver, target, path, new_name=path.name)
+        uploaded = scoped(receiver, target, path, new_name=path.name)
+        if uploaded and on_result is not None:
+            on_result(upload_kind[0])
+        return uploaded
     finally:
         for (key, upload_id), bucket in tuple(pending.items()):
             try:

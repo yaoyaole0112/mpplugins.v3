@@ -400,6 +400,16 @@ class LocalUploadMixin:
                 return
         records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
         record, records = self._prepare_local_upload(path, stat, records, key, output, cache_path)
+        storage = CloudStorage("115网盘Plus")
+        scope = self._upload_scope(storage)
+        if record.get("upload_scope") != scope:
+            record.update(upload_scope=scope, upload_mode=self._local_upload_mode, upload_state="computed", upload_verified=False)
+            record.pop("upload_cloud_item", None)
+            record.pop("upload_attempted", None)
+            record.pop("upload_kind", None)
+            record.update(telegram_sent=False, telegram_target="", telegram_deliveries={})
+            record.update(ordinary_upload_telegram_sent=False, ordinary_upload_telegram_target="",
+                          ordinary_upload_telegram_deliveries={})
         if self._local_upload_mode == "mp" and receipt:
             record["upload_kind"] = (
                 receipt.get("upload_kind")
@@ -423,16 +433,6 @@ class LocalUploadMixin:
             self._write_results(output, cache_path, records)
             self._queue_local_upload(path, record["local_identity"])
             return
-        storage = CloudStorage("115网盘Plus")
-        scope = self._upload_scope(storage)
-        if record.get("upload_scope") != scope:
-            record.update(upload_scope=scope, upload_mode=self._local_upload_mode, upload_state="computed", upload_verified=False)
-            record.pop("upload_cloud_item", None)
-            record.pop("upload_attempted", None)
-            record.pop("upload_kind", None)
-            record.update(telegram_sent=False, telegram_target="", telegram_deliveries={})
-            record.update(ordinary_upload_telegram_sent=False, ordinary_upload_telegram_target="",
-                          ordinary_upload_telegram_deliveries={})
         if not record.get("upload_verified"):
             if self._local_upload_mode == "mp":
                 item = receipt["item"]
@@ -460,6 +460,10 @@ class LocalUploadMixin:
                     from app.schemas import FileItem
                     target = FileItem(storage="115网盘Plus", path=str(PurePosixPath(destination).parent), type="dir")
                     instant_reused = [False]
+                    upload_result = ["unknown"]
+
+                    def capture_upload_result(kind):
+                        upload_result[0] = kind if kind in {"instant", "ordinary"} else "unknown"
 
                     def recheck_instant_upload():
                         self._upload_stage(path, "上传通道空闲，重新检查115秒传")
@@ -513,7 +517,7 @@ class LocalUploadMixin:
                             storage.oper, target, path, record["local_sha1"], record["local_identity"],
                             self._stopping, lambda percent: self._upload_progress(path, percent),
                             self._flush_due_groups, self._local_upload_rate, on_start=mark_started,
-                            before_upload=recheck_instant_upload,
+                            before_upload=recheck_instant_upload, on_result=capture_upload_result,
                         )
                     except CloudError:
                         raise
@@ -523,17 +527,22 @@ class LocalUploadMixin:
                     record = records[key]
                     if not uploaded:
                         raise CloudError("115上传未返回成功回执，保留本地文件，后续先查询目标，不自动重复上传")
-                    record["upload_kind"] = "instant" if instant_reused[0] else "ordinary"
+                    record["upload_kind"] = "instant" if instant_reused[0] else upload_result[0]
                     item = saved_item(uploaded)
                     try:
                         from app.plugins.p115disk.upload_receipts import consume_upload_result
 
-                        consume_upload_result(path, record["local_identity"], item)
+                        result = consume_upload_result(path, record["local_identity"], item)
+                        if (record["upload_kind"] == "unknown" and result
+                                and result.get("upload_kind") in {"instant", "ordinary"}):
+                            record["upload_kind"] = result["upload_kind"]
                     except Exception as failure:
                         logger.debug(
                             f"自动生成ED2K链接：清理直传类型回执失败：{path.name} "
                             f"({type(failure).__name__})"
                         )
+                    kind_label = {"instant": "秒传", "ordinary": "普通上传"}.get(record["upload_kind"], "未知，不作孤本转发")
+                    logger.info(f"自动生成ED2K链接：115最终上传方式：{kind_label}：{path.name}")
                 if cloud_path(item.get("path")) != destination:
                     raise CloudError("115上传回执路径与目标不一致，保留本地文件")
             record.update(upload_state="verifying", upload_note="校验115文件大小与SHA1")
@@ -666,6 +675,8 @@ class LocalUploadMixin:
                 )
             record.update(rapid_check="hit" if hit is True else "miss" if hit is False else "unavailable")
             record.pop("rapid_check_started", None)
+            if hit is True:
+                record["upload_kind"] = "instant"
             record["upload_note"] = (
                 "115快速秒传命中；等待独立核验与链接输出" if hit is True
                 else "115未命中秒传；已转入独立普通上传队列" if hit is False

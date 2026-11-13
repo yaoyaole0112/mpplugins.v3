@@ -46,14 +46,18 @@ class LocalUploadTests(unittest.TestCase):
         storage_patch.start()
         self.addCleanup(storage_patch.stop)
         self.storage.oper.upload.side_effect = self.upload
-        def invoke(oper, target, path, *args, on_start=None, before_upload=None):
+        self.actual_upload_kind = "ordinary"
+        def invoke(oper, target, path, *args, on_start=None, before_upload=None, on_result=None):
             if before_upload:
                 instant_item = before_upload()
                 if instant_item is not None:
                     return instant_item
             if on_start:
                 on_start()
-            return oper.upload(target, path, new_name=path.name)
+            result = oper.upload(target, path, new_name=path.name)
+            if result and on_result:
+                on_result(self.actual_upload_kind)
+            return result
         upload_patch = patch.object(self.upload_module, "upload_with_digest", side_effect=invoke)
         upload_patch.start()
         self.addCleanup(upload_patch.stop)
@@ -137,6 +141,47 @@ class LocalUploadTests(unittest.TestCase):
         self.assertEqual(record["upload_kind"], "ordinary")
         self.assertTrue(record["ordinary_upload_telegram_sent"])
         self.assertEqual(send.call_args.kwargs["target"], ("@private_receiver", None))
+
+    def test_final_instant_result_overrides_precheck_miss_without_ordinary_forward(self):
+        self.configure(ordinary_upload_telegram_enabled=True, ordinary_upload_telegram_targets="@private_receiver")
+        path = self.sample()
+        self.actual_upload_kind = "instant"
+        folder = {"storage": "115网盘Plus", "fileid": "555", "type": "dir", "path": "/upload", "name": "upload"}
+        self.storage.oper.get_item_strict.side_effect = lambda target: folder if str(target) == "/upload" else None
+        with patch.object(self.upload_module, "instant_upload_check", return_value=False), \
+                patch.object(self.plugin, "_send_telegram_user", return_value=True) as send:
+            self.plugin._process_file(path)
+        record = self.records()[str(path)]
+        self.assertEqual(record["rapid_check"], "miss")
+        self.assertEqual(record["upload_kind"], "instant")
+        self.assertTrue(record["upload_verified"])
+        send.assert_not_called()
+
+    def test_unknown_upload_result_does_not_guess_ordinary(self):
+        self.configure(ordinary_upload_telegram_enabled=True, ordinary_upload_telegram_targets="@private_receiver")
+        path = self.sample()
+        self.actual_upload_kind = "unknown"
+        with patch.object(self.plugin, "_send_telegram_user", return_value=True) as send:
+            self.plugin._process_file(path)
+        record = self.records()[str(path)]
+        self.assertEqual(record["upload_kind"], "unknown")
+        self.assertTrue(record["upload_verified"])
+        send.assert_not_called()
+
+    def test_mp_ordinary_receipt_survives_initial_scope_binding(self):
+        self.configure(mode="mp", ordinary_upload_telegram_enabled=True,
+                       ordinary_upload_telegram_targets="@private_receiver")
+        path = self.sample()
+        output, cache = self.plugin._paths()[1:]
+        receipt = {"item": self.remote, "upload_kind": "ordinary"}
+        with patch.object(self.plugin, "_mp_upload_receipt", return_value=receipt), \
+                patch.object(self.plugin, "_send_telegram_user", return_value=True) as send:
+            self.plugin._process_local_upload(path, path.stat(), output, cache, upload_worker=True)
+        record = self.records()[str(path)]
+        self.assertEqual(record["upload_kind"], "ordinary")
+        self.assertTrue(record["ordinary_upload_telegram_sent"])
+        send.assert_called_once()
+        self.storage.oper.upload.assert_not_called()
 
     def test_upload_stages_reset_hash_percent_and_expose_real_bytes(self):
         self.configure()
