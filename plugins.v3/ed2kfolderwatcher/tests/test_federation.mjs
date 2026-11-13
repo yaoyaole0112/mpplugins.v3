@@ -142,6 +142,12 @@ test('record summaries use current structured status and never append stale phas
   assert.match(page, /不代表接收机器人已完成后续处理/)
 })
 
+test('workflow backgrounds fit content while wrapping within narrow record cards', async () => {
+  const page = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
+  assert.match(page, /\.workflow-state\{display:inline-flex;max-width:100%;box-sizing:border-box;/)
+  assert.match(page, /\.workflow-steps\{display:flex;min-width:0;flex-wrap:wrap;/)
+})
+
 test('built federation entry resolves all public components and styles', async () => {
   const source = await readFile(entryUrl, 'utf8')
   assert.equal(source.includes('${__federation_expose_'), false)

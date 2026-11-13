@@ -21,6 +21,13 @@ class WorkflowSummaryTests(unittest.TestCase):
             row, problem, {"state": normal, "text": normal}, {"state": ordinary, "text": ordinary}, enabled, failure,
         )
 
+    def test_forwarding_steps_use_updated_labels(self):
+        for kind in ("ordinary", "instant", "unknown"):
+            result = self.summary(upload_kind=kind)
+            self.assertEqual([step["label"] for step in result["steps"]],
+                             ["计算", "网盘校验", "转发链接", "孤本转存"])
+        self.assertIn("孤本转存", self.summary(upload_kind="unknown")["label"])
+
     def test_success_replaces_all_three_stale_notes(self):
         for note in ("等待115内容核验", "Telegram尚未全部投递成功；120秒后重试", "115云端大小与SHA1校验通过"):
             for state in ("queued", "verifying", "failed", "verified"):

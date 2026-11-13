@@ -33,7 +33,7 @@ def workflow_summary(record, problem, telegram, ordinary, ordinary_enabled, fail
         steps.append({"key": "verify", "label": "网盘校验",
                       "text": "需重新校验" if problem else "已通过" if verified else "失败" if verify_failed else "待完成",
                       "state": "failed" if problem or verify_failed else "success" if verified else "pending"})
-    steps.append({"key": "telegram", "label": "常规TG", **telegram})
+    steps.append({"key": "telegram", "label": "转发链接", **telegram})
     if uploaded:
         if not ordinary_enabled:
             orphan = {"state": "inactive", "text": "未启用"}
@@ -43,7 +43,7 @@ def workflow_summary(record, problem, telegram, ordinary, ordinary_enabled, fail
             orphan = {"state": "pending", "text": "上传方式未知，未执行"}
         else:
             orphan = ordinary
-        steps.append({"key": "ordinary", "label": "孤本", **orphan})
+        steps.append({"key": "ordinary", "label": "孤本转存", **orphan})
     state, label, detail = "pending", "处理中", ""
     if problem:
         state, label = "failed", "链接无效，需重新计算"
@@ -63,7 +63,7 @@ def workflow_summary(record, problem, telegram, ordinary, ordinary_enabled, fail
     elif any(step["state"] == "pending" for step in steps):
         label = "等待转发完成"
         if uploaded and ordinary_enabled and record.get("upload_kind") not in {"instant", "ordinary"}:
-            label = "待确认上传方式，孤本未执行"
+            label = "待确认上传方式，孤本转存未执行"
         if record.get("upload_state") == "failed" and (
             telegram["state"] == "pending"
             or (ordinary_enabled and record.get("upload_kind") == "ordinary" and ordinary["state"] == "pending")
