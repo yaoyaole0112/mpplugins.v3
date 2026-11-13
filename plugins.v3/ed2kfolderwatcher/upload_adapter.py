@@ -4,7 +4,6 @@ import threading
 import time
 import types
 import re
-import hashlib
 from pathlib import Path
 
 from .cloud_storage import CloudError
@@ -24,11 +23,10 @@ def instant_upload_check(oper, path, digest, size, target_id):
     upload_file_init = getattr(client, "upload_file_init", None)
 
     def read_range(value):
-        match = re.search(r"(?<!\d)(\d+)\s*[-:]\s*(\d+)(?!\d)", str(value or ""))
-        if match:
-            start, end = map(int, match.groups())
-        else:
-            start, end = 0, min(size, 1024 * 1024) - 1
+        match = re.fullmatch(r"(?:bytes=)?(\d+)\s*-\s*(\d+)", str(value or "").strip())
+        if not match:
+            raise CloudError("115秒传抽样校验范围无效，不使用其他范围代替")
+        start, end = map(int, match.groups())
         if not 0 <= start <= end < size or end - start > 1024 * 1024:
             raise CloudError("115秒传抽样校验范围超出文件")
         checksum = hashlib.sha1()
@@ -110,6 +108,9 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
     pending = {}
     confirmed = [0]
     upload_kind = ["unknown"]
+    body_checksum = [hashlib.sha1()]
+    body_size = [0]
+    body_parts = [0]
     next_write = [None]
     try:
         check(force=True)
@@ -247,8 +248,30 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
                 return result
 
             def upload_part(self, key, upload_id, part_number, **kwargs):
-                check()
+                check(force=True)
+                data = kwargs.get("data")
+                expected_size = getattr(data, "len", None)
+                if (part_number != body_parts[0] + 1 or not isinstance(expected_size, int)
+                        or isinstance(expected_size, bool) or expected_size <= 0
+                        or body_size[0] + expected_size > identity[0]):
+                    raise CloudError("115上传分片顺序或长度不一致，停止提交并保留本地文件")
+                checksum = body_checksum[0].copy()
+                read_size = [0]
                 last_size = [0]
+
+                class UploadBody:
+                    len = expected_size
+
+                    def read(self, amount=None):
+                        check()
+                        chunk = data.read(amount)
+                        if not chunk:
+                            return b""
+                        if not isinstance(chunk, bytes) or read_size[0] + len(chunk) > expected_size:
+                            raise CloudError("115上传分片内容或长度异常，停止提交并保留本地文件")
+                        checksum.update(chunk)
+                        read_size[0] += len(chunk)
+                        return chunk
 
                 def on_bytes(consumed, total):
                     delta = max(0, consumed - last_size[0])
@@ -262,12 +285,21 @@ def upload_with_digest(oper, target, path, digest, identity, stopping, progress,
                     report((confirmed[0] + consumed) * 100 / identity[0], flush=False)
 
                 pending[(key, upload_id)] = self
+                kwargs["data"] = UploadBody()
                 result = self.bucket.upload_part(key, upload_id, part_number, **kwargs, progress_callback=on_bytes)
+                check(force=True)
+                if read_size[0] != expected_size:
+                    raise CloudError("115上传分片读取不足，停止提交并保留本地文件")
+                body_checksum[0] = checksum
+                body_size[0] += read_size[0]
+                body_parts[0] += 1
                 confirmed[0] += last_size[0]
                 return result
 
             def complete_multipart_upload(self, key, upload_id, *args, **kwargs):
                 check(force=True)
+                if body_size[0] != identity[0] or body_checksum[0].hexdigest().lower() != digest.lower():
+                    raise CloudError("115实际上传字节数或SHA1与本地计算结果不一致，取消提交并保留本地文件")
                 result = self.bucket.complete_multipart_upload(key, upload_id, *args, **kwargs)
                 if result.status == 200:
                     pending.pop((key, upload_id), None)

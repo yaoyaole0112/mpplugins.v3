@@ -1,6 +1,8 @@
 import hashlib
+import os
 import sys
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -110,6 +112,35 @@ class LocalUploadTests(unittest.TestCase):
         self.assertTrue(path.exists())
         self.assertFalse(self.plugin.recent_records()["items"][0]["upload_note"] == "")
 
+    def test_direct_upload_waits_for_recent_change_even_with_preserved_old_mtime(self):
+        self.configure()
+        path = self.sample()
+        now = time.time()
+        os.utime(path, (now - 3600, now - 3600))
+        self.plugin._min_age = 15
+        with patch.object(self.module, "ed2k_hash", wraps=self.module.ed2k_hash) as hashing:
+            self.plugin._process_file(path)
+            hashing.assert_not_called()
+            self.storage.oper.upload.assert_not_called()
+            self.assertFalse((self.root / "data" / "records.json").exists())
+            self.assertIn(str(path), self.plugin._pending)
+            with patch.object(self.module.time, "time", return_value=now + 30):
+                self.plugin._process_file(path)
+            hashing.assert_called_once()
+        self.assertTrue(self.records()[str(path)]["upload_verified"])
+
+    def test_mp_success_receipt_does_not_add_direct_upload_change_wait(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        now = time.time()
+        os.utime(path, (now - 3600, now - 3600))
+        self.plugin._min_age = 15
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        self.plugin._process_file(path)
+        self.assertTrue(self.records()[str(path)]["upload_verified"])
+        self.storage.oper.upload.assert_not_called()
+
     def test_upload_channel_rechecks_instant_upload_before_ordinary_transfer(self):
         self.configure()
         path = self.sample()
@@ -117,10 +148,14 @@ class LocalUploadTests(unittest.TestCase):
             "storage": "115网盘Plus", "fileid": "555", "type": "dir",
             "name": "upload", "path": "/upload",
         }
+        visible = [False]
         self.storage.oper.get_item_strict.side_effect = lambda target: (
-            folder if str(target) == "/upload" else dict(self.remote)
+            folder if str(target) == "/upload" else dict(self.remote) if visible[0] else None
         )
-        with patch.object(self.upload_module, "instant_upload_check", return_value=True) as check, \
+        def hit(*args):
+            visible[0] = True
+            return True
+        with patch.object(self.upload_module, "instant_upload_check", side_effect=hit) as check, \
                 patch.object(self.plugin, "_send_telegram", return_value=True):
             self.plugin._process_file(path)
         record = self.records()[str(path.resolve())]
@@ -128,6 +163,104 @@ class LocalUploadTests(unittest.TestCase):
         self.assertEqual(record["upload_kind"], "instant")
         self.storage.oper.upload.assert_not_called()
         self.assertGreaterEqual(check.call_count, 1)
+
+    def test_successful_fast_check_is_not_repeated_while_waiting_for_verification(self):
+        self.configure()
+        path = self.sample()
+        folder = {"storage": "115网盘Plus", "fileid": "555", "type": "dir", "path": "/upload", "name": "upload"}
+        self.storage.oper.get_item_strict.side_effect = lambda target: folder if str(target) == "/upload" else None
+        with patch.object(self.plugin, "_queue_local_upload"), \
+                patch.object(self.upload_module, "instant_upload_check", return_value=True) as check:
+            self.plugin._process_file(path)
+            self.plugin._process_file(path)
+        record = self.records()[str(path)]
+        self.assertEqual(record["upload_kind"], "instant")
+        self.assertTrue(record["upload_attempted"])
+        self.assertFalse(record["upload_verified"])
+        check.assert_called_once()
+        self.assertEqual((self.root / "ed2k.txt").read_text(), "")
+        self.storage.oper.upload.assert_not_called()
+        self.storage.oper.get_item_strict.side_effect = lambda target: dict(self.remote)
+        output, cache = self.plugin._paths()[1:]
+        self.plugin._process_local_upload(path, path.stat(), output, cache, upload_worker=True)
+        self.assertTrue(self.records()[str(path)]["upload_verified"])
+        self.assertEqual(self.records()[str(path)]["upload_kind"], "instant")
+        self.storage.oper.upload.assert_not_called()
+
+    def test_fast_check_timeout_preserves_marker_and_never_starts_ordinary_upload(self):
+        self.configure()
+        path = self.sample()
+        folder = {"storage": "115网盘Plus", "fileid": "555", "type": "dir", "path": "/upload", "name": "upload"}
+        self.storage.oper.get_item_strict.side_effect = lambda target: folder if str(target) == "/upload" else None
+        with patch.object(self.plugin, "_queue_local_upload"), \
+                patch.object(self.upload_module, "instant_upload_check", side_effect=TimeoutError()) as check:
+            self.plugin._process_file(path)
+            self.plugin._process_file(path)
+        record = self.records()[str(path)]
+        self.assertTrue(record["upload_attempted"])
+        self.assertEqual(record["rapid_check"], "uncertain")
+        check.assert_called_once()
+        output, cache = self.plugin._paths()[1:]
+        with self.assertRaisesRegex(self.cloud_module.CloudError, "上次上传结果未确认"):
+            self.plugin._process_local_upload(path, path.stat(), output, cache, upload_worker=True)
+        self.storage.oper.upload.assert_not_called()
+        self.assertTrue(path.exists())
+        self.assertEqual((self.root / "ed2k.txt").read_text(), "")
+
+    def test_legacy_fast_hit_recovers_marker_without_creating_another_file(self):
+        self.configure()
+        path = self.sample()
+        output, cache = self.plugin._paths()[1:]
+        record, records = self.plugin._prepare_local_upload(path, path.stat(), {}, str(path), output, cache)
+        record.update(upload_scope=self.plugin._upload_scope(self.storage), rapid_check="hit")
+        self.plugin._write_results(output, cache, records)
+        with patch.object(self.plugin, "_queue_local_upload"), \
+                patch.object(self.upload_module, "instant_upload_check") as check:
+            self.plugin._process_file(path)
+        check.assert_not_called()
+        record = self.records()[str(path)]
+        self.assertTrue(record["upload_attempted"])
+        self.assertEqual(record["upload_kind"], "instant")
+        self.storage.oper.upload.assert_not_called()
+
+    def test_manual_retry_explicitly_clears_fast_check_uncertainty_markers(self):
+        self.configure()
+        path = self.sample()
+        output, cache = self.plugin._paths()[1:]
+        record, records = self.plugin._prepare_local_upload(path, path.stat(), {}, str(path), output, cache)
+        record.update(upload_attempted=True, rapid_check="hit", rapid_check_started=True)
+        self.plugin._reset_upload_attempts(cache, records)
+        record = self.records()[str(path)]
+        self.assertNotIn("upload_attempted", record)
+        self.assertNotIn("rapid_check", record)
+        self.assertNotIn("rapid_check_started", record)
+        self.storage.oper.upload.assert_not_called()
+
+    def test_upload_lane_timeout_does_not_fall_through_to_ordinary_upload(self):
+        self.configure()
+        path = self.sample()
+        folder = {"storage": "115网盘Plus", "fileid": "555", "type": "dir", "path": "/upload", "name": "upload"}
+        self.storage.oper.get_item_strict.side_effect = lambda target: folder if str(target) == "/upload" else None
+        output, cache = self.plugin._paths()[1:]
+        with patch.object(self.plugin, "_try_local_instant_upload"), \
+                patch.object(self.plugin, "_queue_local_upload"):
+            self.plugin._process_file(path)
+        with patch.object(self.upload_module, "instant_upload_check", side_effect=TimeoutError()), \
+                self.assertRaisesRegex(self.cloud_module.CloudError, "秒传复查结果未确认"):
+            self.plugin._process_local_upload(path, path.stat(), output, cache, upload_worker=True)
+        self.assertTrue(self.records()[str(path)]["upload_attempted"])
+        self.storage.oper.upload.assert_not_called()
+        self.assertTrue(path.exists())
+
+    def test_existing_destination_does_not_create_another_instant_upload(self):
+        self.configure()
+        path = self.sample()
+        self.storage.oper.get_item_strict.return_value = dict(self.remote)
+        with patch.object(self.upload_module, "instant_upload_check") as check:
+            self.plugin._process_file(path)
+        check.assert_not_called()
+        self.storage.oper.upload.assert_not_called()
+        self.assertTrue(self.records()[str(path)]["upload_verified"])
 
     def test_ordinary_upload_uses_its_separate_telegram_destinations(self):
         self.configure(

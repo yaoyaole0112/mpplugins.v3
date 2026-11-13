@@ -14,6 +14,20 @@ transfer_process = Mock()
 Bucket = Mock()
 
 
+class PartData:
+    def __init__(self, source, size):
+        self.source = source
+        self.len = size
+        self.remaining = size
+
+    def read(self, amount=None):
+        if amount is None or amount < 0:
+            amount = self.remaining
+        chunk = self.source.read(min(amount, self.remaining))
+        self.remaining -= len(chunk)
+        return chunk
+
+
 class Fake115:
     def __init__(self):
         self.client = Mock()
@@ -45,11 +59,12 @@ class Fake115:
         if self.started is not None:
             self.started.set()
             self.release.wait(3)
-        bucket.upload_part("key", result.upload_id, 1, data=local_path)
-        callback(50)
-        if self.token_refresh:
-            bucket = Bucket("auth-new", "endpoint", "bucket")
-        bucket.upload_part("key", result.upload_id, 2, data=local_path)
+        with local_path.open("rb") as source:
+            bucket.upload_part("key", result.upload_id, 1, data=PartData(source, self.file_size // 2))
+            callback(50)
+            if self.token_refresh:
+                bucket = Bucket("auth-new", "endpoint", "bucket")
+            bucket.upload_part("key", result.upload_id, 2, data=PartData(source, self.file_size - self.file_size // 2))
         callback(100)
         bucket.complete_multipart_upload("key", result.upload_id, [])
         return {"path": "/upload/" + new_name}
@@ -64,6 +79,21 @@ class Instant115(Fake115):
         if not response.get("reuse"):
             response = self.client.upload_file_init(filesha1=self._calc_sha1(local_path))
         return {"path": "/upload/" + new_name} if response.get("reuse") else None
+
+
+class Retry115(Fake115):
+    def upload(self, target, local_path, new_name=None):
+        self.client.upload_file_init(filesha1=self._calc_sha1(local_path))
+        bucket = Bucket("auth", "endpoint", "bucket")
+        result = bucket.init_multipart_upload("key")
+        with local_path.open("rb") as source:
+            try:
+                bucket.upload_part("key", result.upload_id, 1, data=PartData(source, self.file_size))
+            except TimeoutError:
+                source.seek(0)
+                bucket.upload_part("key", result.upload_id, 1, data=PartData(source, self.file_size))
+        bucket.complete_multipart_upload("key", result.upload_id, [])
+        return {"path": "/upload/" + new_name}
 
 
 class UploadAdapterTests(unittest.TestCase):
@@ -94,12 +124,17 @@ class UploadAdapterTests(unittest.TestCase):
         self.raw_bucket = Mock()
         self.raw_bucket.init_multipart_upload.return_value = types.SimpleNamespace(upload_id="upload-id")
         self.raw_bucket.complete_multipart_upload.return_value = types.SimpleNamespace(status=200)
+        self.sent_parts = []
         def part(key, upload_id, part_number, data, progress_callback):
             if self.oper.stop_during_part:
                 self.oper.stop_during_part()
             progress_callback(self.identity[0] // 4, self.identity[0] // 2)
             if self.oper.fail_part:
                 raise TimeoutError()
+            received = bytearray()
+            while chunk := data.read(1024):
+                received.extend(chunk)
+            self.sent_parts.append(bytes(received))
             progress_callback(self.identity[0] // 2, self.identity[0] // 2)
             return types.SimpleNamespace(etag="etag")
         self.raw_bucket.upload_part.side_effect = part
@@ -125,6 +160,67 @@ class UploadAdapterTests(unittest.TestCase):
         self.assertEqual(arguments[:3], (self.path.name, self.digest, self.identity[0]))
         self.assertEqual(arguments[5], "U_1_123")
         self.assertEqual(arguments[4]("2-8"), hashlib.sha1(self.path.read_bytes()[2:9]).hexdigest().upper())
+        for invalid in ("bad", "-1-8", "10-2", "bytes=2-8junk", "2-8,10-12"):
+            with self.subTest(invalid=invalid), self.assertRaises(self.adapter.CloudError):
+                arguments[4](invalid)
+
+    def test_actual_uploaded_bytes_match_cached_checksum_without_rereading(self):
+        self.call()
+        self.assertEqual(b"".join(self.sent_parts), self.path.read_bytes())
+        self.raw_bucket.complete_multipart_upload.assert_called_once()
+        self.assertFalse(self.oper.sha1_called)
+
+    def test_oss_sdk_progress_adapter_preserves_body_length_and_checksum(self):
+        try:
+            from oss2.utils import make_progress_adapter
+        except ImportError:
+            self.skipTest("OSS SDK is not available")
+        sent = bytearray()
+        def part(key, upload_id, part_number, data, progress_callback):
+            adapted = make_progress_adapter(data, progress_callback)
+            while chunk := adapted.read(1024):
+                sent.extend(chunk)
+            return types.SimpleNamespace(etag="etag")
+        self.raw_bucket.upload_part.side_effect = part
+        self.assertTrue(self.call())
+        self.assertEqual(bytes(sent), self.path.read_bytes())
+        self.raw_bucket.complete_multipart_upload.assert_called_once()
+
+    def test_wrong_cached_sha1_blocks_server_commit_and_aborts(self):
+        self.digest = "0" * 40
+        with self.assertRaisesRegex(self.adapter.CloudError, "实际上传字节数或SHA1"):
+            self.call()
+        self.raw_bucket.complete_multipart_upload.assert_not_called()
+        self.raw_bucket.abort_multipart_upload.assert_called_once()
+        self.assertTrue(self.path.exists())
+
+    def test_incomplete_part_read_blocks_commit_and_aborts(self):
+        def short_read(key, upload_id, part_number, data, progress_callback):
+            data.read(2)
+            return types.SimpleNamespace(etag="etag")
+        self.raw_bucket.upload_part.side_effect = short_read
+        with self.assertRaisesRegex(self.adapter.CloudError, "分片读取不足"):
+            self.call()
+        self.raw_bucket.complete_multipart_upload.assert_not_called()
+        self.raw_bucket.abort_multipart_upload.assert_called_once()
+
+    def test_retried_part_does_not_double_count_failed_attempt_bytes(self):
+        oper = Retry115()
+        oper.file_size = self.identity[0]
+        attempts = [0]
+        def part(key, upload_id, part_number, data, progress_callback):
+            attempts[0] += 1
+            if attempts[0] == 1:
+                data.read(10)
+                raise TimeoutError()
+            while data.read(1024):
+                pass
+            return types.SimpleNamespace(etag="etag")
+        self.raw_bucket.upload_part.side_effect = part
+        self.assertTrue(self.call(oper))
+        self.assertEqual(attempts[0], 2)
+        self.raw_bucket.complete_multipart_upload.assert_called_once()
+        self.raw_bucket.abort_multipart_upload.assert_not_called()
 
     def test_instant_upload_check_reports_normal_miss_for_independent_queue(self):
         self.oper.client.upload_file_init.return_value = {"status": 1}
@@ -301,7 +397,7 @@ class UploadAdapterTests(unittest.TestCase):
             "Path": Path, "global_vars": global_vars, "Bucket": Bucket,
             "transfer_process": transfer_process, "logger": Mock(), "check_response": Mock(),
             "StsAuth": Mock(), "determine_part_size": lambda *args, **kwargs: 10 * 1024 ** 2,
-            "SizedFileAdapter": lambda stream, size: stream, "PartInfo": lambda *args: args,
+            "SizedFileAdapter": PartData, "PartInfo": lambda *args: args,
             "b64encode_as_string": lambda value: value, "ServerError": RuntimeError,
             "datetime": datetime, "timezone": timezone,
         }
@@ -349,7 +445,7 @@ class UploadAdapterTests(unittest.TestCase):
             "Path": Path, "global_vars": global_vars, "Bucket": Bucket,
             "transfer_process": transfer_process, "logger": Mock(), "check_response": Mock(),
             "StsAuth": Mock(), "determine_part_size": lambda *args, **kwargs: 10 * 1024 ** 2,
-            "SizedFileAdapter": lambda stream, size: stream, "PartInfo": lambda *args: args,
+            "SizedFileAdapter": PartData, "PartInfo": lambda *args: args,
             "b64encode_as_string": lambda value: value, "ServerError": RuntimeError,
             "datetime": datetime, "timezone": timezone, "perf_counter": perf_counter,
             "configer": types.SimpleNamespace(

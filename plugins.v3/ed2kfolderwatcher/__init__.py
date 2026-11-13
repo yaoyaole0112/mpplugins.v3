@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.21.9"
+    plugin_version = "1.21.10"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -2222,7 +2222,10 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                         self._unlink_source(path, stat)
                         logger.info(f"自动生成ED2K链接：低于最小大小阈值，按独立开关删除本地源文件（未生成或发送链接）：{path}")
                 return
-            if stat.st_mtime + self._min_age > time.time():
+            stable_since = stat.st_mtime
+            if self._local_upload_mode == "direct" and self._upload_root_for(path):
+                stable_since = max(stable_since, stat.st_ctime)
+            if stable_since + self._min_age > time.time():
                 self._queue_event(path)
                 return
             if self._upload_root_for(path):

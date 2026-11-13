@@ -244,6 +244,8 @@ class LocalUploadMixin:
         for source, record in records.items():
             if record.get("upload_mode") and not record.get("upload_verified") and self._upload_root_for(Path(source)):
                 record.pop("upload_attempted", None)
+                record.pop("rapid_check", None)
+                record.pop("rapid_check_started", None)
                 record.pop("upload_first_error", None)
                 record.pop("upload_first_error_at", None)
                 record.pop("upload_error_code", None)
@@ -407,6 +409,8 @@ class LocalUploadMixin:
             record.pop("upload_cloud_item", None)
             record.pop("upload_attempted", None)
             record.pop("upload_kind", None)
+            record.pop("rapid_check", None)
+            record.pop("rapid_check_started", None)
             record.update(telegram_sent=False, telegram_target="", telegram_deliveries={})
             record.update(ordinary_upload_telegram_sent=False, ordinary_upload_telegram_target="",
                           ordinary_upload_telegram_deliveries={})
@@ -477,7 +481,7 @@ class LocalUploadMixin:
                                               upload_note="上传前无法确认目标目录；继续按普通上传检查")
                                 self._write_results(output, cache_path, records)
                                 return None
-                            record.update(rapid_check_started=True, upload_state="checking_instant",
+                            record.update(rapid_check_started=True, upload_attempted=True, upload_state="checking_instant",
                                           upload_note="已取得115上传通道，最后复查秒传")
                             self._write_results(output, cache_path, records)
                             with self._cloud_request_lock:
@@ -498,11 +502,10 @@ class LocalUploadMixin:
                         except CloudError:
                             raise
                         except Exception as failure:
-                            record.update(rapid_check="unavailable", upload_note=f"上传前秒传复查不可用（{type(failure).__name__}）；继续普通上传")
+                            record.update(rapid_check="uncertain", upload_note=f"上传前秒传复查结果不明（{type(failure).__name__}）；仅核实目标，不重复上传")
                             record.pop("rapid_check_started", None)
                             self._write_results(output, cache_path, records)
-                            logger.warning(f"自动生成ED2K链接：上传前秒传复查不可用，继续普通上传：{path.name}（{type(failure).__name__}）")
-                            return None
+                            raise CloudError("上传前秒传复查结果未确认，保留本地文件；等待目标核验，不启动普通上传") from None
 
                     def mark_started():
                         nonlocal records, record
@@ -648,12 +651,24 @@ class LocalUploadMixin:
         self._write_results(output, cache_path, records)
 
     def _try_local_instant_upload(self, path, record, output, cache_path, records):
-        key = str(path.resolve())
+        if record.get("upload_attempted") or record.get("rapid_check_started"):
+            return
+        if record.get("rapid_check") == "hit":
+            record.update(upload_attempted=True, upload_kind="instant")
+            self._write_results(output, cache_path, records)
+            return
         try:
             destination = self._upload_destination(path)
             storage = CloudStorage("115网盘Plus")
             lookup = getattr(storage.oper, "get_item_strict", None)
             if lookup is None:
+                return
+            with self._cloud_request_lock:
+                existing = lookup(Path(destination))
+            if existing:
+                record.update(upload_attempted=True, rapid_check="existing",
+                              upload_note="115目标已存在；仅核验内容，不再发起秒传")
+                self._write_results(output, cache_path, records)
                 return
             parent = PurePosixPath(destination).parent.as_posix()
             with self._cloud_request_lock:
@@ -664,7 +679,9 @@ class LocalUploadMixin:
             folder_id = str(folder.get("fileid") or "")
             if not re.fullmatch(r"[1-9][0-9]{0,63}", folder_id):
                 return
-            record.update(rapid_check_started=True, upload_state="checking_instant",
+            if self._stopping.is_set() or local_identity(path.stat()) != record.get("local_identity"):
+                raise InterruptedError("本地文件变化或插件停止，取消115秒传预检查")
+            record.update(rapid_check_started=True, upload_attempted=True, upload_state="checking_instant",
                           upload_note="快速检查115秒传；未命中将转入独立普通上传队列")
             self._write_results(output, cache_path, records)
             self._upload_stage(path, "快速检查115秒传")
@@ -677,6 +694,8 @@ class LocalUploadMixin:
             record.pop("rapid_check_started", None)
             if hit is True:
                 record["upload_kind"] = "instant"
+            else:
+                record.pop("upload_attempted", None)
             record["upload_note"] = (
                 "115快速秒传命中；等待独立核验与链接输出" if hit is True
                 else "115未命中秒传；已转入独立普通上传队列" if hit is False
@@ -684,6 +703,8 @@ class LocalUploadMixin:
             )
             self._write_results(output, cache_path, records)
             logger.info(f"自动生成ED2K链接：本地文件秒传预检查完成（{'命中' if hit else '未命中' if hit is False else '不可用'}）：{path.name}")
+        except InterruptedError:
+            raise
         except Exception as failure:
             record.update(rapid_check="uncertain", upload_note=f"秒传预检查未确认（{type(failure).__name__}）；转入独立上传通道只读核验")
             record.pop("rapid_check_started", None)
