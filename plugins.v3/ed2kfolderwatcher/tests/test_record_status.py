@@ -53,8 +53,10 @@ class WorkflowSummaryTests(unittest.TestCase):
         for kind in (None, "", "unknown"):
             result = self.summary(upload_kind=kind)
             self.assertEqual(result["state"], "pending")
-            self.assertIn("上传方式", result["label"])
-            self.assertEqual(result["steps"][-1]["text"], "上传方式未知，未执行")
+            self.assertIn("上传类型回执", result["label"])
+            self.assertNotIn("待确认", result["label"])
+            self.assertIn("不自动补发", result["detail"])
+            self.assertEqual(result["steps"][-1]["text"], "缺少类型回执，未执行")
             self.assertEqual(self.summary(upload_kind=kind, enabled=False)["state"], "success")
 
     def test_upload_not_verified_never_shows_completed(self):

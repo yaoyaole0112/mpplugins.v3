@@ -416,7 +416,8 @@ class LocalUploadMixin:
                 if (
                     previous
                     and previous.get("identity") == identity
-                    and saved_item(previous.get("item")) == target
+                    and all(str((previous.get("item") or {}).get(field)) == str(target.get(field))
+                            for field in ("storage", "fileid", "path", "name", "size", "type"))
                     and previous.get("upload_kind") in {"instant", "ordinary"}
                     and receipt["upload_kind"] == "unknown"
                 ):
@@ -426,6 +427,57 @@ class LocalUploadMixin:
             self._queue_event(path)
         except (OSError, ValueError):
             logger.exception("自动生成ED2K链接：保存MP上传完成回执失败，保留本地文件")
+
+    def _recover_mp_upload_kind(self, path, record, receipt):
+        if receipt.get("upload_kind") in {"instant", "ordinary"}:
+            return
+        try:
+            from app.plugins.p115disk.upload_receipts import consume_upload_result
+
+            result = consume_upload_result(
+                path, record["local_identity"], receipt["item"], source_sha1=record["local_sha1"],
+            )
+            if not result or result.get("upload_kind") not in {"instant", "ordinary"}:
+                return
+            with self._upload_receipt_lock:
+                receipts = self._upload_receipts()
+                current = receipts.get(str(path.resolve()))
+                if (not current or current.get("identity") != record["local_identity"]
+                        or any(str((current.get("item") or {}).get(field)) != str(receipt["item"].get(field))
+                               for field in ("storage", "fileid", "path", "name", "size", "type"))
+                        or local_identity(path.stat()) != record["local_identity"]):
+                    return
+                current["upload_kind"] = result["upload_kind"]
+                self._atomic_write(
+                    Path(self.get_data_path()) / "local_upload_receipts.json",
+                    json.dumps(receipts, ensure_ascii=False),
+                )
+                receipt["upload_kind"] = result["upload_kind"]
+        except Exception as failure:
+            logger.debug(f"自动生成ED2K链接：上传类型回执暂不可补全：{path.name}（{type(failure).__name__}）")
+
+    def _queue_uploaded_forward(self, path, record, output, cache_path):
+        key = str(path.resolve())
+        with self._condition:
+            if any(
+                batch["contexts"].get(key, {}).get("link") == record["link"]
+                for batch in self._batches.values()
+            ):
+                return
+            created = self._new_batch("uploaded-forward")
+            batch_id = self._register_batch_item(created, key, record["name"])
+            if batch_id != created:
+                self._batches.pop(created, None)
+            batch = self._batches[batch_id]
+            batch["contexts"][key] = {
+                "kind": "local", "path": path, "signature": tuple(record["local_identity"][:4]),
+                "output": output, "cache_path": cache_path, "batch_group": batch["groups"][key],
+                "link": record["link"],
+            }
+            self._mark_batch_item_result(batch, key)
+            if batch_id == created:
+                batch["sealed"] = True
+            self._condition.notify_all()
 
     def _upload_label(self):
         return "CloudDrive2" if self._local_upload_mode == "clouddrive" else "115"
@@ -574,6 +626,7 @@ class LocalUploadMixin:
             record.pop("upload_readback_verified", None)
             record.pop("upload_verified_at", None)
         if self._local_upload_mode == "mp" and receipt:
+            self._recover_mp_upload_kind(path, record, receipt)
             record["upload_kind"] = (
                 receipt.get("upload_kind")
                 if receipt.get("upload_kind") in {"instant", "ordinary"}
@@ -764,13 +817,10 @@ class LocalUploadMixin:
             self._write_results(output, cache_path, records)
             if not record.get("ordinary_upload_telegram_sent"):
                 raise CloudError("115普通上传及内容校验已确认，独立普通上传Telegram目标尚未全部投递成功；重试仅补发，不重新上传")
-        if self._telegram_aggregate and self._active_batch_id in self._batches:
-            with self._condition:
-                batch = self._batches[self._active_batch_id]
-                batch["contexts"][key] = {
-                    "kind": "local", "path": path, "signature": tuple(record["local_identity"][:4]),
-                    "output": output, "cache_path": cache_path, "batch_group": batch["groups"].get(key),
-                }
+        if self._telegram_enabled and self._telegram_aggregate:
+            record.update(upload_state="verified", upload_note="上传及网盘校验已完成，等待本剧本季聚合转发")
+            self._write_results(output, cache_path, records)
+            self._queue_uploaded_forward(path, record, output, cache_path)
             return
         if self._telegram_aggregate:
             candidates = self._aggregate_candidates(record, cache_path, records)

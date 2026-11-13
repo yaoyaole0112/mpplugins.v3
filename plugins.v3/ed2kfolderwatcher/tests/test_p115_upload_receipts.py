@@ -1,4 +1,6 @@
+import hashlib
 import importlib.util
+import os
 import sys
 import types
 import unittest
@@ -70,6 +72,25 @@ class TestP115UploadReceipts(unittest.TestCase):
 
     def test_invalid_upload_kind_is_rejected(self):
         self.assertFalse(self.module.record_upload_result(self.source, self.target, "unknown"))
+
+    def test_content_proof_recovers_receipt_after_metadata_change(self):
+        checksum = hashlib.sha1(self.source.read_bytes()).hexdigest()
+        self.module.record_upload_result(self.source, self.target, "instant", source_sha1=checksum)
+        os.utime(self.source, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+        identity = self.module._identity(self.source)
+        self.assertIsNone(self.module.consume_upload_result(self.source, identity, self.target))
+        result = self.module.consume_upload_result(self.source, identity, self.target, source_sha1=checksum)
+        self.assertEqual(result["upload_kind"], "instant")
+
+    def test_content_fallback_requires_matching_digest_and_live_source_identity(self):
+        checksum = hashlib.sha1(self.source.read_bytes()).hexdigest()
+        self.module.record_upload_result(self.source, self.target, "ordinary", source_sha1=checksum)
+        os.utime(self.source, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+        identity = self.module._identity(self.source)
+        self.assertIsNone(self.module.consume_upload_result(self.source, identity, self.target, source_sha1="0" * 40))
+        self.assertIsNone(self.module.consume_upload_result(self.source, [0] * 5, self.target, source_sha1=checksum))
+        self.assertIsNone(self.module.consume_upload_result(
+            self.source, identity, {**self.target, "fileid": "999"}, source_sha1=checksum))
 
 
 if __name__ == "__main__":

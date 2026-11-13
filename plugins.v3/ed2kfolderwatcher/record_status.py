@@ -40,7 +40,7 @@ def workflow_summary(record, problem, telegram, ordinary, ordinary_enabled, fail
         elif record.get("upload_kind") == "instant":
             orphan = {"state": "inactive", "text": "秒传跳过"}
         elif record.get("upload_kind") != "ordinary":
-            orphan = {"state": "pending", "text": "上传方式未知，未执行"}
+            orphan = {"state": "pending", "text": "缺少类型回执，未执行"}
         else:
             orphan = ordinary
         steps.append({"key": "ordinary", "label": "孤本转存", **orphan})
@@ -63,7 +63,8 @@ def workflow_summary(record, problem, telegram, ordinary, ordinary_enabled, fail
     elif any(step["state"] == "pending" for step in steps):
         label = "等待转发完成"
         if uploaded and ordinary_enabled and record.get("upload_kind") not in {"instant", "ordinary"}:
-            label = "待确认上传方式，孤本转存未执行"
+            label = "缺少上传类型回执，孤本转存未执行"
+            detail = "网盘内容校验通过不代表上传类型已确认；缺少可靠回执时不推断为普通上传，也不自动补发孤本转存。"
         if record.get("upload_state") == "failed" and (
             telegram["state"] == "pending"
             or (ordinary_enabled and record.get("upload_kind") == "ordinary" and ordinary["state"] == "pending")

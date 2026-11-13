@@ -1,11 +1,13 @@
+import hashlib
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock, RLock
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest import TestCase
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from cryptography.hazmat.primitives import hashes
@@ -127,6 +129,16 @@ class TestV3P115DiskUpload(TestCase):
         self.assertIsNone(self.api._id_item_cache.get_item(456))
         self.api.get_folder.assert_called_once_with(path=Path("/movies"))
         self.api.get_item.assert_called_once_with(Path(self.uploaded.path))
+
+    def test_success_receipt_carries_computed_content_digest(self) -> None:
+        receipts = ModuleType("app.plugins.p115disk.upload_receipts")
+        receipts.record_upload_result = MagicMock()
+        with patch.dict(sys.modules, {"app.plugins.p115disk.upload_receipts": receipts}):
+            self.assertIs(self.core.upload(self.target, self.path), self.uploaded)
+        receipts.record_upload_result.assert_called_once_with(
+            self.path, self.uploaded, "instant",
+            source_sha1=hashlib.sha1(self.path.read_bytes()).hexdigest(),
+        )
 
     def test_two_instances_keep_separate_clients_and_cache_invalidation(self) -> None:
         """

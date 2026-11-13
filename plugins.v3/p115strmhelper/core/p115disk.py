@@ -266,7 +266,7 @@ class P115DiskCore:
                         try:
                             from app.plugins.p115disk.upload_receipts import record_upload_result
 
-                            record_upload_result(local_path, uploaded_item, "instant")
+                            record_upload_result(local_path, uploaded_item, "instant", source_sha1=file_sha1)
                         except Exception as error:
                             logger.warning(f"【P115Disk】保存ED2K上传类型回执失败: {error}")
                     return uploaded_item
@@ -548,7 +548,7 @@ class P115DiskCore:
                     try:
                         from app.plugins.p115disk.upload_receipts import record_upload_result
 
-                        record_upload_result(local_path, uploaded_item, "ordinary")
+                        record_upload_result(local_path, uploaded_item, "ordinary", source_sha1=file_sha1)
                     except Exception as error:
                         logger.warning(f"【P115Disk】保存ED2K上传类型回执失败: {error}")
                 return uploaded_item

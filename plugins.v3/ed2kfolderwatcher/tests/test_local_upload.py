@@ -796,6 +796,108 @@ class LocalUploadTests(unittest.TestCase):
         self.storage.oper.upload.assert_not_called()
         self.assertTrue(self.records()[str(path)]["upload_verified"])
 
+    def test_verified_upload_waits_in_its_own_group_without_failure_or_foreign_batch(self):
+        self.configure(mode="mp", telegram_enabled=True, telegram_chat_id="@receiver",
+                       telegram_aggregate=True, telegram_aggregate_window=90)
+        path = self.sample("Melody.Journey.S03E06.mkv")
+        self.remote.update(name="音乐缘计划.S03E06.mkv", path="/upload/音乐缘计划.S03E06.mkv")
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        unrelated = self.plugin._new_batch("cloud-scan")
+        self.plugin._register_batch_item(unrelated, "cloud:other", "其他剧.S01E01.mkv")
+        self.plugin._active_batch_id = unrelated
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as send:
+            self.plugin._process_file(path)
+            self.assertTrue(self.records()[str(path)]["upload_verified"])
+            self.assertFalse(self.records()[str(path)]["telegram_sent"])
+            self.assertNotIn(str(path), self.plugin._batches[unrelated]["contexts"])
+            batches = [batch for batch in self.plugin._batches.values() if str(path) in batch["contexts"]]
+            self.assertEqual(len(batches), 1)
+            batch = batches[0]
+            group = self.module.telegram_aggregate_key(self.remote["name"])
+            self.assertEqual(batch["groups"][str(path)], group)
+            self.assertIn(str(path), batch["group_results"][group])
+            deadline = batch["group_flush_at"][group]
+            self.plugin._process_file(path)
+            self.assertEqual(batch["group_flush_at"][group], deadline)
+            self.assertNotIn(str(path), self.plugin._retry_failures)
+            send.assert_not_called()
+            batch["group_flush_at"][group] = time.monotonic() - 1
+            self.plugin._flush_due_groups()
+            send.assert_called_once()
+        self.assertTrue(self.records()[str(path)]["telegram_sent"])
+        self.storage.oper.upload.assert_not_called()
+
+    def test_new_verified_episode_resets_only_its_own_group_wait(self):
+        self.configure(mode="mp", telegram_enabled=True, telegram_chat_id="@receiver",
+                       telegram_aggregate=True, telegram_aggregate_window=90)
+        self.plugin._enabled = True
+        first = self.sample("音乐缘计划.S03E05.mkv")
+        self.plugin._on_local_upload_transfer(self.event(first))
+        self.plugin._process_file(first)
+        batch = next(batch for batch in self.plugin._batches.values() if str(first) in batch["contexts"])
+        group = self.module.telegram_aggregate_key(first.name)
+        batch["group_flush_at"][group] = time.monotonic() + 10
+        previous = batch["group_flush_at"][group]
+        second = self.sample("音乐缘计划.S03E06.mkv")
+        self.remote["fileid"] = "5678"
+        self.plugin._on_local_upload_transfer(self.event(second))
+        self.plugin._process_file(second)
+        self.assertGreater(batch["group_flush_at"][group], previous + 70)
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as send:
+            batch["group_flush_at"][group] = time.monotonic() - 1
+            self.plugin._flush_due_groups()
+        send.assert_called_once()
+        self.assertIn(first.name, send.call_args.args[1])
+        self.assertIn(second.name, send.call_args.args[1])
+
+    def test_aggregate_upload_deletion_waits_for_successful_delivery(self):
+        self.configure(mode="mp", telegram_enabled=True, telegram_chat_id="@receiver",
+                       telegram_aggregate=True, telegram_aggregate_window=90,
+                       local_upload_delete_source=True)
+        path = self.sample("音乐缘计划.S03E06.mkv")
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        self.plugin._process_file(path)
+        batch_id, batch = next((identifier, batch) for identifier, batch in self.plugin._batches.items()
+                               if str(path) in batch["contexts"])
+        group = batch["groups"][str(path)]
+        self.plugin._local_upload_delete_cloud_copy = True
+        with patch.object(self.plugin, "_delete_uploaded_cloud_copy") as cloud_delete:
+            self.assertTrue(path.exists())
+            cloud_delete.assert_not_called()
+            batch["group_flush_at"][group] = time.monotonic() - 1
+            with patch.object(self.plugin, "_send_telegram", return_value=False):
+                self.plugin._maybe_flush_batch(batch_id)
+            self.assertTrue(path.exists())
+            cloud_delete.assert_not_called()
+            self.plugin._queue_uploaded_forward(path, self.records()[str(path)], *self.plugin._paths()[1:])
+            batch_id, batch = next((identifier, batch) for identifier, batch in self.plugin._batches.items()
+                                   if str(path) in batch["contexts"])
+            batch["group_flush_at"][batch["groups"][str(path)]] = time.monotonic() - 1
+            with patch.object(self.plugin, "_send_telegram", return_value=True):
+                self.plugin._maybe_flush_batch(batch_id)
+            cloud_delete.assert_called_once()
+        self.assertFalse(path.exists())
+        self.assertTrue(self.records()[str(path)]["telegram_sent"])
+
+    def test_stale_upload_context_does_not_forward_replaced_link(self):
+        self.configure(mode="mp", telegram_enabled=True, telegram_chat_id="@receiver",
+                       telegram_aggregate=True, telegram_aggregate_window=90)
+        path = self.sample("音乐缘计划.S03E06.mkv")
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        self.plugin._process_file(path)
+        batch_id, batch = next((identifier, batch) for identifier, batch in self.plugin._batches.items()
+                               if str(path) in batch["contexts"])
+        records = self.records()
+        records[str(path)]["link"] = records[str(path)]["link"].replace(path.name, "另一个文件.S01E01.mkv")
+        self.plugin._write_results(None, self.plugin._paths()[2], records)
+        batch["group_flush_at"][batch["groups"][str(path)]] = time.monotonic() - 1
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as send:
+            self.plugin._maybe_flush_batch(batch_id)
+        send.assert_not_called()
+
     def test_unrelated_mp_events_are_ignored(self):
         self.configure(mode="mp")
         path = self.sample()
@@ -819,6 +921,33 @@ class LocalUploadTests(unittest.TestCase):
             self.plugin._pending.clear()
             self.plugin._queue_event(path, delay=0)
         self.assertFalse(self.plugin._pending)
+
+    def test_mp_upload_kind_recovers_after_hashing_without_guessing(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        receipt_module = types.ModuleType("app.plugins.p115disk.upload_receipts")
+        receipt_module.consume_upload_result = Mock(side_effect=[None, {"upload_kind": "instant"}])
+        self.plugin._enabled = True
+        with patch.dict(sys.modules, {"app.plugins.p115disk.upload_receipts": receipt_module}):
+            self.plugin._on_local_upload_transfer(self.event(path))
+            self.assertEqual(self.plugin._upload_receipts()[str(path)]["upload_kind"], "unknown")
+            self.plugin._process_file(path)
+        self.assertEqual(self.records()[str(path)]["upload_kind"], "instant")
+        self.assertEqual(self.plugin._upload_receipts()[str(path)]["upload_kind"], "instant")
+        self.assertEqual(receipt_module.consume_upload_result.call_args.kwargs["source_sha1"], self.sha1)
+        self.storage.oper.upload.assert_not_called()
+
+    def test_duplicate_mp_event_keeps_upload_kind_when_only_cloud_metadata_changes(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        receipt_module = types.ModuleType("app.plugins.p115disk.upload_receipts")
+        receipt_module.consume_upload_result = Mock(side_effect=[{"upload_kind": "instant"}, None])
+        self.plugin._enabled = True
+        with patch.dict(sys.modules, {"app.plugins.p115disk.upload_receipts": receipt_module}):
+            self.plugin._on_local_upload_transfer(self.event(path))
+            self.remote.update(modify_time=456, pickcode="new-pickcode")
+            self.plugin._on_local_upload_transfer(self.event(path))
+        self.assertEqual(self.plugin._upload_receipts()[str(path)]["upload_kind"], "instant")
         self.assertFalse((self.root / "data" / "records.json").exists())
         self.storage.file_sha1.assert_not_called()
 

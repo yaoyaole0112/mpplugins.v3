@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 
-RECEIPT_TTL = 30 * 60
+RECEIPT_TTL = 24 * 60 * 60
 _LOCK = threading.RLock()
 
 
@@ -54,7 +54,7 @@ def _write(path, records):
     os.replace(temp_path, path)
 
 
-def record_upload_result(source_path, target_item, upload_kind):
+def record_upload_result(source_path, target_item, upload_kind, *, source_sha1=None):
     if upload_kind not in {"instant", "ordinary"}:
         return False
     source = Path(source_path).resolve()
@@ -80,17 +80,24 @@ def record_upload_result(source_path, target_item, upload_kind):
             "source_identity": identity,
             "target": target,
             "upload_kind": upload_kind,
+            "source_sha1": str(source_sha1 or "").lower(),
             "created_at": time.time(),
         })
         _write(path, records[-5000:])
     return True
 
 
-def consume_upload_result(source_path, source_identity, target_item):
+def consume_upload_result(source_path, source_identity, target_item, *, source_sha1=None):
     source = Path(source_path).resolve()
     target = _saved_item(target_item)
     if not target.get("fileid"):
         return None
+    try:
+        if _identity(source) != list(source_identity):
+            return None
+    except OSError:
+        return None
+    checksum = str(source_sha1 or "").lower()
     path = _store_path()
     with _LOCK:
         records = _read(path)
@@ -98,7 +105,13 @@ def consume_upload_result(source_path, source_identity, target_item):
             (
                 index for index in range(len(records) - 1, -1, -1)
                 if records[index].get("source_path") == str(source)
-                and records[index].get("source_identity") == list(source_identity)
+                and (
+                    records[index].get("source_identity") == list(source_identity)
+                    or (re.fullmatch(r"[0-9a-f]{40}", checksum)
+                        and records[index].get("source_sha1") == checksum)
+                )
+                and records[index].get("target", {}).get("storage") == target.get("storage")
+                and records[index].get("target", {}).get("type") == target.get("type")
                 and str(records[index].get("target", {}).get("fileid")) == str(target.get("fileid"))
                 and records[index].get("target", {}).get("path") == target.get("path")
                 and records[index].get("target", {}).get("size") == target.get("size")

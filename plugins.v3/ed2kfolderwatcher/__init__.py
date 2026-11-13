@@ -225,7 +225,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.22.7"
+    plugin_version = "1.22.8"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -833,6 +833,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             records = {}
         eligible = [(key, context, records.get(key)) for key, context in entries]
         eligible = [(key, context, record) for key, context, record in eligible if record
+                    and (not context.get("link") or context["link"] == record.get("link"))
                     and (not record.get("upload_mode") or record.get("upload_verified"))]
         grouped = {}
         for key, context, record in eligible:
@@ -856,12 +857,22 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 self._clear_retry_failure(key)
             if context["kind"] == "cloud":
                 self._maybe_delete_cloud_source(context["storage"], context["item"], record, output, cache_path, records, self._stopping)
-            elif (self._local_upload_delete_source if record.get("upload_mode") else self._local_delete_source) and (output is not None or self._telegram_enabled):
+            elif record.get("upload_mode"):
+                if (self._ordinary_upload_telegram_enabled and record.get("upload_kind") == "ordinary"
+                        and not record.get("ordinary_upload_telegram_sent")):
+                    failed.append(context)
+                    continue
+                if self._local_upload_delete_cloud_copy and not record.get("upload_cloud_copy_deleted"):
+                    self._delete_uploaded_cloud_copy(record, output, cache_path, records)
+                if self._local_upload_delete_source and (output is not None or self._telegram_enabled):
+                    self._finish_uploaded_local_delete(context["path"], record, output, cache_path, records)
+                else:
+                    self._clear_retry_failure(key)
+                self._settle_local_upload_record(record)
+                self._write_results(output, cache_path, records)
+            elif self._local_delete_source and (output is not None or self._telegram_enabled):
                 path = context["path"]
                 try:
-                    if record.get("upload_mode"):
-                        self._finish_uploaded_local_delete(path, record, output, cache_path, records)
-                        continue
                     final = path.stat()
                     if context["signature"] == (final.st_size, final.st_mtime_ns, final.st_ino, final.st_dev) and not self._stopping.is_set():
                         self._unlink_source(path, final)
@@ -872,8 +883,6 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 except OSError:
                     record["delete_failed"] = True
                     self._write_results(output, cache_path, records)
-            elif record.get("upload_mode"):
-                self._clear_retry_failure(key)
         if failed:
             retry_batch = self._new_batch(f"{batch['source']}-retry")
             for context in failed:
