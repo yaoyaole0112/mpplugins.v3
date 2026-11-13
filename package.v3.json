@@ -5,7 +5,7 @@
     "labels": "整理,重命名",
     "version": "1.1.1",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
-    "author": "Local",
+    "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
     "release": false,
     "system_version": ">=3.2.6",
