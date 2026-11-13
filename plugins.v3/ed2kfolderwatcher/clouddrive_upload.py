@@ -61,18 +61,41 @@ def upload_scope(oper, target, folder):
     return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode()).hexdigest()
 
 
+def _check_upload_tasks(client, path):
+    terminal, finished = client.upload_terminal_enums()
+    if finished is None or not terminal:
+        raise CloudError("CloudDrive上传状态接口不兼容，保留本地文件")
+    observed = set()
+    expected_total = None
+    for page in range(64):
+        response = client.get_upload_file_list(get_all=False, items_per_page=100, page_number=page)
+        total = getattr(response, "totalCount", None)
+        if not isinstance(total, int) or isinstance(total, bool) or total < 0 or not hasattr(response, "uploadFiles"):
+            raise CloudError("CloudDrive上传分页状态不完整，等待核验，不重复上传")
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            raise CloudError("CloudDrive上传队列在分页期间变化，稍后重新核验")
+        rows = list(response.uploadFiles)
+        for task in rows:
+            destination = getattr(task, "destPath", "")
+            if destination and cloud_path(destination) == path and getattr(task, "statusEnum", None) != finished:
+                raise CloudError("CloudDrive目标仍在上传或上传未成功；等待核验，不重复上传")
+        identities = {(getattr(task, "key", ""), getattr(task, "destPath", "")) for task in rows}
+        if len(identities) != len(rows) or observed.intersection(identities):
+            raise CloudError("CloudDrive上传分页存在重复任务，无法确认是否遗漏未完成上传")
+        observed.update(identities)
+        if len(observed) == expected_total:
+            return
+        if not rows or len(observed) > expected_total:
+            raise CloudError("CloudDrive上传任务分页读取不完整，等待核验")
+    raise CloudError("CloudDrive上传队列超过安全分页上限，等待核验")
+
+
 def uploaded_sha1(oper, item):
     path = cloud_path(item["path"])
     client = bounded_client(oper.client)
-    response = client.get_upload_file_list(get_all=True)
-    terminal, finished = client.upload_terminal_enums()
-    if finished is None or not terminal or not hasattr(response, "uploadFiles"):
-        raise CloudError("CloudDrive上传状态接口不兼容，保留本地文件")
-    for task in response.uploadFiles:
-        destination = getattr(task, "destPath", "")
-        if destination and cloud_path(destination) == path:
-            if getattr(task, "statusEnum", None) != finished:
-                raise CloudError("CloudDrive目标仍在上传或上传未成功；等待核验，不重复上传")
+    _check_upload_tasks(client, path)
     parent = PurePosixPath(path).parent.as_posix()
     refreshed = list(client.get_sub_files(parent, force_refresh=True))
     if not any(str(getattr(entry, "id", "")) == str(item.get("fileid")) for entry in refreshed):
@@ -91,6 +114,7 @@ def uploaded_sha1(oper, item):
     digest = getattr(remote, "fileHashes", {}).get(2, "")
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", digest):
         raise CloudError("CloudDrive尚未返回云端SHA1；保留本地文件等待核验，不转发、不重复上传")
+    _check_upload_tasks(client, path)
     return digest.lower()
 
 

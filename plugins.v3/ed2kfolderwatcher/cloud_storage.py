@@ -404,7 +404,7 @@ class CloudStorage:
         if self.storage == "115网盘Plus":
             if not item.get("pickcode"):
                 raise CloudError("115 文件缺少 pickcode，无法读取")
-            result = self.oper.client.download_url(item["pickcode"], user_agent=settings.USER_AGENT)
+            result = self.oper.client.download_url(item["pickcode"], user_agent=settings.USER_AGENT, timeout=30)
             url = result.geturl() if result else None
             extra = getattr(result, "headers", None)
             if isinstance(extra, dict):

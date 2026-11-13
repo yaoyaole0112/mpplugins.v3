@@ -58,7 +58,7 @@ class CloudDriveAdapterTests(unittest.TestCase):
         self.oper._download_base = "http://cd2:19798"
         self.oper.client.find_file_by_path.return_value = self.remote
         self.oper.client.get_sub_files.return_value = [self.remote]
-        self.oper.client.get_upload_file_list.return_value = types.SimpleNamespace(uploadFiles=[])
+        self.oper.client.get_upload_file_list.return_value = types.SimpleNamespace(uploadFiles=[], totalCount=0)
         self.oper.client.upload_terminal_enums.return_value = ({2, 3}, 2)
         schemas = types.ModuleType("app.schemas")
         schemas.FileItem = lambda **values: types.SimpleNamespace(**values)
@@ -82,7 +82,7 @@ class CloudDriveAdapterTests(unittest.TestCase):
     def test_remote_sha1_requires_cloud_file_identity_and_finished_upload(self):
         self.assertEqual(self.adapter.uploaded_sha1(self.oper, self.item), self.remote.fileHashes[2])
         task = types.SimpleNamespace(destPath=self.remote.fullPathName, statusEnum=1)
-        self.oper.client.get_upload_file_list.return_value = types.SimpleNamespace(uploadFiles=[task])
+        self.oper.client.get_upload_file_list.return_value = types.SimpleNamespace(uploadFiles=[task], totalCount=1)
         with self.assertRaises(self.adapter.CloudError):
             self.adapter.uploaded_sha1(self.oper, self.item)
         task.statusEnum = 3
@@ -90,6 +90,39 @@ class CloudDriveAdapterTests(unittest.TestCase):
             self.adapter.uploaded_sha1(self.oper, self.item)
         task.statusEnum = 2
         self.assertEqual(self.adapter.uploaded_sha1(self.oper, self.item), self.remote.fileHashes[2])
+
+    def test_later_page_pending_upload_is_not_mistaken_for_complete(self):
+        completed = [types.SimpleNamespace(destPath=f"/other/{index}", statusEnum=2) for index in range(100)]
+        pending = types.SimpleNamespace(destPath=self.remote.fullPathName, statusEnum=1)
+        self.oper.client.get_upload_file_list.side_effect = [
+            types.SimpleNamespace(uploadFiles=completed, totalCount=101),
+            types.SimpleNamespace(uploadFiles=[pending], totalCount=101),
+        ]
+        with self.assertRaisesRegex(self.adapter.CloudError, "仍在上传"):
+            self.adapter.uploaded_sha1(self.oper, self.item)
+        self.oper.client.get_upload_file_list.assert_any_call(get_all=False, items_per_page=100, page_number=1)
+        self.oper.client.get_sub_files.assert_not_called()
+
+    def test_partial_duplicate_or_changing_task_pages_fail_closed(self):
+        row = types.SimpleNamespace(destPath="/other/a", statusEnum=2)
+        for pages in (
+            [types.SimpleNamespace(uploadFiles=[], totalCount=1)],
+            [types.SimpleNamespace(uploadFiles=[row], totalCount=2), types.SimpleNamespace(uploadFiles=[row], totalCount=2)],
+            [types.SimpleNamespace(uploadFiles=[row], totalCount=2), types.SimpleNamespace(uploadFiles=[], totalCount=1)],
+        ):
+            with self.subTest(pages=pages):
+                self.oper.client.get_upload_file_list.side_effect = pages
+                with self.assertRaises(self.adapter.CloudError):
+                    self.adapter.uploaded_sha1(self.oper, self.item)
+
+    def test_new_pending_task_after_cloud_refresh_blocks_output(self):
+        pending = types.SimpleNamespace(destPath=self.remote.fullPathName, statusEnum=1)
+        self.oper.client.get_upload_file_list.side_effect = [
+            types.SimpleNamespace(uploadFiles=[], totalCount=0),
+            types.SimpleNamespace(uploadFiles=[pending], totalCount=1),
+        ]
+        with self.assertRaisesRegex(self.adapter.CloudError, "仍在上传"):
+            self.adapter.uploaded_sha1(self.oper, self.item)
 
     def test_missing_sha1_or_wrong_identity_never_uses_local_hash_as_remote_evidence(self):
         for changed in ({"fileHashes": {}}, {"id": "different"},
@@ -227,6 +260,17 @@ class CloudDriveWorkflowTests(unittest.TestCase):
         self.upload_module.upload_with_digest.assert_not_called()
         self.plugin._process_file(path)
         adapter.upload_file.assert_called_once()
+
+    def test_cloud_upload_readback_failure_never_forwards_or_deletes(self):
+        path = self.configure_cloud(telegram_enabled=True, telegram_chat_id="@target", local_upload_delete_source=True)
+        self.upload_module.verify_cloud_readback.side_effect = self.upload_module.CloudError("cloud content unavailable")
+        with patch.object(self.plugin, "_send_telegram") as send:
+            with self.assertRaisesRegex(self.upload_module.CloudError, "cloud content unavailable"):
+                self.plugin._process_file(path)
+            send.assert_not_called()
+        self.assertFalse(self.records()[str(path)]["upload_verified"])
+        self.assertTrue(path.exists())
+        self.assertEqual((self.root / "ed2k.txt").read_text(), "")
 
     def test_missing_remote_hash_retains_source_and_retries_only_verification(self):
         path = self.configure_cloud(local_upload_delete_source=True)

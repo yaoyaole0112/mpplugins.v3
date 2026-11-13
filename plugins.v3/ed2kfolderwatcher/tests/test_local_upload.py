@@ -48,6 +48,9 @@ class LocalUploadTests(unittest.TestCase):
         storage_patch = patch.object(self.upload_module, "CloudStorage", return_value=self.storage)
         storage_patch.start()
         self.addCleanup(storage_patch.stop)
+        readback_patch = patch.object(self.upload_module, "verify_cloud_readback")
+        self.readback = readback_patch.start()
+        self.addCleanup(readback_patch.stop)
         self.storage.oper.upload.side_effect = self.upload
         self.actual_upload_kind = "ordinary"
         def invoke(oper, target, path, *args, on_start=None, before_upload=None, on_result=None):
@@ -112,6 +115,41 @@ class LocalUploadTests(unittest.TestCase):
         self.assertIn(record["link"], (self.root / "ed2k.txt").read_text())
         self.assertTrue(path.exists())
         self.assertFalse(self.plugin.recent_records()["items"][0]["upload_note"] == "")
+
+    def test_unreadable_cloud_blocks_all_forwarding_output_and_deletion(self):
+        self.configure(telegram_enabled=True, telegram_chat_id="@target", local_upload_delete_source=True,
+                       ordinary_upload_telegram_enabled=True, ordinary_upload_telegram_targets="@ordinary")
+        path = self.sample()
+        self.readback.side_effect = self.cloud_module.CloudError("cloud not ready")
+        with patch.object(self.plugin, "_send_telegram") as send, \
+                patch.object(self.plugin, "_send_telegram_user") as ordinary:
+            with self.assertRaisesRegex(self.cloud_module.CloudError, "cloud not ready"):
+                self.plugin._process_file(path)
+            send.assert_not_called()
+            ordinary.assert_not_called()
+        record = self.records()[str(path)]
+        self.assertFalse(record["upload_verified"])
+        self.assertNotIn("upload_readback_verified", record)
+        self.assertEqual((self.root / "ed2k.txt").read_text(), "")
+        self.assertTrue(path.exists())
+        self.storage.oper.get_item_strict.return_value = self.remote
+        self.readback.side_effect = None
+        with patch.object(self.plugin, "_send_telegram", return_value=True), \
+                patch.object(self.plugin, "_send_telegram_user", return_value=True):
+            self.plugin._process_local_upload(path, path.stat(), *self.plugin._paths()[1:], upload_worker=True)
+        self.storage.oper.upload.assert_called_once()
+        self.assertTrue(self.records()[str(path)]["upload_readback_verified"])
+        self.assertTrue(self.records()[str(path)]["upload_verified_at"])
+        self.assertFalse(path.exists())
+
+    def test_mp_receipt_path_does_not_add_direct_upload_readback(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        self.plugin._process_file(path)
+        self.readback.assert_not_called()
+        self.assertTrue(self.records()[str(path)]["upload_verified"])
 
     def test_completed_upload_is_not_queued_by_events_or_repeated_scans(self):
         self.configure(telegram_enabled=True, telegram_chat_id="@target", telegram_aggregate=False)

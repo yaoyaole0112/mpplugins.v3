@@ -10,6 +10,7 @@ from app.log import logger
 from .cloud_storage import CloudError, CloudStorage, cloud_path, monitor_roots
 from .upload_adapter import UploadNotStarted, instant_upload_check, upload_with_digest
 from . import clouddrive_upload
+from .upload_verification import verify_cloud_readback
 
 
 UPLOAD_FIELDS = (
@@ -570,6 +571,8 @@ class LocalUploadMixin:
             record.pop("upload_kind", None)
             record.pop("rapid_check", None)
             record.pop("rapid_check_started", None)
+            record.pop("upload_readback_verified", None)
+            record.pop("upload_verified_at", None)
             record.update(telegram_sent=False, telegram_target="", telegram_deliveries={})
             record.update(ordinary_upload_telegram_sent=False, ordinary_upload_telegram_target="",
                           ordinary_upload_telegram_deliveries={})
@@ -725,12 +728,21 @@ class LocalUploadMixin:
             self._upload_stage(path, f"校验{self._upload_label()}云端文件大小与SHA1")
             with self._cloud_request_lock:
                 item = self._verify_uploaded(storage, item, record)
+            if self._local_upload_mode in {"direct", "clouddrive"}:
+                record.update(upload_cloud_item=item, upload_note="云端大小与SHA1已匹配，正在独立回读首／中／尾内容")
+                self._write_results(output, cache_path, records)
+                self._upload_stage(path, "独立回读云端首／中／尾内容，尚未转发")
+                verify_cloud_readback(storage, item, path, record["local_sha1"], self._stopping)
+                record["upload_readback_verified"] = True
             if self._stopping.is_set() or local_identity(path.stat()) != record["local_identity"]:
                 raise OSError("上传期间本地文件变化，不转发、不删除")
             digest = record["link"].split("|")[4]
             record.update(name=item["name"], link=ed2k_link(item["name"], digest, record["size"]),
                           upload_verified=True, upload_cloud_item=item, upload_state="verified",
-                          upload_note=f"{self._upload_label()}云端大小与SHA1校验通过；链接复用本地计算结果")
+                          upload_verified_at=time.time(),
+                          upload_note=(f"{self._upload_label()}云端大小、SHA1及实际内容抽样通过；115的ED2K云下载就绪状态未知"
+                                       if record.get("upload_readback_verified")
+                                       else f"{self._upload_label()}云端大小与SHA1校验通过；链接复用本地计算结果"))
             if (self._local_upload_delete_cloud_copy and self._cloud_delete_enabled
                     and self._local_upload_cloud_delete_scope):
                 record["upload_cloud_delete_scope"] = self._local_upload_cloud_delete_scope
