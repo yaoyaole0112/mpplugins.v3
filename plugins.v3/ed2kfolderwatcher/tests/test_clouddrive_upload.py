@@ -244,6 +244,23 @@ class CloudDriveWorkflowTests(unittest.TestCase):
         self.assertTrue(self.records()[str(path)]["upload_verified"])
         self.assertFalse(path.exists())
 
+    def test_completed_cloud_uploads_are_filtered_with_one_scope_lookup_per_scan(self):
+        path = self.configure_cloud()
+        adapter = self.upload_module.clouddrive_upload
+        self.plugin._process_file(path)
+        records = self.records()
+        other = self.sample("another.mkv")
+        records[str(other)] = {**records[str(path)], "local_identity": self.upload_module.local_identity(other.stat())}
+        self.plugin._write_results(None, self.plugin._paths()[2], records)
+        adapter.upload_scope.reset_mock()
+        adapter.uploaded_sha1.reset_mock()
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("completed")):
+            self.plugin.scan(upload_only=True)
+        self.assertEqual(self.plugin._pending, {})
+        adapter.upload_scope.assert_called_once()
+        adapter.uploaded_sha1.assert_not_called()
+        adapter.upload_file.assert_called_once()
+
     def test_ambiguous_upload_never_restarts_when_target_is_missing(self):
         path = self.configure_cloud()
         adapter = self.upload_module.clouddrive_upload

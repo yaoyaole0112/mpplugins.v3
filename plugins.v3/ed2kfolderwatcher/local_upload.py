@@ -116,6 +116,68 @@ class LocalUploadMixin:
     def _local_upload_queue_path(self):
         return Path(self.get_data_path()) / "local_upload_queue.json"
 
+    def _local_upload_complete(self, path, stat, record, scope):
+        from . import ED2K_PART_SIZE, record_problem
+        if (
+            not record or not record.get("upload_verified") or record_problem(record)
+            or record.get("local_identity") != local_identity(stat)
+            or not re.fullmatch(r"[0-9a-f]{40}", record.get("local_sha1", ""))
+            or record.get("upload_mode") != self._local_upload_mode
+            or not scope or record.get("upload_scope") != scope
+            or (stat.st_size % ED2K_PART_SIZE == 0 and record.get("hash_version") != 2)
+        ):
+            return False
+        if self._local_upload_mode == "mp":
+            receipt = self._mp_upload_receipt(path, stat)
+            uploaded = record.get("upload_cloud_item") or {}
+            if not receipt or any(
+                str(receipt["item"].get(field)) != str(uploaded.get(field))
+                for field in ("storage", "fileid", "path", "name", "size")
+            ):
+                return False
+            if receipt.get("upload_kind") in {"instant", "ordinary"} and receipt["upload_kind"] != record.get("upload_kind"):
+                return False
+        if self._telegram_enabled and (
+            not record.get("telegram_sent") or record.get("telegram_target") != self._telegram_target_key()
+        ):
+            return False
+        ordinary_required = self._ordinary_upload_telegram_enabled and record.get("upload_kind") == "ordinary"
+        if ordinary_required and (
+            not record.get("ordinary_upload_telegram_sent")
+            or record.get("ordinary_upload_telegram_target") != self._ordinary_upload_telegram_target_key()
+        ):
+            return False
+        if self._local_upload_delete_cloud_copy and not record.get("upload_cloud_copy_deleted"):
+            return False
+        if self._local_upload_delete_source and (self._output_enabled or self._telegram_enabled or ordinary_required):
+            return False
+        return True
+
+    def _local_upload_recovery_complete(self, path, stat, record, recovery):
+        if not record or not record.get("upload_verified") or record.get("local_identity") != local_identity(stat):
+            return False
+        if "upload_scope" not in recovery:
+            try:
+                recovery["upload_scope"] = self._upload_scope(self._upload_storage())
+            except Exception:
+                recovery["upload_scope"] = None
+        return self._local_upload_complete(path, stat, record, recovery["upload_scope"])
+
+    def _settle_local_upload_record(self, record):
+        if record.get("upload_state") in {"queued", "upload_queued", "verifying", "failed"}:
+            record.update(upload_state="verified", upload_note="上传及所选输出已完成，无需重复处理")
+            return True
+        return False
+
+    def _retire_missing_local_upload(self, record):
+        if record and record.get("upload_mode"):
+            record.update(
+                upload_state="verified" if record.get("upload_verified") else "failed",
+                upload_note="本地源文件已不存在，已移出上传队列；保留已有链接及上传记录",
+            )
+            return True
+        return False
+
     def _load_local_upload_queue(self):
         try:
             queue = json.loads(self._local_upload_queue_path().read_text(encoding="utf-8"))
@@ -128,8 +190,34 @@ class LocalUploadMixin:
             or not isinstance(item.get("path"), str) for item in queue.values()
         ):
             raise ValueError("本地115上传队列格式错误，请检查local_upload_queue.json")
+        cache_path = self._paths()[2]
+        records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+        recovery = {}
+        restored = {}
+        changed = False
+        for key, item in queue.items():
+            path = Path(item["path"])
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                changed = self._retire_missing_local_upload(records.get(key)) or changed
+                continue
+            except OSError:
+                restored[key] = item
+                continue
+            if key != str(path.resolve()) or local_identity(stat) != item["identity"] or not self._eligible(path):
+                continue
+            record = records.get(key)
+            if self._local_upload_recovery_complete(path, stat, record, recovery):
+                changed = self._settle_local_upload_record(record) or changed
+                continue
+            restored[key] = item
+        if changed:
+            self._write_results(None, cache_path, records)
         with self._local_upload_queue_lock:
-            self._local_upload_queue = queue
+            self._local_upload_queue = restored
+            if restored != queue:
+                self._save_local_upload_queue()
 
     def _save_local_upload_queue(self):
         self._atomic_write(
@@ -195,7 +283,16 @@ class LocalUploadMixin:
             key, item = candidate
             path = Path(item["path"])
             try:
-                stat = path.stat()
+                try:
+                    stat = path.stat()
+                except FileNotFoundError:
+                    cache_path = self._paths()[2]
+                    with self._lock:
+                        records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+                        if self._retire_missing_local_upload(records.get(key)):
+                            self._write_results(None, cache_path, records)
+                    self._remove_local_upload_queue(key)
+                    continue
                 if local_identity(stat) != item["identity"] or not self._eligible(path):
                     self._remove_local_upload_queue(key)
                     continue
@@ -483,6 +580,11 @@ class LocalUploadMixin:
                 else "unknown"
             )
             self._write_results(output, cache_path, records)
+        if self._local_upload_complete(path, stat, record, scope):
+            if self._settle_local_upload_record(record):
+                self._write_results(output, cache_path, records)
+            self._clear_retry_failure(key)
+            return
         if not upload_worker:
             if self._local_upload_mode == "direct" and not record.get("upload_verified") and not record.get("upload_attempted"):
                 self._try_local_instant_upload(path, record, output, cache_path, records)

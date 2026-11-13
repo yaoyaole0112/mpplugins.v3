@@ -73,6 +73,26 @@ class Ed2kTests(unittest.TestCase):
 
     def test_parallel_setting_defaults_and_persists_through_config_save(self):
         self.assertTrue(self.plugin._movie_series_parallel)
+
+    def test_completed_local_file_is_not_requeued_on_repeated_scans(self):
+        path = self.create(data=b"a completed file")
+        self.plugin._process_file(path)
+        for _ in range(2):
+            self.plugin.scan()
+        self.assertEqual(self.plugin._pending, {})
+
+    def test_completed_local_file_remains_eligible_for_new_delivery_or_delete(self):
+        path = self.create(data=b"a completed file")
+        self.plugin._process_file(path)
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@new-target"
+        self.plugin._queue_event(path)
+        self.assertIn(str(path), self.plugin._pending)
+        self.plugin._pending.clear()
+        self.plugin._telegram_enabled = False
+        self.plugin._local_delete_source = True
+        self.plugin._queue_event(path)
+        self.assertIn(str(path), self.plugin._pending)
         for enabled in (False, True):
             self.plugin.init_plugin({"folder": str(self.folder), "movie_series_parallel": enabled})
             self.assertIs(self.plugin._movie_series_parallel, enabled)

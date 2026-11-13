@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import sys
 import threading
@@ -111,6 +112,193 @@ class LocalUploadTests(unittest.TestCase):
         self.assertIn(record["link"], (self.root / "ed2k.txt").read_text())
         self.assertTrue(path.exists())
         self.assertFalse(self.plugin.recent_records()["items"][0]["upload_note"] == "")
+
+    def test_completed_upload_is_not_queued_by_events_or_repeated_scans(self):
+        self.configure(telegram_enabled=True, telegram_chat_id="@target", telegram_aggregate=False)
+        path = self.sample()
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as send:
+            self.plugin._process_file(path)
+            with patch.object(self.plugin, "_verify_uploaded", side_effect=AssertionError("already completed")), \
+                    patch.object(self.module, "ed2k_hash", side_effect=AssertionError("already computed")):
+                self.plugin._queue_event(path)
+                self.plugin.scan(upload_only=True)
+                self.plugin.scan(upload_only=True)
+                self.plugin._process_file(path)
+                self.plugin._process_local_upload(path, path.stat(), *self.plugin._paths()[1:], upload_worker=True)
+        self.assertEqual(self.plugin._pending, {})
+        self.assertEqual(self.plugin._local_upload_queue, {})
+        self.assertEqual(self.records()[str(path)]["upload_state"], "verified")
+        send.assert_called_once()
+        self.storage.oper.upload.assert_called_once()
+
+    def test_saving_unchanged_settings_does_not_restore_completed_upload(self):
+        self.configure()
+        path = self.sample()
+        self.plugin._process_file(path)
+        self.plugin._local_upload_queue[str(path)] = {
+            "path": str(path), "identity": self.records()[str(path)]["local_identity"],
+            "queued_at": time.time(), "retry_at": 0, "attempts": 0,
+        }
+        self.plugin._save_local_upload_queue()
+        config = {
+            "enabled": True, "folder": "", "local_upload_enabled": True,
+            "local_upload_mode": "direct", "local_upload_folder": str(self.folder),
+            "local_upload_target": "/upload", "output": str(self.root / "ed2k.txt"),
+            "output_enabled": True, "min_age": 0,
+        }
+        with patch.object(self.module.threading, "Thread") as worker, \
+                patch.object(self.plugin, "_start_monitor"), \
+                patch.object(self.plugin, "_start_local_upload_worker"), \
+                patch.object(self.plugin, "_verify_uploaded", side_effect=AssertionError("already verified")):
+            worker.return_value.is_alive.return_value = False
+            self.plugin.init_plugin(config)
+            self.plugin.init_plugin(config)
+        self.assertEqual(self.plugin._pending, {})
+        self.assertEqual(self.plugin._local_upload_queue, {})
+        self.assertEqual(json.loads(self.plugin._local_upload_queue_path().read_text()), {})
+        self.storage.oper.upload.assert_called_once()
+
+    def test_restore_prunes_completed_uploads_and_keeps_unverified_work(self):
+        self.configure()
+        completed = self.sample()
+        self.plugin._process_file(completed)
+        pending = self.sample("pending.mkv")
+        records = self.records()
+        records[str(completed)]["upload_state"] = "upload_queued"
+        self.plugin._write_results(None, self.plugin._paths()[2], records)
+        self.plugin._local_upload_queue = {
+            str(path): {
+                "path": str(path), "identity": self.upload_module.local_identity(path.stat()),
+                "queued_at": time.time(), "retry_at": 0, "attempts": 0,
+            } for path in (completed, pending)
+        }
+        self.plugin._save_local_upload_queue()
+        self.plugin._load_local_upload_queue()
+        self.assertEqual(set(self.plugin._local_upload_queue), {str(pending)})
+        self.assertEqual(self.records()[str(completed)]["upload_state"], "verified")
+        self.assertEqual(set(json.loads(self.plugin._local_upload_queue_path().read_text())), {str(pending)})
+
+    def test_missing_upload_source_is_removed_without_retry_or_cloud_calls(self):
+        self.configure()
+        path = self.sample()
+        self.plugin._process_file(path)
+        entry = {
+            "path": str(path), "identity": self.upload_module.local_identity(path.stat()),
+            "queued_at": time.time(), "retry_at": 0, "attempts": 0,
+        }
+        path.unlink()
+        self.plugin._local_upload_queue = {str(path): entry}
+        self.plugin._save_local_upload_queue()
+        with patch.object(self.plugin, "_upload_storage", side_effect=AssertionError("missing source")), \
+                patch.object(self.plugin, "_record_upload_error", side_effect=AssertionError("no retry")):
+            self.plugin._load_local_upload_queue()
+            self.assertEqual(self.plugin._local_upload_queue, {})
+            self.plugin._local_upload_queue = {str(path): entry}
+            self.plugin._local_upload_queue_wake.wait = lambda timeout: self.plugin._stopping.set()
+            self.plugin._drain_local_upload_queue()
+        self.assertEqual(self.plugin._local_upload_queue, {})
+        self.assertEqual(self.records()[str(path)]["upload_state"], "verified")
+        self.assertTrue(self.records()[str(path)]["upload_verified"])
+        self.assertIn("本地源文件已不存在", self.records()[str(path)]["upload_note"])
+
+    def test_changed_file_is_still_queued_after_previous_upload_completed(self):
+        self.configure()
+        path = self.sample()
+        self.plugin._process_file(path)
+        path.write_bytes(b"changed upload content")
+        self.plugin.scan(upload_only=True)
+        self.assertIn(str(path), self.plugin._pending)
+
+    def test_new_destination_account_or_mode_still_queues_completed_source(self):
+        self.configure()
+        path = self.sample()
+        self.plugin._process_file(path)
+        self.plugin._local_upload_target = "/another"
+        self.plugin._queue_event(path)
+        self.assertIn(str(path), self.plugin._pending)
+        self.plugin._pending.clear()
+        self.plugin._local_upload_target = "/upload"
+        self.storage.oper.client.user_id = 456
+        self.plugin._queue_event(path)
+        self.assertIn(str(path), self.plugin._pending)
+        self.plugin._pending.clear()
+        self.storage.oper.client.user_id = 123
+        self.plugin._local_upload_mode = "clouddrive"
+        with patch.object(self.plugin, "_upload_scope", return_value=self.records()[str(path)]["upload_scope"]):
+            self.plugin._queue_event(path)
+        self.assertIn(str(path), self.plugin._pending)
+
+    def test_unavailable_account_does_not_drop_pending_upload(self):
+        self.configure()
+        path = self.sample()
+        self.plugin._process_file(path)
+        with patch.object(self.plugin, "_upload_scope", side_effect=self.cloud_module.CloudError("account unavailable")):
+            self.plugin._queue_event(path)
+        self.assertIn(str(path), self.plugin._pending)
+
+    def test_new_telegram_target_keeps_completed_upload_eligible_for_delivery(self):
+        self.configure(telegram_enabled=True, telegram_chat_id="@first")
+        path = self.sample()
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as send:
+            self.plugin._process_file(path)
+            self.plugin._telegram_chat_id = "@first,@second"
+            self.plugin.scan(upload_only=True)
+            self.assertIn(str(path), self.plugin._pending)
+            self.plugin._process_file(path)
+        self.assertEqual(send.call_count, 2)
+        self.storage.oper.upload.assert_called_once()
+        self.assertTrue(self.records()[str(path)]["telegram_sent"])
+
+    def test_partial_telegram_delivery_is_not_filtered_out(self):
+        self.configure(telegram_enabled=True, telegram_chat_id="@first")
+        path = self.sample()
+        with patch.object(self.plugin, "_send_telegram", return_value=False):
+            with self.assertRaises(self.cloud_module.CloudError):
+                self.plugin._process_file(path)
+        self.plugin.scan(upload_only=True)
+        self.assertIn(str(path), self.plugin._pending)
+        self.assertTrue(self.records()[str(path)]["upload_verified"])
+
+    def test_new_ordinary_forward_target_is_not_filtered_out(self):
+        self.configure(ordinary_upload_telegram_enabled=True, ordinary_upload_telegram_targets="@first")
+        path = self.sample()
+        with patch.object(self.plugin, "_send_telegram_user", return_value=True) as send:
+            self.plugin._process_file(path)
+            self.plugin._queue_event(path)
+            self.assertEqual(self.plugin._pending, {})
+            self.plugin._ordinary_upload_telegram_targets = "@first,@second"
+            self.plugin._queue_event(path)
+            self.assertIn(str(path), self.plugin._pending)
+            self.plugin._process_file(path)
+        self.assertEqual(send.call_count, 2)
+        self.storage.oper.upload.assert_called_once()
+
+    def test_new_local_or_cloud_delete_setting_is_not_filtered_out(self):
+        self.configure()
+        path = self.sample()
+        self.plugin._process_file(path)
+        self.plugin._local_upload_delete_source = True
+        self.plugin._queue_event(path)
+        self.assertIn(str(path), self.plugin._pending)
+        self.plugin._pending.clear()
+        self.plugin._local_upload_delete_source = False
+        self.plugin._local_upload_delete_cloud_copy = True
+        self.plugin._queue_event(path)
+        self.assertIn(str(path), self.plugin._pending)
+
+    def test_mp_completed_receipt_is_not_replayed_but_changed_target_is_processed(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        self.plugin._pending.clear()
+        self.plugin._process_file(path)
+        self.plugin.scan(upload_only=True)
+        self.assertEqual(self.plugin._pending, {})
+        changed = {**self.remote, "fileid": "5678", "name": "renamed.mkv", "path": "/upload/renamed.mkv"}
+        self.plugin._on_local_upload_transfer(self.event(path, changed))
+        self.assertIn(str(path), self.plugin._pending)
+        self.storage.oper.upload.assert_not_called()
 
     def test_direct_upload_waits_for_recent_change_even_with_preserved_old_mtime(self):
         self.configure()

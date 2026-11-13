@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.22.0"
+    plugin_version = "1.22.1"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -1091,7 +1091,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                     return target_batch_id
         return batch_id
 
-    def _queue_event(self, path: Path, delay=None, batch_id=None) -> None:
+    def _queue_event(self, path: Path, delay=None, batch_id=None, recovery=None) -> None:
         if self._stopping.is_set():
             return
         try:
@@ -1099,6 +1099,16 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 return
             stat = path.stat()
             if self._local_upload_mode == "mp" and self._upload_root_for(path) and self._mp_upload_receipt(path, stat) is None:
+                return
+            if recovery is None:
+                cache_path = self._paths()[2]
+                records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+                recovery = {"records": records}
+            record = recovery["records"].get(str(path.resolve()))
+            if self._upload_root_for(path):
+                if self._local_upload_recovery_complete(path, stat, record, recovery):
+                    return
+            elif self._local_recovery_complete(path, stat, record):
                 return
             signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
             with self._condition:
@@ -1134,6 +1144,25 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 self._maybe_flush_batch(completed_old)
         except OSError:
             return
+
+    def _local_recovery_complete(self, path, stat, record):
+        if (
+            not record or record.get("upload_mode") or record.get("source_type") == "cloud"
+            or record_problem(record) or record.get("size") != stat.st_size
+            or record.get("mtime_ns") != stat.st_mtime_ns
+        ):
+            return False
+        if record.get("inode") is not None and (
+            record.get("inode"), record.get("device"), record.get("ctime_ns")
+        ) != (stat.st_ino, stat.st_dev, stat.st_ctime_ns):
+            return False
+        if self._telegram_enabled and (
+            not record.get("telegram_sent") or record.get("telegram_target") != self._telegram_target_key()
+        ):
+            return False
+        if self._local_delete_source and not record.get("source_deleted"):
+            return False
+        return True
 
     def _pending_order(self, key, entry, position, now):
         due, signature = entry
@@ -2438,6 +2467,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             if self._output_enabled:
                 self._write_results(output, cache_path, records)
         batch_id = self._new_batch("local-scan")
+        recovery = {"records": records}
         mp_upload = self._local_upload_enabled and self._local_upload_mode == "mp"
         if mp_upload:
             from .cloud_storage import monitor_roots
@@ -2454,13 +2484,13 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             for path in self._iter_files(folder):
                 if self._stopping.is_set():
                     return
-                self._queue_event(path, batch_id=batch_id)
+                self._queue_event(path, batch_id=batch_id, recovery=recovery)
         for source in sorted(receipt_sources, key=filename_order):
             if self._stopping.is_set():
                 return
             path = Path(source)
             if path.is_absolute() and self._upload_root_for(path):
-                self._queue_event(path, batch_id=batch_id)
+                self._queue_event(path, batch_id=batch_id, recovery=recovery)
         self._seal_batch(batch_id)
         if mp_upload and upload_only:
             logger.info("自动生成ED2K链接：仅补扫已有MP上传成功回执的文件；未上传文件不计算")
