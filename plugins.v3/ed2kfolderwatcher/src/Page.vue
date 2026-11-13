@@ -29,16 +29,6 @@ const copyFailedId = ref('')
 let timer
 let disposed = false
 const statuses = { deleted: '已删除源文件', retained: '未删除源文件', delete_failed: '删除失败，源文件保留', delete_uncertain: '删除结果未确认', unknown: '历史记录：删源状态未记录' }
-const workflowLabels = {
-  link_ready: 'ED2K计算完成，输出就绪',
-  computed_waiting_upload: 'ED2K已计算，等待上传网盘',
-  upload_queued: 'ED2K已计算，排队等待网盘上传',
-  waiting_mp: 'ED2K已计算，等待MP复制上传',
-  upload_active: 'ED2K已计算，正在秒传／上传／核验',
-  upload_verified: 'ED2K已计算，网盘内容已确认',
-  upload_failed: 'ED2K已计算，但上传或核验失败；源文件保留',
-}
-
 function formatTime(value) {
   return value ? new Date(value * 1000).toLocaleString() : '历史记录：生成时间未记录'
 }
@@ -205,10 +195,12 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
       <li v-for="(item, index) in items" :key="`${item.link}-${index}`" class="record">
         <div class="record-heading"><h3>{{ item.name }}</h3><div class="record-actions"><button v-if="item.can_delete && item.source_status !== 'deleted'" type="button" class="delete-source" :disabled="!!deleting" @click="deleteSource(item)">{{ deleting === item.id ? '校验删除中…' : '手动删除源文件' }}</button><span class="source-status" :class="item.source_status">{{ statuses[item.source_status] || statuses.unknown }}</span></div></div>
         <p class="record-time">文件大小：{{ item.size === null || item.size === undefined ? '未知' : formatBytes(item.size) }}<span v-if="item.upload_badge" class="upload-kind-tag" :class="`kind-${item.upload_badge.kind}`" :title="item.upload_badge.title" :aria-label="`上传方式：${item.upload_badge.label}`">{{ item.upload_badge.label }}</span> · 生成时间：{{ formatTime(item.generated_at) }}<span v-if="item.deleted_at"> · 删除时间：{{ formatTime(item.deleted_at) }}</span><span v-if="item.source_type === 'cloud'"> · 网盘：{{ item.storage }}<span v-if="item.cloud_delete_note"> · {{ item.cloud_delete_note }}</span><span v-else>（未记录自动删除）</span></span></p>
-        <p v-if="item.upload_state" class="workflow-state" :class="item.workflow_status">{{ item.upload_mode === 'mp' && item.workflow_status === 'upload_verified' ? 'MP整理上传成功，ED2K已计算并校验' : workflowLabels[item.workflow_status] || (item.upload_mode === 'mp' ? 'MP回执后处理中' : '本地计算上传：处理中') }}<span v-if="item.upload_note"> · {{ item.upload_note }}</span></p>
-        <p v-if="item.upload_kind === 'ordinary' && item.ordinary_upload_telegram_enabled" class="record-time">FUCK孤本转发：{{ item.ordinary_upload_telegram_sent ? '已投递' : '待投递或投递失败' }}</p>
+        <div class="workflow-state" :class="`workflow-${item.display_status?.state || 'pending'}`" aria-label="计算校验与转发状态" title="投递成功表示Telegram返回成功，不代表接收机器人已完成后续处理；删除状态单独显示。">
+          <strong>{{ item.display_status?.label || '状态待确认，请更新插件后刷新' }}</strong>
+          <span v-if="item.display_status?.steps" class="workflow-steps"><span v-for="step in item.display_status.steps" :key="step.key" class="workflow-step">{{ step.label }}：{{ step.text }}</span></span>
+        </div>
+        <p v-if="item.display_status?.detail" class="record-time error">{{ item.display_status.detail }}</p>
         <p v-if="item.upload_cloud_delete_note" class="record-time">网盘副本：{{ item.upload_cloud_delete_note }}</p>
-        <p v-if="item.upload_state === 'failed' && item.upload_first_error && item.upload_first_error !== item.upload_note" class="record-time">首次失败：{{ item.upload_first_error }}</p>
         <p v-if="item.link_valid === false" class="error">{{ item.link_error || '链接无效，需要完整源文件重新生成' }}</p>
         <pre v-if="item.link_valid === false">{{ item.link }}</pre><button v-else type="button" class="copy-link" title="点击复制 ED2K 链接" @click="copyLink(item, $event)">{{ item.link }}</button>
         <div v-if="item.link_valid !== false" class="copy-feedback" role="status" aria-live="polite"><span v-if="copiedId === (item.id || item.link)" class="notice">链接已复制</span><span v-else-if="copyFailedId === (item.id || item.link)" class="error">复制受限：Ctrl+C／⌘C 或长按</span></div>
@@ -229,6 +221,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
 </template>
 
 <style scoped>
+.workflow-state{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 12px;overflow-wrap:anywhere}.workflow-steps{display:flex;flex-wrap:wrap;font-weight:400;color:rgba(var(--v-theme-on-surface),.75)}.workflow-step+.workflow-step::before{content:"｜";margin:0 5px;color:rgba(var(--v-theme-on-surface),.35)}.workflow-success{color:#57b985}.workflow-pending{color:#dba34b}.workflow-failed{color:#df7b7b}
 .upload-kind-tag{display:inline-block;margin-left:8px;padding:2px 7px;border-radius:5px;font-size:12px;line-height:1.4;vertical-align:middle;white-space:nowrap;background:rgba(var(--v-theme-on-surface),.08)}.kind-instant{color:#57b985;background:rgba(60,180,110,.13)}.kind-ordinary{color:rgb(var(--v-theme-primary));background:rgba(var(--v-theme-primary),.13)}.kind-unknown{color:rgba(var(--v-theme-on-surface),.65)}
 .cancel-task{flex:none;padding:5px 8px;font-size:12px;white-space:nowrap;color:#df7b7b;background:rgba(220,60,60,.13)}@media(max-width:650px){.progress-heading{flex-wrap:wrap}.progress-heading strong{flex-basis:calc(100% - 60px)}.progress-stage{margin-left:auto}}
 .copy-feedback{height:20px;min-height:20px;font-size:12px;line-height:20px;overflow-wrap:anywhere;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

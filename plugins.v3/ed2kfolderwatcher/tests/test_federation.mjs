@@ -90,9 +90,9 @@ test('upload progress and independent delete settings are exposed', async () => 
   assert.match(page, /task\.progress_known !== false/)
   assert.match(page, /暂未返回字节进度/)
   assert.match(page, /task\.upload_speed/)
-  assert.match(page, /首次失败：\{\{ item\.upload_first_error \}\}/)
+  assert.match(page, /item\.display_status\?\.detail/)
   assert.match(page, /本地／网盘队列表示 ED2K 尚未计算/)
-  assert.match(page, /upload_verified: 'ED2K已计算，网盘内容已确认'/)
+  assert.match(page, /计算校验与转发状态/)
   const panel = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
   const save = panel.match(/async function saveSettings\(\) \{([\s\S]*?)\n\}/)?.[1]
   assert.match(save, /settings\.local_upload_delete_cloud_copy/)
@@ -125,8 +125,21 @@ test('MP upload mode explains receipt-driven calculation and recovery', async ()
   }
   const page = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
   assert.match(page, /MP回执后处理/)
-  assert.match(page, /MP整理上传成功，ED2K已计算并校验/)
-  assert.match(page, /item\.upload_mode === 'mp'/)
+  assert.match(page, /item\.display_status\?\.label/)
+  assert.equal(page.includes('{{ item.upload_note }}'), false)
+})
+
+test('record summaries use current structured status and never append stale phase notes', async () => {
+  const page = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
+  assert.match(page, /workflow-\$\{item\.display_status\?\.state \|\| 'pending'\}/)
+  assert.match(page, /v-for="step in item\.display_status\.steps"/)
+  assert.match(page, /\.workflow-success\{color:#57b985\}/)
+  assert.match(page, /\.workflow-pending\{color:#dba34b\}/)
+  assert.match(page, /\.workflow-failed\{color:#df7b7b\}/)
+  assert.equal(page.includes('{{ item.upload_note }}'), false)
+  assert.equal(page.includes('{{ item.upload_first_error }}'), false)
+  assert.equal(page.includes('120秒后重试'), false)
+  assert.match(page, /不代表接收机器人已完成后续处理/)
 })
 
 test('built federation entry resolves all public components and styles', async () => {

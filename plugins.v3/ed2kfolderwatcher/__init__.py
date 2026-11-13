@@ -225,7 +225,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.22.5"
+    plugin_version = "1.22.6"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -2669,7 +2669,21 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 logger.warning(f"自动生成ED2K链接：手动删除未完成：{type(failure).__name__}")
                 return {"ok": False, "message": "删除未完成，请刷新核对实际状态并检查日志、文件权限或文件是否变化"}
 
+    def _record_delivery_context(self, channel):
+        enabled = self._telegram_enabled if channel == "telegram" else self._ordinary_upload_telegram_enabled
+        if not enabled:
+            return {"enabled": False}
+        try:
+            targets = (self._telegram_targets() if channel == "telegram"
+                       else self._ordinary_upload_telegram_targets_list())
+            keyed = [(target, self._telegram_delivery_key(*target)) for target in targets]
+            target_key = hashlib.sha256("|".join(sorted(key for _, key in keyed)).encode("utf-8")).hexdigest()
+            return {"enabled": True, "targets": keyed, "target_key": target_key}
+        except (OSError, ValueError, TypeError):
+            return {"enabled": True, "error": True}
+
     def recent_records(self) -> dict:
+        from .record_status import delivery_status, workflow_summary
         cache_path = Path(self.get_data_path()) / "records.json"
         try:
             progress = self._progress_snapshot()
@@ -2678,6 +2692,10 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 raise ValueError()
             ordered = sorted(enumerate(records.items()),
                              key=lambda item: (float(item[1][1].get("generated_at") or 0), item[0]), reverse=True)
+            delivery_contexts = {
+                channel: self._record_delivery_context(channel)
+                for channel in ("telegram", "ordinary_upload_telegram")
+            }
             items = []
             for index, (path, record) in ordered[:100]:
                 if record.get("source_deleted") is True:
@@ -2710,6 +2728,22 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                     can_delete = self._source_matches(Path(path), record)
                 except (OSError, ValueError):
                     can_delete = False
+                delivery = {
+                    channel: delivery_status(record, channel, context, self._telegram_delivery_store,
+                                             self._legacy_telegram_delivered)
+                    for channel, context in delivery_contexts.items()
+                }
+                failure = self._retry_failures.get(path)
+                if failure:
+                    identity = record.get("cloud_fingerprint") if record.get("source_type") == "cloud" else [
+                        record.get("size"), record.get("mtime_ns"), record.get("inode"),
+                    ]
+                    if failure.get("identity") != identity:
+                        failure = None
+                display_status = workflow_summary(
+                    record, problem, delivery["telegram"], delivery["ordinary_upload_telegram"],
+                    self._ordinary_upload_telegram_enabled, failure,
+                )
                 items.append({"name": record.get("name") or Path(path).name, "size": record.get("size"), "link": record.get("link", ""),
                               "id": self._record_id(path, record), "can_delete": can_delete,
                               "link_valid": not problem, "link_error": problem,
@@ -2718,6 +2752,8 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                               "source_path": record.get("source_path", path),
                               "upload_state": record.get("upload_state", ""), "upload_note": record.get("upload_note", ""),
                               "upload_mode": record.get("upload_mode", ""),
+                              "upload_verified": record.get("upload_verified", False),
+                              "display_status": display_status,
                               "upload_kind": record.get("upload_kind", ""),
                               "ordinary_upload_telegram_sent": record.get("ordinary_upload_telegram_sent", False),
                               "ordinary_upload_telegram_enabled": self._ordinary_upload_telegram_enabled,
