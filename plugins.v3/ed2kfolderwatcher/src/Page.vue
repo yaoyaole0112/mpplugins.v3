@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import Panel from './Panel.vue'
 import './mobile-layout.css'
 import { useMobilePage } from './useMobilePage'
+import { uploadKindBadge } from './uploadKind'
 
 const props = defineProps({ api: { type: Object, default: () => ({}) }, pluginId: { type: String, default: 'Ed2kFolderWatcher' } })
 const emit = defineEmits(['close', 'layout'])
@@ -128,7 +129,7 @@ async function refresh() {
     if (result?.success === false) throw new Error(result.message || '读取失败')
     const data = result?.success !== undefined ? result.data : result?.data ?? result
     if (!data?.ok) throw new Error(data?.message || '读取生成记录失败')
-    items.value = data.items || []
+    items.value = (data.items || []).map(item => ({ ...item, upload_badge: uploadKindBadge(item) }))
     progress.value = data.progress || []
     failedTasks.value = data.failed_tasks || []
     total.value = data.total || 0
@@ -203,7 +204,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
     <ol v-if="items.length" class="records-list" tabindex="0" aria-label="最近生成的 ED2K 链接记录">
       <li v-for="(item, index) in items" :key="`${item.link}-${index}`" class="record">
         <div class="record-heading"><h3>{{ item.name }}</h3><div class="record-actions"><button v-if="item.can_delete && item.source_status !== 'deleted'" type="button" class="delete-source" :disabled="!!deleting" @click="deleteSource(item)">{{ deleting === item.id ? '校验删除中…' : '手动删除源文件' }}</button><span class="source-status" :class="item.source_status">{{ statuses[item.source_status] || statuses.unknown }}</span></div></div>
-        <p class="record-time">文件大小：{{ item.size === null || item.size === undefined ? '未知' : formatBytes(item.size) }} · 生成时间：{{ formatTime(item.generated_at) }}<span v-if="item.deleted_at"> · 删除时间：{{ formatTime(item.deleted_at) }}</span><span v-if="item.source_type === 'cloud'"> · 网盘：{{ item.storage }}<span v-if="item.cloud_delete_note"> · {{ item.cloud_delete_note }}</span><span v-else>（未记录自动删除）</span></span></p>
+        <p class="record-time">文件大小：{{ item.size === null || item.size === undefined ? '未知' : formatBytes(item.size) }}<span v-if="item.upload_badge" class="upload-kind-tag" :class="`kind-${item.upload_badge.kind}`" :title="item.upload_badge.title" :aria-label="`上传方式：${item.upload_badge.label}`">{{ item.upload_badge.label }}</span> · 生成时间：{{ formatTime(item.generated_at) }}<span v-if="item.deleted_at"> · 删除时间：{{ formatTime(item.deleted_at) }}</span><span v-if="item.source_type === 'cloud'"> · 网盘：{{ item.storage }}<span v-if="item.cloud_delete_note"> · {{ item.cloud_delete_note }}</span><span v-else>（未记录自动删除）</span></span></p>
         <p v-if="item.upload_state" class="workflow-state" :class="item.workflow_status">{{ item.upload_mode === 'mp' && item.workflow_status === 'upload_verified' ? 'MP整理上传成功，ED2K已计算并校验' : workflowLabels[item.workflow_status] || (item.upload_mode === 'mp' ? 'MP回执后处理中' : '本地计算上传：处理中') }}<span v-if="item.upload_note"> · {{ item.upload_note }}</span></p>
         <p v-if="item.upload_kind === 'ordinary' && item.ordinary_upload_telegram_enabled" class="record-time">FUCK孤本转发：{{ item.ordinary_upload_telegram_sent ? '已投递' : '待投递或投递失败' }}</p>
         <p v-if="item.upload_cloud_delete_note" class="record-time">网盘副本：{{ item.upload_cloud_delete_note }}</p>
@@ -228,6 +229,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
 </template>
 
 <style scoped>
+.upload-kind-tag{display:inline-block;margin-left:8px;padding:2px 7px;border-radius:5px;font-size:12px;line-height:1.4;vertical-align:middle;white-space:nowrap;background:rgba(var(--v-theme-on-surface),.08)}.kind-instant{color:#57b985;background:rgba(60,180,110,.13)}.kind-ordinary{color:rgb(var(--v-theme-primary));background:rgba(var(--v-theme-primary),.13)}.kind-unknown{color:rgba(var(--v-theme-on-surface),.65)}
 .cancel-task{flex:none;padding:5px 8px;font-size:12px;white-space:nowrap;color:#df7b7b;background:rgba(220,60,60,.13)}@media(max-width:650px){.progress-heading{flex-wrap:wrap}.progress-heading strong{flex-basis:calc(100% - 60px)}.progress-stage{margin-left:auto}}
 .copy-feedback{height:20px;min-height:20px;font-size:12px;line-height:20px;overflow-wrap:anywhere;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .progress-section{flex:none;margin-top:14px;padding:14px 16px;border:1px solid rgba(var(--v-theme-on-surface),.16);border-radius:12px}.progress-section h3{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:16px}.worker-status,.source-tag,.queue-position{flex:none;border-radius:7px;padding:4px 8px;font-size:12px;background:rgba(var(--v-theme-on-surface),.08)}.worker-on{color:#57b985}.worker-off{color:#df7b7b}.progress-empty,.progress-detail{font-size:13px;margin:6px 0;color:rgba(var(--v-theme-on-surface),.68)}.progress-list{list-style:none;padding:0;margin:8px 0 0}.progress-item{padding:9px 0;border-top:1px solid rgba(var(--v-theme-on-surface),.1)}.progress-item.failed .progress-detail{color:#df7b7b;overflow-wrap:anywhere}.progress-heading{display:flex;align-items:center;gap:8px;min-width:0}.progress-heading strong{min-width:0;overflow-wrap:anywhere;flex:1}.progress-stage{font-size:12px;color:rgba(var(--v-theme-on-surface),.65);text-align:right}.progress-track{height:6px;margin:8px 0 4px;background:rgba(var(--v-theme-on-surface),.1);border-radius:6px;overflow:hidden}.progress-track span{display:block;height:100%;background:rgb(var(--v-theme-primary));transition:width .2s ease}
