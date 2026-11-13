@@ -102,6 +102,8 @@ test('upload progress and independent delete settings are exposed', async () => 
   const upload = panel.split('data-testid="local-upload"')[1].split('</article>')[0]
   const cloud = panel.split('data-testid="cloud-source"')[1].split('</article>')[0]
   assert.match(upload, /网盘副本删除/)
+  assert.match(upload, /输出成功后删除本地源文件/)
+  assert.equal(upload.includes('输出成功后删除本地原文件'), false)
   assert.equal(cloud.includes('单独授权115网盘删源'), false)
   assert.match(cloud, /开启后将使用当前115账号，并把授权限定在已配置监控目录和子目录范围/)
   assert.match(save, /values\.cloud_delete_enabled = settings\.cloud_delete_source \|\| settings\.local_upload_delete_cloud_copy/)

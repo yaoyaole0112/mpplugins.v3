@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.22.2"
+    plugin_version = "1.22.3"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -2727,7 +2727,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             field("VTextField", "local_upload_folder", "本地计算上传目录", hint="多个目录用英文逗号分隔；自动监控新增文件，包含子目录及过滤沿用通用设置。", persistent_hint=True),
             field("VTextField", "local_upload_target", "上传目标目录（直传模式）", hint="115模式填115绝对路径；CloudDrive2模式填其115挂载点下完整路径（含挂载点名称），不填NAS挂载路径。", persistent_hint=True),
             field("VTextField", "local_upload_rate", "直传速度上限（MiB/s）", type="number", min=0, max=128, hint="默认8，0不限速；仅限制本插件向115或CloudDrive2传输，CloudDrive2到网盘的速度由其设置控制。", persistent_hint=True),
-            field("VSwitch", "local_upload_delete_source", "输出成功后删除本地原文件", hint="仅本模块生效；115上传核验及所选输出全部成功后再次校验本地身份再删除。", persistent_hint=True),
+            field("VSwitch", "local_upload_delete_source", "输出成功后删除本地源文件", hint="仅本模块生效；115上传核验及所选输出全部成功后再次校验本地身份再删除。", persistent_hint=True),
             field("VSwitch", "local_upload_delete_cloud_copy", "网盘副本删除", hint="仅115插件直传支持；CloudDrive2模式不删除网盘副本。", persistent_hint=True),
             {"component": "VAlert", "props": {"type": "info"}, "text": "先计算本地ED2K与SHA1，再上传并核验后转发。MP模式只接收成功回执；CloudDrive2复用已登录插件，等待云端完成与SHA1一致，缺少SHA1则保留本地文件。CloudDrive2上传类型未知，不触发孤本转发。"},
             {"component": "VCardTitle", "text": "本地监控"},
