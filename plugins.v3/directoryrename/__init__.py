@@ -14,7 +14,7 @@ from .routing import install_hooks, parse_rules
 class DirectoryRename(_PluginBase):
     plugin_name = "目标目录重命名"
     plugin_desc = "按目标存储和目录为电影、电视剧选择独立重命名模板。"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "helios"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
     plugin_config_prefix = "directoryrename_"

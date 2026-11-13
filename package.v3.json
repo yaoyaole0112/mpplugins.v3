@@ -3,7 +3,7 @@
     "name": "目标目录重命名",
     "description": "按目标存储和目录为电影、电视剧选择独立模板，保留原生整理计划及媒体库文件反查。",
     "labels": "整理,重命名",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -11,6 +11,7 @@
     "system_version": ">=3.2.6",
     "level": 1,
     "history": {
+      "v1.1.2": "插件作者更新为 helios，递增版本号以便检测更新；保留现有目录规则、模板及透明表单样式。",
       "v1.1.1": "底部操作区改为透明背景，添加、取消和保存按钮同排显示，修正规则首尾圆角，保留现有规则及模板。",
       "v1.1.0": "配置界面改为可增删、复制的规则表单，支持选择存储和已配置目录、分影视类型编辑模板及保存前校验，保留原有规则数据。",
       "v1.0.0": "按目标存储和目录边界选择影视模板，支持分类子目录、Season根目录推导及媒体库文件反查；未匹配和音乐保留全局配置。"
