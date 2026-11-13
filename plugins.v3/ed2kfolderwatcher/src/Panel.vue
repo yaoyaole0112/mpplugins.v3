@@ -33,6 +33,9 @@ watch(() => settings.cloud_storage, () => {
     settings.local_upload_delete_cloud_copy = false
   }
 })
+watch(() => settings.local_upload_mode, () => {
+  if (settings.local_upload_mode !== 'direct') settings.local_upload_delete_cloud_copy = false
+})
 
 function unpack(response) {
   const result = response?.success === undefined && response?.data?.success !== undefined ? response.data : response
@@ -216,14 +219,16 @@ onUnmounted(() => {
       <h3>本地计算，上传115</h3>
       <div class="switches"><label class="switch"><input v-model="settings.local_upload_enabled" type="checkbox" :disabled="disabled">启用本地计算上传115</label><label class="switch"><input v-model="settings.local_upload_delete_source" type="checkbox" :disabled="disabled || !settings.local_upload_enabled">输出成功后删除本地原文件</label><label v-if="settings.local_upload_mode === 'direct'" class="switch"><input v-model="settings.local_upload_delete_cloud_copy" type="checkbox" :disabled="disabled || !settings.local_upload_enabled">网盘副本删除</label></div>
       <div class="fields">
-        <label>上传方式<select v-model="settings.local_upload_mode" :disabled="disabled || !settings.local_upload_enabled"><option value="mp">使用现有MP整理上传（复制）</option><option value="direct">调用115插件直接上传（不整理）</option></select><small>{{ settings.local_upload_mode === 'mp' ? 'MP上传成功后才本地计算；大小与SHA1核验一致后输出、转发。' : '先计算本地ED2K与SHA1；115大小与SHA1一致后才输出、转发。' }}</small></label>
-        <label v-if="settings.local_upload_mode === 'direct'">直传速度上限（MiB/s）<input v-model.number="settings.local_upload_rate" type="number" min="0" max="128" step="1" :disabled="disabled || !settings.local_upload_enabled"><small>默认8，0不限速；仅限制本插件直传，始终单文件分片上传，不影响MP整理。</small></label>
+        <label>上传方式<select v-model="settings.local_upload_mode" :disabled="disabled || !settings.local_upload_enabled"><option value="mp">使用现有MP整理上传（复制）</option><option value="direct">调用115插件直接上传（不整理）</option><option value="clouddrive">调用CloudDrive2插件直接上传（不整理）</option></select><small>{{ settings.local_upload_mode === 'mp' ? 'MP上传成功后才本地计算；大小与SHA1核验一致后输出、转发。' : '先计算本地ED2K与SHA1；网盘完成上传且大小与SHA1一致后才输出、转发。' }}</small></label>
+        <label v-if="settings.local_upload_mode !== 'mp'">直传速度上限（MiB/s）<input v-model.number="settings.local_upload_rate" type="number" min="0" max="128" step="1" :disabled="disabled || !settings.local_upload_enabled"><small>默认8，0不限速；保持单文件上传，不影响MP整理。CloudDrive2模式限制MP→CD2速度，CD2→网盘速度在CD2设置。</small></label>
         <label>本地计算上传目录<input v-model="settings.local_upload_folder" class="monitor-roots" :disabled="disabled || !settings.local_upload_enabled" placeholder="/downloads/complete"><small>{{ settings.local_upload_mode === 'mp' ? '填写MP本地资源目录，多个用英文逗号分隔；仅接收上传成功回执，不监控新增文件。' : '多个用英文逗号分隔；自动监控新增文件，每10分钟补漏。' }}沿用通用过滤与子目录设置。</small></label>
         <label v-if="settings.local_upload_mode === 'direct'">115上传目标目录<input v-model="settings.local_upload_target" :disabled="disabled || !settings.local_upload_enabled" placeholder="/影视资源/本地上传"><small>保留本地根目录内相对结构；缺少目录由115插件创建，同名异内容不覆盖。</small></label>
+        <label v-if="settings.local_upload_mode === 'clouddrive'">CloudDrive2上传目标目录<input v-model="settings.local_upload_target" :disabled="disabled || !settings.local_upload_enabled" placeholder="/115挂载点名称/影视资源/本地上传"><small>填写CD2中115挂载点下的完整路径，包含实际挂载点名称，不是NAS本地路径；保留相对目录结构。</small></label>
       </div>
       <p v-if="settings.local_upload_mode === 'mp'" class="warning">MP按原有目录监控规则整理并复制上传；本插件不发起MP整理或115上传，只在收到MP成功回执后计算、核验并输出／转发。保留本地文件以完成计算及校验。</p>
       <p v-if="settings.local_upload_mode === 'direct'">计算与普通上传分离：慢速大文件占用独立上传通道，后续文件仍可继续计算及检查秒传。</p>
-      <div v-if="settings.local_upload_mode === 'direct'" class="actions"><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.local_upload_enabled" @click="runUpload">立即本地计算／上传／补发</button></div>
+      <p v-if="settings.local_upload_mode === 'clouddrive'">复用已登录的CloudDrive2插件及其上传模式，无需NAS挂载；MP与CD2会传输文件数据，CD2可能使用磁盘缓存。等待云端完成与SHA1核验；缺少SHA1时保留本地文件、不转发。暂不识别秒传类型、不触发FUCK孤本、不删除网盘副本，不保证115云下载秒下。</p>
+      <div v-if="settings.local_upload_mode !== 'mp'" class="actions"><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.local_upload_enabled" @click="runUpload">立即本地计算／上传／补发</button></div>
     </article>
 
     <article class="card" data-testid="local-source">
@@ -237,9 +242,9 @@ onUnmounted(() => {
 
     <article class="card" data-testid="cloud-source">
       <h3>网盘监控</h3>
-      <p>无需挂载网盘；通过存储插件分块读取，不保存完整临时文件。并发遵循通用设置，CloudDrive只读。</p>
+      <p>无需挂载网盘；通过存储插件分块读取，不保存完整临时文件。并发遵循通用设置，CloudDrive监控不删源。</p>
       <div class="switches"><label class="switch"><input v-model="settings.cloud_enabled" type="checkbox" :disabled="disabled" @change="settings.cloud_enabled || (settings.cloud_delete_source = false)">启用网盘增量生成</label><label class="switch"><input v-model="settings.cloud_monitor_enabled" type="checkbox" :disabled="disabled || settings.cloud_storage !== '115网盘Plus'">115生活事件监控（近实时）</label><label class="switch"><input v-model="settings.cloud_scan_enabled" type="checkbox" :disabled="disabled">网盘定时增量补扫</label><label class="switch"><input v-model="settings.cloud_delete_source" type="checkbox" :disabled="disabled || !settings.cloud_enabled || settings.cloud_storage !== '115网盘Plus'">输出成功后删除网盘源文件</label></div>
-      <p v-if="settings.cloud_delete_source" class="warning">开启后将使用当前115账号，并把授权限定在已配置监控目录和子目录范围；关闭此开关即撤销删源授权。CloudDrive始终只读。</p>
+      <p v-if="settings.cloud_delete_source" class="warning">开启后将使用当前115账号，并把授权限定在已配置监控目录和子目录范围；关闭此开关即撤销删源授权。CloudDrive监控不提供删源。</p>
       <div class="fields"><label>网盘存储<select v-model="settings.cloud_storage" :disabled="disabled" @change="cloud.folders = []; cloud.browsing = ''; if (settings.cloud_storage !== '115网盘Plus') { settings.cloud_monitor_enabled = false; settings.cloud_delete_enabled = false; settings.cloud_delete_source = false; settings.local_upload_delete_cloud_copy = false }"><option value="115网盘Plus">115网盘Plus</option><option value="CloudDrive储存">CloudDrive储存</option></select><small>已配置：{{ cloud.storages.map(item => item.name).join('、') || '未检测到支持的存储' }}</small></label><label>网盘监控目录<input v-model="settings.cloud_folder" class="monitor-roots" :disabled="disabled" placeholder="/电影,/电视剧"><small>同一存储内的绝对路径，多个用英文逗号分隔，最多32个。</small></label><label>网盘补扫计划<input v-model.trim="settings.cloud_cron" :disabled="disabled || !settings.cloud_scan_enabled" placeholder="*/10 * * * *"><small>开启定时补扫后生效，默认每10分钟。</small></label><label>网盘读取超时（秒）<input v-model="settings.cloud_read_timeout" type="number" min="30" max="1800" :disabled="disabled"><small>单次网络读取等待上限，默认300秒。</small></label><label v-if="settings.cloud_monitor_enabled">115生活事件来源<select v-model="settings.cloud_life_source" :disabled="disabled"><option value="shared">复用115插件监听（不额外请求生活接口）</option><option value="direct">独立轮询（每分钟一次生活接口）</option></select><small>复用模式需115插件监听和账号一致。</small></label></div>
       <p v-if="settings.cloud_monitor_enabled">只将事件对应且位于监控目录内的单个文件加入队列，不扫描或补算目录中的已有文件；每个事件最多复查10次。</p>
       <div class="actions"><button type="button" class="secondary" :disabled="disabled" @click="browseCloud()">浏览网盘目录</button><button type="button" class="secondary" :disabled="disabled || !settings.enabled || !settings.cloud_enabled" @click="runCloud">立即网盘增量扫描／补发</button><button type="button" class="secondary" :disabled="disabled" @click="work(refreshCloud)">刷新网盘进度</button></div>

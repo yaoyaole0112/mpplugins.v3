@@ -13,6 +13,7 @@ from .user_account import UserAccountError
 from .telegram_targets import telegram_targets
 from .file_size import minimum_file_bytes, minimum_gb_value, minimum_gb_setting
 from .local_upload import UPLOAD_FIELDS
+from . import clouddrive_upload
 
 
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
@@ -87,20 +88,26 @@ def validate_settings(plugin, values):
     if result["cloud_life_source"] not in {"shared", "direct"}:
         raise UserAccountError("生活事件来源无效")
     result["local_upload_mode"] = result["local_upload_mode"] or "mp"
-    if result["local_upload_mode"] not in {"mp", "direct"}:
+    if result["local_upload_mode"] not in {"mp", "direct", "clouddrive"}:
         raise UserAccountError("请选择有效的本地计算上传方式")
     if result["local_upload_enabled"]:
         if not result["local_upload_folder"]:
             raise UserAccountError("请填写本地计算上传目录")
-        if result["local_upload_mode"] == "direct" and not result["local_upload_target"]:
-            raise UserAccountError("直传模式请填写115上传目标目录")
+        if result["local_upload_mode"] != "mp" and not result["local_upload_target"]:
+            raise UserAccountError("直传模式请填写上传目标目录")
         from .cloud_storage import CloudStorage, CloudError
         try:
-            storage = CloudStorage("115网盘Plus")
-            if result["local_upload_mode"] == "direct" and not callable(getattr(storage.oper, "get_item_strict", None)):
-                raise CloudError("请更新115插件以提供严格目标查询")
+            storage = CloudStorage("CloudDrive储存" if result["local_upload_mode"] == "clouddrive" else "115网盘Plus")
+            if result["local_upload_mode"] != "mp" and not callable(getattr(storage.oper, "get_item_strict", None)):
+                raise CloudError("请更新所选存储插件以提供严格目标查询")
+            if result["local_upload_mode"] == "clouddrive":
+                clouddrive_upload.upload_scope(storage.oper, result["local_upload_target"], result["local_upload_folder"])
+                if result["local_upload_delete_cloud_copy"]:
+                    raise CloudError("CloudDrive上传暂不支持网盘副本删除，请关闭该开关")
         except CloudError as failure:
             raise UserAccountError(str(failure)) from None
+        except Exception as failure:
+            raise UserAccountError(f"上传存储连接或目录校验失败（{type(failure).__name__}），设置未保存") from None
     if result["cloud_monitor_enabled"] and result["cloud_storage"] != "115网盘Plus":
         raise UserAccountError("115生活事件仅支持115网盘Plus")
     try:

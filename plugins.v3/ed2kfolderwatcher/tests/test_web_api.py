@@ -373,6 +373,28 @@ class WebApiTests(unittest.TestCase):
             with self.subTest(values=values), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, values)
 
+    def test_clouddrive_upload_settings_use_own_storage_and_require_safe_target(self):
+        from ed2k_api_test_package import cloud_storage
+        values = {
+            "local_upload_enabled": True, "local_upload_mode": "clouddrive",
+            "local_upload_folder": "/downloads", "local_upload_target": "/115open/upload",
+        }
+        with patch.object(cloud_storage, "CloudStorage") as storage, \
+                patch.object(web_api.clouddrive_upload, "upload_scope", return_value="scope") as scope:
+            result = web_api.validate_settings(self.plugin, values)
+            self.assertEqual(result["local_upload_mode"], "clouddrive")
+            storage.assert_called_once_with("CloudDrive储存")
+            scope.assert_called_once()
+            for invalid in (
+                {**values, "local_upload_target": ""},
+                {**values, "local_upload_delete_cloud_copy": True},
+            ):
+                with self.subTest(invalid=invalid), self.assertRaises(web_api.UserAccountError):
+                    web_api.validate_settings(self.plugin, invalid)
+            scope.side_effect = cloud_storage.CloudError("目标不是115网盘")
+            with self.assertRaisesRegex(web_api.UserAccountError, "不是115"):
+                web_api.validate_settings(self.plugin, values)
+
     def test_upload_endpoint_only_scans_upload_source_and_requires_enabled_worker(self):
         self.authorize()
         self.assertFalse(self.client.post("/local-upload/run").json()["ok"])

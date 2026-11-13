@@ -59,6 +59,9 @@ test('local upload card precedes local monitoring and offers MP and direct modes
   }
   assert.match(upload, /value="mp"/)
   assert.match(upload, /value="direct"/)
+  assert.match(upload, /value="clouddrive"/)
+  assert.match(upload, /CloudDrive2上传目标目录/)
+  assert.match(upload, /不触发FUCK孤本/)
   assert.match(upload, /复制上传/)
   assert.match(upload, /独立上传通道/)
   assert.match(source, /request\('local-upload\/run'/)
@@ -89,7 +92,7 @@ test('upload progress and independent delete settings are exposed', async () => 
   assert.match(page, /task\.upload_speed/)
   assert.match(page, /首次失败：\{\{ item\.upload_first_error \}\}/)
   assert.match(page, /本地／网盘队列表示 ED2K 尚未计算/)
-  assert.match(page, /upload_verified: 'ED2K已计算，115内容已确认'/)
+  assert.match(page, /upload_verified: 'ED2K已计算，网盘内容已确认'/)
   const panel = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
   const save = panel.match(/async function saveSettings\(\) \{([\s\S]*?)\n\}/)?.[1]
   assert.match(save, /settings\.local_upload_delete_cloud_copy/)
@@ -111,7 +114,7 @@ test('MP upload mode explains receipt-driven calculation and recovery', async ()
   assert.match(upload, /MP上传成功后才本地计算/)
   assert.match(upload, /不监控新增文件/)
   assert.match(upload, /本插件不发起MP整理或115上传/)
-  assert.match(upload, /v-if="settings\.local_upload_mode === 'direct'" class="actions"/)
+  assert.match(upload, /v-if="settings\.local_upload_mode !== 'mp'" class="actions"/)
   assert.equal(upload.includes('立即回执补扫'), false)
   for (const selector of ['data-testid="local-upload"', 'data-testid="local-source"', 'data-testid="cloud-source"']) {
     const card = source.split(selector)[1].split('</article>')[0]

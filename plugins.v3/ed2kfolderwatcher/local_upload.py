@@ -9,6 +9,7 @@ from app.log import logger
 
 from .cloud_storage import CloudError, CloudStorage, cloud_path, monitor_roots
 from .upload_adapter import UploadNotStarted, instant_upload_check, upload_with_digest
+from . import clouddrive_upload
 
 
 UPLOAD_FIELDS = (
@@ -57,14 +58,16 @@ class LocalUploadMixin:
             self._local_upload_rate = 8
         try:
             self._local_upload_folder = ",".join(monitor_roots(self._local_upload_folder))
-            if self._local_upload_mode not in {"mp", "direct"}:
-                raise ValueError("请选择MP整理上传或115插件直接上传")
+            if self._local_upload_mode not in {"mp", "direct", "clouddrive"}:
+                raise ValueError("请选择MP整理上传、115插件或CloudDrive2插件直接上传")
             if self._local_upload_target:
                 self._local_upload_target = cloud_path(self._local_upload_target)
             if self._local_upload_enabled and not self._local_upload_folder:
                 raise ValueError("请指定本地计算上传目录")
-            if self._local_upload_enabled and self._local_upload_mode == "direct" and not self._local_upload_target:
-                raise ValueError("请指定115上传目标目录")
+            if self._local_upload_enabled and self._local_upload_mode != "mp" and not self._local_upload_target:
+                raise ValueError("请指定上传目标目录")
+            if self._local_upload_mode == "clouddrive" and self._local_upload_delete_cloud_copy:
+                raise ValueError("CloudDrive上传暂不支持删除网盘副本，请关闭该开关")
             if self._local_upload_enabled:
                 self._upload_receipts()
                 self._load_local_upload_queue()
@@ -199,7 +202,7 @@ class LocalUploadMixin:
                 self._upload_active = {
                     "path": str(path), "name": path.name, "size": stat.st_size,
                     "bytes_read": 0, "phase": "upload", "progress_known": False,
-                    "stage": "MP上传已完成，等待内容核验" if self._local_upload_mode == "mp" else "等待115秒传／普通上传通道", "started_at": time.time(),
+                    "stage": "MP上传已完成，等待内容核验" if self._local_upload_mode == "mp" else f"等待{self._upload_label()}上传通道", "started_at": time.time(),
                 }
                 output, cache_path = self._paths()[1:]
                 output = output if self._output_enabled else None
@@ -326,7 +329,19 @@ class LocalUploadMixin:
         except (OSError, ValueError):
             logger.exception("自动生成ED2K链接：保存MP上传完成回执失败，保留本地文件")
 
+    def _upload_label(self):
+        return "CloudDrive2" if self._local_upload_mode == "clouddrive" else "115"
+
+    def _upload_storage(self):
+        if self._local_upload_mode == "clouddrive":
+            return clouddrive_upload.bounded_storage(CloudStorage("CloudDrive储存"))
+        return CloudStorage("115网盘Plus")
+
     def _upload_scope(self, storage):
+        if self._local_upload_mode == "clouddrive":
+            return clouddrive_upload.upload_scope(
+                storage.oper, self._local_upload_target, self._local_upload_folder,
+            )
         account = getattr(storage.oper.client, "user_id", None)
         if not re.fullmatch(r"[1-9][0-9]*", str(account or "")):
             raise CloudError("无法确认115账号，保留本地文件")
@@ -344,15 +359,62 @@ class LocalUploadMixin:
     def _verify_uploaded(self, storage, item, record):
         try:
             item = storage.fresh(item)
-            if item.get("storage") != "115网盘Plus" or item.get("type") != "file" or item.get("size") != record["size"]:
+            expected_storage = "CloudDrive储存" if record.get("upload_mode") == "clouddrive" else "115网盘Plus"
+            if item.get("storage") != expected_storage or item.get("type") != "file" or item.get("size") != record["size"]:
                 raise CloudError("上传后文件身份或大小不一致，保留本地文件，不转发")
-            if storage.file_sha1(item) != record["local_sha1"]:
+            if expected_storage == "CloudDrive储存" and record.get("upload_scope") != self._upload_scope(storage):
+                raise CloudError("CloudDrive账号或上传范围已变化，保留本地文件，不转发")
+            checksum = (clouddrive_upload.uploaded_sha1(storage.oper, item)
+                        if expected_storage == "CloudDrive储存" else storage.file_sha1(item))
+            if checksum != record["local_sha1"]:
                 raise CloudError("上传后SHA1与本地不一致，保留本地文件，不转发")
             return saved_item(item)
         except CloudError:
             raise
         except Exception as failure:
-            raise CloudError(f"115上传内容核验暂时失败（{type(failure).__name__}），保留本地文件") from None
+            raise CloudError(f"网盘上传内容核验暂时失败（{type(failure).__name__}），保留本地文件") from None
+
+    def _upload_clouddrive(self, storage, path, record, output, cache_path, records):
+        destination = self._upload_destination(path)
+        lookup = getattr(storage.oper, "get_item_strict", None)
+        if not callable(lookup):
+            raise UploadNotStarted("CloudDrive插件缺少严格查询接口，请更新后重试；未上传")
+        self._upload_stage(path, "检查CloudDrive上传目标")
+        try:
+            with self._cloud_request_lock:
+                existing = lookup(Path(destination))
+        except Exception as failure:
+            raise CloudError(f"CloudDrive目标查询未确认（{type(failure).__name__}），不重复上传") from None
+        if existing:
+            item = saved_item(existing)
+        else:
+            if record.get("upload_attempted"):
+                raise CloudError("CloudDrive上次上传结果未确认；仅查询目标，保留本地文件，不重复上传")
+            from app.schemas import FileItem
+            target = FileItem(storage="CloudDrive储存", type="dir",
+                              path=PurePosixPath(destination).parent.as_posix())
+            def mark_started():
+                nonlocal records, record
+                records = json.loads(cache_path.read_text(encoding="utf-8"))
+                record = records[str(path.resolve())]
+                if record.get("upload_scope") != self._upload_scope(storage):
+                    raise CloudError("CloudDrive账号或目标范围变化，取消上传")
+                record.update(upload_attempted=True, upload_state="uploading", upload_kind="unknown",
+                              upload_note="调用CloudDrive2插件上传；等待云端完成及SHA1核验")
+                self._write_results(output, cache_path, records)
+                self._upload_stage(path, "CloudDrive2正在上传；等待云端提交")
+            uploaded = clouddrive_upload.upload_file(
+                storage.oper, target, path, record["local_identity"], self._stopping,
+                lambda percent: self._upload_progress(path, percent),
+                self._flush_due_groups, self._local_upload_rate, on_start=mark_started,
+            )
+            if not uploaded:
+                raise CloudError("CloudDrive未返回上传成功回执；保留本地文件，后续只查询目标")
+            item = saved_item(uploaded)
+        if item.get("storage") != "CloudDrive储存" or cloud_path(item.get("path")) != destination:
+            raise CloudError("CloudDrive回执存储或路径与目标不符，保留本地文件")
+        record["upload_kind"] = "unknown"
+        return item
 
     def _prepare_local_upload(self, path, stat, records, key, output, cache_path):
         from . import ed2k_hash, ed2k_link, record_problem
@@ -402,7 +464,7 @@ class LocalUploadMixin:
                 return
         records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
         record, records = self._prepare_local_upload(path, stat, records, key, output, cache_path)
-        storage = CloudStorage("115网盘Plus")
+        storage = self._upload_storage()
         scope = self._upload_scope(storage)
         if record.get("upload_scope") != scope:
             record.update(upload_scope=scope, upload_mode=self._local_upload_mode, upload_state="computed", upload_verified=False)
@@ -422,7 +484,7 @@ class LocalUploadMixin:
             )
             self._write_results(output, cache_path, records)
         if not upload_worker:
-            if self._local_upload_mode != "mp" and not record.get("upload_verified") and not record.get("upload_attempted"):
+            if self._local_upload_mode == "direct" and not record.get("upload_verified") and not record.get("upload_attempted"):
                 self._try_local_instant_upload(path, record, output, cache_path, records)
                 records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else records
                 record = records.get(key, record)
@@ -431,7 +493,10 @@ class LocalUploadMixin:
                 upload_note=(
                     "MP复制上传已完成，本地ED2K已计算；等待115内容核验"
                     if self._local_upload_mode == "mp"
-                    else record.get("upload_note") or "ED2K已计算；等待独立115上传通道（先检查秒传，未命中再普通上传）"
+                    else record.get("upload_note") or (
+                        "ED2K已计算；等待独立CloudDrive2上传通道"
+                        if self._local_upload_mode == "clouddrive"
+                        else "ED2K已计算；等待独立115上传通道（先检查秒传，未命中再普通上传）")
                 ),
             )
             self._write_results(output, cache_path, records)
@@ -440,6 +505,11 @@ class LocalUploadMixin:
         if not record.get("upload_verified"):
             if self._local_upload_mode == "mp":
                 item = receipt["item"]
+            elif self._local_upload_mode == "clouddrive":
+                item = self._upload_clouddrive(storage, path, record, output, cache_path, records)
+                records = json.loads(cache_path.read_text(encoding="utf-8"))
+                record = records[key]
+                record["upload_kind"] = "unknown"
             else:
                 destination = self._upload_destination(path)
                 lookup = getattr(storage.oper, "get_item_strict", None)
@@ -548,9 +618,9 @@ class LocalUploadMixin:
                     logger.info(f"自动生成ED2K链接：115最终上传方式：{kind_label}：{path.name}")
                 if cloud_path(item.get("path")) != destination:
                     raise CloudError("115上传回执路径与目标不一致，保留本地文件")
-            record.update(upload_state="verifying", upload_note="校验115文件大小与SHA1")
+            record.update(upload_state="verifying", upload_note=f"校验{self._upload_label()}云端文件大小与SHA1")
             self._write_results(output, cache_path, records)
-            self._upload_stage(path, "校验115文件大小与SHA1")
+            self._upload_stage(path, f"校验{self._upload_label()}云端文件大小与SHA1")
             with self._cloud_request_lock:
                 item = self._verify_uploaded(storage, item, record)
             if self._stopping.is_set() or local_identity(path.stat()) != record["local_identity"]:
@@ -558,13 +628,13 @@ class LocalUploadMixin:
             digest = record["link"].split("|")[4]
             record.update(name=item["name"], link=ed2k_link(item["name"], digest, record["size"]),
                           upload_verified=True, upload_cloud_item=item, upload_state="verified",
-                          upload_note="115大小与SHA1校验通过；链接复用本地计算结果")
+                          upload_note=f"{self._upload_label()}云端大小与SHA1校验通过；链接复用本地计算结果")
             if (self._local_upload_delete_cloud_copy and self._cloud_delete_enabled
                     and self._local_upload_cloud_delete_scope):
                 record["upload_cloud_delete_scope"] = self._local_upload_cloud_delete_scope
             record.pop("upload_error_code", None)
             self._write_results(output, cache_path, records)
-            logger.info(f"自动生成ED2K链接：115上传内容校验通过，复用本地ED2K：{item['name']}")
+            logger.info(f"自动生成ED2K链接：{self._upload_label()}上传内容校验通过，复用本地ED2K：{item['name']}")
         else:
             with self._cloud_request_lock:
                 self._verify_uploaded(storage, record["upload_cloud_item"], record)
@@ -602,7 +672,7 @@ class LocalUploadMixin:
                 raise CloudError("115普通上传及内容校验已确认，独立普通上传Telegram目标尚未全部投递成功；重试仅补发，不重新上传")
             if self._local_upload_mode == "mp":
                 raise CloudError("MP整理上传及网盘内容校验已确认，Telegram尚未全部投递成功；重试仅补发，不重新上传")
-            raise CloudError("115上传已确认，Telegram尚未全部投递成功；重试仅补发，不重复上传")
+            raise CloudError(f"{self._upload_label()}上传已确认，Telegram尚未全部投递成功；重试仅补发，不重复上传")
         if self._local_upload_delete_cloud_copy and not record.get("upload_cloud_copy_deleted"):
             self._delete_uploaded_cloud_copy(record, output, cache_path, records)
         if self._local_upload_delete_source and (
@@ -612,6 +682,8 @@ class LocalUploadMixin:
             self._clear_retry_failure(key)
 
     def _delete_uploaded_cloud_copy(self, record, output, cache_path, records):
+        if self._local_upload_mode == "clouddrive" or record.get("upload_mode") == "clouddrive":
+            raise CloudError("CloudDrive模式不支持网盘副本删除，已保留")
         if record.get("upload_cloud_delete_state") == "uncertain":
             raise CloudError("115网盘副本删除结果未确认；不会自动重发删除请求，请先到网盘核实")
         if not self._cloud_delete_enabled or not self._local_upload_cloud_delete_scope:
@@ -724,20 +796,20 @@ class LocalUploadMixin:
         if not active or active.get("path") != str(path):
             return
         if percent is None:
-            self._upload_stage(path, "等待115秒传／上传初始化")
+            self._upload_stage(path, f"等待{self._upload_label()}上传初始化")
             return
         now = time.time()
         done = min(active["size"], int(active["size"] * percent / 100))
         elapsed = now - active.get("updated_at", now)
         speed = max(0, done - active.get("bytes_read", 0)) / elapsed if elapsed > 0 else 0
-        active.update(stage="正在上传至115" if percent < 100 else "传输完成，等待115提交确认",
+        active.update(stage=f"正在上传至{self._upload_label()}" if percent < 100 else f"传输完成，等待{self._upload_label()}云端提交确认",
                       phase="upload", progress_known=True, bytes_read=done, upload_speed=speed,
                       updated_at=now)
 
     def _delete_uploaded_local(self, path, record, output, cache_path, records):
         if not record.get("upload_verified") or self._stopping.is_set():
             return
-        storage = CloudStorage("115网盘Plus")
+        storage = self._upload_storage()
         if record.get("upload_scope") != self._upload_scope(storage):
             raise CloudError("上传账号或配置范围变化，保留本地文件")
         with self._cloud_request_lock:

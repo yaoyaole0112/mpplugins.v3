@@ -30,12 +30,12 @@ let disposed = false
 const statuses = { deleted: '已删除源文件', retained: '未删除源文件', delete_failed: '删除失败，源文件保留', delete_uncertain: '删除结果未确认', unknown: '历史记录：删源状态未记录' }
 const workflowLabels = {
   link_ready: 'ED2K计算完成，输出就绪',
-  computed_waiting_upload: 'ED2K已计算，等待上传115',
-  upload_queued: 'ED2K已计算，排队等待115上传',
+  computed_waiting_upload: 'ED2K已计算，等待上传网盘',
+  upload_queued: 'ED2K已计算，排队等待网盘上传',
   waiting_mp: 'ED2K已计算，等待MP复制上传',
   upload_active: 'ED2K已计算，正在秒传／上传／核验',
-  upload_verified: 'ED2K已计算，115内容已确认',
-  upload_failed: 'ED2K已计算，但115上传失败；源文件保留',
+  upload_verified: 'ED2K已计算，网盘内容已确认',
+  upload_failed: 'ED2K已计算，但上传或核验失败；源文件保留',
 }
 
 function formatTime(value) {
@@ -182,7 +182,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <section class="progress-section" aria-live="polite">
       <h3>正在处理与等待队列 <span class="worker-status" :class="workerAlive ? 'worker-on' : 'worker-off'">{{ workerAlive ? '工作线程运行中' : '工作线程未运行' }}</span></h3>
-      <p class="progress-detail">本地／网盘队列表示 ED2K 尚未计算；“本地上传”队列表示 ED2K 已完成、正在等待或执行115直传；“MP回执后处理”表示 MP 已整理上传，插件正在核验网盘副本或投递链接。</p>
+      <p class="progress-detail">本地／网盘队列表示 ED2K 尚未计算；“本地上传”队列表示 ED2K 已完成、正在等待或执行115／CloudDrive2直传；“MP回执后处理”表示 MP 已整理上传，插件正在核验网盘副本或投递链接。</p>
       <p v-if="!progress.length" class="progress-empty">当前没有本地或网盘文件等待处理。</p>
       <ol v-else class="progress-list">
         <li v-for="(task, index) in progress" :key="task.id || `${task.source}-${task.name}-${index}`" class="progress-item" :class="task.status">

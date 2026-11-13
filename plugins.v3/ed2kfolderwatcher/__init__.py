@@ -224,7 +224,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.21.10"
+    plugin_version = "1.22.0"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -466,7 +466,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             self.scan()
             if self._cloud_enabled:
                 self.queue_cloud_scan()
-        if self._enabled and ((self._folder and self._monitor_enabled) or (self._local_upload_enabled and self._local_upload_mode == "direct")):
+        if self._enabled and ((self._folder and self._monitor_enabled) or (self._local_upload_enabled and self._local_upload_mode != "mp")):
             self._start_monitor()
         if self._enabled and self._local_upload_enabled:
             self.scan(upload_only=True)
@@ -588,7 +588,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         folders = []
         if not upload_only and (not watching or self._monitor_enabled):
             folders.extend(monitor_roots(self._folder))
-        if self._local_upload_enabled and (not watching or self._local_upload_mode == "direct"):
+        if self._local_upload_enabled and (not watching or self._local_upload_mode != "mp"):
             folders.extend(monitor_roots(self._local_upload_folder))
         roots = [Path(root) for root in folders]
         unique = {}
@@ -2223,7 +2223,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                         logger.info(f"自动生成ED2K链接：低于最小大小阈值，按独立开关删除本地源文件（未生成或发送链接）：{path}")
                 return
             stable_since = stat.st_mtime
-            if self._local_upload_mode == "direct" and self._upload_root_for(path):
+            if self._local_upload_mode != "mp" and self._upload_root_for(path):
                 stable_since = max(stable_since, stat.st_ctime)
             if stable_since + self._min_age > time.time():
                 self._queue_event(path)
@@ -2357,7 +2357,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             items.append({
                 "id": hashlib.sha256(key.encode()).hexdigest(), "name": Path(key).name,
                 "size": entry.get("identity", [None])[0], "bytes_read": 0,
-                "stage": "等待115内容核验／链接投递" if self._local_upload_mode == "mp" else "等待独立115普通上传通道",
+                "stage": "等待115内容核验／链接投递" if self._local_upload_mode == "mp" else f"等待独立{self._upload_label()}上传通道",
                 "source": "MP回执后处理" if self._local_upload_mode == "mp" else "本地上传",
                 "status": "queued", "queue_position": position, "can_cancel": False,
             })
@@ -2693,13 +2693,13 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             field("VTextField", "retry_limit", "失败后自动重试次数", type="number", min=0, max=10, hint="0表示不自动重试；最多10次，不含首次处理。达到上限后保留失败记录，可手动增量补扫重试。", persistent_hint=True),
             {"component": "VCardTitle", "text": "本地计算，上传115"},
             field("VSwitch", "local_upload_enabled", "启用本地计算上传115"),
-            field("VSelect", "local_upload_mode", "上传方式", items=[{"title": "使用现有MP整理上传（复制）", "value": "mp"}, {"title": "调用115插件直接上传（不整理）", "value": "direct"}]),
+            field("VSelect", "local_upload_mode", "上传方式", items=[{"title": "使用现有MP整理上传（复制）", "value": "mp"}, {"title": "调用115插件直接上传（不整理）", "value": "direct"}, {"title": "调用CloudDrive2插件直接上传（不整理）", "value": "clouddrive"}]),
             field("VTextField", "local_upload_folder", "本地计算上传目录", hint="多个目录用英文逗号分隔；自动监控新增文件，包含子目录及过滤沿用通用设置。", persistent_hint=True),
-            field("VTextField", "local_upload_target", "115上传目标目录（直传模式）", hint="单个115绝对路径；保留本地根目录内相对结构，同名异内容不覆盖。", persistent_hint=True),
-            field("VTextField", "local_upload_rate", "直传速度上限（MiB/s）", type="number", min=0, max=128, hint="默认8，0不限速；仅限制本插件直传，保持单文件分片上传。", persistent_hint=True),
+            field("VTextField", "local_upload_target", "上传目标目录（直传模式）", hint="115模式填115绝对路径；CloudDrive2模式填其115挂载点下完整路径（含挂载点名称），不填NAS挂载路径。", persistent_hint=True),
+            field("VTextField", "local_upload_rate", "直传速度上限（MiB/s）", type="number", min=0, max=128, hint="默认8，0不限速；仅限制本插件向115或CloudDrive2传输，CloudDrive2到网盘的速度由其设置控制。", persistent_hint=True),
             field("VSwitch", "local_upload_delete_source", "输出成功后删除本地原文件", hint="仅本模块生效；115上传核验及所选输出全部成功后再次校验本地身份再删除。", persistent_hint=True),
-            field("VSwitch", "local_upload_delete_cloud_copy", "网盘副本删除", hint="默认关闭；需115单独授权，上传路径、账号、大小及SHA1复核通过后才删除网盘副本。", persistent_hint=True),
-            {"component": "VAlert", "props": {"type": "info"}, "text": "先计算本地ED2K与SHA1，再上传并核验后转发。MP模式不主动整理，须用复制上传并保留本地文件；直传复用115插件。"},
+            field("VSwitch", "local_upload_delete_cloud_copy", "网盘副本删除", hint="仅115插件直传支持；CloudDrive2模式不删除网盘副本。", persistent_hint=True),
+            {"component": "VAlert", "props": {"type": "info"}, "text": "先计算本地ED2K与SHA1，再上传并核验后转发。MP模式只接收成功回执；CloudDrive2复用已登录插件，等待云端完成与SHA1一致，缺少SHA1则保留本地文件。CloudDrive2上传类型未知，不触发孤本转发。"},
             {"component": "VCardTitle", "text": "本地监控"},
             field("VTextField", "folder", "本地监控目录", placeholder="/downloads/complete,/media/movies", hint="容器内绝对路径，多个用英文逗号分隔，最多32个。", persistent_hint=True),
             field("VSwitch", "monitor_enabled", "本地实时监控文件"),
@@ -2709,7 +2709,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             field("VTextField", "cron", "本地补扫计划", hint="默认每 10 分钟：*/10 * * * *", persistent_hint=True),
             {"component": "VCardTitle", "text": "网盘监控"},
             field("VSwitch", "cloud_enabled", "启用网盘增量生成"),
-            field("VSwitch", "cloud_delete_source", "输出成功后删除网盘源文件", hint="仅网盘监控生效；开启后即授权当前115账号及所选目录范围；CloudDrive只读。", persistent_hint=True),
+            field("VSwitch", "cloud_delete_source", "输出成功后删除网盘源文件", hint="仅网盘监控生效；开启后即授权当前115账号及所选目录范围；CloudDrive监控不提供删源。", persistent_hint=True),
             field("VSelect", "cloud_storage", "网盘存储", items=[{"title": "115网盘Plus", "value": "115网盘Plus"}, {"title": "CloudDrive储存", "value": "CloudDrive储存"}]),
             field("VTextField", "cloud_folder", "网盘监控目录", placeholder="/电影,/电视剧", hint="同一存储内的绝对路径，多个用英文逗号分隔，最多32个。", persistent_hint=True),
             field("VSwitch", "cloud_monitor_enabled", "115生活事件监控（近实时）", hint="仅处理开启后的新增事件，不扫描已有文件；每分钟检查。", persistent_hint=True),
