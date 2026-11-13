@@ -5,6 +5,7 @@ import re
 import stat as stat_module
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, unquote
@@ -224,7 +225,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.22.3"
+    plugin_version = "1.22.4"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -294,6 +295,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     _reload_lock = threading.Lock()
     _reload_thread = None
     _reload_pending = None
+    _telegram_delivery_store = None
 
     def init_plugin(self, config: dict = None) -> None:
         self.stop_service()
@@ -451,6 +453,19 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 self._cloud_status["error"] = str(failure)
                 logger.warning(f"自动生成ED2K链接：网盘来源配置无效：{failure}")
         self._onlyonce = bool(config.get("onlyonce", False))
+        self._telegram_delivery_store = None
+        try:
+            from .telegram_delivery import TelegramDeliveryStore
+            delivery_store = TelegramDeliveryStore(
+                Path(self.get_data_path()) / "telegram_deliveries.json", self._atomic_write,
+            )
+            cache_path = self._paths()[2]
+            records = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+            delivery_store.checkpoint(records.values())
+            self._telegram_delivery_store = delivery_store
+        except (OSError, ValueError, TypeError) as failure:
+            self._enabled = self._onlyonce = False
+            logger.error(f"自动生成ED2K链接：Telegram投递凭据读取或保存失败，已停止插件以避免重复发送；保留源文件（{type(failure).__name__}）")
         self._init_local_upload(config)
         local_sources = self._folder or (self._local_upload_enabled and self._local_upload_folder)
         if (local_sources or self._cloud_enabled) and (self._enabled or self._onlyonce):
@@ -821,7 +836,8 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                     and (not record.get("upload_mode") or record.get("upload_verified"))]
         grouped = {}
         for key, context, record in eligible:
-            if record.get("telegram_sent"):
+            if record.get("telegram_sent") and (
+                    not self._telegram_enabled or record.get("telegram_target") == self._telegram_target_key()):
                 continue
             grouped.setdefault(group_key, []).append(record)
         if self._telegram_enabled:
@@ -1953,6 +1969,10 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         return hashlib.sha256("|".join(keys).encode("utf-8")).hexdigest()
 
     def _notify_ordinary_upload_record(self, record: dict, checkpoint=None) -> None:
+        with self._telegram_delivery_guard([record], "ordinary_upload_telegram", checkpoint) as persist:
+            self._deliver_ordinary_upload_record(record, persist)
+
+    def _deliver_ordinary_upload_record(self, record: dict, checkpoint=None) -> None:
         targets = self._ordinary_upload_telegram_targets_list()
         if not targets:
             return
@@ -2069,27 +2089,66 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             return
         if not self._telegram_enabled:
             return
+        with self._telegram_delivery_guard([record], "telegram", checkpoint) as persist:
+            self._deliver_record(path, record, persist)
+
+    @contextmanager
+    def _telegram_delivery_guard(self, records, channel, checkpoint):
+        store = self._telegram_delivery_store
+        if store is None:
+            raise ValueError("Telegram投递凭据不可用，保留源文件并停止发送")
+        with store.lock:
+            targets = (self._telegram_targets() if channel == "telegram"
+                       else self._ordinary_upload_telegram_targets_list())
+            target_key = (self._telegram_target_key() if channel == "telegram"
+                          else self._ordinary_upload_telegram_target_key())
+            for record in records:
+                completed = store.restore(record, channel)
+                deliveries = record[f"{channel}_deliveries"]
+                for destination, thread_id in targets:
+                    delivery_key = self._telegram_delivery_key(destination, thread_id)
+                    if target_key in completed or self._legacy_telegram_delivered(
+                            destination, thread_id, completed, len(targets), channel):
+                        deliveries[delivery_key] = True
+                sent = bool(targets) and all(
+                    deliveries.get(self._telegram_delivery_key(*target)) for target in targets
+                )
+                record[f"{channel}_sent"] = sent
+                record[f"{channel}_target"] = target_key if sent else ""
+            store.checkpoint(records, (channel,))
+
+            def persist():
+                store.checkpoint(records, (channel,))
+                if checkpoint is not None:
+                    checkpoint()
+
+            yield persist
+            store.checkpoint(records, (channel,))
+
+    def _legacy_telegram_delivered(self, destination, thread_id, completed, count, channel):
+        if channel != "telegram" or not completed:
+            return False
+        from .user_account import TelegramUserAccount
+        identity = TelegramUserAccount(Path(self.get_data_path())).identity()
+        aliases = {destination, destination.lstrip("@"), f"https://t.me/{destination.lstrip('@')}", f"t.me/{destination.lstrip('@')}"}
+        if destination.startswith("@"):
+            for host in ("t.me", "telegram.me", "www.t.me"):
+                for scheme in ("http://", "https://"):
+                    address = f"{scheme}{host}/{destination.lstrip('@')}"
+                    aliases.update({address, f"{address}/"})
+        if count == 1:
+            aliases.add(self._telegram_chat_id)
+        return any(
+            hashlib.sha256(f"user|{identity}|{alias}|{thread_id or ''}".encode("utf-8")).hexdigest() in completed
+            for alias in aliases
+        )
+
+    def _deliver_record(self, path: Path, record: dict, checkpoint=None) -> None:
         target_key = self._telegram_target_key()
         if record.get("telegram_sent") and record.get("telegram_target") == target_key:
             return
         targets = self._telegram_targets()
         deliveries = record.setdefault("telegram_deliveries", {})
-        if record.get("telegram_sent") and record.get("telegram_target"):
-            from .user_account import TelegramUserAccount
-            identity = TelegramUserAccount(Path(self.get_data_path())).identity()
-            for destination, thread_id in targets:
-                aliases = {destination, destination.lstrip("@"), f"https://t.me/{destination.lstrip('@')}", f"t.me/{destination.lstrip('@')}"}
-                if destination.startswith("@"):
-                    for host in ("t.me", "telegram.me", "www.t.me"):
-                        for scheme in ("http://", "https://"):
-                            address = f"{scheme}{host}/{destination.lstrip('@')}"
-                            aliases.update({address, f"{address}/"})
-                if len(targets) == 1:
-                    aliases.add(self._telegram_chat_id)
-                for alias in aliases:
-                    legacy = f"user|{identity}|{alias}|{thread_id or ''}"
-                    if hashlib.sha256(legacy.encode("utf-8")).hexdigest() == record["telegram_target"]:
-                        deliveries[self._telegram_delivery_key(destination, thread_id)] = True
         record["telegram_sent"] = False
         record["telegram_target"] = ""
         for target in targets:
@@ -2110,11 +2169,18 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             return
         if not self._telegram_enabled:
             return
+        with self._telegram_delivery_guard(records, "telegram", checkpoint) as persist:
+            self._deliver_records(records, persist)
+
+    def _deliver_records(self, records: list, checkpoint=None) -> None:
         targets = self._telegram_targets()
         if not targets:
             return
+        deliveries_by_link = {}
         for record in records:
-            record.setdefault("telegram_deliveries", {})
+            deliveries = deliveries_by_link.setdefault(record["link"], {})
+            deliveries.update(record.setdefault("telegram_deliveries", {}))
+            record["telegram_deliveries"] = deliveries
         grouped = {}
         for record in records:
             key = telegram_aggregate_key(record.get("name", "")) if self._telegram_aggregate else None
@@ -2125,7 +2191,10 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             chunks = telegram_message_chunks(group)
             for target in targets:
                 delivery_key = self._telegram_delivery_key(*target)
-                pending = [item for item in group if not item["telegram_deliveries"].get(delivery_key)]
+                pending = list({
+                    item["link"]: item for item in group
+                    if not item["telegram_deliveries"].get(delivery_key)
+                }.values())
                 if not pending:
                     continue
                 for chunk in telegram_message_chunks(pending):

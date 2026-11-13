@@ -1145,6 +1145,7 @@ class Ed2kTests(unittest.TestCase):
                 self.assertEqual(self.plugin._retry_failures, {})
                 self.assertFalse(saved[key]["telegram_sent"])
                 (self.root / "data" / "records.json").unlink()
+                (self.root / "data" / "telegram_deliveries.json").unlink()
 
     def test_partial_telegram_failure_remains_bounded_and_never_deletes_source(self):
         batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
@@ -2511,6 +2512,236 @@ class Ed2kTests(unittest.TestCase):
             self.plugin._notify_record(Path("test.bin"), record)
         sender.assert_called_once_with(Path("test.bin"), "pure-link", target=("@third", None))
 
+    def test_stale_record_does_not_resend_after_settings_reload(self):
+        config = {
+            "folder": str(self.folder), "min_age": 0, "telegram_enabled": True,
+            "telegram_chat_id": "@first,@second",
+        }
+        self.plugin.init_plugin(config)
+        path = self.create()
+        with patch.object(self.plugin, "_send_telegram", return_value=False):
+            self.plugin._process_file(path)
+        stale = self.records()
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_record(path, stale[str(path)])
+        self.assertEqual(sender.call_count, 2)
+        self.plugin._write_results(None, self.plugin._paths()[2], stale)
+        overwritten = json.loads(json.dumps(stale))
+        overwritten[str(path)].update(telegram_sent=False, telegram_target="", telegram_deliveries={})
+        self.plugin._write_results(None, self.plugin._paths()[2], overwritten)
+        self.plugin.init_plugin({**config, "telegram_aggregate_window": 30})
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_records(list(overwritten.values()))
+        sender.assert_not_called()
+        self.assertTrue(overwritten[str(path)]["telegram_sent"])
+
+    def test_aggregate_honors_existing_completed_target_without_delivery_map(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first"
+        record = {
+            "name": "show.S01E01.mkv", "link": "existing-link", "telegram_sent": True,
+            "telegram_target": self.plugin._telegram_target_key(),
+        }
+        with patch.object(self.plugin, "_send_telegram_text", return_value=True) as sender:
+            self.plugin._notify_records([record])
+        sender.assert_not_called()
+        self.assertTrue(record["telegram_sent"])
+
+    def test_aggregate_batch_sends_only_new_target_after_target_change(self):
+        batch_id, batch, paths, group_key = self.prepare_partial_aggregate()
+        records = self.records()
+        record = records[str(paths[0])]
+        with patch.object(self.plugin, "_send_telegram", return_value=True):
+            self.plugin._notify_record(paths[0], record)
+        self.plugin._write_results(None, self.plugin._paths()[2], records)
+        self.plugin._telegram_chat_id = "@receiver,@new"
+        batch["sealed"] = True
+        batch["group_flush_at"][group_key] = time.monotonic() - 1
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._maybe_flush_batch(batch_id)
+        sender.assert_called_once_with(Path("聚合链接"), record["link"], target=("@new", None))
+
+    def test_delivery_receipt_survives_record_checkpoint_failure(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first"
+        record = {"link": "completed-link"}
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            with self.assertRaises(OSError):
+                self.plugin._notify_record(
+                    Path("test.bin"), record, Mock(side_effect=OSError("record write failed")),
+                )
+        sender.assert_called_once()
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_record(Path("test.bin"), {"link": "completed-link"})
+        sender.assert_not_called()
+
+    def test_duplicate_links_in_one_batch_are_sent_only_once(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first"
+        for aggregate in (False, True):
+            with self.subTest(aggregate=aggregate):
+                self.plugin._telegram_aggregate = aggregate
+                records = [
+                    {"name": "show.S01E01.mkv", "link": f"duplicate-link-{aggregate}"}
+                    for _ in range(2)
+                ]
+                with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+                    self.plugin._notify_records(records)
+                sender.assert_called_once_with(
+                    Path("聚合链接"), f"duplicate-link-{aggregate}", target=("@first", None),
+                )
+                self.assertTrue(all(record["telegram_sent"] for record in records))
+
+    def test_delivery_receipts_do_not_suppress_changed_links_or_new_targets(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first"
+        with patch.object(self.plugin, "_send_telegram", return_value=True):
+            self.plugin._notify_record(Path("test.bin"), {"link": "first-link"})
+        self.plugin._telegram_chat_id = "@first,@second"
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_record(Path("test.bin"), {"link": "first-link"})
+        sender.assert_called_once_with(Path("test.bin"), "first-link", target=("@second", None))
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_record(Path("test.bin"), {"link": "changed-link"})
+        self.assertEqual(sender.call_count, 2)
+
+    def test_partial_delivery_survives_reload_and_target_reordering(self):
+        config = {
+            "folder": str(self.folder), "telegram_enabled": True,
+            "telegram_chat_id": "@first,@second",
+        }
+        self.plugin.init_plugin(config)
+        with patch.object(self.plugin, "_send_telegram", side_effect=[True, False]):
+            self.plugin._notify_record(Path("test.bin"), {"link": "partially-sent-link"})
+        self.plugin.init_plugin({**config, "telegram_chat_id": "https://t.me/SECOND,first"})
+        record = {"link": "partially-sent-link"}
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_records([record])
+        sender.assert_called_once_with(Path("聚合链接"), "partially-sent-link", target=("@SECOND", None))
+        self.assertTrue(record["telegram_sent"])
+
+    def test_historical_delivery_receipts_are_imported_before_queue_restore(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first"
+        record = {
+            "link": "historically-sent-link", "telegram_sent": True,
+            "telegram_target": self.plugin._telegram_target_key(),
+        }
+        self.plugin._write_results(None, self.plugin._paths()[2], {"old": record})
+        self.plugin.init_plugin({
+            "folder": str(self.folder), "telegram_enabled": True, "telegram_chat_id": "@first",
+        })
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_records([{"link": "historically-sent-link"}])
+        sender.assert_not_called()
+
+    def test_normal_and_ordinary_deliveries_remain_independent(self):
+        config = {
+            "folder": str(self.folder), "telegram_enabled": True, "telegram_chat_id": "@first",
+            "ordinary_upload_telegram_enabled": True, "ordinary_upload_telegram_targets": "@first",
+        }
+        self.plugin.init_plugin(config)
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as normal, \
+                patch.object(self.plugin, "_send_telegram_user", return_value=True) as ordinary:
+            self.plugin._notify_record(Path("test.bin"), {"link": "shared-link"})
+            self.plugin._notify_ordinary_upload_record({"link": "shared-link"})
+        normal.assert_called_once()
+        ordinary.assert_called_once()
+        self.plugin.init_plugin(config)
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as normal, \
+                patch.object(self.plugin, "_send_telegram_user", return_value=True) as ordinary:
+            self.plugin._notify_records([{"link": "shared-link"}])
+            self.plugin._notify_ordinary_upload_record({"link": "shared-link"})
+        normal.assert_not_called()
+        ordinary.assert_not_called()
+
+    def test_delivery_receipts_are_bound_to_account_and_topic(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first"
+        with patch("ed2k_test_plugin.user_account.TelegramUserAccount.identity", return_value="account-one"), \
+                patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_record(Path("test.bin"), {"link": "account-bound-link"})
+        sender.assert_called_once()
+        with patch("ed2k_test_plugin.user_account.TelegramUserAccount.identity", return_value="account-two"), \
+                patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_record(Path("test.bin"), {"link": "account-bound-link"})
+            self.plugin._telegram_thread_id = "123"
+            self.plugin._notify_record(Path("test.bin"), {"link": "account-bound-link"})
+        self.assertEqual(sender.call_count, 2)
+
+    def test_simultaneous_single_and_aggregate_delivery_send_only_once(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first"
+        started = threading.Event()
+        release = threading.Event()
+        failures = []
+
+        def send(*args, **kwargs):
+            started.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("delivery not released")
+            return True
+
+        def notify(aggregate):
+            try:
+                record = {"link": "concurrent-link"}
+                if aggregate:
+                    self.plugin._notify_records([record])
+                else:
+                    self.plugin._notify_record(Path("test.bin"), record)
+            except Exception as failure:
+                failures.append(failure)
+
+        with patch.object(self.plugin, "_send_telegram", side_effect=send) as sender:
+            first = threading.Thread(target=notify, args=(False,))
+            second = threading.Thread(target=notify, args=(True,))
+            try:
+                first.start()
+                self.assertTrue(started.wait(timeout=5))
+                second.start()
+            finally:
+                release.set()
+                first.join(timeout=5)
+                if second.ident is not None:
+                    second.join(timeout=5)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(failures, [])
+            sender.assert_called_once()
+
+    def test_delivery_store_write_failure_blocks_further_sends_until_persisted(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_chat_id = "@first"
+        store = self.plugin._telegram_delivery_store
+        with patch.object(store, "atomic_write", side_effect=OSError("disk full")), \
+                patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            with self.assertRaises(OSError):
+                self.plugin._notify_record(Path("test.bin"), {"link": "persist-failure-link"})
+            with self.assertRaises(OSError):
+                self.plugin._notify_record(Path("test.bin"), {"link": "persist-failure-link"})
+            sender.assert_called_once()
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._notify_record(Path("test.bin"), {"link": "persist-failure-link"})
+        sender.assert_not_called()
+
+    def test_corrupt_delivery_store_stops_plugin_without_sending_or_deleting(self):
+        path = self.create()
+        journal = self.root / "data" / "telegram_deliveries.json"
+        journal.write_text("invalid json")
+        with patch.object(self.module.threading, "Thread") as worker:
+            self.plugin.init_plugin({
+                "folder": str(self.folder), "enabled": True, "telegram_enabled": True,
+                "telegram_chat_id": "@first", "local_delete_source": True,
+            })
+        self.assertFalse(self.plugin._enabled)
+        worker.assert_not_called()
+        with patch.object(self.plugin, "_send_telegram") as sender:
+            with self.assertRaises(ValueError):
+                self.plugin._notify_record(path, {"link": "blocked-link"})
+        sender.assert_not_called()
+        self.assertTrue(path.exists())
+        self.assertEqual(journal.read_text(), "invalid json")
+
     def test_multi_target_legacy_delivery_migrates(self):
         import hashlib
         from ed2k_test_plugin.user_account import TelegramUserAccount
@@ -2970,7 +3201,7 @@ class Ed2kTests(unittest.TestCase):
     def test_corrupt_cache_not_silently_overwritten(self):
         path = self.create()
         data = self.root / "data"
-        data.mkdir()
+        data.mkdir(exist_ok=True)
         (data / "records.json").write_text("broken")
         with self.assertRaises(ValueError):
             self.plugin._process_file(path)

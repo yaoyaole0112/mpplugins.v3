@@ -573,9 +573,6 @@ class LocalUploadMixin:
             record.pop("rapid_check_started", None)
             record.pop("upload_readback_verified", None)
             record.pop("upload_verified_at", None)
-            record.update(telegram_sent=False, telegram_target="", telegram_deliveries={})
-            record.update(ordinary_upload_telegram_sent=False, ordinary_upload_telegram_target="",
-                          ordinary_upload_telegram_deliveries={})
         if self._local_upload_mode == "mp" and receipt:
             record["upload_kind"] = (
                 receipt.get("upload_kind")
@@ -737,7 +734,12 @@ class LocalUploadMixin:
             if self._stopping.is_set() or local_identity(path.stat()) != record["local_identity"]:
                 raise OSError("上传期间本地文件变化，不转发、不删除")
             digest = record["link"].split("|")[4]
-            record.update(name=item["name"], link=ed2k_link(item["name"], digest, record["size"]),
+            link = ed2k_link(item["name"], digest, record["size"])
+            if link != record["link"]:
+                record.update(telegram_sent=False, telegram_target="", telegram_deliveries={})
+                record.update(ordinary_upload_telegram_sent=False, ordinary_upload_telegram_target="",
+                              ordinary_upload_telegram_deliveries={})
+            record.update(name=item["name"], link=link,
                           upload_verified=True, upload_cloud_item=item, upload_state="verified",
                           upload_verified_at=time.time(),
                           upload_note=(f"{self._upload_label()}云端大小、SHA1及实际内容抽样通过；115的ED2K云下载就绪状态未知"

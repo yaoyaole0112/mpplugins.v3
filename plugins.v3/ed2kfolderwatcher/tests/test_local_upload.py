@@ -216,6 +216,46 @@ class LocalUploadTests(unittest.TestCase):
         self.assertEqual(self.records()[str(completed)]["upload_state"], "verified")
         self.assertEqual(set(json.loads(self.plugin._local_upload_queue_path().read_text())), {str(pending)})
 
+    def test_scope_rebinding_preserves_successful_telegram_deliveries(self):
+        self.configure(
+            telegram_enabled=True, telegram_chat_id="@target",
+            ordinary_upload_telegram_enabled=True, ordinary_upload_telegram_targets="@ordinary",
+        )
+        path = self.sample()
+        with patch.object(self.plugin, "_send_telegram", return_value=True), \
+                patch.object(self.plugin, "_send_telegram_user", return_value=True):
+            self.plugin._process_file(path)
+        self.plugin._local_upload_target = "/another-target"
+        self.remote["path"] = f"/another-target/{path.name}"
+        self.storage.oper.get_item_strict.return_value = dict(self.remote)
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as normal, \
+                patch.object(self.plugin, "_send_telegram_user", return_value=True) as ordinary:
+            self.plugin._process_file(path)
+        normal.assert_not_called()
+        ordinary.assert_not_called()
+        self.assertTrue(self.records()[str(path)]["upload_verified"])
+        self.assertTrue(self.records()[str(path)]["telegram_sent"])
+        self.assertTrue(self.records()[str(path)]["ordinary_upload_telegram_sent"])
+
+    def test_cloud_rename_changes_link_and_requires_new_delivery(self):
+        self.configure(telegram_enabled=True, telegram_chat_id="@target")
+        path = self.sample()
+        with patch.object(self.plugin, "_send_telegram", return_value=True):
+            self.plugin._process_file(path)
+        self.remote.update(name="renamed.mkv", path="/upload/renamed.mkv")
+        self.plugin._local_upload_mode = "mp"
+        self.plugin._atomic_write(
+            self.root / "data" / "local_upload_receipts.json",
+            json.dumps({str(path): {
+                "identity": self.upload_module.local_identity(path.stat()), "item": self.remote,
+            }}),
+        )
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._process_file(path)
+        sender.assert_called_once()
+        self.assertIn("|renamed.mkv|", sender.call_args.args[1])
+        self.assertTrue(self.records()[str(path)]["telegram_sent"])
+
     def test_missing_upload_source_is_removed_without_retry_or_cloud_calls(self):
         self.configure()
         path = self.sample()
