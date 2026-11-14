@@ -133,6 +133,16 @@ async def verify(base_url, output, executable_path=None):
             assert await editor.get_by_label("分享任务", exact=True).count() == 0
             assert await editor.get_by_text("资源身份未确认时", exact=True).count() == 0
             dedup = editor.get_by_label("规格去重", exact=True)
+            switches = editor.locator(".editor-switches").first
+            assert await switches.locator(".v-label").all_text_contents() == [
+                "启用任务", "发送通知", "规格去重",
+            ]
+            assert await switches.evaluate("""element => {
+                const boxes = [...element.children].map(item => item.getBoundingClientRect());
+                return boxes.every((box, index) => boxes.slice(index + 1).every(other =>
+                    box.right <= other.left + 1 || other.right <= box.left + 1 ||
+                    box.bottom <= other.top + 1 || other.bottom <= box.top + 1));
+            }"""), width
             assert await dedup.is_checked()
             await dedup.uncheck()
             assert await editor.get_by_text("资源身份未确认时", exact=True).count() == 0
@@ -170,6 +180,8 @@ async def verify(base_url, output, executable_path=None):
             await page.wait_for_timeout(400)
             await editor.locator(".v-card-text").first.evaluate("element => { element.scrollTop = 0 }")
             await page.screenshot(path=str(output / f"task-dedup-on-{width}.png"), full_page=True)
+            await editor.locator(".editor-switches").first.scroll_into_view_if_needed()
+            await page.screenshot(path=str(output / f"task-switches-{width}.png"), full_page=True)
             assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
             await editor.get_by_role("button", name="保存任务", exact=True).click()
             await page.wait_for_function("""window.brushflowRequests.some(item => item.path.endsWith('/tasks')
@@ -180,6 +192,10 @@ async def verify(base_url, output, executable_path=None):
             assert not errors, errors
             await page.goto(f"{base_url}/tests/channel-dedup-smoke.html?task=traffic")
             await page.wait_for_function("window.brushflowReady === true")
+            badge = page.locator(".brushflow-task-head__title .v-chip").first
+            await badge.get_by_text("关闭去重", exact=True).wait_for()
+            assert "关闭去重" in await page.locator(".brushflow-task-item").first.inner_text()
+            assert await page.get_by_text("规格去重关", exact=False).count() == 0
             await page.locator(".brushflow-task-head__actions button").filter(
                 has=page.locator(".mdi-pencil-outline")
             ).click()
@@ -192,6 +208,9 @@ async def verify(base_url, output, executable_path=None):
             await page.wait_for_function("""window.brushflowRequests.some(item => item.method === 'PUT'
                 && item.body.id === 'saved-traffic' && item.body.spec_dedup_enabled === true)""")
             await editor.wait_for(state="hidden")
+            await badge.get_by_text("开启去重", exact=True).wait_for()
+            assert "开启去重" in await page.locator(".brushflow-task-item").first.inner_text()
+            assert await page.get_by_text("规格去重开", exact=False).count() == 0
             await page.screenshot(path=str(output / f"task-edited-{width}.png"), full_page=True)
             assert not errors, errors
             print(json.dumps({"width": width, "height": height, "passed": True}))

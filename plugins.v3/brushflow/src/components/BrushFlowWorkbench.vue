@@ -663,7 +663,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 <strong>{{ task.name }}</strong>
                 <span class="brushflow-status-dot" :class="`brushflow-status-dot--${taskStateMeta(task.state).color}`" />
               </span>
-              <span>规格去重{{ task.spec_dedup_enabled ? '开' : '关' }} · {{ task.site_name }} · {{ task.downloader }}</span>
+              <span>{{ task.spec_dedup_enabled ? '开启去重' : '关闭去重' }} · {{ task.site_name }} · {{ task.downloader }}</span>
               <span class="brushflow-task-item__meta">
                 <span>{{ task.statistic.active || 0 }} 个种子</span>
                 <span>{{ task.next_run_at ? formatDateTime(task.next_run_at) : '暂无计划' }}</span>
@@ -684,7 +684,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               <div>
                 <div class="brushflow-task-head__title">
                   <h2>{{ selectedTask.name }}</h2>
-                  <VChip size="small" variant="outlined">规格去重{{ selectedTask.spec_dedup_enabled ? '开' : '关' }}</VChip>
+                  <VChip size="small" variant="outlined">{{ selectedTask.spec_dedup_enabled ? '开启去重' : '关闭去重' }}</VChip>
                   <VChip :color="selectedState.color" size="small" variant="tonal" :prepend-icon="selectedState.icon">
                     {{ selectedState.text }}
                   </VChip>

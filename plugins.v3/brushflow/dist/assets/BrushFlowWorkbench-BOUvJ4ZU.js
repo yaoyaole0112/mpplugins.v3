@@ -93,8 +93,8 @@ return (_ctx, _cache) => {
   const _component_VTextField = _resolveComponent$1("VTextField");
   const _component_VCol = _resolveComponent$1("VCol");
   const _component_VSelect = _resolveComponent$1("VSelect");
-  const _component_VSwitch = _resolveComponent$1("VSwitch");
   const _component_VRow = _resolveComponent$1("VRow");
+  const _component_VSwitch = _resolveComponent$1("VSwitch");
   const _component_VWindowItem = _resolveComponent$1("VWindowItem");
   const _component_VBtnToggle = _resolveComponent$1("VBtnToggle");
   const _component_VWindow = _resolveComponent$1("VWindow");
@@ -302,36 +302,6 @@ return (_ctx, _cache) => {
                                     }, null, 8, ["modelValue"])
                                   ]),
                                   _: 1
-                                }),
-                                _createVNode$1(_component_VCol, {
-                                  cols: "12",
-                                  md: "6"
-                                }, {
-                                  default: _withCtx$1(() => [
-                                    _createVNode$1(_component_VSwitch, {
-                                      modelValue: localTask.value.spec_dedup_enabled,
-                                      "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((localTask.value.spec_dedup_enabled) = $event)),
-                                      label: "规格去重",
-                                      color: "primary",
-                                      "hide-details": "",
-                                      inset: ""
-                                    }, null, 8, ["modelValue"]),
-                                    (localTask.value.spec_dedup_enabled)
-                                      ? (_openBlock$1(), _createBlock$1(_component_VBtn, {
-                                          key: 0,
-                                          "prepend-icon": "mdi-tune-variant",
-                                          variant: "text",
-                                          size: "small",
-                                          onClick: _cache[6] || (_cache[6] = $event => (emit('dedup-settings')))
-                                        }, {
-                                          default: _withCtx$1(() => [...(_cache[60] || (_cache[60] = [
-                                            _createTextVNode$1("设置全局去重规则", -1)
-                                          ]))]),
-                                          _: 1
-                                        }))
-                                      : _createCommentVNode$1("", true)
-                                  ]),
-                                  _: 1
                                 })
                               ]),
                               _: 1
@@ -339,7 +309,7 @@ return (_ctx, _cache) => {
                             _createElementVNode$1("div", _hoisted_3$1, [
                               _createVNode$1(_component_VSwitch, {
                                 modelValue: localTask.value.enabled,
-                                "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((localTask.value.enabled) = $event)),
+                                "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((localTask.value.enabled) = $event)),
                                 label: "启用任务",
                                 color: "primary",
                                 "hide-details": "",
@@ -347,13 +317,36 @@ return (_ctx, _cache) => {
                               }, null, 8, ["modelValue"]),
                               _createVNode$1(_component_VSwitch, {
                                 modelValue: localTask.value.notify,
-                                "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((localTask.value.notify) = $event)),
+                                "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((localTask.value.notify) = $event)),
                                 label: "发送通知",
                                 color: "primary",
                                 "hide-details": "",
                                 inset: ""
+                              }, null, 8, ["modelValue"]),
+                              _createVNode$1(_component_VSwitch, {
+                                modelValue: localTask.value.spec_dedup_enabled,
+                                "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((localTask.value.spec_dedup_enabled) = $event)),
+                                label: "规格去重",
+                                color: "primary",
+                                "hide-details": "",
+                                inset: ""
                               }, null, 8, ["modelValue"])
-                            ])
+                            ]),
+                            (localTask.value.spec_dedup_enabled)
+                              ? (_openBlock$1(), _createBlock$1(_component_VBtn, {
+                                  key: 0,
+                                  "prepend-icon": "mdi-tune-variant",
+                                  class: "editor-dedup-settings",
+                                  variant: "text",
+                                  size: "small",
+                                  onClick: _cache[8] || (_cache[8] = $event => (emit('dedup-settings')))
+                                }, {
+                                  default: _withCtx$1(() => [...(_cache[60] || (_cache[60] = [
+                                    _createTextVNode$1("设置全局去重规则", -1)
+                                  ]))]),
+                                  _: 1
+                                }))
+                              : _createCommentVNode$1("", true)
                           ]),
                           _createElementVNode$1("section", _hoisted_4$1, [
                             _cache[61] || (_cache[61] = _createElementVNode$1("header", { class: "editor-section__head" }, [
@@ -1152,7 +1145,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const TaskEditorDialog = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-d56d1281"]]);
+const TaskEditorDialog = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-72f9b1e2"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle} = await importShared('vue');
 
@@ -2077,7 +2070,7 @@ return (_ctx, _cache) => {
                             class: _normalizeClass(["brushflow-status-dot", `brushflow-status-dot--${_unref(taskStateMeta)(task.state).color}`])
                           }, null, 2)
                         ]),
-                        _createElementVNode("span", null, "规格去重" + _toDisplayString(task.spec_dedup_enabled ? '开' : '关') + " · " + _toDisplayString(task.site_name) + " · " + _toDisplayString(task.downloader), 1),
+                        _createElementVNode("span", null, _toDisplayString(task.spec_dedup_enabled ? '开启去重' : '关闭去重') + " · " + _toDisplayString(task.site_name) + " · " + _toDisplayString(task.downloader), 1),
                         _createElementVNode("span", _hoisted_11, [
                           _createElementVNode("span", null, _toDisplayString(task.statistic.active || 0) + " 个种子", 1),
                           _createElementVNode("span", null, _toDisplayString(task.next_run_at ? _unref(formatDateTime)(task.next_run_at) : '暂无计划'), 1)
@@ -2123,7 +2116,7 @@ return (_ctx, _cache) => {
                               variant: "outlined"
                             }, {
                               default: _withCtx(() => [
-                                _createTextVNode("规格去重" + _toDisplayString(selectedTask.value.spec_dedup_enabled ? '开' : '关'), 1)
+                                _createTextVNode(_toDisplayString(selectedTask.value.spec_dedup_enabled ? '开启去重' : '关闭去重'), 1)
                               ]),
                               _: 1
                             }),
@@ -3317,6 +3310,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const BrushFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-b24b65f1"]]);
+const BrushFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-6336dae3"]]);
 
 export { BrushFlowWorkbench as B };

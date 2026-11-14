@@ -125,16 +125,15 @@ async function saveTask() {
                   <VCol cols="12" md="6">
                     <VTextField v-model="localTask.save_path" label="保存目录" placeholder="留空使用下载器默认目录" />
                   </VCol>
-                  <VCol cols="12" md="6">
-                    <VSwitch v-model="localTask.spec_dedup_enabled" label="规格去重" color="primary" hide-details inset />
-                    <VBtn v-if="localTask.spec_dedup_enabled" prepend-icon="mdi-tune-variant"
-                      variant="text" size="small" @click="emit('dedup-settings')">设置全局去重规则</VBtn>
-                  </VCol>
                 </VRow>
                 <div class="editor-switches">
                   <VSwitch v-model="localTask.enabled" label="启用任务" color="primary" hide-details inset />
                   <VSwitch v-model="localTask.notify" label="发送通知" color="primary" hide-details inset />
+                  <VSwitch v-model="localTask.spec_dedup_enabled" label="规格去重" color="primary" hide-details inset />
                 </div>
+                <VBtn v-if="localTask.spec_dedup_enabled" prepend-icon="mdi-tune-variant"
+                  class="editor-dedup-settings" variant="text" size="small"
+                  @click="emit('dedup-settings')">设置全局去重规则</VBtn>
               </section>
 
               <section class="editor-section">
@@ -522,6 +521,10 @@ async function saveTask() {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 24px;
+}
+
+.editor-dedup-settings {
+  align-self: flex-start;
 }
 
 .brushflow-editor__summary {
