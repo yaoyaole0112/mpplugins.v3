@@ -47,7 +47,10 @@ from app.sdk.network import RequestUtils
 from app.sdk.utilities import StringUtils
 
 from .models import BrushFlowSettingsPayload, BrushTaskPayload, BrushTaskStatePayload
-from .models import ChannelDedupSettingsPayload
+from .models import (
+    ChannelDedupSettingsPayload, ResourceLedgerDeletePayload, migrated_identity_policy, task_spec_dedup_enabled,
+)
+from .resource_dedup import evidence_key, index_records, resource_slot
 from .active_dedup import download_complete, download_files, download_state, paths_agree
 from .channel_dedup import (
     filename_title_aliases, long_title_prefix_matches, normalize_title,
@@ -98,6 +101,7 @@ TASK_CONFIG_FIELDS = (
     "qb_category",
     "site_hr_active",
     "recent_episodes_only",
+    "spec_dedup_enabled",
     "blacklist_site_ids",
     "download_types",
     "site_skip_tips",
@@ -196,6 +200,7 @@ class BrushTaskConfig:
         self.qb_category = self._clean_text(config.get("qb_category"))
         self.site_hr_active = bool(config.get("site_hr_active", False))
         self.recent_episodes_only = bool(config.get("recent_episodes_only", False))
+        self.spec_dedup_enabled = bool(task_spec_dedup_enabled(config))
         self.blacklist_site_ids = list(dict.fromkeys(
             int(site_id) for site_id in config.get("blacklist_site_ids", [])
             if str(site_id).isdigit() and int(site_id) > 0
@@ -256,7 +261,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.3.7"
+    plugin_version = "6.4.3"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -264,6 +269,7 @@ class BrushFlow(_PluginBase):
     auth_level = 2
 
     DATA_SCHEMA_VERSION = 2
+    CONFIG_SCHEMA_VERSION = 6
     MAX_RUN_HISTORY = 50
     GLOBAL_BRUSH_TAG = "刷流"
     TASK_DATA_NAMES = ("torrents", "archived", "unmanaged", "statistic", "runs")
@@ -310,10 +316,17 @@ class BrushFlow(_PluginBase):
             self._inflight_legacy_checked = {}
             self._inflight_task_snapshot = (0, [])
             self._inflight_alias_snapshot = None
+            self._resource_ledger = self.get_data("resource_ledger") or {}
+            self._identity_pending = self.get_data("resource_identity_pending") or {}
+            self._resource_forgotten = self.get_data("resource_forgotten") or {}
         try:
             channel_config = ChannelDedupSettingsPayload.model_validate({
                 "enabled": raw_config.get("channel_dedup_enabled", False),
                 "cancel_downloading": raw_config.get("channel_dedup_cancel_downloading", False),
+                "inflight_enabled": raw_config.get("channel_dedup_inflight_enabled", True),
+                "pack_dedup_enabled": raw_config.get("channel_dedup_pack_dedup_enabled", True),
+                "pack_policy": raw_config.get("channel_dedup_pack_policy", "partial"),
+                "identity_policy": migrated_identity_policy(raw_config),
                 "channels": raw_config.get("channel_dedup_channels", []),
                 "attributes": raw_config.get(
                     "channel_dedup_attributes", ["resolution", "effects", "codec", "source", "fps"]
@@ -321,17 +334,23 @@ class BrushFlow(_PluginBase):
                 "size_tolerance_pct": raw_config.get("channel_dedup_size_tolerance_pct", 5),
                 "unknown_policy": raw_config.get("channel_dedup_unknown_policy", "exclude"),
                 "identity_aliases": raw_config.get("channel_dedup_identity_aliases", {}),
+                "movie_identity_aliases": raw_config.get("channel_dedup_movie_identity_aliases", {}),
             })
         except ValueError as err:
             channel_config = ChannelDedupSettingsPayload()
             logger.warning(f"频道去重配置无效，已使用默认值：{err}")
         self._channel_dedup_enabled = channel_config.enabled
         self._channel_dedup_cancel_downloading = channel_config.cancel_downloading
+        self._channel_dedup_inflight_enabled = channel_config.inflight_enabled
+        self._channel_dedup_pack_dedup_enabled = channel_config.pack_dedup_enabled
+        self._channel_dedup_pack_policy = channel_config.pack_policy
+        self._channel_dedup_identity_policy = channel_config.identity_policy
         self._channel_dedup_channels = channel_config.channels
         self._channel_dedup_attributes = channel_config.attributes
         self._channel_dedup_size_tolerance_pct = channel_config.size_tolerance_pct
         self._channel_dedup_unknown_policy = channel_config.unknown_policy
         self._channel_dedup_identity_aliases = channel_config.identity_aliases
+        self._channel_dedup_movie_identity_aliases = channel_config.movie_identity_aliases
         self._channel_dedup_state = self.get_data("channel_dedup_state") or {
             "cursors": {}, "records": [], "last_poll_at": None, "last_error": "", "last_poll_ok": None,
         }
@@ -371,6 +390,12 @@ class BrushFlow(_PluginBase):
         for row in task_rows:
             if not isinstance(row, dict):
                 continue
+            if "spec_dedup_enabled" not in row:
+                row = dict(row)
+                row["spec_dedup_enabled"] = (
+                    task_spec_dedup_enabled(row) if "purpose" in row or "resource_dedup_mode" in row
+                    else "分享" in str(row.get("name", "")) or row.get("qb_category") == "分享"
+                )
             task = BrushTaskConfig(row)
             if self._restore_task_tag(task, row):
                 restored_tags = True
@@ -385,6 +410,16 @@ class BrushFlow(_PluginBase):
             self.update_config(normalized)
         self._migrate_legacy_data()
         self._migrate_torrent_identity_data()
+        with self._inflight_lock:
+            for entry in self._inflight_entries.values():
+                entry["spec_dedup_enabled"] = self._inflight_entry_enabled(entry)
+                owners = [task for task in self._task_configs.values()
+                          if task.name == entry.get("task_name") and task.downloader == entry.get("downloader")]
+                if not entry.get("task_id") and len(owners) == 1:
+                    entry["task_id"] = owners[0].id
+                entry.pop("purpose", None)
+            self._save_inflight_entries()
+        self._remember_resources(self._channel_dedup_state.get("records") or [], "channel")
 
         # V5 为任务增加了唯一标签；启动时回收升级前已经失去任务配置的孤立标签。
         if self._enabled:
@@ -451,6 +486,20 @@ class BrushFlow(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "获取频道监听与去重状态",
+            },
+            {
+                "path": "/resource-ledger",
+                "endpoint": self.get_resource_ledger,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "资源长期账本及待核验身份",
+            },
+            {
+                "path": "/resource-ledger/forget",
+                "endpoint": self.forget_resource,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "移除一条资源长期证据",
             },
             {
                 "path": "/channel-dedup/settings",
@@ -667,11 +716,15 @@ class BrushFlow(_PluginBase):
             )
             self._channel_dedup_enabled = payload.enabled
             self._channel_dedup_cancel_downloading = payload.cancel_downloading
+            for field in ("inflight_enabled", "pack_dedup_enabled", "pack_policy", "identity_policy"):
+                if field in payload.model_fields_set:
+                    setattr(self, f"_channel_dedup_{field}", getattr(payload, field))
             self._channel_dedup_channels = payload.channels
             self._channel_dedup_attributes = payload.attributes
             self._channel_dedup_size_tolerance_pct = payload.size_tolerance_pct
             self._channel_dedup_unknown_policy = payload.unknown_policy
             self._channel_dedup_identity_aliases = payload.identity_aliases
+            self._channel_dedup_movie_identity_aliases = payload.movie_identity_aliases
             self._channel_identity_cache.clear()
             self._inflight_task_snapshot = (0, [])
             self._channel_generation += 1
@@ -681,6 +734,8 @@ class BrushFlow(_PluginBase):
                 self._save_channel_dedup_state()
             self._prune_channel_dedup_records()
         self._save_config()
+        with self._inflight_lock:
+            self._refresh_inflight_identity_bindings()
         self._refresh_scheduler()
         if payload.enabled and payload.channels and self.get_state():
             ThreadHelper().submit(self.poll_channel_messages)
@@ -820,6 +875,7 @@ class BrushFlow(_PluginBase):
                         f"频道资源记录同步完成：新增 {parsed_count} 条结构化记录，"
                         f"保留 {len(state['records'])} 条，下次约 {interval // 60} 分钟后同步"
                     )
+                self._remember_resources(state["records"], "channel")
             except Exception as err:
                 state["last_poll_at"] = time.time()
                 state["last_poll_ok"] = False
@@ -910,6 +966,9 @@ class BrushFlow(_PluginBase):
         if not self._validate_task_reference(task):
             return schemas.Response(success=False, message="站点或下载器配置无效")
         self._task_configs[task_id] = task
+        with self._inflight_lock:
+            self._inflight_task_snapshot = (0, [])
+            self._inflight_legacy_checked = {}
         self._save_config()
         self._refresh_scheduler()
         return schemas.Response(success=True, data=self._build_task_detail(task_id))
@@ -985,21 +1044,26 @@ class BrushFlow(_PluginBase):
 
     def _schema_needs_persist(self, raw_config: dict) -> bool:
         """仅在 schema 版本变化时把规范化配置写回数据库"""
-        return (raw_config.get("schema_version") or 0) != self.DATA_SCHEMA_VERSION
+        return (raw_config.get("schema_version") or 0) != self.CONFIG_SCHEMA_VERSION
 
     def _current_config(self) -> Dict[str, Any]:
         """返回插件当前可持久化配置快照"""
         config = {
-            "schema_version": self.DATA_SCHEMA_VERSION,
+            "schema_version": self.CONFIG_SCHEMA_VERSION,
             "enabled": bool(getattr(self, "_enabled", False)),
             "show_sidebar_nav": bool(getattr(self, "_show_sidebar_nav", True)),
             "channel_dedup_enabled": bool(getattr(self, "_channel_dedup_enabled", False)),
             "channel_dedup_cancel_downloading": bool(getattr(self, "_channel_dedup_cancel_downloading", False)),
+            "channel_dedup_inflight_enabled": bool(getattr(self, "_channel_dedup_inflight_enabled", True)),
+            "channel_dedup_pack_dedup_enabled": bool(getattr(self, "_channel_dedup_pack_dedup_enabled", True)),
+            "channel_dedup_pack_policy": getattr(self, "_channel_dedup_pack_policy", "partial"),
+            "channel_dedup_identity_policy": getattr(self, "_channel_dedup_identity_policy", "defer"),
             "channel_dedup_channels": list(getattr(self, "_channel_dedup_channels", [])),
             "channel_dedup_attributes": list(getattr(self, "_channel_dedup_attributes", [])),
             "channel_dedup_size_tolerance_pct": getattr(self, "_channel_dedup_size_tolerance_pct", 5),
             "channel_dedup_unknown_policy": getattr(self, "_channel_dedup_unknown_policy", "exclude"),
             "channel_dedup_identity_aliases": dict(getattr(self, "_channel_dedup_identity_aliases", {})),
+            "channel_dedup_movie_identity_aliases": dict(getattr(self, "_channel_dedup_movie_identity_aliases", {})),
             "tasks": [task.to_dict() for task in getattr(self, "_task_configs", {}).values()],
         }
         config.update({field: getattr(self, f"_{field}", None) for field in GLOBAL_LIMIT_FIELDS})
@@ -1041,11 +1105,18 @@ class BrushFlow(_PluginBase):
             payload = {
                 "enabled": self._channel_dedup_enabled,
                 "cancel_downloading": bool(getattr(self, "_channel_dedup_cancel_downloading", False)),
+                "inflight_enabled": bool(getattr(self, "_channel_dedup_inflight_enabled", True)),
+                "pack_dedup_enabled": bool(getattr(self, "_channel_dedup_pack_dedup_enabled", True)),
+                "pack_policy": getattr(self, "_channel_dedup_pack_policy", "partial"),
+                "identity_policy": getattr(self, "_channel_dedup_identity_policy", "defer"),
                 "channels": list(self._channel_dedup_channels),
                 "attributes": list(self._channel_dedup_attributes),
                 "size_tolerance_pct": self._channel_dedup_size_tolerance_pct,
                 "unknown_policy": getattr(self, "_channel_dedup_unknown_policy", "exclude"),
                 "identity_aliases": dict(getattr(self, "_channel_dedup_identity_aliases", {})),
+                "movie_identity_aliases": dict(getattr(self, "_channel_dedup_movie_identity_aliases", {})),
+                "ledger_count": len(getattr(self, "_resource_ledger", {})),
+                "pending_count": len(getattr(self, "_identity_pending", {})),
                 "retention_hours": 72,
                 "last_poll_at": state.get("last_poll_at"),
                 "last_poll_ok": state.get("last_poll_ok"),
@@ -1533,6 +1604,7 @@ class BrushFlow(_PluginBase):
             "enabled": task.enabled,
             "site_id": task.site_id,
             "site_name": self._get_site_name(task.site_id) or "站点已删除",
+            "spec_dedup_enabled": task.spec_dedup_enabled,
             "downloader": task.downloader,
             "brush_interval": task.brush_interval,
             "check_interval": task.check_interval,
@@ -1937,6 +2009,7 @@ class BrushFlow(_PluginBase):
         return {
             "task_id": task.id,
             "task_name": task.name,
+            "spec_dedup_enabled": task.spec_dedup_enabled,
             "site": site.id,
             "site_name": site.name,
             "title": torrent.title,
@@ -2239,6 +2312,7 @@ class BrushFlow(_PluginBase):
             return
         check_torrents = [seeding_torrents_dict[item] for item in check_hashes if item in seeding_torrents_dict]
         self.__update_torrent_tasks_state(check_torrents, torrent_tasks)
+        self._record_completed_resources(task, check_torrents, torrent_tasks)
         self.__update_undeleted_torrents_missing_in_downloader(torrent_tasks, check_hashes, seeding_torrents)
         filtered_torrents = self.__filter_torrents_by_tag(check_torrents, task.delete_except_tags)
         if self._global_dynamic_delete_enabled():
@@ -2250,6 +2324,8 @@ class BrushFlow(_PluginBase):
         need_delete_hashes = list(dict.fromkeys(need_delete_hashes or []))
         deleted_from_downloader = False
         if need_delete_hashes:
+            self._record_completed_resources(task, [item for item in check_torrents
+                if self.__get_hash(item) in need_delete_hashes], torrent_tasks, force=True)
             if DownloaderHelper().is_downloader("qbittorrent", service=self.service_info):
                 self.__qb_torrents_reannounce(need_delete_hashes)
             if downloader.delete_torrents(ids=need_delete_hashes, delete_file=True):
@@ -2622,6 +2698,7 @@ class BrushFlow(_PluginBase):
                     if torrent_hash in downloader_torrent_map
                 ]
                 self.__update_torrent_tasks_state(check_torrents, torrent_tasks)
+                self._record_completed_resources(task, check_torrents, torrent_tasks)
                 self.__update_undeleted_torrents_missing_in_downloader(
                     torrent_tasks,
                     check_hashes,
@@ -2669,6 +2746,7 @@ class BrushFlow(_PluginBase):
                     candidate_rows.setdefault(torrent_key, []).append(
                         {
                             "task": task,
+                            "live_torrent": torrent,
                             "torrent_hash": torrent_hash,
                             "torrent_task": torrent_task,
                             "downloader_name": task.downloader,
@@ -2796,6 +2874,11 @@ class BrushFlow(_PluginBase):
                     if not service or not service.instance:
                         continue
                     torrent_hashes = list(dict.fromkeys(entry["torrent_hash"] for entry in entries))
+                    for entry in entries:
+                        for owner, row in entry.get("associated_records", []):
+                            with self._task_scope(owner.id):
+                                self._record_completed_resources(owner, [entry["live_torrent"]],
+                                    {entry["torrent_hash"]: row}, force=True)
                     if downloader_helper.is_downloader("qbittorrent", service=service):
                         try:
                             if getattr(service.instance, "qbc", None):
@@ -3098,6 +3181,12 @@ class BrushFlow(_PluginBase):
         if not expected_hash:
             logger.warning(f"刷流任务 [{task.name}] 跳过种子 {torrent.title}：无法解析种子 Hash")
             return None
+        if (self._resource_identity_deferred(task)
+                and not parse_torrent_files(torrent_content)):
+            self._pending_identity({"path": torrent.title, "specs": {}}, torrent.title, task,
+                                   "未取得可核验的种子文件清单，不添加下载")
+            logger.info(f"资源去重待核验 {torrent.title}：无法读取元数据，暂不添加下载")
+            return None
         try:
             existing_torrents, query_error = downloader.get_torrents(ids=[expected_hash])
         except Exception as err:
@@ -3119,14 +3208,18 @@ class BrushFlow(_PluginBase):
             recent_selection = self._recent_episode_file_selection(torrent_content, torrent.title)
             if not recent_selection:
                 return None
-        if getattr(self, "_channel_dedup_enabled", False) and getattr(self, "_channel_dedup_attributes", []):
+        if self._resource_mode(task) != "off":
             dedup_selection = self._channel_dedup_file_selection(
                 torrent_content,
                 torrent.title,
                 accepted_paths=recent_selection.get("accepted") if recent_selection else None,
                 spec_hint=" ".join([torrent.description or "", *(torrent.labels or [])]),
+                task=task,
             )
             if dedup_selection and dedup_selection["excluded"]:
+                if dedup_selection["reject_torrent"]:
+                    logger.info(f"规格去重排除整包 {torrent.title}：存在不合格文件，按整包排除策略处理")
+                    return None
                 if recent_selection:
                     remaining = set(recent_selection.get("accepted") or []) - dedup_selection["excluded"]
                     if not remaining:
@@ -3225,6 +3318,167 @@ class BrushFlow(_PluginBase):
             return added_torrent.hashString
         return None
 
+    def _resource_mode(self, task=None) -> str:
+        if task is None and hasattr(self, "_task_context"):
+            task = self._get_task_config()
+        if task and not task.spec_dedup_enabled:
+            return "off"
+        return "specs" if ((task or getattr(self, "_channel_dedup_enabled", False))
+                           and getattr(self, "_channel_dedup_attributes", [])) else "off"
+
+    def _resource_identity_deferred(self, task) -> bool:
+        return (task is not None and self._resource_mode(task) != "off"
+                and getattr(self, "_channel_dedup_identity_policy", "defer") == "defer")
+
+    def _inflight_entry_enabled(self, entry) -> bool:
+        if not getattr(self, "_channel_dedup_inflight_enabled", True):
+            return False
+        tasks = getattr(self, "_task_configs", {})
+        task = tasks.get(entry.get("task_id"))
+        if task is None:
+            matches = [row for row in tasks.values() if row.name == entry.get("task_name")
+                       and row.downloader == entry.get("downloader")]
+            task = matches[0] if len(matches) == 1 else None
+        return task.spec_dedup_enabled if task else bool(task_spec_dedup_enabled(entry))
+
+    def _remember_resources(self, records, source: str) -> None:
+        if not hasattr(self, "_resource_ledger"):
+            return
+        with self._inflight_lock:
+            self._refresh_inflight_identity_bindings()
+            forgotten = getattr(self, "_resource_forgotten", {})
+            additions = {evidence_key(row): row for row in records if row and (row.get("tmdb_id") or row.get("title_key"))}
+            additions = {key: row for key, row in additions.items()
+                         if key not in self._resource_ledger and key not in forgotten}
+            if not additions:
+                return
+            ledger = dict(self._resource_ledger)
+            now, changed = time.time(), False
+            for key, record in additions.items():
+                ledger[key] = {**copy.deepcopy(record), "evidence_source": source,
+                               "remembered_at": now, "channel": record.get("channel") or "已完成下载"}
+                changed = True
+            if changed:
+                self.save_data("resource_ledger", ledger)
+                self._resource_ledger = ledger
+
+    def get_resource_ledger(self, page: int = 1, page_size: int = 50,
+                            state: str = "ledger") -> schemas.Response:
+        page, page_size = max(int(page), 1), min(max(int(page_size), 1), 100)
+        with self._inflight_lock:
+            rows = getattr(self, "_identity_pending" if state == "pending" else "_resource_ledger", {})
+            items = [{"key": key, **value} for key, value in rows.items()]
+            items.sort(key=lambda row: row.get("remembered_at", row.get("last_seen", 0)), reverse=True)
+            return schemas.Response(success=True, data={"total": len(items), "page": page,
+                "items": items[(page - 1) * page_size:page * page_size]})
+
+    def forget_resource(self, payload: ResourceLedgerDeletePayload) -> schemas.Response:
+        with self._inflight_lock:
+            ledger = dict(getattr(self, "_resource_ledger", {}))
+            ledger.pop(payload.key, None)
+            forgotten = {**getattr(self, "_resource_forgotten", {}), payload.key: time.time()}
+            self.save_data("resource_forgotten", forgotten)
+            self.save_data("resource_ledger", ledger)
+            self._resource_ledger, self._resource_forgotten = ledger, forgotten
+        return schemas.Response(success=True, message="已移除长期证据；当前频道和在队任务仍参与去重")
+
+    def _verify_resource_identity(self, candidate: dict, title: str, task=None) -> bool:
+        if candidate.get("tmdb_id"):
+            return True
+        movie = candidate.get("media_type") == "movie"
+        bindings = getattr(self, "_channel_dedup_movie_identity_aliases" if movie
+                           else "_channel_dedup_identity_aliases", {})
+        names = set(candidate.get("title_keys") or [])
+        ids = {int(value) for name, value in bindings.items() if normalize_title(name) in names}
+        identity = next(iter(ids)) if len(ids) == 1 else None
+        if not ids and not movie:
+            identity = self._channel_candidate_tmdb_identity(candidate["path"], title)
+        elif not ids and movie:
+            meta = MetaInfo(candidate["path"].rsplit("/", 1)[-1])
+            key = ("movie", tuple(sorted(names)), candidate.get("year"))
+            cached_identity = self._channel_identity_cache.get(key)
+            if cached_identity and cached_identity[0] > time.monotonic():
+                identity = cached_identity[1]
+            else:
+                try:
+                    media = self.chain.recognize_media(meta=meta)
+                    aliases = {normalize_title(getattr(media, field, "")) for field in
+                               ("title", "en_title", "original_title", "original_name")}
+                    aliases.update(normalize_title(name) for name in getattr(media, "names", []) or [])
+                    cn = {name for name in names if re.search(r"[\u3400-\u9fff]", name)}
+                    cn_aliases = {name for name in aliases if re.search(r"[\u3400-\u9fff]", name)}
+                    if (self._is_movie(media) and names.intersection(aliases)
+                            and candidate.get("year") == self._movie_year(media, None)
+                            and candidate.get("year") is not None
+                            and not (cn and cn_aliases and not cn.intersection(cn_aliases))):
+                        identity = getattr(media, "tmdb_id", None)
+                except Exception as err:
+                    logger.info(f"资源身份核验失败 {candidate['path']}：{type(err).__name__}")
+                self._channel_identity_cache[key] = (time.monotonic() + (600 if identity else 60), identity)
+        if identity:
+            candidate.update({"tmdb_id": int(identity), "identity_source": "alias" if ids else "cache",
+                              "identity_evidence_names": sorted(names)})
+            return True
+        return False
+
+    def _pending_identity(self, candidate: dict, title: str, task, reason: str) -> None:
+        if not hasattr(self, "_identity_pending") or not self._resource_identity_deferred(task):
+            return
+        row = {**candidate, "task_name": task.name, "title": title, "reason": reason}
+        key = evidence_key({**candidate, "title_key": candidate.get("title_key") or candidate.get("path")})
+        with self._inflight_lock:
+            pending = dict(self._identity_pending)
+            if key in pending and time.time() - pending[key].get("last_seen", 0) < 300:
+                return
+            pending.pop(key, None)
+            pending[key] = {**row, "last_seen": time.time()}
+            pending = dict(list(pending.items())[-5000:])
+            self.save_data("resource_identity_pending", pending)
+            self._identity_pending = pending
+
+    def _resolve_pending_identity(self, candidate: dict, task) -> None:
+        if not getattr(self, "_identity_pending", None):
+            return
+        with self._inflight_lock:
+            remaining = {key: row for key, row in self._identity_pending.items()
+                         if not (row.get("path") == candidate["path"]
+                                 and row.get("task_name") == task.name)}
+            if len(remaining) != len(self._identity_pending):
+                self.save_data("resource_identity_pending", remaining)
+                self._identity_pending = remaining
+
+    def _record_completed_resources(self, task, torrents, rows, force: bool = False) -> None:
+        if not hasattr(self, "_resource_ledger") or not task.spec_dedup_enabled:
+            return
+        for torrent in torrents:
+            torrent_hash = self.__get_hash(torrent)
+            row = rows.get(torrent_hash) or {}
+            if row.get("resource_ledger_recorded") or (not force and not self._torrent_complete(row)):
+                continue
+            try:
+                kind = "qbittorrent" if isinstance(torrent, dict) else "transmission"
+                files = download_files(self.downloader.get_files(torrent_hash), kind)
+                if not files:
+                    continue
+                records = []
+                wanted_videos = [item for item in files if item["wanted"] and self._video_file(item["path"])]
+                for item in files:
+                    if not item["wanted"] or not item["complete"]:
+                        continue
+                    candidate = parse_candidate_file(item["path"], item["size"], row.get("title", ""),
+                                                     row.get("description", ""), allow_movie=True)
+                    if candidate and not getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None):
+                        if self._verify_resource_identity(candidate, row.get("title", ""), task):
+                            records.append(candidate)
+                            self._resolve_pending_identity(candidate, task)
+                        else:
+                            self._pending_identity(candidate, row.get("title", ""), task, "已完成文件身份待核验，账本尚未记全")
+                self._remember_resources(records, "completed")
+                if self._torrent_complete(row) and records and len(records) == len(wanted_videos):
+                    row["resource_ledger_recorded"] = True
+            except Exception as err:
+                logger.warning(f"资源账本读取完成文件失败，稍后重试：{torrent_hash} {type(err).__name__}")
+
     def _save_inflight_entries(self) -> None:
         self.save_data("channel_dedup_inflight", self._inflight_entries)
 
@@ -3234,6 +3488,7 @@ class BrushFlow(_PluginBase):
                 self._channel_dedup_enabled, getattr(self, "_channel_dedup_cancel_downloading", False),
                 self._channel_dedup_channels, self._channel_dedup_attributes,
                 self._channel_dedup_size_tolerance_pct, self._channel_dedup_identity_aliases,
+                getattr(self, "_channel_dedup_movie_identity_aliases", {}),
             ], sort_keys=True, ensure_ascii=False)
 
     def cancel_channel_duplicates(self) -> None:
@@ -3241,7 +3496,7 @@ class BrushFlow(_PluginBase):
         if (not self.get_state() or getattr(self, "_channel_stopping", False)
                 or not getattr(self, "_channel_dedup_enabled", False)
                 or not getattr(self, "_channel_dedup_cancel_downloading", False)
-                or not self._channel_dedup_attributes or not self._channel_dedup_channels):
+                or not self._channel_dedup_channels):
             return
         if not self._channel_cancel_lock.acquire(blocking=False):
             return
@@ -3265,10 +3520,7 @@ class BrushFlow(_PluginBase):
                 attributes = list(self._channel_dedup_attributes)
                 tolerance = self._channel_dedup_size_tolerance_pct
                 signature, generation = self._channel_cancel_settings(), self._channel_generation
-            episodes = {}
-            for record in records:
-                for number in record.get("episodes") or []:
-                    episodes.setdefault((record.get("season"), number), []).append(record)
+            episodes = index_records(records)
             task_data, owners = {}, {}
             for task in self._task_configs.values():
                 task_data[task.id] = self._get_task_data(task.id, "torrents") or {}
@@ -3279,6 +3531,7 @@ class BrushFlow(_PluginBase):
                 (name, torrent_hash, entries[0][0], entries[0][1])
                 for (name, torrent_hash), entries in owners.items()
                 if len(entries) == 1 and entries[0][0].enabled and entries[0][0].id in available
+                and self._resource_mode(entries[0][0]) != "off"
                 and entries[0][1].get("hit_and_run") is False and not entries[0][0].site_hr_active
                 and (records or entries[0][1].get("channel_dedup_cancel_pending"))
                 and (not download_complete(entries[0][1], "qbittorrent")
@@ -3349,7 +3602,7 @@ class BrushFlow(_PluginBase):
         excluded = {tag.strip() for tag in (task.delete_except_tags or "").split(",") if tag.strip()}
         owners = [other for other in self._task_configs.values()
                   if other.downloader == task.downloader and other.brush_tag in tags]
-        return (task.enabled and self._task_configs.get(task.id) is task
+        return (task.enabled and task.spec_dedup_enabled and self._task_configs.get(task.id) is task
                 and task.brush_tag in tags and not excluded.intersection(tags)
                 and len(owners) == 1 and owners[0].id == task.id)
 
@@ -3372,7 +3625,7 @@ class BrushFlow(_PluginBase):
             if not item["wanted"] or item["complete"]:
                 continue
             candidate = parse_candidate_file(item["path"], item["size"], row.get("title") or "",
-                                             spec_hint=row.get("description") or "")
+                                             spec_hint=row.get("description") or "", allow_movie=True)
             if not candidate or getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None):
                 continue
             evidence = [record for record in queued if paths_agree(record.get("path"), item["path"])
@@ -3381,12 +3634,20 @@ class BrushFlow(_PluginBase):
                         and (record.get("specs") or {}).get("size") == item["size"]]
             if not candidate.get("tmdb_id") and len(evidence) == 1:
                 candidate["tmdb_id"] = evidence[0].get("tmdb_id")
-            bound_ids = {bindings[name] for name in candidate.get("title_keys") or [] if name in bindings}
+            if candidate.get("media_type") == "movie":
+                candidate_bindings = {normalize_title(name): int(value) for name, value in
+                                     getattr(self, "_channel_dedup_movie_identity_aliases", {}).items()}
+            else:
+                candidate_bindings = bindings
+            bound_ids = {candidate_bindings[name] for name in candidate.get("title_keys") or [] if name in candidate_bindings}
             if not candidate.get("tmdb_id") and bound_ids:
                 if len(bound_ids) != 1:
                     continue
                 candidate["tmdb_id"] = bound_ids.pop()
-            found = self._match_channel_candidate(candidate, episodes, attributes, tolerance, row.get("title") or "")
+            if self._resource_identity_deferred(task) and not self._verify_resource_identity(candidate, row.get("title") or "", task):
+                continue
+            found = self._match_channel_candidate(candidate, episodes, attributes, tolerance, row.get("title") or "",
+                                                   mode=self._resource_mode(task), task=task)
             if found and all(found):
                 matches[item["path"]] = found
         return matches
@@ -3560,6 +3821,9 @@ class BrushFlow(_PluginBase):
         """Persist only explicit bindings or identities already verified in the local cache."""
         if candidate.get("tmdb_id"):
             return
+        if candidate.get("media_type") == "movie":
+            self._verify_resource_identity(candidate, title)
+            return
         identity = self._channel_candidate_tmdb_identity(candidate["path"], title, cached_only=True)
         if not identity:
             return
@@ -3576,29 +3840,48 @@ class BrushFlow(_PluginBase):
         })
 
     def _refresh_inflight_identity_bindings(self) -> None:
-        """Rebind derived queue identities after settings edits; never rewrite file-embedded IDs."""
+        """Rebind derived identities in queues and ledger; preserve file-embedded IDs."""
         with self._channel_state_lock:
             bindings = {
                 normalize_title(name): int(tmdb_id)
                 for name, tmdb_id in getattr(self, "_channel_dedup_identity_aliases", {}).items()
             }
-        signature = tuple(sorted(bindings.items()))
+            movie_bindings = {normalize_title(name): int(tmdb_id) for name, tmdb_id in
+                              getattr(self, "_channel_dedup_movie_identity_aliases", {}).items()}
+        signature = (tuple(sorted(bindings.items())), tuple(sorted(movie_bindings.items())))
         if getattr(self, "_inflight_alias_snapshot", None) == signature:
             return
+        def rebind(record):
+            if record.get("identity_source") not in {"alias", "cache"}:
+                return False
+            mapping = movie_bindings if record.get("media_type") == "movie" else bindings
+            ids = {mapping[name] for name in record.get("identity_evidence_names") or [] if name in mapping}
+            if not ids and record["identity_source"] != "alias":
+                return False
+            identity = next(iter(ids)) if len(ids) == 1 else None
+            if record.get("tmdb_id") == identity and record.get("identity_invalidated", False) == (identity is None):
+                return False
+            record.update({"tmdb_id": identity, "identity_source": "alias",
+                           "identity_invalidated": identity is None})
+            return True
+
+        entries = copy.deepcopy(self._inflight_entries)
         changed = False
-        for entry in self._inflight_entries.values():
+        for entry in entries.values():
             for record in entry.get("records") or []:
-                if record.get("identity_source") not in {"alias", "cache"}:
-                    continue
-                ids = {bindings[name] for name in record.get("identity_evidence_names") or [] if name in bindings}
-                if not ids and record["identity_source"] != "alias":
-                    continue
-                identity = ids.pop() if len(ids) == 1 else None
-                if record.get("tmdb_id") != identity:
-                    record.update({"tmdb_id": identity, "identity_source": "alias"})
-                    changed = True
+                changed = rebind(record) or changed
         if changed:
-            self._save_inflight_entries()
+            self.save_data("channel_dedup_inflight", entries)
+            self._inflight_entries = entries
+        ledger, ledger_changed = {}, False
+        for key, old in getattr(self, "_resource_ledger", {}).items():
+            record = copy.deepcopy(old)
+            updated = rebind(record)
+            ledger[evidence_key(record) if updated else key] = record
+            ledger_changed = ledger_changed or updated
+        if ledger_changed:
+            self.save_data("resource_ledger", ledger)
+            self._resource_ledger = ledger
         self._inflight_alias_snapshot = signature
 
     @staticmethod
@@ -3658,8 +3941,11 @@ class BrushFlow(_PluginBase):
         if now - snapshot_at >= self.INFLIGHT_QUERY_SECONDS:
             tasks = []
             for task in getattr(self, "_task_configs", {}).values():
+                if self._resource_mode(task) == "off":
+                    continue
                 for torrent_hash, row in (self._get_task_data(task.id, "torrents") or {}).items():
                     if not row.get("deleted"):
+                        row = {**row, "task_id": task.id, "task_name": task.name}
                         title = row.get("title") or ""
                         header = parse_candidate_file(title + ".mkv", row.get("size"))
                         tasks.append((
@@ -3672,6 +3958,8 @@ class BrushFlow(_PluginBase):
         candidate_ids = {row["tmdb_id"] for row in candidates if row.get("tmdb_id")}
         changed = False
         for name, torrent_hash, row, names, tmdb_id in tasks:
+            if not self._inflight_entry_enabled({**row, "downloader": name}):
+                continue
             key = self._inflight_key(name, torrent_hash)
             if key in self._inflight_entries or now - self._inflight_legacy_checked.get(key, 0) < 60:
                 continue
@@ -3697,7 +3985,7 @@ class BrushFlow(_PluginBase):
                         path, size = getattr(item, "name", ""), getattr(item, "size", None)
                     if not wanted:
                         continue
-                    candidate = parse_candidate_file(path, size, title, spec_hint=row.get("description") or "")
+                    candidate = parse_candidate_file(path, size, title, spec_hint=row.get("description") or "", allow_movie=True)
                     if candidate and not getattr(MetaInfo(path.rsplit("/", 1)[-1]), "episode_group", None):
                         self._cache_inflight_file_identity(candidate, title)
                         records.append(candidate)
@@ -3705,6 +3993,7 @@ class BrushFlow(_PluginBase):
                     self._inflight_entries[key] = {
                         "downloader": name, "hash": torrent_hash, "task_name": row.get("task_name") or "",
                         "created_at": now, "confirmed_at": now, "status": "queued", "records": records,
+                        "task_id": row.get("task_id"), "spec_dedup_enabled": True,
                     }
                     changed = True
             except Exception as err:
@@ -3719,10 +4008,8 @@ class BrushFlow(_PluginBase):
     ) -> Iterator[dict]:
         """匹配和持久化占位原子化；添加及选集完成后提交，失败核实后回滚。"""
         outcome = {"blocked": False, "selection": selection, "added": False}
-        if not (
-            getattr(self, "_channel_dedup_enabled", False)
-            and getattr(self, "_channel_dedup_attributes", []) and isinstance(content, bytes)
-        ):
+        if (self._resource_mode(task) == "off" or not getattr(self, "_channel_dedup_inflight_enabled", True)
+                or not isinstance(content, bytes)):
             yield outcome
             return
         files = parse_torrent_files(content)
@@ -3735,9 +4022,13 @@ class BrushFlow(_PluginBase):
         for item in files:
             if accepted is not None and item["path"] not in accepted:
                 continue
-            candidate = parse_candidate_file(item["path"], item.get("size"), torrent.title, spec_hint=spec_hint)
+            candidate = parse_candidate_file(item["path"], item.get("size"), torrent.title,
+                                             spec_hint=spec_hint, allow_movie=True)
             if candidate and not getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None):
-                self._cache_inflight_file_identity(candidate, torrent.title)
+                if self._resource_identity_deferred(task):
+                    self._verify_resource_identity(candidate, torrent.title, task)
+                else:
+                    self._cache_inflight_file_identity(candidate, torrent.title)
                 candidates.append(candidate)
         if not candidates:
             yield outcome
@@ -3752,17 +4043,29 @@ class BrushFlow(_PluginBase):
                 logger.info(f"已入队同规格去重排除种子 {torrent.title}：相同 Hash 已占位或已入队")
                 outcome["blocked"] = True
             records = [
-                {**record, "channel": f"{entry.get('task_name') or entry['downloader']} / {entry['hash'][:12]}"}
-                for entry in self._inflight_entries.values() for record in entry.get("records") or []
+                {**record, "dedup_origin": "在队重复",
+                 "channel": f"{entry.get('task_name') or entry['downloader']} / {entry['hash'][:12]}"}
+                for entry in self._inflight_entries.values()
+                if self._inflight_entry_enabled(entry)
+                for record in entry.get("records") or []
             ]
+            records += [{**row, "dedup_origin": "账本重复"}
+                        for row in getattr(self, "_resource_ledger", {}).values()]
+            with self._channel_state_lock:
+                if getattr(self, "_channel_dedup_enabled", False):
+                    self._prune_channel_dedup_records()
+                    records += [{**row, "dedup_origin": "频道重复"}
+                                for row in self._channel_dedup_state.get("records") or []]
             duplicate = self._channel_dedup_file_selection(
                 content, torrent.title, accepted_paths=accepted, spec_hint=spec_hint,
                 records_override=records, match_source="已入队同规格去重",
+                task=task,
             ) if not outcome["blocked"] else None
             if duplicate:
                 remaining = (set(accepted) - duplicate["excluded"]) if accepted is not None else duplicate["remaining_paths"]
                 if (
-                    accepted is not None and not remaining
+                    duplicate["reject_torrent"]
+                    or accepted is not None and not remaining
                     or len(duplicate["excluded"]) >= duplicate["video_count"]
                 ):
                     logger.info(f"已入队同规格去重排除种子 {torrent.title}：{self._dedup_exclusion_summary(duplicate)}")
@@ -3774,6 +4077,7 @@ class BrushFlow(_PluginBase):
                 self._inflight_entries[key] = {
                     "downloader": task.downloader, "hash": expected_hash, "task_name": task.name,
                     "created_at": time.time(), "status": "reserved", "token": token, "records": candidates,
+                    "task_id": task.id, "spec_dedup_enabled": task.spec_dedup_enabled,
                 }
                 self._save_inflight_entries()
         if outcome["blocked"]:
@@ -3815,7 +4119,7 @@ class BrushFlow(_PluginBase):
 
     @staticmethod
     def _video_file(path: str) -> bool:
-        return path.lower().rsplit(".", 1)[-1] in {
+        return normalize("NFKC", path).lower().rsplit(".", 1)[-1] in {
             "mkv", "mp4", "avi", "mov", "wmv", "m4v", "ts", "m2ts", "webm",
         }
 
@@ -3963,23 +4267,36 @@ class BrushFlow(_PluginBase):
         spec_hint: str = "",
         records_override: Optional[List[dict]] = None,
         match_source: str = "频道同规格去重",
+        task: Optional[BrushTaskConfig] = None,
     ) -> Optional[dict]:
-        """只比较勾选规格；候选缺失勾选项时按配置排除，不以未知字段认定重复。"""
-        if not isinstance(torrent_content, bytes) or not self._channel_dedup_attributes:
+        """按任务开关与勾选字段匹配频道、账本及同包证据，不以未知值认定重复。"""
+        if task is None and hasattr(self, "_task_context"):
+            task = self._get_task_config()
+        mode = self._resource_mode(task)
+        if not isinstance(torrent_content, bytes) or mode == "off":
             return None
         with self._channel_state_lock:
             if records_override is None:
                 self._prune_channel_dedup_records()
             records = list(
                 self._channel_dedup_state.get("records") or []
-            ) if records_override is None else records_override
+            ) if records_override is None and getattr(self, "_channel_dedup_enabled", False) else (records_override or [])
             attributes = list(self._channel_dedup_attributes)
             tolerance = self._channel_dedup_size_tolerance_pct
             unknown_policy = getattr(self, "_channel_dedup_unknown_policy", "exclude")
+            defer_identity = self._resource_identity_deferred(task)
+            pack_dedup = task is not None and getattr(self, "_channel_dedup_pack_dedup_enabled", True)
+            pack_policy = getattr(self, "_channel_dedup_pack_policy", "partial")
             bindings = {
                 normalize_title(name): int(tmdb_id)
                 for name, tmdb_id in getattr(self, "_channel_dedup_identity_aliases", {}).items()
             }
+        if records_override is None:
+            with self._inflight_lock:
+                self._refresh_inflight_identity_bindings()
+                records = [{**row, "dedup_origin": "频道重复"} for row in records]
+                records += [{**row, "dedup_origin": "账本重复"}
+                            for row in getattr(self, "_resource_ledger", {}).values()]
         files = parse_torrent_files(torrent_content)
         if not files:
             logger.info(f"{match_source}跳过 {title}：无法读取种子内逐文件大小与路径，按未命中放行")
@@ -3996,15 +4313,23 @@ class BrushFlow(_PluginBase):
         excluded: Set[str] = set()
         matched_count = 0
         missing_count = 0
-        episode_records = {}
-        for record in records:
-            for number in record.get("episodes") or []:
-                episode_records.setdefault((record.get("season"), number), []).append(record)
+        identity_count = 0
+        episode_records = index_records(records)
+        pack_records = {}
         for item in considered:
-            candidate = parse_candidate_file(item["path"], item.get("size"), title, spec_hint=spec_hint)
+            candidate = parse_candidate_file(item["path"], item.get("size"), title,
+                                             spec_hint=spec_hint, allow_movie=task is not None)
             if not candidate:
+                if defer_identity:
+                    excluded.add(item["path"])
+                    identity_count += 1
+                    self._pending_identity({"path": item["path"], "specs": {}}, title, task, "无法解析资源")
                 continue
             if getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None):
+                if defer_identity:
+                    excluded.add(item["path"])
+                    identity_count += 1
+                    self._pending_identity(candidate, title, task, "剧集组需核验标准季集号")
                 continue
             missing_attributes = [
                 key for key in attributes if candidate["specs"].get(key) is None
@@ -4017,34 +4342,63 @@ class BrushFlow(_PluginBase):
                         f"{match_source}排除文件 {item['path']}：候选缺少勾选规格 "
                         f"{', '.join(missing_attributes)}，按缺规格排除策略处理（不是已发布重复）"
                     )
+                    continue
                 else:
                     logger.info(
                         f"{match_source}放行 {item['path']}：候选缺少勾选规格 "
                         f"{', '.join(missing_attributes)}，按缺规格放行策略处理"
                     )
-                continue
-            bound_ids = {bindings[name] for name in candidate.get("title_keys") or [] if name in bindings}
+            candidate_bindings = bindings if candidate.get("media_type") != "movie" else {
+                normalize_title(name): int(value) for name, value in
+                getattr(self, "_channel_dedup_movie_identity_aliases", {}).items()}
+            bound_ids = {candidate_bindings[name] for name in candidate.get("title_keys") or [] if name in candidate_bindings}
             if not candidate.get("tmdb_id") and bound_ids:
                 if len(bound_ids) != 1:
                     logger.info(f"{match_source}无法确认剧集身份 {item['path']}：文件名命中互相冲突的别名绑定")
+                    if defer_identity:
+                        excluded.add(item["path"])
+                        identity_count += 1
+                        self._pending_identity(candidate, title, task, "别名绑定冲突")
                     continue
-                candidate["tmdb_id"] = bound_ids.pop()
+                candidate.update({"tmdb_id": bound_ids.pop(), "identity_source": "alias",
+                                  "identity_evidence_names": candidate.get("title_keys") or []})
+            if defer_identity:
+                if not self._verify_resource_identity(candidate, title, task):
+                    excluded.add(item["path"])
+                    identity_count += 1
+                    self._pending_identity(candidate, title, task, "身份未确认，等待别名绑定或识别重试")
+                    logger.info(f"资源去重待核验 {item['path']}：不添加下载，非重复命中")
+                    continue
+                self._resolve_pending_identity(candidate, task)
             if "effects" in attributes and "effects" in candidate["inferred_attributes"]:
                 logger.info(
                     f"{match_source}规格推断 {item['path']}：未标动态范围的常规 "
                     f"{candidate['specs']['resolution']} H.264 WEB 资源按 SDR 命名约定比较，非媒体实测"
                 )
-            matched_records = self._match_channel_candidate(candidate, episode_records, attributes, tolerance, title)
+            matched_records = self._match_channel_candidate(candidate, episode_records, attributes, tolerance, title,
+                                                            mode=mode, task=task)
+            pack_match = self._match_channel_candidate(candidate, pack_records, attributes, tolerance, title,
+                                                       mode=mode, task=task) if pack_dedup else []
+            if pack_match:
+                matched_records = [external or packed for external, packed in zip(matched_records, pack_match)]
             if matched_records and all(matched_records):
                 excluded.add(item["path"])
                 matched_count += 1
                 matched_from = sorted({record.get("channel", "") for record in matched_records if record})
-                episode_text = ",".join(f"E{number:02d}" for number in candidate["episodes"])
+                origins = sorted({record.get("dedup_origin", "频道重复") for record in matched_records if record})
+                episode_text = (f"S{candidate['season']:02d}" +
+                    ",".join(f"E{number:02d}" for number in candidate["episodes"])) if candidate["episodes"] else "电影"
                 logger.info(
-                    f"{match_source}命中 {item['path']}：S{candidate['season']:02d}{episode_text}；"
-                    f"{'频道' if records_override is None else '已有任务'} {', '.join(matched_from)}；匹配规格 "
+                    f"{match_source}命中 {item['path']}：{episode_text}；"
+                    f"{'频道' if records_override is None else '已有任务'} {', '.join(matched_from)}；"
+                    f"判定来源 {', '.join(origins)}；匹配规格 "
                     f"{', '.join(f'{key}={candidate['specs'].get(key)}' for key in attributes)}"
                 )
+            elif pack_dedup:
+                for slot, rows in index_records([{
+                    **candidate, "channel": "同包已保留文件", "dedup_origin": "包内重复",
+                }]).items():
+                    pack_records.setdefault(slot, []).extend(rows)
         if not excluded:
             return None
         excluded_keys = {path.replace("\\", "/").casefold() for path in excluded}
@@ -4056,33 +4410,43 @@ class BrushFlow(_PluginBase):
             "video_count": len(considered),
             "matched_video_count": matched_count,
             "missing_spec_count": missing_count,
+            "identity_pending_count": identity_count,
+            "reject_torrent": pack_policy == "exclude",
         }
 
     def _match_channel_candidate(self, candidate: dict, episode_records: dict,
-                                 attributes: List[str], tolerance: float, title: str) -> List[Optional[dict]]:
+                                 attributes: List[str], tolerance: float, title: str, mode: str = "specs",
+                                 task: Optional[BrushTaskConfig] = None) -> List[Optional[dict]]:
         """One identity/spec contract for pre-add filtering and unfinished-file cancellation."""
         matches = []
-        for episode in candidate["episodes"]:
-            one_episode = {**candidate, "episodes": [episode]}
+        numbers = candidate["episodes"] or ([None] if candidate.get("media_type") == "movie" else [])
+        for episode in numbers:
+            one_episode = {**candidate, "episodes": [episode] if episode is not None else []}
             plausible = [
-                record for record in episode_records.get((candidate["season"], episode), [])
-                if specs_match(one_episode, record, attributes, tolerance)
-                and ("size" not in attributes or set(candidate["episodes"]) == set(record.get("episodes") or []))
+                record for record in episode_records.get(resource_slot(candidate, episode),
+                    episode_records.get((candidate["season"], episode), []))
+                if (mode == "episode" or specs_match(one_episode, record, attributes, tolerance))
+                and (mode == "episode" or "size" not in attributes
+                     or set(candidate["episodes"]) == set(record.get("episodes") or []))
             ]
-            match = next((row for row in plausible if same_release(one_episode, row, attributes, tolerance)), None)
+            match = next((row for row in plausible if same_release(one_episode, row, attributes, tolerance, mode)), None)
             if not match and any(row.get("tmdb_id") for row in plausible) and not candidate.get("tmdb_id"):
-                identity = self._channel_candidate_tmdb_identity(candidate["path"], title)
+                identity = (self._verify_resource_identity(candidate, title, task) and candidate.get("tmdb_id")
+                            if candidate.get("media_type") == "movie"
+                            else self._channel_candidate_tmdb_identity(candidate["path"], title))
                 if identity:
                     candidate["tmdb_id"] = one_episode["tmdb_id"] = identity
-                    match = next((row for row in plausible if same_release(one_episode, row, attributes, tolerance)), None)
+                    match = next((row for row in plausible if same_release(one_episode, row, attributes, tolerance, mode)), None)
             matches.append(match)
         return matches
 
     @staticmethod
     def _dedup_exclusion_summary(selection: dict) -> str:
         return (
-            f"没有可下载视频：同规格重复 {selection.get('matched_video_count', 0)} 个，"
+            f"{'整包排除（存在不合格文件）' if selection.get('reject_torrent') else '没有可下载视频'}："
+            f"同规格重复 {selection.get('matched_video_count', 0)} 个，"
             f"缺少勾选规格 {selection.get('missing_spec_count', 0)} 个"
+            f"，身份待核验 {selection.get('identity_pending_count', 0)} 个"
         )
 
     @staticmethod

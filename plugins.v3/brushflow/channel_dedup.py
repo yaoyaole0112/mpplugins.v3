@@ -18,7 +18,7 @@ def normalize_title(value: Any) -> str:
 
 def filename_title_aliases(value: Any) -> set[str]:
     """Keep title evidence that generic filename parsers may discard as bracketed tags."""
-    name = PurePosixPath(str(value or "").replace("\\", "/")).name
+    name = normalize("NFKC", PurePosixPath(str(value or "").replace("\\", "/")).name)
     head = re.split(
         r"(?i)(?:^|[ ._-])(?:S\s*\d{1,3}(?:\s*E\s*\d{1,4})?|E\d{1,4}|\d{1,3}x\d{1,4})(?!\d)",
         name, maxsplit=1,
@@ -65,7 +65,7 @@ def long_title_prefix_matches(name: str, aliases: Iterable[str]) -> bool:
 
 
 def parse_episode(value: Any) -> tuple[Optional[int], list[int]]:
-    text = str(value or "")
+    text = normalize("NFKC", str(value or ""))
     match = re.search(r"(?i)(?:^|[^A-Z0-9])S\s*(\d{1,3})\s*E\s*(\d{1,4})(.*)", text)
     if match:
         season = int(match.group(1))
@@ -99,7 +99,7 @@ def _line_value(text: str, labels: Iterable[str]) -> str:
 
 
 def _extract_tmdb_id(text: str) -> Optional[int]:
-    match = re.search(r"(?i)tmdb\s*id\s*[:=：]?\s*(\d+)|themoviedb\.org/tv/(\d+)", text)
+    match = re.search(r"(?i)tmdb\s*id\s*[:=：]?\s*(\d+)|themoviedb\.org/(?:tv|movie)/(\d+)", text)
     if not match:
         return None
     try:
@@ -122,10 +122,13 @@ def parse_size(value: Any) -> Optional[int]:
 
 
 def parse_specs(text: Any, size: Any = None) -> dict:
-    value = str(text or "").upper().replace("Ｈ", "H").replace("．", ".")
+    value = normalize("NFKC", str(text or "")).upper()
+    value = re.sub(r"(?<![A-Z0-9])(?:4K|UHD)(?![A-Z0-9])", "2160P", value)
+    value = re.sub(r"(?<![A-Z0-9])FHD(?![A-Z0-9])", "1080P", value)
     resolution_match = re.search(r"(?<!\d)(2160|1440|1080|720|576|540|480)\s*([PI])", value)
     effects = []
     for pattern, label in (
+        (r"HDR[ ._-]*VIVID|MAXPLUS", "HDR Vivid"),
         (r"HDR10\s*\+", "HDR10+"),
         (r"DOLBY[ ._-]*VISION|DOVI|(?:^|[^A-Z0-9])DV(?:[^A-Z0-9]|$)", "DV"),
         (r"HDR10(?!\s*\+)", "HDR10"),
@@ -135,6 +138,8 @@ def parse_specs(text: Any, size: Any = None) -> dict:
     ):
         if re.search(pattern, value):
             effects.append(label)
+    if "HDR Vivid" in effects and "HDR" in effects:
+        effects.remove("HDR")
     codec = None
     for pattern, label in (
         (r"(?:H\.?\s*265|HEVC|X265|H265)", "H.265"),
@@ -221,7 +226,8 @@ def parse_channel_message(
     if not title and filename:
         title = re.split(r"(?i)[ ._-]S\d{1,3}E\d{1,4}", filename, maxsplit=1)[0]
         title = re.sub(r"\((?:19|20)\d{2}\)|\(tmdbid=\d+\)", "", title, flags=re.I)
-    if not title or season is None or not episodes:
+    movie = bool(re.search(r"类型\s*[:：]\s*电影|themoviedb\.org/movie/", text))
+    if not title or (not movie and (season is None or not episodes)):
         return None
     if filename:
         title = re.sub(r"\s*\([^)]*https?://[^)]*\)", "", title).strip()
@@ -246,7 +252,7 @@ def parse_channel_message(
     tmdb_id = _extract_tmdb_id(filename)
     if not tmdb_id:
         tmdb_id = _extract_tmdb_id(text)
-    if not tmdb_id and re.search(r"类型\s*[:：]\s*剧集", text):
+    if not tmdb_id and re.search(r"类型\s*[:：]\s*(?:剧集|电影)", text):
         id_match = re.search(r"(?:^|[|｜\s])ID\s*[:：]\s*(\d+)", text)
         tmdb_id = int(id_match.group(1)) if id_match else None
     year_match = re.search(r"(?:19|20)\d{2}", _line_value(text, ("年份",)))
@@ -259,6 +265,7 @@ def parse_channel_message(
         "file_key": filename,
         "tmdb_id": tmdb_id,
         "year": int(year_match.group()) if year_match else None,
+        "media_type": "movie" if movie else "tv",
         "season": season,
         "episodes": sorted(set(episodes)),
         "specs": specs,
@@ -296,9 +303,9 @@ def parse_torrent_files(content: bytes) -> list[dict]:
 
 
 def parse_candidate_file(
-    path: str, size: Optional[int], title_hint: str = "", spec_hint: str = "",
+    path: str, size: Optional[int], title_hint: str = "", spec_hint: str = "", allow_movie: bool = False,
 ) -> Optional[dict]:
-    filename = PurePosixPath(str(path or "")).name
+    filename = normalize("NFKC", PurePosixPath(str(path or "").replace("\\", "/")).name)
     if "." not in filename or filename.rsplit(".", 1)[-1].lower() not in VIDEO_EXTENSIONS:
         return None
     season, episodes = parse_episode(filename)
@@ -307,17 +314,26 @@ def parse_candidate_file(
         season_match = re.search(r"(?i)(?:^|[^A-Z0-9])S(?:EASON[ ._-]*)?(\d{1,3})(?!\d)", f"{path} {title_hint}")
         if episode_match and season_match:
             season, episodes = int(season_match.group(1)), [int(episode_match.group(1))]
-    if season is None or not episodes:
+    movie = season is None and not episodes
+    if movie and re.search(r"(?i)(?:^|[^A-Z0-9])(?:S(?:EASON[ ._-]*)?\d{1,3}|E\d{1,4})(?!\d)|第\s*\d+\s*[季集]",
+                           f"{path} {title_hint}"):
+        return None
+    if movie and not allow_movie:
         return None
     title_part = re.split(r"(?i)(?:^|[ ._-])(?:S\s*\d{1,3}\s*E\s*\d{1,4}|E\d{1,4}|\d{1,3}x\d{1,4})", filename, maxsplit=1)[0]
     title_part = re.sub(r"(?i)\b(?:19|20)\d{2}\b|\(?tmdbid\s*=\s*\d+\)?", " ", title_part)
+    if movie:
+        title_part = re.split(
+            r"(?i)(?:19|20)\d{2}|(?:^|[ ._-])(?:2160[pi]|1080[pi]|720[pi]|4K|UHD|FHD|WEB|BluRay|REMUX)\b",
+            filename.rsplit(".", 1)[0], maxsplit=1,
+        )[0].strip(" ._-")
     title_key = normalize_title(title_part)
     if not title_key:
         hinted_title = re.split(r"(?i)(?:^|[ ._-])S\s*\d{1,3}\s*E\s*\d{1,4}", str(title_hint), maxsplit=1)[0]
         hinted_title = re.sub(r"(?i)\b(?:19|20)\d{2}\b|\(?tmdbid\s*=\s*\d+\)?", " ", hinted_title)
         title_key = normalize_title(hinted_title)
     tmdb_id = _extract_tmdb_id(filename) or _extract_tmdb_id(title_hint)
-    year_match = re.search(r"\b(?:19|20)\d{2}\b", filename)
+    year_match = re.search(r"\b(?:19|20)\d{2}\b", filename) or re.search(r"\b(?:19|20)\d{2}\b", title_hint)
     specs = merge_specs(parse_specs(filename, size), merge_specs(parse_specs(title_hint), parse_specs(spec_hint)))
     inferred_attributes = []
     # Naming convention only, not a probe: limit implicit SDR to ordinary AVC WEB releases.
@@ -344,6 +360,7 @@ def parse_candidate_file(
         "year": int(year_match.group()) if year_match else None,
         "season": season,
         "episodes": sorted(set(episodes)),
+        "media_type": "movie" if movie else "tv",
         "specs": specs,
         "inferred_attributes": inferred_attributes,
     }
@@ -375,14 +392,20 @@ def specs_match(candidate: dict, record: dict, attributes: Iterable[str], size_t
     return True
 
 
-def same_release(candidate: dict, record: dict, attributes: Iterable[str], size_tolerance_pct: float = 5) -> bool:
+def same_release(candidate: dict, record: dict, attributes: Iterable[str], size_tolerance_pct: float = 5,
+                 mode: str = "specs") -> bool:
     if not candidate or not record:
         return False
-    if candidate.get("season") != record.get("season"):
+    if candidate.get("identity_invalidated") or record.get("identity_invalidated"):
+        return False
+    candidate_type = candidate.get("media_type", "tv")
+    if candidate_type != record.get("media_type", "tv"):
+        return False
+    if candidate_type == "tv" and candidate.get("season") != record.get("season"):
         return False
     candidate_episodes = set(candidate.get("episodes") or [])
     record_episodes = set(record.get("episodes") or [])
-    if not candidate_episodes or not candidate_episodes.issubset(record_episodes):
+    if candidate_type == "tv" and (not candidate_episodes or not candidate_episodes.issubset(record_episodes)):
         return False
     candidate_id, record_id = candidate.get("tmdb_id"), record.get("tmdb_id")
     if candidate_id and record_id:
@@ -395,4 +418,4 @@ def same_release(candidate: dict, record: dict, attributes: Iterable[str], size_
             return False
         if candidate.get("year") and record.get("year") and candidate["year"] != record["year"]:
             return False
-    return specs_match(candidate, record, attributes, size_tolerance_pct)
+    return mode == "episode" or specs_match(candidate, record, attributes, size_tolerance_pct)

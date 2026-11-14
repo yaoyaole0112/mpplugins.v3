@@ -1,0 +1,53 @@
+name: Publish BrushFlow MoviePilot release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - plugins.v3/brushflow/**
+      - package.v3.json
+      - scripts/build_brushflow_release.py
+      - scripts/tests/test_brushflow_release.py
+      - .github/workflows/brushflow-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: brushflow-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test release contract
+        run: python -m unittest discover -s scripts/tests -v
+      - name: Build official plugin asset
+        run: python scripts/build_brushflow_release.py --output /tmp/brushflow-release
+      - name: Publish once per plugin version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=$(python -c 'import json; print(json.load(open("/tmp/brushflow-release/metadata.json"))["tag"])')
+          asset=$(python -c 'import json; print(json.load(open("/tmp/brushflow-release/metadata.json"))["asset"])')
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$asset"; then
+              echo "Release $tag already exists; leaving published assets unchanged."
+            else
+              gh release upload "$tag" "/tmp/brushflow-release/$asset" --repo "$GITHUB_REPOSITORY"
+            fi
+            exit 0
+          fi
+          gh release create "$tag" "/tmp/brushflow-release/$asset" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "站点刷流 $tag" --notes-file /tmp/brushflow-release/notes.md --latest=false

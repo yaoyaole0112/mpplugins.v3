@@ -196,7 +196,7 @@ class InflightDedupTests(unittest.TestCase):
             (False, ["resolution"], self.content), (True, [], self.content),
             (True, ["resolution"], "magnet:?xt=urn:btih:" + "a" * 40),
         ):
-            self.plugin._channel_dedup_enabled = enabled
+            self.task.spec_dedup_enabled = enabled
             self.plugin._channel_dedup_attributes = attributes
             with self.plugin._inflight_download_scope(content, self.torrent, self.task, "a" * 40, None) as result:
                 self.assertFalse(result["blocked"])

@@ -42,6 +42,7 @@ export const taskDefaults = {
   qb_category: null,
   site_hr_active: false,
   recent_episodes_only: false,
+  spec_dedup_enabled: true,
   blacklist_site_ids: [],
   download_types: [],
   site_skip_tips: false,
@@ -62,6 +63,13 @@ export function unwrapResponse(response) {
 export function cloneTask(task = {}) {
   const source = task || {}
   const merged = { ...taskDefaults, ...source }
+  if (!Object.prototype.hasOwnProperty.call(source, 'spec_dedup_enabled')
+      && ('purpose' in source || 'resource_dedup_mode' in source)) {
+    merged.spec_dedup_enabled = source.purpose !== 'traffic' && source.resource_dedup_mode !== 'off'
+  }
+  delete merged.purpose
+  delete merged.resource_dedup_mode
+  delete merged.identity_policy
   if ((merged.tag == null || merged.tag === '') && source.downloader_tag) {
     merged.tag = source.downloader_tag
   }

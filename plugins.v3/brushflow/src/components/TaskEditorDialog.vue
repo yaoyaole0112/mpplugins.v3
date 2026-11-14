@@ -12,7 +12,7 @@ const props = defineProps({
   saving: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['update:modelValue', 'save'])
+const emit = defineEmits(['update:modelValue', 'save', 'dedup-settings'])
 const display = useDisplay()
 const formRef = ref(null)
 const activeTab = ref('base')
@@ -124,6 +124,11 @@ async function saveTask() {
                   </VCol>
                   <VCol cols="12" md="6">
                     <VTextField v-model="localTask.save_path" label="保存目录" placeholder="留空使用下载器默认目录" />
+                  </VCol>
+                  <VCol cols="12" md="6">
+                    <VSwitch v-model="localTask.spec_dedup_enabled" label="规格去重" color="primary" hide-details inset />
+                    <VBtn v-if="localTask.spec_dedup_enabled" prepend-icon="mdi-tune-variant"
+                      variant="text" size="small" @click="emit('dedup-settings')">设置全局去重规则</VBtn>
                   </VCol>
                 </VRow>
                 <div class="editor-switches">

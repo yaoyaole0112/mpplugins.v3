@@ -20,15 +20,21 @@
   import * as vue from 'vue'
   import * as vuetify from '../node_modules/vuetify/dist/vuetify.esm.js'
   import * as remote from '../dist/assets/remoteEntry.js'
+  import { cloneTask } from '../src/utils.js'
 
+  let savedTask = new URLSearchParams(location.search).get('task') === 'traffic'
+    ? cloneTask({ id: 'saved-traffic', name: '【分享】Saved Traffic', site_id: 1, downloader: 'QB',
+      spec_dedup_enabled: false }) : null
   const status = {
     enabled: true, show_sidebar_nav: true, tasks: [],
-    summary: { task_count: 15, running_count: 14 }, options: { sites: [], downloaders: [] },
+    summary: { task_count: 15, running_count: 14 }, options: { sites: [{ value: 1, title: 'Test Site' }], downloaders: [{ value: 'QB', title: 'QB' }] },
   }
   let settings = {
     enabled: true, channels: ['@example_channel'], attributes: ['resolution', 'effects', 'codec', 'source'],
     size_tolerance_pct: 5, record_count: 2, last_poll_at: Date.now() / 1000, last_error: '',
-    unknown_policy: 'exclude', identity_aliases: {}, cancel_downloading: false,
+    unknown_policy: 'exclude', identity_aliases: {}, movie_identity_aliases: {}, cancel_downloading: false,
+    inflight_enabled: true, pack_dedup_enabled: true, pack_policy: 'partial', identity_policy: 'defer',
+    ledger_count: 1, pending_count: 1,
     poll_interval_seconds: 300, next_poll_at: Date.now() / 1000 + 300,
     records: [1, 2].map(number => ({
       channel: '@example_channel', message_id: 42, file_key: `file-${number}`,
@@ -42,6 +48,20 @@
   const api = {
     get: async path => {
       window.brushflowRequests.push({ method: 'GET', path })
+      if (path.includes('/tasks/')) return { success: true, data: {
+        task: structuredClone(savedTask), runs: [], torrents: { items: [], total: 0, page_size: 50 },
+      } }
+      if (path.endsWith('/status')) return { success: true, data: { ...structuredClone(status),
+        tasks: savedTask ? [{ ...structuredClone(savedTask), site_name: 'Test Site', statistic: {},
+          state: 'idle', next_run_at: null }] : [],
+      } }
+      if (path.includes('/resource-ledger?')) {
+        return { success: true, data: { total: 1, items: [{ key: 'a'.repeat(64),
+          title: path.includes('state=pending') ? 'Unknown Resource' : 'Film Resource',
+          path: 'Film.2026.mkv', media_type: 'movie', tmdb_id: path.includes('state=pending') ? null : 123,
+          specs: { resolution: '2160p' }, evidence_source: 'completed',
+        }] } }
+      }
       return { success: true, data: structuredClone(path.endsWith('/status') ? status : settings) }
     },
     post: async (path, body) => {
@@ -52,10 +72,18 @@
         const identity_aliases = Object.fromEntries((body.identity_aliases || '').split('\n').filter(Boolean)
           .map(line => line.split('=').map(item => item.trim()))
           .map(([name, id]) => [name, Number(id)]))
-        settings = { ...settings, ...body, identity_aliases, channels: body.channels.split('\n').filter(Boolean) }
+        const movie_identity_aliases = Object.fromEntries((body.movie_identity_aliases || '').split('\n').filter(Boolean)
+          .map(line => line.split('=').map(item => item.trim()))
+          .map(([name, id]) => [name, Number(id)]))
+        settings = { ...settings, ...body, identity_aliases, movie_identity_aliases, channels: body.channels.split('\n').filter(Boolean) }
         return { success: true, data: structuredClone(settings) }
       }
       return { success: true, message: '已提交' }
+    },
+    put: async (path, body) => {
+      window.brushflowRequests.push({ method: 'PUT', path, body: structuredClone(body) })
+      savedTask = structuredClone(body)
+      return { success: true, data: { task: savedTask } }
     },
   }
   remote.init({

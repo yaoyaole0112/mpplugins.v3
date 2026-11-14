@@ -127,6 +127,58 @@ class ActiveDedupTests(unittest.TestCase):
         self.assertEqual(len(self.row["channel_dedup_cancelled_files"]), 1)
         self.assertNotIn("channel_dedup_cancel_pending", self.row)
 
+    def test_no_fields_selected_never_authorizes_cancellation(self):
+        self.task.spec_dedup_enabled = True
+        self.plugin._channel_dedup_identity_policy = "defer"
+        self.plugin._channel_dedup_attributes = []
+        self.downloader.files[0]["name"] = "Show.(tmdbid=123).S01E01.2160p.H265.mkv"
+        self.record["tmdb_id"] = 123
+        self.run_check()
+        self.assert_untouched()
+
+    def test_switch_off_is_never_cancelled_by_channel(self):
+        self.task.spec_dedup_enabled = False
+        self.run_check()
+        self.assert_untouched()
+
+    def test_resolution_only_cancellation_ignores_effects_but_preserves_new_resolution(self):
+        self.task.spec_dedup_enabled = True
+        self.plugin._channel_dedup_identity_policy = "defer"
+        self.record["tmdb_id"] = 123
+        self.record["specs"]["effects"] = "HDR10"
+        self.downloader.files[0]["name"] = "Show.(tmdbid=123).S01E01.4K.SDR.H264.mkv"
+        self.run_check()
+        self.assert_untouched()
+        self.downloader.files[0]["name"] = "Show.(tmdbid=123).S01E01.1080p.SDR.H264.mkv"
+        self.run_check()
+        self.downloader.delete_torrents.assert_called_once_with(ids="a" * 40, delete_file=False)
+
+    def test_movie_can_be_cancelled_by_matching_movie_record(self):
+        self.task.spec_dedup_enabled = True
+        self.plugin._channel_dedup_identity_policy = "defer"
+        self.row["title"] = "Film.2026.2160p"
+        self.downloader.files[0]["name"] = "Film.2026.(tmdbid=123).2160p.mkv"
+        self.record.update({"media_type": "movie", "tmdb_id": 123, "season": None, "episodes": []})
+        self.record["specs"]["resolution"] = "2160p"
+        self.run_check()
+        self.downloader.delete_torrents.assert_called_once_with(ids="a" * 40, delete_file=False)
+
+    def test_movie_and_tv_with_same_id_never_authorize_cancellation(self):
+        self.task.spec_dedup_enabled = True
+        self.plugin._channel_dedup_identity_policy = "defer"
+        self.row["title"] = "Film.2026.2160p"
+        self.downloader.files[0]["name"] = "Film.2026.(tmdbid=123).2160p.mkv"
+        self.record["tmdb_id"] = 123
+        self.run_check()
+        self.assert_untouched()
+
+    def test_unknown_identity_does_not_cancel(self):
+        self.task.spec_dedup_enabled = True
+        self.plugin._channel_dedup_identity_policy = "defer"
+        self.plugin._inflight_entries.clear()
+        self.run_check()
+        self.assert_untouched()
+
     def test_pack_only_deselects_unfinished_duplicate_and_preserves_other_priorities(self):
         self.add_file()
         self.run_check()

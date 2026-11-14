@@ -48,10 +48,17 @@ const channelDedupDialog = ref(false)
 const channelDedupLoading = ref(false)
 const channelDedupSaving = ref(false)
 const channelDedupError = ref('')
+const resourceRows = ref({ total: 0, items: [] })
+const resourceState = ref('ledger')
+const resourcePage = ref(1)
+const forgetKey = ref('')
+const ledgerLoading = ref(false)
 const channelDedup = ref({ enabled: false, channels: [], attributes: [], records: [] })
 const channelDedupDraft = ref({
   enabled: false, channels: '', attributes: [], size_tolerance_pct: 5,
   unknown_policy: 'exclude', identity_aliases: '', cancel_downloading: false,
+  movie_identity_aliases: '',
+  inflight_enabled: true, pack_dedup_enabled: true, pack_policy: 'partial', identity_policy: 'defer',
 })
 const channelUnknownPolicies = [
   { value: 'exclude', title: '排除不下载' },
@@ -288,11 +295,16 @@ async function loadChannelDedup({ resetDraft = true } = {}) {
       channelDedupDraft.value = {
         enabled: Boolean(data?.enabled),
         cancel_downloading: Boolean(data?.cancel_downloading),
+        inflight_enabled: data?.inflight_enabled ?? true,
+        pack_dedup_enabled: data?.pack_dedup_enabled ?? true,
+        pack_policy: data?.pack_policy || 'partial',
+        identity_policy: data?.identity_policy || 'defer',
         channels: (data?.channels || []).join('\n'),
         attributes: [...(data?.attributes || [])],
         size_tolerance_pct: Number(data?.size_tolerance_pct ?? 5),
         unknown_policy: data?.unknown_policy || 'exclude',
         identity_aliases: Object.entries(data?.identity_aliases || {}).map(([name, id]) => `${name} = ${id}`).join('\n'),
+        movie_identity_aliases: Object.entries(data?.movie_identity_aliases || {}).map(([name, id]) => `${name} = ${id}`).join('\n'),
       }
     }
   } catch (err) {
@@ -305,6 +317,33 @@ async function loadChannelDedup({ resetDraft = true } = {}) {
 async function openChannelDedup() {
   channelDedupDialog.value = true
   await loadChannelDedup()
+  await loadResourceRows()
+}
+
+async function loadResourceRows() {
+  ledgerLoading.value = true
+  try {
+    resourceRows.value = unwrapResponse(await props.api.get(
+      `${pluginBase.value}/resource-ledger?state=${resourceState.value}&page=${resourcePage.value}&page_size=20`,
+    )) || { total: 0, items: [] }
+  } catch (err) {
+    channelDedupError.value = err?.message || '读取资源账本失败'
+  } finally {
+    ledgerLoading.value = false
+  }
+}
+
+watch(resourceState, () => { resourcePage.value = 1; loadResourceRows() })
+
+async function forgetResource() {
+  try {
+    unwrapResponse(await props.api.post(`${pluginBase.value}/resource-ledger/forget`, { key: forgetKey.value }))
+    forgetKey.value = ''
+    await loadResourceRows()
+    await loadChannelDedup({ resetDraft: false })
+  } catch (err) {
+    channelDedupError.value = err?.message || '移除长期证据失败'
+  }
 }
 
 async function saveChannelDedup() {
@@ -314,16 +353,21 @@ async function saveChannelDedup() {
     const data = unwrapResponse(await props.api.post(`${pluginBase.value}/channel-dedup/settings`, {
       enabled: channelDedupDraft.value.enabled,
       cancel_downloading: channelDedupDraft.value.cancel_downloading,
+      inflight_enabled: channelDedupDraft.value.inflight_enabled,
+      pack_dedup_enabled: channelDedupDraft.value.pack_dedup_enabled,
+      pack_policy: channelDedupDraft.value.pack_policy,
+      identity_policy: channelDedupDraft.value.identity_policy,
       channels: channelDedupDraft.value.channels,
       attributes: channelDedupDraft.value.attributes,
       size_tolerance_pct: channelDedupDraft.value.size_tolerance_pct,
       unknown_policy: channelDedupDraft.value.unknown_policy,
       identity_aliases: channelDedupDraft.value.identity_aliases,
+      movie_identity_aliases: channelDedupDraft.value.movie_identity_aliases,
     }))
     channelDedup.value = data || channelDedup.value
     await loadChannelDedup()
     await loadStatus()
-    notify('频道监听设置已保存')
+    notify('频道与去重设置已保存')
   } catch (err) {
     channelDedupError.value = err?.message || '保存频道监听设置失败'
   } finally {
@@ -619,7 +663,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 <strong>{{ task.name }}</strong>
                 <span class="brushflow-status-dot" :class="`brushflow-status-dot--${taskStateMeta(task.state).color}`" />
               </span>
-              <span>{{ task.site_name }} · {{ task.downloader }}</span>
+              <span>规格去重{{ task.spec_dedup_enabled ? '开' : '关' }} · {{ task.site_name }} · {{ task.downloader }}</span>
               <span class="brushflow-task-item__meta">
                 <span>{{ task.statistic.active || 0 }} 个种子</span>
                 <span>{{ task.next_run_at ? formatDateTime(task.next_run_at) : '暂无计划' }}</span>
@@ -640,6 +684,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               <div>
                 <div class="brushflow-task-head__title">
                   <h2>{{ selectedTask.name }}</h2>
+                  <VChip size="small" variant="outlined">规格去重{{ selectedTask.spec_dedup_enabled ? '开' : '关' }}</VChip>
                   <VChip :color="selectedState.color" size="small" variant="tonal" :prepend-icon="selectedState.icon">
                     {{ selectedState.text }}
                   </VChip>
@@ -972,6 +1017,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
       :global-dynamic-delete="Boolean(status.global_proxy_delete)"
       :saving="saving"
       @save="saveTask"
+      @dedup-settings="openChannelDedup"
     />
 
     <VDialog v-model="channelDedupDialog" max-width="52rem" scrollable>
@@ -987,9 +1033,10 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VAlert v-if="channelDedup.last_error" type="warning" variant="tonal" density="compact">
             {{ channelDedup.last_error }}
           </VAlert>
+          <div class="text-subtitle-2">频道监听</div>
           <VSwitch
             v-model="channelDedupDraft.enabled"
-            label="启用频道监听与同规格去重"
+            label="启用频道监听"
             color="primary"
             hide-details
             inset
@@ -1005,7 +1052,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             :disabled="!channelDedupDraft.enabled"
           />
           <div class="channel-dedup__section">
-            <div class="text-subtitle-2">重复判断规格</div>
+            <div class="text-subtitle-2">全局去重字段</div>
             <div class="channel-dedup__attributes">
               <VCheckbox
                 v-for="attribute in channelDedupAttributes"
@@ -1016,7 +1063,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 color="primary"
                 density="compact"
                 hide-details
-                :disabled="!channelDedupDraft.enabled"
               />
             </div>
           </div>
@@ -1031,13 +1077,42 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             label="单集文件大小容差"
             hint="按种子内单个视频文件大小比较，不使用整包总大小"
             persistent-hint
-            :disabled="!channelDedupDraft.enabled"
           />
           <VSelect
             v-model="channelDedupDraft.unknown_policy"
             :items="channelUnknownPolicies"
             label="候选缺少勾选规格时"
-            :disabled="!channelDedupDraft.enabled || !channelDedupDraft.attributes.length"
+            :disabled="!channelDedupDraft.attributes.length"
+            hide-details
+          />
+          <VDivider />
+          <div class="text-subtitle-2">资源去重规则</div>
+          <VSwitch
+            v-model="channelDedupDraft.inflight_enabled"
+            label="排除已入队的同规格资源"
+            color="primary" hide-details inset
+          />
+          <VSwitch
+            v-model="channelDedupDraft.pack_dedup_enabled"
+            label="排除同一种子包内的同规格重复文件"
+            color="primary" hide-details inset
+          />
+          <VSelect
+            v-model="channelDedupDraft.pack_policy"
+            label="整包处理方式"
+            :items="[
+              { title: '逐文件排除，仅下载剩余文件', value: 'partial' },
+              { title: '存在不合格文件则排除整包', value: 'exclude' },
+            ]"
+            hide-details
+          />
+          <VSelect
+            v-model="channelDedupDraft.identity_policy"
+            label="资源身份未确认时"
+            :items="[
+              { title: '等待核验，不下载', value: 'defer' },
+              { title: '按未命中放行', value: 'allow' },
+            ]"
             hide-details
           />
           <VSwitch
@@ -1048,20 +1123,29 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             inset
             :disabled="!channelDedupDraft.enabled || !channelDedupDraft.attributes.length"
           />
+          <VDivider />
+          <div class="text-subtitle-2">别名绑定</div>
           <VTextarea
             v-model="channelDedupDraft.identity_aliases"
             label="剧名别名绑定（可选）"
             placeholder="剧名别名 = TMDB剧集ID"
             rows="2"
             auto-grow
-            :disabled="!channelDedupDraft.enabled"
             hide-details
+          />
+          <VTextarea
+            v-model="channelDedupDraft.movie_identity_aliases"
+            label="电影别名绑定（可选）"
+            placeholder="电影别名 = TMDB电影ID"
+            rows="2" auto-grow hide-details
           />
           <VDivider />
           <div class="channel-dedup__status">
             <div><span>账号来源</span><strong>自动生成ED2K链接</strong></div>
             <div><span>监听状态</span><strong>{{ channelDedup.syncing ? '同步中' : channelDedup.enabled ? '已启用' : '未启用' }}</strong></div>
             <div><span>结构化记录</span><strong>{{ channelDedup.record_count || 0 }}</strong></div>
+            <div><span>长期资源账本</span><strong>{{ channelDedup.ledger_count || 0 }}</strong></div>
+            <div><span>身份待核验</span><strong>{{ channelDedup.pending_count || 0 }}</strong></div>
             <div><span>最近同步</span><strong>{{ formatChannelTimestamp(channelDedup.last_poll_at) }}</strong></div>
             <div><span>同步间隔</span><strong>{{ Math.ceil((channelDedup.poll_interval_seconds || 120) / 60) }} 分钟</strong></div>
             <div><span>下次同步</span><strong>{{ channelDedup.enabled && channelDedup.next_poll_at ? formatChannelTimestamp(channelDedup.next_poll_at) : '-' }}</strong></div>
@@ -1078,6 +1162,34 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                   :loading="channelDedupLoading" @click="loadChannelDedup({ resetDraft: false })" />
               </template>
             </VTooltip>
+          </div>
+          <div class="channel-dedup__section">
+            <VTabs v-model="resourceState" density="compact">
+              <VTab value="ledger">长期账本</VTab>
+              <VTab value="pending">身份待核验</VTab>
+            </VTabs>
+            <VProgressLinear v-if="ledgerLoading" indeterminate />
+            <div v-else-if="!resourceRows.items?.length" class="text-body-2 text-medium-emphasis">暂无记录</div>
+            <div class="channel-dedup__records">
+              <div v-for="row in resourceRows.items" :key="row.key" class="channel-dedup__record">
+                <div class="channel-dedup__record-main">
+                  <strong>{{ row.title || row.path || row.file_key || row.title_key }}</strong>
+                  <span>{{ row.media_type === 'movie' ? '电影' : channelRecordEpisodes(row) }}</span>
+                  <small>{{ row.tmdb_id ? `TMDB ${row.tmdb_id}` : '身份待确认' }} · {{ channelRecordSpecs(row) }}</small>
+                </div>
+                <div class="channel-dedup__record-meta">
+                  <span>{{ row.reason || (row.evidence_source === 'channel' ? '频道已发布' : '下载已完成') }}</span>
+                  <VTooltip v-if="resourceState === 'ledger'" text="移除长期证据">
+                    <template #activator="{ props: tooltipProps }">
+                      <VBtn v-bind="tooltipProps" icon="mdi-delete-outline" size="small" variant="text"
+                        aria-label="移除长期证据" @click="forgetKey = row.key" />
+                    </template>
+                  </VTooltip>
+                </div>
+              </div>
+            </div>
+            <VPagination v-if="resourceRows.total > 20" v-model="resourcePage"
+              :length="Math.ceil(resourceRows.total / 20)" :total-visible="3" @update:model-value="loadResourceRows" />
           </div>
           <div class="channel-dedup__section">
             <div class="text-subtitle-2">最近 72 小时解析记录</div>
@@ -1102,6 +1214,17 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VSpacer />
           <VBtn variant="text" @click="channelDedupDialog = false">关闭</VBtn>
           <VBtn color="primary" variant="flat" :loading="channelDedupSaving" @click="saveChannelDedup">保存设置</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+
+    <VDialog :model-value="Boolean(forgetKey)" max-width="28rem" @update:model-value="value => { if (!value) forgetKey = '' }">
+      <VCard title="移除长期证据">
+        <VCardText>移除后，该资源不再受这条长期记录保护。当前频道记录和在队任务仍会参与去重。</VCardText>
+        <VCardActions>
+          <VSpacer />
+          <VBtn @click="forgetKey = ''">取消</VBtn>
+          <VBtn color="error" @click="forgetResource">确认移除</VBtn>
         </VCardActions>
       </VCard>
     </VDialog>
@@ -1233,6 +1356,16 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   display: grid;
   gap: 16px;
   max-block-size: min(76vh, 48rem);
+}
+
+.channel-dedup__body :deep(.v-input) {
+  min-inline-size: 0;
+}
+
+.channel-dedup__body :deep(.v-selection-control .v-label),
+.channel-dedup__body :deep(.v-select__selection-text) {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .channel-dedup__section {

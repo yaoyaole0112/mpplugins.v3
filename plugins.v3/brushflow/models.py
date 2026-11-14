@@ -9,6 +9,24 @@ from .channel_dedup import normalize_title
 CHANNEL_DEDUP_ATTRIBUTES = {"resolution", "effects", "codec", "source", "fps", "size"}
 
 
+def task_spec_dedup_enabled(config):
+    """仅迁移旧用途/模式；显式规格开关始终优先。"""
+    return config.get("spec_dedup_enabled",
+                      config.get("purpose", "share") != "traffic" and config.get("resource_dedup_mode") != "off")
+
+
+def migrated_identity_policy(config):
+    """旧任务策略一致时沿用；冲突时采用严格策略，显式全局值优先。"""
+    if "channel_dedup_identity_policy" in config:
+        return config["channel_dedup_identity_policy"]
+    policies = {
+        row.get("identity_policy", "defer")
+        for row in config.get("tasks") or []
+        if isinstance(row, dict) and task_spec_dedup_enabled(row)
+    }
+    return "allow" if policies == {"allow"} else "defer"
+
+
 def _normalize_optional_positive_number(value):
     """把历史配置中的空值和 0 统一转换为未设置。"""
     if value is None or value == "":
@@ -71,11 +89,21 @@ class BrushTaskPayload(BaseModel):
     qb_category: Optional[str] = None
     site_hr_active: bool = False
     recent_episodes_only: bool = False
+    spec_dedup_enabled: bool = True
     blacklist_site_ids: list[int] = Field(default_factory=list, max_length=100)
     download_types: list[Literal["movie", "tv", "variety", "anime", "sports", "documentary", "mv", "music"]] = Field(default_factory=list)
     site_skip_tips: bool = False
     rss_support: bool = False
     tag: Optional[str] = Field(None, validation_alias=AliasChoices("tag", "downloader_tag"))
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_spec_dedup_switch(cls, value):
+        if isinstance(value, dict) and "spec_dedup_enabled" not in value and (
+            "purpose" in value or "resource_dedup_mode" in value
+        ):
+            return {**value, "spec_dedup_enabled": task_spec_dedup_enabled(value)}
+        return value
 
     @field_validator(
         "disksize",
@@ -269,12 +297,17 @@ class ChannelDedupSettingsPayload(BaseModel):
     enabled: bool = False
     channels: list[str] = Field(default_factory=list, max_length=50)
     cancel_downloading: bool = False
+    inflight_enabled: bool = True
+    pack_dedup_enabled: bool = True
+    pack_policy: Literal["partial", "exclude"] = "partial"
+    identity_policy: Literal["defer", "allow"] = "defer"
     attributes: list[str] = Field(default_factory=lambda: ["resolution", "effects", "codec", "source", "fps"])
     size_tolerance_pct: float = Field(5, ge=0, le=20)
     unknown_policy: Literal["exclude", "allow"] = "exclude"
     identity_aliases: dict[str, int] = Field(default_factory=dict)
+    movie_identity_aliases: dict[str, int] = Field(default_factory=dict)
 
-    @field_validator("identity_aliases", mode="before")
+    @field_validator("identity_aliases", "movie_identity_aliases", mode="before")
     @classmethod
     def validate_identity_aliases(cls, value):
         if value is None or value == "":
@@ -345,3 +378,7 @@ class ChannelDedupSettingsPayload(BaseModel):
         if self.enabled and not self.channels:
             raise ValueError("开启频道监听时请至少添加一个频道")
         return self
+
+
+class ResourceLedgerDeletePayload(BaseModel):
+    key: str = Field(..., min_length=64, max_length=64, pattern=r"^[0-9a-f]+$")
