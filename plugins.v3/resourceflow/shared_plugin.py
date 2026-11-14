@@ -66,7 +66,7 @@ class SharedResourceMixin:
         self._shared_worker = None
         self._shared_store = None
         self._shared_stopping = False
-        self._shared_error = ""
+        self._shared_error = self.get_data("shared_retry_error") or ""
         self._shared_last_ok = None
         raw = dict(config.get("shared") or {})
         instance_id = raw.pop("instance_id", None)
@@ -171,9 +171,17 @@ class SharedResourceMixin:
         except SharedError as error:
             return schemas.Response(success=False, message=str(error))
 
+    def _check_shared_available(self):
+        if self._shared_stopping:
+            raise SharedError("共享审批已停止")
+        retry_at = getattr(self, "_shared_retry_at", 0)
+        if time.time() < retry_at:
+            remaining = max(1, int(retry_at - time.time()) + 1)
+            reason = getattr(self, "_shared_error", "") or "上次连接失败"
+            raise SharedError(f"共享审批退避等待，约 {remaining} 秒后重试；上次原因：{reason}")
+
     def _shared_exchange(self, request_id, value):
-        if self._shared_stopping or time.time() < self._shared_retry_at:
-            raise SharedError("共享审批已停止或正在退避等待")
+        self._check_shared_available()
         config = self._shared_settings
         body = {"v": 1, "group": config.group, "instance": self._shared_instance_id,
                 "label": config.instance_label, **value}
@@ -181,11 +189,17 @@ class SharedResourceMixin:
             account = ed2k_account(settings.PROXY)
             result = TelegramRPC(account, config.bot_username).exchange(request_id, body)
             self._shared_last_ok, self._shared_error = time.time(), ""
+            if self._shared_retry_at:
+                self._shared_retry_at = 0
+                self.save_data("shared_retry_at", 0)
+                self.save_data("shared_retry_error", "")
             return result
         except SharedError as error:
             self._shared_error = str(error)
-            self._shared_retry_at = time.time() + max(15, getattr(error, "retry_after", 15))
-            self.save_data("shared_retry_at", self._shared_retry_at)
+            if not getattr(error, "definitive", False):
+                self._shared_retry_at = time.time() + max(15, getattr(error, "retry_after", 15))
+                self.save_data("shared_retry_at", self._shared_retry_at)
+                self.save_data("shared_retry_error", self._shared_error)
             raise
 
     def _save_shared(self):
@@ -278,6 +292,7 @@ class SharedResourceMixin:
                 content, cookies, task, downloader, service, expected_hash, selection, title)
         with self._shared_rpc_lock, self._shared_lock:
             try:
+                self._check_shared_available()
                 if not isinstance(content, bytes) or not self._channel_dedup_attributes:
                     raise SharedError("共享审批需要可核验的文件清单与至少一个规格字段")
                 if any(row["hash"] == expected_hash and row["downloader"] == task.downloader
@@ -291,8 +306,9 @@ class SharedResourceMixin:
                 request_id = uuid.uuid4().hex
                 body = {"op": "reserve", "revision": current_policy["revision"],
                         "pack_policy": self._channel_dedup_pack_policy,
-                        "files": [{key: row.get(key) for key in
-                                   ("id", "title", "media_type", "tmdb_id", "season", "episodes", "specs")}
+                        "files": [{**{key: row.get(key) for key in
+                                   ("id", "title", "media_type", "tmdb_id", "season", "episodes")},
+                                   "specs": {key: row["specs"].get(key) for key in current_policy["attributes"]}}
                                   for row in candidates]}
                 entry = {"request_id": request_id, "body": body, "title": title[:160],
                          "task_id": task.id, "downloader": task.downloader, "hash": expected_hash,

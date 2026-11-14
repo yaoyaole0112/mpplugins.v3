@@ -14,6 +14,7 @@ import uuid
 import zlib
 
 from resourceflow.shared_coordinator import BotWorker, CoordinatorStore
+from resourceflow.channel_dedup import parse_candidate_file
 from resourceflow.shared_models import SharedSettingsPayload
 from resourceflow.shared_plugin import SharedResourceMixin
 from resourceflow.shared_protocol import MAX_BYTES, SharedError, decode, encode, parse_part, policy
@@ -93,6 +94,40 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(self.send(self.request([file_row(effects="SDR")]))["approved"])
         self.assertTrue(self.send(self.request([file_row(effects="HDR10")]))["approved"])
         self.assertFalse(self.send(self.request([file_row(effects="SDR")]))["approved"])
+
+    def test_unselected_null_or_invalid_specs_are_ignored_and_not_stored(self):
+        row = file_row(effects=None, codec=[], source=False, fps=None, size=-1)
+        self.assertTrue(self.send(self.request([row]))["approved"])
+        self.assertEqual(self.store.recent()[0]["specs"], {"resolution": "1080p"})
+        row["specs"].update(effects="HDR10", fps=60, size=999)
+        self.assertFalse(self.send(self.request([row], instance="b" * 32), sender=22)["approved"])
+
+    def test_each_selected_spec_still_rejects_missing_or_invalid_values(self):
+        valid = {"resolution": "1080p", "effects": "SDR", "codec": "H.264",
+                 "source": "WEB-DL", "fps": 25, "size": 123456}
+        for field in valid:
+            self.store = CoordinatorStore(self.path, "resources", [field], 5)
+            bad_values = [None, "", False, -1] if field in {"fps", "size"} else [None, "", 25]
+            for value in bad_values:
+                with self.subTest(field=field, value=value):
+                    specs = {key: None for key in valid}
+                    specs[field] = value
+                    self.assertFalse(self.send(self.request([file_row(**specs)]))["ok"])
+            with self.subTest(field=field, value="valid"):
+                specs[field] = valid[field]
+                self.assertTrue(self.send(self.request([file_row(**specs)]))["approved"])
+
+    def test_production_filename_with_unknown_fps_passes_and_peer_is_rejected(self):
+        self.store = CoordinatorStore(self.path, "resources", ["resolution", "effects"], 5)
+        row = parse_candidate_file(
+            "Shuiro.no.Kamen.S01E06.2026.1080p.Viu.WEB-DL.H264.AAC-ADWeb.mkv",
+            123456, allow_movie=True)
+        row.update(id="1" * 24, media_type="tv", tmdb_id=295420)
+        self.assertIsNone(row["specs"]["fps"])
+        body = self.request([row])
+        wire = decode([parse_part(part)[3] for part in encode(body, "f" * 32)])
+        self.assertTrue(self.send(wire)["approved"])
+        self.assertFalse(self.send(self.request([row], instance="b" * 32), sender=22)["approved"])
 
     def test_partial_pack_and_exclude_pack_are_atomic(self):
         self.send(self.request())
@@ -244,6 +279,19 @@ class AdmissionTests(unittest.TestCase):
         self.assertTrue(selection["hold_paused"])
         self.assertEqual(selection["shared_tag"], self.plugin._shared_tag(self.entry()))
         self.assertEqual(self.entry()["phase"], "queued")
+
+    def test_wire_request_contains_only_selected_specs(self):
+        self.plugin._shared_candidates.return_value[0][0]["specs"].update(fps=None, effects=None)
+        self.assertEqual(self.add(), "a" * 40)
+        self.assertEqual(self.entry()["body"]["files"][0]["specs"], {"resolution": "1080p"})
+
+    def test_cooldown_does_not_create_unsent_request_or_add_torrent(self):
+        self.plugin._shared_retry_at = time.time() + 30
+        self.plugin._shared_error = "Telegram 请求超时"
+        self.assertIsNone(self.add())
+        self.assertEqual(self.plugin._shared_claims, {})
+        self.plugin._shared_exchange.assert_not_called()
+        self.plugin._add_local_prechecked_torrent.assert_not_called()
 
     def test_lost_reservation_reply_never_adds_and_persists_request(self):
         self.plugin._shared_exchange.side_effect = SharedError("timeout")
@@ -431,6 +479,40 @@ class PluginSetupTests(unittest.TestCase):
         self.assertFalse(self.plugin._channel_dedup_enabled)
         self.assertEqual(self.plugin._channel_dedup_channels, [])
         self.assertEqual(self.plugin._shared_claims, {})
+
+    def test_definitive_refusal_does_not_backoff_other_requests(self):
+        error = SharedError("规格数值无效")
+        error.definitive = True
+        with patch("resourceflow.shared_plugin.ed2k_account"), patch(
+                "resourceflow.shared_plugin.TelegramRPC") as rpc:
+            rpc.return_value.exchange.side_effect = [error, {"ok": True}]
+            with self.assertRaisesRegex(SharedError, "规格数值无效"):
+                self.plugin._shared_exchange("a" * 32, {"op": "policy"})
+            self.assertEqual(self.plugin._shared_retry_at, 0)
+            self.assertTrue(self.plugin._shared_exchange("b" * 32, {"op": "policy"})["ok"])
+            self.assertEqual(rpc.return_value.exchange.call_count, 2)
+
+    def test_transport_failure_backs_off_with_reason_and_success_clears_state(self):
+        p = self.plugin
+        with patch("resourceflow.shared_plugin.ed2k_account"), patch(
+                "resourceflow.shared_plugin.TelegramRPC") as rpc:
+            rpc.return_value.exchange.side_effect = [SharedError("Telegram 请求超时"), {"ok": True}]
+            with self.assertRaisesRegex(SharedError, "Telegram 请求超时"):
+                p._shared_exchange("a" * 32, {"op": "policy"})
+            self.assertGreater(p._shared_retry_at, time.time())
+            p.save_data.assert_any_call("shared_retry_error", "Telegram 请求超时")
+            with self.assertRaisesRegex(SharedError, "退避等待.*上次原因：Telegram 请求超时"):
+                p._shared_exchange("b" * 32, {"op": "policy"})
+            self.assertEqual(rpc.return_value.exchange.call_count, 1)
+            p._shared_retry_at = time.time() - 1
+            self.assertTrue(p._shared_exchange("b" * 32, {"op": "policy"})["ok"])
+            self.assertEqual(p._shared_retry_at, 0)
+            p.save_data.assert_any_call("shared_retry_error", "")
+
+    def test_stopped_message_is_distinct_from_backoff(self):
+        self.plugin._shared_stopping = True
+        with self.assertRaisesRegex(SharedError, "^共享审批已停止$"):
+            self.plugin._shared_exchange("a" * 32, {"op": "policy"})
 
     def test_http_json_settings_routes_preserve_pydantic_body_contract(self):
         from fastapi import FastAPI

@@ -64,7 +64,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流与Telegram共享下载审批，跨实例同规格下载前占位，无需公网入口。",
     "labels": "刷流,资源去重,Telegram",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -72,6 +72,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.2": "修复共享审批错误校验未勾选的空帧率等规格导致有效资源无法下载：客户端仅提交勾选规格，协调端仅校验及保存勾选规格。协调端明确拒绝不再触发连接退避，区分停止与退避提示并显示原始原因，退避期间不创建无发送的待核验申请。",
       "v1.0.1": "从站点刷流6.4.4完整独立复制，隔离插件ID、配置、数据、API和默认下载标签。新增Telegram私聊中转、Bot长轮询协调端、SQLite事务查重与下载前占位、幂等审批、暂停选集、入队确认后启动、逐文件完成回报和失败核验释放；不读取频道、不开放公网接口，保留原选种、限额及删种保护。"
     }
   },

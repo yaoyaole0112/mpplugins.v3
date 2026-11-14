@@ -198,16 +198,16 @@ class CoordinatorStore:
         specs = row.get("specs")
         if not isinstance(specs, dict):
             raise SharedError("规格字段无效")
-        allowed = {"resolution", "effects", "codec", "source", "fps", "size"}
-        specs = {key: value for key, value in specs.items() if key in allowed}
+        # Unknown, unselected parser fields must not block an otherwise valid claim.
+        specs = {key: specs.get(key) for key in self.policy["attributes"]}
+        if any(value is None or value == "" for value in specs.values()):
+            raise SharedError("缺少共享规则勾选的规格")
         for key, value in specs.items():
             if key in {"fps", "size"}:
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                     raise SharedError("规格数值无效")
             elif not isinstance(value, str) or not 0 < len(value) <= 80:
                 raise SharedError("规格文本无效")
-        if any(not specs.get(key) for key in self.policy["attributes"]):
-            raise SharedError("缺少共享规则勾选的规格")
         return {"id": row["id"], "media_type": media_type, "tmdb_id": tmdb_id, "season": season,
                 "episodes": episodes, "specs": specs, "title": str(row.get("title", ""))[:160]}
 
