@@ -60,6 +60,21 @@
       "v1.0.0": "新增 Telegram 接收 115 分享及离线链接并转存到指定目录。"
     }
   },
+  "ResourceFlow": {
+    "name": "资源刷流",
+    "description": "独立资源刷流与Telegram共享下载审批，跨实例同规格下载前占位，无需公网入口。",
+    "labels": "刷流,资源去重,Telegram",
+    "version": "1.0.1",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
+    "author": "jxxghp,InfinityPacer,Seed680 / helios",
+    "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
+    "release": true,
+    "system_version": ">=3.0.0",
+    "level": 2,
+    "history": {
+      "v1.0.1": "从站点刷流6.4.4完整独立复制，隔离插件ID、配置、数据、API和默认下载标签。新增Telegram私聊中转、Bot长轮询协调端、SQLite事务查重与下载前占位、幂等审批、暂停选集、入队确认后启动、逐文件完成回报和失败核验释放；不读取频道、不开放公网接口，保留原选种、限额及删种保护。"
+    }
+  },
   "BrushFlow": {
     "name": "站点刷流",
     "description": "自动托管多个站点刷流任务，并独立调度、统计与诊断。",

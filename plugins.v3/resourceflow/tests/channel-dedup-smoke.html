@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ResourceFlow Shared Arbitration Test</title>
+  <link rel="stylesheet" href="../node_modules/vuetify/dist/vuetify.min.css">
+  <link rel="stylesheet" href="../node_modules/@mdi/font/css/materialdesignicons.min.css">
+  <script type="importmap">
+    {"imports":{"vue":"../node_modules/vue/dist/vue.esm-browser.prod.js"}}
+  </script>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    :root { --app-surface-radius: 8px; --app-control-radius: 6px; }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+<script type="module">
+  import * as vue from 'vue'
+  import * as vuetify from '../node_modules/vuetify/dist/vuetify.esm.js'
+  import * as remote from '../dist/assets/remoteEntry.js'
+  import { cloneTask } from '../src/utils.js'
+
+  let savedTask = new URLSearchParams(location.search).get('task') === 'traffic'
+    ? cloneTask({ id: 'saved-traffic', name: '【分享】Saved Traffic', site_id: 1, downloader: 'QB',
+      spec_dedup_enabled: false }) : null
+  const status = {
+    enabled: true, show_sidebar_nav: true, tasks: [],
+    summary: { task_count: 15, running_count: 14 }, options: { sites: [{ value: 1, title: 'Test Site' }], downloaders: [{ value: 'QB', title: 'QB' }] },
+  }
+  let settings = {
+    enabled: true, channels: ['@example_channel'], attributes: ['resolution', 'effects', 'codec', 'source'],
+    size_tolerance_pct: 5, record_count: 2, last_poll_at: Date.now() / 1000, last_error: '',
+    unknown_policy: 'exclude', identity_aliases: {}, movie_identity_aliases: {}, cancel_downloading: false,
+    inflight_enabled: true, pack_dedup_enabled: true, pack_policy: 'partial', identity_policy: 'defer',
+    ledger_count: 1, pending_count: 1,
+    poll_interval_seconds: 300, next_poll_at: Date.now() / 1000 + 300,
+    records: [1, 2].map(number => ({
+      channel: '@example_channel', message_id: 42, file_key: `file-${number}`,
+      title: number === 1 ? 'PSYREN 决战游戏' : 'A Very Long Series Name With Several Words',
+      tmdb_id: 297903, season: 1, episodes: [number + 4], published_at: Date.now() / 1000,
+      specs: { resolution: '1080p', effects: 'SDR', codec: 'H.264', source: 'WEB-DL', fps: 24, size: 1251017826 },
+    })),
+  }
+  window.resourceflowRequests = []
+  window.resourceflowFailSave = false
+  let shared = {
+    enabled: true, host_coordinator: false, bot_username: '@testbot', group: 'resources',
+    instance_label: '本机测试', instance_id: 'a'.repeat(32), allowed_users: [11, 22], token_configured: true,
+    requests: [{ request_id: 'b'.repeat(32), title: 'Show S01E05', phase: 'queued', approved: 1, rejected: [] }],
+    records: [{ id: 'b'.repeat(32), title: 'Show S01E05', label: '朋友A', state: 'reserved', tmdb_id: 123,
+      season: 1, episodes: [5], media_type: 'tv', specs: { resolution: '1080p' } }],
+  }
+  const api = {
+    get: async path => {
+      window.resourceflowRequests.push({ method: 'GET', path })
+      if (path.endsWith('/shared/status')) return { success: true, data: structuredClone(shared) }
+      if (path.includes('/tasks/')) return { success: true, data: {
+        task: structuredClone(savedTask), runs: [], torrents: { items: [], total: 0, page_size: 50 },
+      } }
+      if (path.endsWith('/status')) return { success: true, data: { ...structuredClone(status),
+        tasks: savedTask ? [{ ...structuredClone(savedTask), site_name: 'Test Site', statistic: {},
+          state: 'idle', next_run_at: null }] : [],
+      } }
+      if (path.includes('/resource-ledger?')) {
+        return { success: true, data: { total: 1, items: [{ key: 'a'.repeat(64),
+          title: path.includes('state=pending') ? 'Unknown Resource' : 'Film Resource',
+          path: 'Film.2026.mkv', media_type: 'movie', tmdb_id: path.includes('state=pending') ? null : 123,
+          specs: { resolution: '2160p' }, evidence_source: 'completed',
+        }] } }
+      }
+      return { success: true, data: structuredClone(path.endsWith('/status') ? status : settings) }
+    },
+    post: async (path, body) => {
+      body = JSON.parse(JSON.stringify(body))
+      window.resourceflowRequests.push({ method: 'POST', path, body })
+      if (path.endsWith('/shared/settings')) {
+        if (window.resourceflowFailSave) return { success: false, message: '模拟共享保存失败' }
+        const { bot_token, ...publicSettings } = body
+        shared = { ...shared, ...publicSettings, token_configured: Boolean(bot_token || shared.token_configured) }
+        return { success: true, data: structuredClone(shared) }
+      }
+      if (path.endsWith('/shared/test')) {
+        shared.probe = { user_id: 11, policy: { revision: 'c'.repeat(64), attributes: ['resolution'], size_tolerance_pct: 3 } }
+        return { success: true, data: structuredClone(shared) }
+      }
+      if (path.endsWith('/channel-dedup/settings')) {
+        if (window.resourceflowFailSave) return { success: false, message: '模拟保存失败' }
+        const identity_aliases = Object.fromEntries((body.identity_aliases || '').split('\n').filter(Boolean)
+          .map(line => line.split('=').map(item => item.trim()))
+          .map(([name, id]) => [name, Number(id)]))
+        const movie_identity_aliases = Object.fromEntries((body.movie_identity_aliases || '').split('\n').filter(Boolean)
+          .map(line => line.split('=').map(item => item.trim()))
+          .map(([name, id]) => [name, Number(id)]))
+        settings = { ...settings, ...body, identity_aliases, movie_identity_aliases, channels: body.channels.split('\n').filter(Boolean) }
+        return { success: true, data: structuredClone(settings) }
+      }
+      return { success: true, message: '已提交' }
+    },
+    put: async (path, body) => {
+      window.resourceflowRequests.push({ method: 'PUT', path, body: structuredClone(body) })
+      savedTask = structuredClone(body)
+      return { success: true, data: { task: savedTask } }
+    },
+  }
+  remote.init({
+    vue: { [vue.version]: { get: () => () => vue, loaded: true } },
+    vuetify: { [vuetify.version]: { get: () => () => vuetify, loaded: true } },
+  })
+  const factory = await remote.get('./Page')
+  const app = vue.createApp({
+    render: () => vue.h(vuetify.components.VApp, null, () => vue.h(factory(), { api })),
+  })
+  app.use(vuetify.createVuetify({
+    components: vuetify.components, directives: vuetify.directives,
+    theme: { defaultTheme: 'light', themes: { light: { colors: { primary: '#8b5cf6' } } } },
+  }))
+  app.mount('#app')
+  window.resourceflowReady = true
+</script>
+</body>
+</html>
