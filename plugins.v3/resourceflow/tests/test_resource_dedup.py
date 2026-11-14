@@ -695,6 +695,10 @@ class ResourceMigrationTests(unittest.TestCase):
         plugin.save_data = Mock()
         plugin.update_config = Mock()
         plugin.init_plugin({'enabled': False, 'tasks': [], 'channel_dedup_identity_policy': 'allow'})
+        from resourceflow.shared_models import SharedSettingsPayload
+        plugin._shared_settings = SharedSettingsPayload(
+            host_coordinator=True, bot_username="@testbot", allowed_users=[11])
+        plugin._shared_policy_changed = Mock()
         plugin._save_config = Mock()
         plugin._refresh_scheduler = Mock()
         before = copy.deepcopy(plugin._resource_ledger)

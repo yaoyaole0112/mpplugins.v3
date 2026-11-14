@@ -19,23 +19,79 @@ from .channel_dedup import parse_candidate_file, parse_torrent_files
 from .models import ChannelDedupSettingsPayload
 from .shared_coordinator import BotWorker, CoordinatorStore
 from .shared_models import SharedSettingsPayload
-from .shared_protocol import SharedError, digest, policy
+from .shared_protocol import RULE_DEFAULTS, SharedError, digest, policy
 from .telegram_rpc import TelegramRPC, ed2k_account
 
 
 class SharedResourceMixin:
+    def _shared_rules(self):
+        return {key: getattr(self, f"_channel_dedup_{key}", default) for key, default in RULE_DEFAULTS.items()}
+
+    def _local_shared_policy(self):
+        return policy(self._channel_dedup_attributes, self._channel_dedup_size_tolerance_pct, self._shared_rules())
+
+    def _apply_shared_policy(self, value):
+        if not isinstance(value, dict) or "rules" not in value:
+            raise SharedError("协调端尚不支持统一资源规则，请将协调端更新至 1.0.3 或以上")
+        expected = policy(value.get("attributes", []), value.get("size_tolerance_pct", 5), value["rules"])
+        if expected != value:
+            raise SharedError("协调端规则版本或内容无效")
+        current = self._local_shared_policy() if self._channel_dedup_attributes else None
+        if self._shared_settings.host_coordinator:
+            if expected != current:
+                raise SharedError("协调端规则与本机设置不一致")
+            return
+        if expected == current:
+            return
+        with self._channel_state_lock:
+            self._channel_dedup_attributes = list(expected["attributes"])
+            self._channel_dedup_size_tolerance_pct = expected["size_tolerance_pct"]
+            for key, setting in expected["rules"].items():
+                setattr(self, f"_channel_dedup_{key}", setting)
+            self._channel_identity_cache.clear()
+            self._inflight_task_snapshot = (0, [])
+            self._channel_generation += 1
+        self._save_config()
+
+    def _sync_shared_policy(self):
+        with self._shared_rpc_lock:
+            if self._shared_settings.host_coordinator:
+                if not self._shared_store:
+                    raise SharedError("本机协调端尚未就绪，暂缓新增下载")
+                self._apply_shared_policy(self._shared_store.policy)
+            else:
+                response = self._shared_exchange(uuid.uuid4().hex, {"op": "policy"})
+                self._apply_shared_policy(response.get("policy"))
+                self._shared_probe = response
+
     def update_channel_dedup_settings(self, payload: ChannelDedupSettingsPayload) -> schemas.Response:
         with getattr(self, "_shared_rpc_lock", threading.RLock()):
             store = getattr(self, "_shared_store", None)
-            changed = (set(payload.attributes) != set(self._channel_dedup_attributes)
-                       or payload.size_tolerance_pct != self._channel_dedup_size_tolerance_pct)
+            fields = {"attributes": list(self._channel_dedup_attributes),
+                      "size_tolerance_pct": self._channel_dedup_size_tolerance_pct, **self._shared_rules()}
+            changed = any(getattr(payload, key) != value for key, value in fields.items()
+                          if key in payload.model_fields_set)
+            config = getattr(self, "_shared_settings", None)
+            if config and not config.host_coordinator:
+                if changed:
+                    return schemas.Response(success=False, message="全局去重字段和资源规则仅可在协调端设置")
+            payload = payload.model_copy(update={
+                key: getattr(payload, key) if key in payload.model_fields_set else value
+                for key, value in fields.items()
+            })
             try:
+                if changed and any(row["phase"] not in {"released", "completed", "rejected"}
+                                   for row in getattr(self, "_shared_claims", {}).values()):
+                    return schemas.Response(success=False, message="仍有未完成共享申请，暂不变更协调端规则")
                 if store and changed:
                     self._stop_shared()
                     self._shared_stopping = False
                     if store.has_unfinished():
                         return schemas.Response(success=False, message="协调端仍有未完成共享占位，暂不变更匹配字段或容差")
-                return self._update_resource_dedup_settings(payload)
+                response = self._update_resource_dedup_settings(payload)
+                if response.success and changed and config and config.host_coordinator:
+                    self._shared_policy_changed()
+                return response
             finally:
                 if store and changed and not self._shared_worker:
                     self._shared_stopping = False
@@ -93,6 +149,7 @@ class SharedResourceMixin:
             self._shared_store = CoordinatorStore(
                 Path(self.get_data_path()) / f"coordinator-{route}.sqlite3", config.group,
                 self._channel_dedup_attributes, self._channel_dedup_size_tolerance_pct,
+                self._shared_rules(),
             )
             self._shared_worker = BotWorker(
                 self._shared_store, config.bot_token, config.bot_username, config.allowed_users,
@@ -121,7 +178,7 @@ class SharedResourceMixin:
             "last_error": self._shared_error or (worker.last_error if worker else ""),
             "last_ok": self._shared_last_ok, "coordinator_last_ok": worker.last_ok if worker else None,
             "retry_at": self._shared_retry_at,
-            "policy": policy(self._channel_dedup_attributes, self._channel_dedup_size_tolerance_pct)
+            "policy": self._local_shared_policy()
             if self._channel_dedup_attributes else None,
             "requests": [{"request_id": row["request_id"], "title": row["title"], "phase": row["phase"],
                           "task_id": row["task_id"], "updated": row.get("updated"), "error": row.get("error", ""),
@@ -146,17 +203,21 @@ class SharedResourceMixin:
                 if unfinished and route_changed:
                     raise SharedError("仍有未完成共享申请，不能更换 Bot、Token 或共享组")
                 store = self._shared_store
-                self._stop_shared()
-                self._shared_stopping = False
-                if (store and store.has_unfinished()
-                        and (route_changed or not payload.host_coordinator)):
-                    self._start_shared_worker()
-                    raise SharedError("协调端仍有其他实例未完成的占位，不能更换连接或关闭协调端")
+                restart = (route_changed or payload.host_coordinator != previous.host_coordinator
+                           or payload.allowed_users != previous.allowed_users)
+                if restart:
+                    self._stop_shared()
+                    self._shared_stopping = False
+                    if (store and store.has_unfinished()
+                            and (route_changed or not payload.host_coordinator)):
+                        self._start_shared_worker()
+                        raise SharedError("协调端仍有其他实例未完成的占位，不能更换连接或关闭协调端")
                 self._shared_settings = payload
                 self._shared_stopping = False
                 self._shared_error = ""
                 self._save_config()
-                self._start_shared_worker()
+                if restart:
+                    self._start_shared_worker()
                 self._refresh_scheduler()
             return self.get_shared_status()
         except (SharedError, ValueError) as error:
@@ -166,6 +227,7 @@ class SharedResourceMixin:
         try:
             with self._shared_rpc_lock:
                 response = self._shared_exchange(uuid.uuid4().hex, {"op": "policy"})
+                self._apply_shared_policy(response.get("policy"))
                 self._shared_probe = response
             return self.get_shared_status()
         except SharedError as error:
@@ -302,7 +364,7 @@ class SharedResourceMixin:
                 candidates, rejected = self._shared_candidates(content, title, task, selection, spec_hint)
                 if not candidates or rejected and self._channel_dedup_pack_policy == "exclude":
                     raise SharedError("共享审批候选身份或规格不完整，本次不添加下载")
-                current_policy = policy(self._channel_dedup_attributes, self._channel_dedup_size_tolerance_pct)
+                current_policy = self._local_shared_policy()
                 request_id = uuid.uuid4().hex
                 body = {"op": "reserve", "revision": current_policy["revision"],
                         "pack_policy": self._channel_dedup_pack_policy,

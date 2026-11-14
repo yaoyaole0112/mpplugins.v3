@@ -83,6 +83,7 @@
       }
       if (path.endsWith('/shared/test')) {
         shared.probe = { user_id: 11, policy: { revision: 'c'.repeat(64), attributes: ['resolution'], size_tolerance_pct: 3 } }
+        settings = { ...settings, attributes: ['resolution'], size_tolerance_pct: 3 }
         return { success: true, data: structuredClone(shared) }
       }
       if (path.endsWith('/channel-dedup/settings')) {

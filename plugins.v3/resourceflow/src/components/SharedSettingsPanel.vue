@@ -1,9 +1,9 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { formatDateTime, unwrapResponse } from '../utils'
 
 const props = defineProps({ api: { type: Object, required: true }, pluginBase: { type: String, required: true } })
-const emit = defineEmits(['policy'])
+const emit = defineEmits(['host-change', 'policy-synced'])
 const state = ref({ requests: [], records: [] })
 const draft = ref({
   enabled: false, host_coordinator: false, bot_username: '', group: 'resources',
@@ -35,8 +35,10 @@ async function perform(action) {
   finally { busy.value = false }
 }
 
-function save() {
-  return perform(async () => {
+async function save() {
+  busy.value = true
+  error.value = ''
+  try {
     const users = draft.value.allowed_users.split(/[\s,，]+/).filter(Boolean)
     if (users.some(value => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) <= 0)) {
       throw new Error('白名单须为个人账号数字 ID')
@@ -45,12 +47,17 @@ function save() {
     if (!payload.bot_token) delete payload.bot_token
     unwrapResponse(await props.api.post(`${props.pluginBase}/shared/settings`, payload))
     await load(true)
-  })
+    return state.value
+  } catch (failure) {
+    error.value = failure?.message || '共享连接保存失败'
+    throw failure
+  } finally { busy.value = false }
 }
 
 function test() {
   return perform(async () => {
     state.value = unwrapResponse(await props.api.post(`${props.pluginBase}/shared/test`, {}))
+    emit('policy-synced')
   })
 }
 
@@ -62,6 +69,8 @@ function reconcile() {
 }
 
 onMounted(() => perform(() => load(true)))
+watch(() => draft.value.host_coordinator, value => emit('host-change', value), { immediate: true })
+defineExpose({ save })
 </script>
 
 <template>
@@ -92,7 +101,6 @@ onMounted(() => perform(() => load(true)))
       <VTextarea v-model="draft.allowed_users" label="允许的个人账号 ID" rows="2" auto-grow hide-details />
     </template>
     <div class="shared-settings__actions">
-      <VBtn prepend-icon="mdi-content-save-outline" :loading="busy" variant="tonal" @click="save">保存共享连接</VBtn>
       <VBtn prepend-icon="mdi-connection" :disabled="busy || !state.bot_username" variant="text" @click="test">测试审批连接</VBtn>
       <VTooltip text="刷新共享状态">
         <template #activator="{ props: tip }">
@@ -108,8 +116,6 @@ onMounted(() => perform(() => load(true)))
       <div v-if="state.probe?.user_id"><dt>本机 Telegram ID</dt><dd>{{ state.probe.user_id }}</dd></div>
       <div v-if="state.probe?.policy"><dt>协调端规则版本</dt><dd>{{ state.probe.policy.revision.slice(0, 12) }}</dd></div>
     </dl>
-    <VBtn v-if="state.probe?.policy" prepend-icon="mdi-sync" variant="text"
-      @click="emit('policy', state.probe.policy)">采用协调端匹配字段</VBtn>
     <VTabs v-model="tab" density="compact">
       <VTab value="requests">本机共享申请</VTab>
       <VTab v-if="state.host_coordinator" value="records">共享占位记录</VTab>

@@ -262,7 +262,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -756,7 +756,6 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         with self._inflight_lock:
             self._refresh_inflight_identity_bindings()
         self._refresh_scheduler()
-        self._shared_policy_changed()
         if payload.enabled and payload.channels and self.get_state():
             ThreadHelper().submit(self.poll_channel_messages)
         return schemas.Response(success=True, data=self._channel_dedup_payload(include_records=True))
@@ -1806,6 +1805,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
 
     def _run_brush(self, task: BrushTaskConfig, report: dict) -> None:
         """在已绑定任务上下文中执行刷流核心流程"""
+        if self._shared_participates(task):
+            self._sync_shared_policy()
         if not self._validate_task_reference(task) or not self.downloader:
             report["result"] = "downloader_unavailable"
             return

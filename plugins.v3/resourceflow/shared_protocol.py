@@ -15,6 +15,10 @@ PART_SIZE = 2700
 REQUEST_PREFIX = "RFQ1"
 RESPONSE_PREFIX = "RFA1"
 ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
+RULE_DEFAULTS = {
+    "unknown_policy": "exclude", "inflight_enabled": True, "pack_dedup_enabled": True,
+    "pack_policy": "partial", "identity_policy": "defer",
+}
 
 
 class SharedError(Exception):
@@ -89,7 +93,7 @@ def decode(parts):
         raise SharedError("无法解码协议消息") from None
 
 
-def policy(attributes, tolerance):
+def policy(attributes, tolerance, rules=None):
     fields = sorted(set(attributes))
     if not fields or any(field not in {"resolution", "effects", "codec", "source", "fps", "size"}
                          for field in fields):
@@ -98,4 +102,17 @@ def policy(attributes, tolerance):
     if not 0 <= tolerance <= 20:
         raise SharedError("文件大小容差必须在 0 至 20 之间")
     value = {"version": VERSION, "attributes": fields, "size_tolerance_pct": tolerance}
+    if rules is not None:
+        if not isinstance(rules, dict) or set(rules) != set(RULE_DEFAULTS):
+            raise SharedError("协调端资源规则字段不完整，请更新双方插件")
+        for field in ("inflight_enabled", "pack_dedup_enabled"):
+            if type(rules[field]) is not bool:
+                raise SharedError("协调端资源规则无效")
+        for field, choices in {
+            "unknown_policy": ("exclude", "allow"), "pack_policy": ("partial", "exclude"),
+            "identity_policy": ("defer", "allow"),
+        }.items():
+            if rules[field] not in choices:
+                raise SharedError("协调端资源规则无效")
+        value["rules"] = dict(rules)
     return {**value, "revision": digest(value)}

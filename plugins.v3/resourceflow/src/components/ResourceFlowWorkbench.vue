@@ -49,6 +49,8 @@ const channelDedupDialog = ref(false)
 const channelDedupLoading = ref(false)
 const channelDedupSaving = ref(false)
 const channelDedupError = ref('')
+const sharedSettingsPanel = ref(null)
+const sharedHost = ref(false)
 const resourceRows = ref({ total: 0, items: [] })
 const resourceState = ref('ledger')
 const resourcePage = ref(1)
@@ -351,24 +353,28 @@ async function saveChannelDedup() {
   channelDedupSaving.value = true
   channelDedupError.value = ''
   try {
+    if (!sharedSettingsPanel.value) throw new Error('共享连接尚未加载')
+    const shared = await sharedSettingsPanel.value.save()
     const data = unwrapResponse(await props.api.post(`${pluginBase.value}/channel-dedup/settings`, {
       enabled: false,
       cancel_downloading: false,
-      inflight_enabled: channelDedupDraft.value.inflight_enabled,
-      pack_dedup_enabled: channelDedupDraft.value.pack_dedup_enabled,
-      pack_policy: channelDedupDraft.value.pack_policy,
-      identity_policy: channelDedupDraft.value.identity_policy,
+      ...(shared.host_coordinator ? {
+        inflight_enabled: channelDedupDraft.value.inflight_enabled,
+        pack_dedup_enabled: channelDedupDraft.value.pack_dedup_enabled,
+        pack_policy: channelDedupDraft.value.pack_policy,
+        identity_policy: channelDedupDraft.value.identity_policy,
+        attributes: channelDedupDraft.value.attributes,
+        size_tolerance_pct: channelDedupDraft.value.size_tolerance_pct,
+        unknown_policy: channelDedupDraft.value.unknown_policy,
+      } : {}),
       channels: '',
-      attributes: channelDedupDraft.value.attributes,
-      size_tolerance_pct: channelDedupDraft.value.size_tolerance_pct,
-      unknown_policy: channelDedupDraft.value.unknown_policy,
       identity_aliases: channelDedupDraft.value.identity_aliases,
       movie_identity_aliases: channelDedupDraft.value.movie_identity_aliases,
     }))
     channelDedup.value = data || channelDedup.value
     await loadChannelDedup()
     await loadStatus()
-    notify('资源去重设置已保存')
+    notify('共享下载审批设置已保存')
   } catch (err) {
     channelDedupError.value = err?.message || '保存资源去重设置失败'
   } finally {
@@ -507,13 +513,13 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
         <VChip v-if="status.summary.task_count" size="small" variant="tonal">
           {{ status.summary.running_count ?? status.summary.enabled_count ?? 0 }} / {{ status.summary.task_count }} 运行
         </VChip>
-        <VTooltip text="共享审批与同规格去重">
+        <VTooltip text="共享下载审批">
           <template #activator="{ props: tooltipProps }">
             <VBtn
               v-bind="tooltipProps"
               icon="mdi-send"
               variant="text"
-              aria-label="共享审批与同规格去重"
+              aria-label="共享下载审批"
               @click="openChannelDedup"
             />
           </template>
@@ -1009,7 +1015,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
       <VCard>
         <VCardTitle class="channel-dedup__title">
           <VIcon icon="mdi-send" color="primary" />
-          <span>共享审批与同规格去重</span>
+          <span>共享下载审批</span>
         </VCardTitle>
         <VCardText class="channel-dedup__body">
           <VAlert v-if="channelDedupError" type="error" variant="tonal" density="compact">
@@ -1018,11 +1024,9 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VAlert v-if="channelDedup.last_error" type="warning" variant="tonal" density="compact">
             {{ channelDedup.last_error }}
           </VAlert>
-          <SharedSettingsPanel :api="api" :plugin-base="pluginBase"
-            @policy="value => {
-              channelDedupDraft.attributes = [...value.attributes]
-              channelDedupDraft.size_tolerance_pct = value.size_tolerance_pct
-            }" />
+          <SharedSettingsPanel ref="sharedSettingsPanel" :api="api" :plugin-base="pluginBase"
+            @host-change="sharedHost = $event" @policy-synced="loadChannelDedup()" />
+          <template v-if="sharedHost">
           <VDivider />
           <div class="channel-dedup__section">
             <div class="text-subtitle-2">全局去重字段</div>
@@ -1088,6 +1092,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             ]"
             hide-details
           />
+          </template>
           <VDivider />
           <div class="text-subtitle-2">别名绑定</div>
           <VTextarea

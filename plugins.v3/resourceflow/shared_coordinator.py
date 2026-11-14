@@ -18,11 +18,11 @@ from .shared_protocol import (
 
 
 class CoordinatorStore:
-    def __init__(self, path, group, attributes, tolerance):
+    def __init__(self, path, group, attributes, tolerance, rules=None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.group = group
-        self.policy = policy(attributes, tolerance)
+        self.policy = policy(attributes, tolerance, rules)
         with self.connect() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS rpc (
@@ -138,6 +138,8 @@ class CoordinatorStore:
             raise SharedError("申请中的文件编号重复")
         if body.get("pack_policy") not in {"partial", "exclude"}:
             raise SharedError("整包处理策略无效")
+        if self.policy.get("rules") and body["pack_policy"] != self.policy["rules"]["pack_policy"]:
+            raise SharedError("整包处理策略与协调端不一致")
         approved, rejected, pending = [], [], []
         now = time.time()
         for item in validated:

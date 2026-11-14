@@ -19,32 +19,46 @@ async def verify(base_url, output, executable_path):
             await page.goto(f"{base_url}/tests/channel-dedup-smoke.html")
             await page.wait_for_function("window.resourceflowReady === true")
             await page.evaluate("document.fonts.ready")
-            await page.get_by_role("button", name="共享审批与同规格去重", exact=True).click()
+            await page.get_by_role("button", name="共享下载审批", exact=True).click()
             dialog = page.get_by_role("dialog")
             await dialog.get_by_text("Show S01E05", exact=True).wait_for()
             assert await dialog.get_by_label("启用频道监听", exact=True).count() == 0
             assert await dialog.get_by_role("button", name="立即同步", exact=True).count() == 0
             assert await dialog.get_by_label("协调 Bot 用户名", exact=True).input_value() == "@testbot"
+            assert await dialog.get_by_text("全局去重字段", exact=True).count() == 0
+            assert await dialog.get_by_text("资源去重规则", exact=True).count() == 0
+            await dialog.get_by_label("本机名称", exact=True).fill("NAS A 修改后")
+            await dialog.get_by_role("button", name="保存设置", exact=True).click()
+            await page.wait_for_function("""window.resourceflowRequests.some(item =>
+                item.path.endsWith('/shared/settings') && item.body.instance_label === 'NAS A 修改后')""")
+            await dialog.get_by_role("button", name="关闭", exact=True).click()
+            await page.get_by_role("button", name="共享下载审批", exact=True).click()
+            await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
+            assert await dialog.get_by_label("本机名称", exact=True).input_value() == "NAS A 修改后"
+            client_saves = await page.evaluate("""window.resourceflowRequests.filter(item =>
+                item.path.endsWith('/channel-dedup/settings'))""")
+            assert client_saves and all("attributes" not in row["body"] for row in client_saves)
             await dialog.get_by_role("button", name="测试审批连接", exact=True).click()
             await dialog.get_by_text("本机 Telegram ID", exact=True).wait_for()
-            await dialog.get_by_role("button", name="采用协调端匹配字段", exact=True).click()
+            assert await dialog.get_by_role("button", name="采用协调端匹配字段", exact=True).count() == 0
+            await dialog.get_by_label("在本机运行协调端", exact=True).check()
+            await dialog.get_by_text("全局去重字段", exact=True).wait_for()
+            await dialog.get_by_text("资源去重规则", exact=True).wait_for()
             assert await dialog.get_by_label("分辨率", exact=True).is_checked()
             for label in ("特效", "编码", "来源", "帧率", "文件大小"):
                 assert not await dialog.get_by_label(label, exact=True).is_checked()
-            await dialog.get_by_role("button", name="保存设置", exact=True).click()
-            await page.wait_for_function("""window.resourceflowRequests.some(item =>
-                item.path.endsWith('/channel-dedup/settings') && item.body.attributes.length === 1
-                && item.body.attributes[0] === 'resolution' && item.body.enabled === false
-                && item.body.channels === '' && item.body.size_tolerance_pct === 3)""")
-            await dialog.get_by_label("在本机运行协调端", exact=True).check()
             token = dialog.get_by_label("协调 Bot Token（已保存）", exact=True)
             assert await token.get_attribute("type") == "password"
             await token.fill("123456:FAKE_TOKEN_FOR_UI_TEST_ONLY_12345")
             await dialog.get_by_label("允许的个人账号 ID", exact=True).fill("11\n22")
-            await dialog.get_by_role("button", name="保存共享连接", exact=True).click()
+            await dialog.get_by_role("button", name="保存设置", exact=True).click()
             await page.wait_for_function("""window.resourceflowRequests.some(item =>
                 item.path.endsWith('/shared/settings') && item.body.host_coordinator === true
                 && item.body.allowed_users.join(',') === '11,22')""")
+            await page.wait_for_function("""window.resourceflowRequests.some(item =>
+                item.path.endsWith('/channel-dedup/settings') && item.body.attributes?.length === 1
+                && item.body.attributes[0] === 'resolution' && item.body.enabled === false
+                && item.body.channels === '' && item.body.size_tolerance_pct === 3)""")
             await page.wait_for_function("document.querySelector('input[type=password]').value === ''")
             await dialog.get_by_role("tab", name="共享占位记录", exact=True).click()
             await dialog.get_by_text("朋友A", exact=False).wait_for()
@@ -59,8 +73,13 @@ async def verify(base_url, output, executable_path):
                     && item.scrollWidth > item.clientWidth + 2).map(item => item.textContent)""")
             assert not clipped, (width, clipped)
             await page.evaluate("window.resourceflowFailSave = true")
-            await dialog.get_by_role("button", name="保存共享连接", exact=True).click()
-            await dialog.get_by_text("模拟共享保存失败", exact=True).wait_for()
+            before = await page.evaluate("""window.resourceflowRequests.filter(item =>
+                item.path.endsWith('/channel-dedup/settings')).length""")
+            await dialog.get_by_role("button", name="保存设置", exact=True).click()
+            await dialog.get_by_text("模拟共享保存失败", exact=True).first.wait_for()
+            after = await page.evaluate("""window.resourceflowRequests.filter(item =>
+                item.path.endsWith('/channel-dedup/settings')).length""")
+            assert before == after
             assert await dialog.is_visible()
             assert not errors, errors
             assert not await page.evaluate("window.resourceflowRequests.some(item => item.path.endsWith('/poll'))")

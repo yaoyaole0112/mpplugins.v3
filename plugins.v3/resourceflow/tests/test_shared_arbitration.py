@@ -17,7 +17,7 @@ from resourceflow.shared_coordinator import BotWorker, CoordinatorStore
 from resourceflow.channel_dedup import parse_candidate_file
 from resourceflow.shared_models import SharedSettingsPayload
 from resourceflow.shared_plugin import SharedResourceMixin
-from resourceflow.shared_protocol import MAX_BYTES, SharedError, decode, encode, parse_part, policy
+from resourceflow.shared_protocol import MAX_BYTES, RULE_DEFAULTS, SharedError, decode, encode, parse_part, policy
 from resourceflow.telegram_rpc import TelegramRPC
 from resourceflow import ResourceFlow
 from test_channel_integration import make_torrent
@@ -257,7 +257,7 @@ class AdmissionTests(unittest.TestCase):
             if body["op"] == "reserve":
                 return {"ok": True, "approved": [{"id": file_row()["id"], "claim": "b" * 32}],
                         "rejected": [{"id": file_row(2)["id"], "reason": "duplicate"}],
-                        "policy": policy(["resolution"], 5), "pack_rejected": False}
+                        "policy": p._local_shared_policy(), "pack_rejected": False}
             return {"ok": True, "updated": len(body["updates"])}
 
         p._shared_exchange = Mock(side_effect=exchange)
@@ -480,6 +480,104 @@ class PluginSetupTests(unittest.TestCase):
         self.assertEqual(self.plugin._channel_dedup_channels, [])
         self.assertEqual(self.plugin._shared_claims, {})
 
+    def test_name_save_survives_reload_without_restarting_coordinator(self):
+        p = self.plugin
+        p._refresh_scheduler = Mock()
+        p._shared_settings = SharedSettingsPayload(
+            host_coordinator=True, bot_username="@testbot", bot_token="12345:" + "x" * 30,
+            allowed_users=[11], instance_label="old")
+        p._shared_worker = SimpleNamespace(thread=None, last_error="", last_ok=None)
+        p._shared_store = SimpleNamespace(recent=lambda: [], has_unfinished=lambda: True)
+        p._stop_shared = Mock()
+        response = p.update_shared_settings(p._shared_settings.model_copy(update={"instance_label": "NAS A"}))
+        self.assertTrue(response.success)
+        self.assertEqual(response.data["instance_label"], "NAS A")
+        p._stop_shared.assert_not_called()
+        saved = p.update_config.call_args.args[0]
+        self.assertEqual(saved["shared"]["instance_label"], "NAS A")
+        # Reconstruct from the persisted snapshot without starting a real Bot.
+        p._start_shared_worker = Mock()
+        p.init_plugin(saved)
+        self.assertEqual(p.get_shared_status().data["instance_label"], "NAS A")
+
+    def test_client_cannot_edit_global_rules_but_can_save_local_aliases(self):
+        from resourceflow.models import ChannelDedupSettingsPayload
+        p = self.plugin
+        p._refresh_scheduler = Mock()
+        before = p._local_shared_policy()
+        for changes in ({"attributes": ["size"]}, {"pack_policy": "exclude"}, {"inflight_enabled": False}):
+            response = p.update_channel_dedup_settings(ChannelDedupSettingsPayload(**changes))
+            self.assertFalse(response.success)
+            self.assertEqual(p._local_shared_policy(), before)
+        response = p.update_channel_dedup_settings(ChannelDedupSettingsPayload(identity_aliases="Show = 123"))
+        self.assertTrue(response.success)
+        self.assertEqual(p._channel_dedup_identity_aliases, {"Show": 123})
+        self.assertEqual(p._local_shared_policy(), before)
+
+    def test_client_syncs_all_coordinator_rules_before_local_filters_and_persists(self):
+        p = self.plugin
+        rules = {**RULE_DEFAULTS, "pack_policy": "exclude", "inflight_enabled": False,
+                 "unknown_policy": "allow", "identity_policy": "allow", "pack_dedup_enabled": False}
+        expected = policy(["resolution"], 3, rules)
+        p._shared_exchange = Mock(return_value={"ok": True, "policy": expected, "user_id": 11})
+        p._sync_shared_policy()
+        self.assertEqual(p._local_shared_policy(), expected)
+        self.assertEqual(p.update_config.call_args.args[0]["channel_dedup_pack_policy"], "exclude")
+        p._shared_exchange.return_value = {"ok": True, "policy": policy(["resolution"], 3)}
+        with self.assertRaisesRegex(SharedError, "更新"):
+            p._sync_shared_policy()
+        self.assertEqual(p._local_shared_policy(), expected)
+
+    def test_client_with_empty_legacy_fields_adopts_policy_and_rejects_tampering(self):
+        p = self.plugin
+        p._channel_dedup_attributes = []
+        expected = policy(["resolution"], 5, RULE_DEFAULTS)
+        p._apply_shared_policy(expected)
+        self.assertEqual(p._local_shared_policy(), expected)
+        with self.assertRaisesRegex(SharedError, "版本或内容无效"):
+            p._apply_shared_policy({**expected, "rules": {**RULE_DEFAULTS, "pack_policy": "exclude"}})
+        self.assertEqual(p._local_shared_policy(), expected)
+
+    def test_unchanged_host_rules_or_alias_save_does_not_restart_worker(self):
+        from resourceflow.models import ChannelDedupSettingsPayload
+        p = self.plugin
+        p._shared_settings = SharedSettingsPayload(host_coordinator=True, bot_username="@testbot",
+                                                   allowed_users=[11])
+        p._refresh_scheduler = Mock()
+        p._shared_policy_changed = Mock()
+        response = p.update_channel_dedup_settings(ChannelDedupSettingsPayload(
+            **p._local_shared_policy()["rules"], attributes=p._channel_dedup_attributes,
+            size_tolerance_pct=p._channel_dedup_size_tolerance_pct, identity_aliases="Show = 123"))
+        self.assertTrue(response.success)
+        p._shared_policy_changed.assert_not_called()
+
+    def test_rule_revision_covers_pack_and_local_resource_rules(self):
+        original = policy(["resolution"], 5, RULE_DEFAULTS)
+        changed = policy(["resolution"], 5, {**RULE_DEFAULTS, "pack_policy": "exclude"})
+        self.assertNotEqual(original["revision"], changed["revision"])
+        with TemporaryDirectory() as directory:
+            store = CoordinatorStore(Path(directory) / "host.sqlite3", "resources", ["resolution"], 5,
+                                     {**RULE_DEFAULTS, "pack_policy": "exclude"})
+            body = {"v": 1, "group": "resources", "instance": "a" * 32, "op": "reserve",
+                    "revision": store.policy["revision"], "pack_policy": "partial", "files": [file_row()]}
+            reply = store.handle(11, uuid.uuid4().hex, body)
+            self.assertFalse(reply["ok"])
+            self.assertFalse(store.recent())
+
+    def test_shared_batch_does_not_enter_local_filtering_when_rule_sync_fails(self):
+        p = self.plugin
+        p._shared_settings = SharedSettingsPayload(enabled=True, bot_username="@testbot")
+        p._sync_shared_policy = Mock(side_effect=SharedError("offline"))
+        p._validate_task_reference = Mock()
+        task = SimpleNamespace(spec_dedup_enabled=True)
+        with self.assertRaisesRegex(SharedError, "offline"):
+            p._run_brush(task, {})
+        p._validate_task_reference.assert_not_called()
+        task.spec_dedup_enabled = False
+        p._validate_task_reference.return_value = False
+        p._run_brush(task, {})
+        p._validate_task_reference.assert_called_once()
+
     def test_definitive_refusal_does_not_backoff_other_requests(self):
         error = SharedError("规格数值无效")
         error.definitive = True
@@ -529,7 +627,7 @@ class PluginSetupTests(unittest.TestCase):
             self.assertNotIn("bot_token", response.json()["data"])
             response = client.post("/rules", json={"attributes": ["resolution"], "enabled": False})
             self.assertEqual(response.status_code, 200)
-            self.assertTrue(response.json()["success"])
+            self.assertFalse(response.json()["success"])
             self.assertEqual(client.post("/rules", json={"attributes": ["not-a-field"]}).status_code, 422)
 
     def test_real_candidate_parser_requires_only_selected_specs(self):
