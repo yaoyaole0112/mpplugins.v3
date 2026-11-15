@@ -167,6 +167,28 @@ class SharedResourceMixin:
             self._shared_worker = None
         self._shared_store = None
 
+    def _shared_request_status(self, row):
+        files = row.get("files") or []
+        approved = row.get("approved") or {}
+        rejected = row.get("rejected") or []
+        decisions = {item["id"]: item for item in rejected if isinstance(item, dict) and "id" in item}
+        task = getattr(self, "_task_configs", {}).get(row.get("task_id"))
+        return {
+            "request_id": row["request_id"], "title": row["title"], "phase": row["phase"],
+            "task_id": row["task_id"], "task_name": getattr(task, "name", None),
+            "downloader": row.get("downloader"), "created": row.get("created"), "updated": row.get("updated"),
+            "error": row.get("error", ""), "approved": len(approved), "rejected": rejected,
+            "file_count": len(files), "completed": len(row.get("done") or []),
+            "files": [{**{key: item.get(key) for key in
+                         ("id", "path", "media_type", "tmdb_id", "season", "episodes", "specs")},
+                       "decision": "approved" if item.get("id") in approved else
+                       "rejected" if item.get("id") in decisions else
+                       "not_approved" if row["phase"] == "rejected" else "pending",
+                       "reason": decisions.get(item.get("id"), {}).get("reason", ""),
+                       "owner": decisions.get(item.get("id"), {}).get("owner", "")}
+                      for item in files],
+        }
+
     def get_shared_status(self) -> schemas.Response:
         config = self._shared_config()
         token = config.pop("bot_token", None)
@@ -180,9 +202,7 @@ class SharedResourceMixin:
             "retry_at": self._shared_retry_at,
             "policy": self._local_shared_policy()
             if self._channel_dedup_attributes else None,
-            "requests": [{"request_id": row["request_id"], "title": row["title"], "phase": row["phase"],
-                          "task_id": row["task_id"], "updated": row.get("updated"), "error": row.get("error", ""),
-                          "approved": len(row.get("approved") or []), "rejected": row.get("rejected") or []}
+            "requests": [self._shared_request_status(row)
                          for row in sorted(claims, key=lambda row: row.get("updated", 0), reverse=True)[:100]],
             "records": self._shared_store.recent() if self._shared_store else [],
             "probe": self._shared_probe,

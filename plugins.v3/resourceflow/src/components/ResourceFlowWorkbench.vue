@@ -1011,8 +1011,10 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
       @dedup-settings="openChannelDedup"
     />
 
-    <VDialog v-model="channelDedupDialog" max-width="52rem" scrollable>
-      <VCard>
+    <VDialog v-model="channelDedupDialog" :width="$vuetify.display.xs ? '100vw' : '94vw'"
+      :max-width="$vuetify.display.xs ? '100vw' : '80rem'"
+      :fullscreen="$vuetify.display.xs" scrollable>
+      <VCard class="channel-dedup__card">
         <VCardTitle class="channel-dedup__title">
           <VIcon icon="mdi-send" color="primary" />
           <span>共享下载审批</span>
@@ -1293,8 +1295,17 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
 .channel-dedup__body {
   display: grid;
+  align-content: start;
   gap: 16px;
-  max-block-size: min(76vh, 48rem);
+  min-block-size: 0;
+}
+
+.channel-dedup__card {
+  block-size: 92dvh;
+}
+
+@media (max-width: 599px) {
+  .channel-dedup__card { block-size: 100dvh; }
 }
 
 .channel-dedup__body :deep(.v-input) {

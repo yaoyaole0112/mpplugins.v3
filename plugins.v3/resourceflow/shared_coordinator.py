@@ -237,7 +237,7 @@ class CoordinatorStore:
 
     def recent(self, limit=100):
         with self.connect() as db:
-            rows = db.execute("SELECT id,label,title,media_type,tmdb_id,season,episodes,specs,state,updated "
+            rows = db.execute("SELECT id,label,title,media_type,tmdb_id,season,episodes,specs,state,created,updated "
                               "FROM claims WHERE group_id=? ORDER BY updated DESC LIMIT ?",
                               (self.group, min(int(limit), 100))).fetchall()
         return [{**dict(row), "episodes": json.loads(row["episodes"]), "specs": json.loads(row["specs"])}

@@ -81,6 +81,16 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(restored.recent()), 1)
         self.assertTrue(restored.has_unfinished())
 
+    def test_recent_claim_includes_creation_and_update_times_without_private_rpc(self):
+        before = time.time()
+        self.send(self.request())
+        row = self.store.recent()[0]
+        self.assertGreaterEqual(row["created"], before)
+        self.assertEqual(row["created"], row["updated"])
+        self.assertEqual(row["specs"], {"resolution": "1080p"})
+        for field in ("sender", "instance", "request_id", "fingerprint", "response"):
+            self.assertNotIn(field, row)
+
     def test_selected_resolution_only_ignores_unknown_or_different_other_fields(self):
         self.assertTrue(self.send(self.request())["approved"])
         body = self.request([file_row(codec="H.265", effects="HDR10", fps=60)], instance="b" * 32)
@@ -499,6 +509,35 @@ class PluginSetupTests(unittest.TestCase):
         p._start_shared_worker = Mock()
         p.init_plugin(saved)
         self.assertEqual(p.get_shared_status().data["instance_label"], "NAS A")
+
+    def test_status_returns_detailed_safe_request_projection_and_legacy_defaults(self):
+        p = self.plugin
+        p._task_configs = {"task": SimpleNamespace(name="Test site")}
+        first = {**file_row(), "path": "Show.S01E01.mkv", "private_url": "do-not-expose"}
+        second = {**file_row(2, 2), "path": "Show.S01E02.mkv"}
+        third = {**file_row(3, 3), "path": "Show.S01E03.mkv"}
+        entry = {"request_id": "a" * 32, "title": "Show S01", "phase": "queued", "task_id": "task",
+                 "created": 1794711600, "updated": 1794711660, "downloader": "QB", "files": [first, second, third],
+                 "approved": {first["id"]: "b" * 32}, "done": [first["id"]],
+                 "rejected": [{"id": second["id"], "reason": "同规格已占位或已完成", "owner": "Peer"}],
+                 "body": {"secret": "do-not-expose"}, "hash": "do-not-expose"}
+        p._shared_claims = {entry["request_id"]: entry}
+        response = p.get_shared_status().data["requests"][0]
+        self.assertEqual(response["created"], entry["created"])
+        self.assertEqual(response["updated"], entry["updated"])
+        self.assertEqual((response["task_name"], response["downloader"]), ("Test site", "QB"))
+        self.assertEqual((response["file_count"], response["approved"], response["completed"]), (3, 1, 1))
+        self.assertEqual([row["decision"] for row in response["files"]], ["approved", "rejected", "pending"])
+        self.assertEqual(response["files"][1]["owner"], "Peer")
+        self.assertEqual(response["files"][0]["tmdb_id"], 123)
+        self.assertNotIn("do-not-expose", str(response))
+        entry["phase"] = "rejected"
+        self.assertEqual(p._shared_request_status(entry)["files"][2]["decision"], "not_approved")
+        old = {"request_id": "c" * 32, "title": "Old", "phase": "rejected", "task_id": "removed"}
+        response = p._shared_request_status(old)
+        self.assertIsNone(response["created"])
+        self.assertIsNone(response["task_name"])
+        self.assertEqual(response["files"], [])
 
     def test_client_cannot_edit_global_rules_but_can_save_local_aliases(self):
         from resourceflow.models import ChannelDedupSettingsPayload

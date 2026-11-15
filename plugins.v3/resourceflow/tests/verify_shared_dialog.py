@@ -13,7 +13,8 @@ async def verify(base_url, output, executable_path):
         browser = await playwright.chromium.launch(headless=True, executable_path=executable_path,
                                                    args=["--no-sandbox"])
         for width, height in ((1440, 1000), (390, 844), (320, 720)):
-            page = await browser.new_page(viewport={"width": width, "height": height}, locale="zh-CN")
+            page = await browser.new_page(viewport={"width": width, "height": height}, locale="zh-CN",
+                                          timezone_id="Asia/Shanghai")
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             await page.goto(f"{base_url}/tests/channel-dedup-smoke.html")
@@ -22,6 +23,30 @@ async def verify(base_url, output, executable_path):
             await page.get_by_role("button", name="共享下载审批", exact=True).click()
             dialog = page.get_by_role("dialog")
             await dialog.get_by_text("Show S01E05", exact=True).wait_for()
+            assert await dialog.get_by_label("启用共享下载审批", exact=True).is_checked()
+            assert await dialog.get_by_label("参与跨实例共享审批", exact=True).count() == 0
+            bounds = await dialog.bounding_box()
+            assert bounds["width"] >= (1100 if width >= 1000 else width - 2), bounds
+            assert bounds["height"] >= height * 0.88, bounds
+            await page.wait_for_timeout(300)
+            card_bounds = await dialog.locator('.channel-dedup__card').bounding_box()
+            assert card_bounds["width"] >= (1100 if width >= 1000 else width - 2), card_bounds
+            records = dialog.locator('.shared-settings__records')
+            first = records.locator('article').first
+            await first.get_by_text("申请时间", exact=False).wait_for()
+            assert '2026' in await first.inner_text()
+            assert '11:00:00' in await first.inner_text()
+            assert '最近更新' in await first.inner_text()
+            assert 'TMDB 123 · S01E05' in await first.inner_text()
+            assert '23.976 FPS' in await first.inner_text()
+            assert await first.locator('.shared-settings__meta').evaluate(
+                "element => getComputedStyle(element).color") == 'rgba(0, 0, 0, 0.72)'
+            assert await first.locator('.v-chip.text-success').count() >= 1
+            assert await first.locator('.v-chip.text-error').count() >= 1
+            await first.locator('summary').click()
+            await first.get_by_text('Show.S01E06.2026.1080p.WEB-DL.H264.AAC.mkv', exact=True).wait_for()
+            await page.screenshot(path=str(output / f"shared-requests-{width}.png"), full_page=True)
+            assert await records.evaluate('element => element.clientHeight >= element.scrollHeight - 1')
             assert await dialog.get_by_label("启用频道监听", exact=True).count() == 0
             assert await dialog.get_by_role("button", name="立即同步", exact=True).count() == 0
             assert await dialog.get_by_label("协调 Bot 用户名", exact=True).input_value() == "@testbot"
@@ -62,6 +87,13 @@ async def verify(base_url, output, executable_path):
             await page.wait_for_function("document.querySelector('input[type=password]').value === ''")
             await dialog.get_by_role("tab", name="共享占位记录", exact=True).click()
             await dialog.get_by_text("朋友A", exact=False).wait_for()
+            claim = dialog.locator('.shared-settings__records article').first
+            assert '占位时间' in await claim.inner_text()
+            assert '最近更新' in await claim.inner_text()
+            assert 'TMDB 123 · S01E05' in await claim.inner_text()
+            assert '23.976 FPS' in await claim.inner_text()
+            await claim.scroll_into_view_if_needed()
+            await page.screenshot(path=str(output / f"shared-claims-{width}.png"), full_page=True)
             await dialog.get_by_role("tab", name="本机共享申请", exact=True).click()
             await dialog.get_by_role("button", name="核验未完成申请", exact=True).click()
             await dialog.locator(".v-card-text").evaluate("element => { element.scrollTop = 0 }")
