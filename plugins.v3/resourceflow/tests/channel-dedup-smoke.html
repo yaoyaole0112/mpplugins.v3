@@ -59,7 +59,11 @@
         reason: number === 1 ? '' : '同规格已占位或已完成', owner: number === 1 ? '' : '朋友A',
       })),
     }, { request_id: 'd'.repeat(32), title: 'Legacy Failure', phase: 'rejected', approved: 0,
-      rejected: [], error: '规格数值无效', files: [] }],
+      rejected: [], error: '规格数值无效', files: [] },
+    { request_id: 'e'.repeat(32), title: 'Pending Verification', phase: 'uncertain', approved: 0,
+      rejected: [], files: [] },
+    { request_id: 'f'.repeat(32), title: 'Released Request', phase: 'released', approved: 0,
+      rejected: [], files: [] }],
     records: [{ id: 'b'.repeat(32), title: 'Show S01E05', label: '朋友A', state: 'reserved', tmdb_id: 123,
       season: 1, episodes: [5], media_type: 'tv', created: 1794711600, updated: 1794711660,
       specs: { resolution: '1080p', effects: 'SDR', fps: 23.976, size: 1251017826 } }],
@@ -125,10 +129,15 @@
   const app = vue.createApp({
     render: () => vue.h(vuetify.components.VApp, null, () => vue.h(factory(), { api })),
   })
-  app.use(vuetify.createVuetify({
+  const ui = vuetify.createVuetify({
     components: vuetify.components, directives: vuetify.directives,
     theme: { defaultTheme: 'light', themes: { light: { colors: { primary: '#8b5cf6' } } } },
-  }))
+  })
+  app.use(ui)
+  window.resourceflowSetTheme = async name => {
+    ui.theme.global.name.value = name
+    await vue.nextTick()
+  }
   app.mount('#app')
   window.resourceflowReady = true
 </script>

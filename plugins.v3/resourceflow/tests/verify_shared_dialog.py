@@ -7,7 +7,25 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 
-async def verify(base_url, output, executable_path):
+BADGE_COLORS = {
+    'success': ('rgb(21, 103, 52)', 'rgb(232, 245, 233)'),
+    'error': ('rgb(176, 32, 42)', 'rgb(255, 235, 238)'),
+    'info': ('rgb(0, 88, 153)', 'rgb(227, 242, 253)'),
+    'warning': ('rgb(133, 77, 14)', 'rgb(255, 248, 225)'),
+    'secondary': ('rgb(75, 85, 99)', 'rgb(243, 244, 246)'),
+}
+
+
+async def verify_badge_colors(dialog):
+    badges = await dialog.locator('.shared-settings__badge').evaluate_all('''elements =>
+        elements.map(element => ({tone: element.dataset.tone, text: element.textContent,
+            color: getComputedStyle(element).color, background: getComputedStyle(element).backgroundColor}))''')
+    assert set(BADGE_COLORS).issubset({badge['tone'] for badge in badges}), badges
+    for badge in badges:
+        assert (badge['color'], badge['background']) == BADGE_COLORS[badge['tone']], badge
+
+
+async def verify(base_url, output, executable_path, host_css=None):
     output.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True, executable_path=executable_path,
@@ -41,10 +59,33 @@ async def verify(base_url, output, executable_path):
             assert '23.976 FPS' in await first.inner_text()
             assert await first.locator('.shared-settings__meta').evaluate(
                 "element => getComputedStyle(element).color") == 'rgba(0, 0, 0, 0.72)'
-            assert await first.locator('.v-chip.text-success').count() >= 1
-            assert await first.locator('.v-chip.text-error').count() >= 1
+            assert await first.locator('.shared-settings__badge[data-tone="success"]').count() >= 1
+            assert await first.locator('.shared-settings__badge[data-tone="error"]').count() >= 1
             await first.locator('summary').click()
             await first.get_by_text('Show.S01E06.2026.1080p.WEB-DL.H264.AAC.mkv', exact=True).wait_for()
+            await verify_badge_colors(dialog)
+            if host_css:
+                stylesheet = await page.add_style_tag(path=str(host_css))
+                for scheme in ('light', 'dark'):
+                    await page.evaluate('scheme => window.resourceflowSetTheme(scheme)', scheme)
+                    await page.evaluate('''scheme => {
+                        for (const element of [document.documentElement, document.body]) {
+                            element.dataset.theme = 'glass'
+                            element.dataset.glassColorScheme = scheme
+                        }
+                    }''', scheme)
+                    await verify_badge_colors(dialog)
+                    await first.scroll_into_view_if_needed()
+                    await page.screenshot(path=str(output / f'shared-glass-{scheme}-{width}.png'), full_page=True)
+                await page.evaluate('() => window.resourceflowSetTheme("light")')
+                await page.evaluate('''() => {
+                    for (const element of [document.documentElement, document.body]) {
+                        delete element.dataset.theme
+                        delete element.dataset.glassColorScheme
+                    }
+                }''')
+                await stylesheet.evaluate('element => element.remove()')
+            await first.scroll_into_view_if_needed()
             await page.screenshot(path=str(output / f"shared-requests-{width}.png"), full_page=True)
             assert await records.evaluate('element => element.clientHeight >= element.scrollHeight - 1')
             assert await dialog.get_by_label("启用频道监听", exact=True).count() == 0
@@ -115,9 +156,31 @@ async def verify(base_url, output, executable_path):
             assert await dialog.is_visible()
             assert not errors, errors
             assert not await page.evaluate("window.resourceflowRequests.some(item => item.path.endsWith('/poll'))")
+            await page.goto(f"{base_url}/tests/channel-dedup-smoke.html?task=traffic")
+            await page.wait_for_function("window.resourceflowReady === true")
+            await page.locator('button:has(.mdi-pencil-outline)').click()
+            editor = page.get_by_role('dialog')
+            await editor.get_by_text('编辑刷流任务', exact=True).wait_for()
+            approval = editor.get_by_label('共享下载审批', exact=True)
+            assert not await approval.is_checked()
+            assert await editor.get_by_label('规格去重', exact=True).count() == 0
+            switches = await editor.locator('.editor-switches label').all_text_contents()
+            assert switches.index('共享下载审批') > switches.index('发送通知'), switches
+            await approval.check()
+            await approval.scroll_into_view_if_needed()
+            await page.screenshot(path=str(output / f'task-approval-{width}.png'), full_page=True)
+            await editor.get_by_role('button', name='保存任务', exact=True).click()
+            await page.wait_for_function('''window.resourceflowRequests.some(item =>
+                item.method === 'PUT' && item.body.spec_dedup_enabled === true)''')
+            await editor.wait_for(state='hidden')
+            await page.locator('button:has(.mdi-pencil-outline)').click()
+            assert await editor.get_by_label('共享下载审批', exact=True).is_checked()
+            assert not errors, errors
             await page.close()
         await browser.close()
-    print("Shared settings verified: desktop 1440, mobile 390 and 320; no channel polling")
+    print("Shared settings and task approval verified: 1440, 390 and 320; rendered badge colors; no channel polling")
+    if host_css:
+        print('MoviePilot host stylesheet verified with glass light/dark overrides')
 
 
 if __name__ == "__main__":
@@ -125,5 +188,6 @@ if __name__ == "__main__":
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--executable-path", default="/opt/google/chrome/chrome")
+    parser.add_argument("--host-css", type=Path)
     args = parser.parse_args()
-    asyncio.run(verify(args.base_url, args.output, args.executable_path))
+    asyncio.run(verify(args.base_url, args.output, args.executable_path, args.host_css))

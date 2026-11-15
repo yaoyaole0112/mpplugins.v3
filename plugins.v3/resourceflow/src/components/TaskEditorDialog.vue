@@ -129,7 +129,7 @@ async function saveTask() {
                 <div class="editor-switches">
                   <VSwitch v-model="localTask.enabled" label="启用任务" color="primary" hide-details inset />
                   <VSwitch v-model="localTask.notify" label="发送通知" color="primary" hide-details inset />
-                  <VSwitch v-model="localTask.spec_dedup_enabled" label="规格去重" color="primary" hide-details inset />
+                  <VSwitch v-model="localTask.spec_dedup_enabled" label="共享下载审批" color="primary" hide-details inset />
                 </div>
                 <VBtn v-if="localTask.spec_dedup_enabled" prepend-icon="mdi-tune-variant"
                   class="editor-dedup-settings" variant="text" size="small"

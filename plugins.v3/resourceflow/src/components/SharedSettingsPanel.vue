@@ -156,9 +156,9 @@ defineExpose({ save })
       <article v-for="row in state.requests || []" :key="row.request_id" class="shared-settings__record">
         <strong>{{ row.title }}</strong>
         <div class="shared-settings__badges">
-          <VChip :color="phaseColors[row.phase] || 'secondary'" size="small" variant="tonal">{{ phaseNames[row.phase] || row.phase }}</VChip>
-          <VChip color="success" prepend-icon="mdi-check-circle-outline" size="small" variant="tonal">批准 {{ row.approved || 0 }}</VChip>
-          <VChip color="error" prepend-icon="mdi-close-circle-outline" size="small" variant="tonal">排除 {{ row.rejected?.length || 0 }}</VChip>
+          <span class="shared-settings__badge" :data-tone="phaseColors[row.phase] || 'secondary'">{{ phaseNames[row.phase] || row.phase }}</span>
+          <span class="shared-settings__badge" data-tone="success"><VIcon icon="mdi-check-circle-outline" size="16" />批准 {{ row.approved || 0 }}</span>
+          <span class="shared-settings__badge" data-tone="error"><VIcon icon="mdi-close-circle-outline" size="16" />排除 {{ row.rejected?.length || 0 }}</span>
           <span class="text-caption">文件 {{ row.file_count ?? row.files?.length ?? 0 }} · 完成 {{ row.completed || 0 }}</span>
         </div>
         <div class="shared-settings__meta text-caption">
@@ -177,7 +177,7 @@ defineExpose({ save })
           <summary>文件审批明细（{{ row.files.length }}）</summary>
           <div v-for="file in row.files" :key="file.id" class="shared-settings__file">
             <div class="shared-settings__badges">
-              <VChip :color="decisionColors[file.decision] || 'secondary'" size="small" variant="tonal">{{ decisionNames[file.decision] || '待审批' }}</VChip>
+              <span class="shared-settings__badge" :data-tone="decisionColors[file.decision] || 'secondary'">{{ decisionNames[file.decision] || '待审批' }}</span>
               <span class="text-body-2">{{ identity(file) }}</span>
             </div>
             <span class="text-body-2">{{ file.path }}</span>
@@ -194,7 +194,7 @@ defineExpose({ save })
       <article v-for="row in state.records || []" :key="row.id" class="shared-settings__record">
         <strong>{{ row.title }}</strong>
         <div class="shared-settings__badges">
-          <VChip :color="phaseColors[row.state] || 'secondary'" size="small" variant="tonal">{{ phaseNames[row.state] || row.state }}</VChip>
+          <span class="shared-settings__badge" :data-tone="phaseColors[row.state] || 'secondary'">{{ phaseNames[row.state] || row.state }}</span>
           <span class="text-body-2">占位方 {{ row.label || '-' }}</span>
           <span class="text-body-2">{{ identity(row) }}</span>
         </div>
@@ -219,6 +219,12 @@ defineExpose({ save })
 .shared-settings__record { display: flex; flex-direction: column; gap: 10px; padding-block: 20px; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); overflow-wrap: anywhere; min-inline-size: 0; }
 .shared-settings__record strong { font-size: 14px; line-height: 1.6; }
 .shared-settings__badges, .shared-settings__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+/* Native badges keep approval colors independent of host VChip/glass theme overrides. */
+.shared-settings__badge { display: inline-flex; align-items: center; gap: 4px; max-inline-size: 100%; padding: 3px 8px; border: 1px solid rgba(var(--shared-badge-ink), 0.24); border-radius: 4px; font-size: 12px; font-weight: 600; line-height: 20px; color: rgb(var(--shared-badge-ink)); background-color: rgb(var(--shared-badge-fill)); --shared-badge-ink: 75, 85, 99; --shared-badge-fill: 243, 244, 246; }
+.shared-settings__badge[data-tone="success"] { --shared-badge-ink: 21, 103, 52; --shared-badge-fill: 232, 245, 233; }
+.shared-settings__badge[data-tone="error"] { --shared-badge-ink: 176, 32, 42; --shared-badge-fill: 255, 235, 238; }
+.shared-settings__badge[data-tone="info"] { --shared-badge-ink: 0, 88, 153; --shared-badge-fill: 227, 242, 253; }
+.shared-settings__badge[data-tone="warning"] { --shared-badge-ink: 133, 77, 14; --shared-badge-fill: 255, 248, 225; }
 .shared-settings__preview { display: flex; flex-direction: column; gap: 4px; }
 .shared-settings__meta, .shared-settings__id { color: rgba(var(--v-theme-on-surface), 0.72); }
 .shared-settings__error { margin: 0; color: rgb(var(--v-theme-error)); }

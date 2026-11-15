@@ -326,7 +326,7 @@ return (_ctx, _cache) => {
                               _createVNode$2(_component_VSwitch, {
                                 modelValue: localTask.value.spec_dedup_enabled,
                                 "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((localTask.value.spec_dedup_enabled) = $event)),
-                                label: "规格去重",
+                                label: "共享下载审批",
                                 color: "primary",
                                 "hide-details": "",
                                 inset: ""
@@ -1145,7 +1145,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const TaskEditorDialog = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-e6be015d"]]);
+const TaskEditorDialog = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-b78478bf"]]);
 
 const {createElementVNode:_createElementVNode$1,toDisplayString:_toDisplayString$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,createVNode:_createVNode$1,Fragment:_Fragment$1,createElementBlock:_createElementBlock$1,mergeProps:_mergeProps$1,renderList:_renderList$1} = await importShared('vue');
 
@@ -1164,44 +1164,55 @@ const _hoisted_7$1 = {
   class: "text-body-2 text-medium-emphasis"
 };
 const _hoisted_8$1 = { class: "shared-settings__badges" };
-const _hoisted_9$1 = { class: "text-caption" };
-const _hoisted_10$1 = { class: "shared-settings__meta text-caption" };
+const _hoisted_9$1 = ["data-tone"];
+const _hoisted_10$1 = {
+  class: "shared-settings__badge",
+  "data-tone": "success"
+};
 const _hoisted_11$1 = {
+  class: "shared-settings__badge",
+  "data-tone": "error"
+};
+const _hoisted_12$1 = { class: "text-caption" };
+const _hoisted_13$1 = { class: "shared-settings__meta text-caption" };
+const _hoisted_14$1 = {
   key: 0,
   class: "shared-settings__preview text-body-2"
 };
-const _hoisted_12$1 = { class: "text-caption" };
-const _hoisted_13$1 = {
+const _hoisted_15$1 = { class: "text-caption" };
+const _hoisted_16$1 = {
   key: 1,
   class: "shared-settings__error text-body-2"
 };
-const _hoisted_14$1 = {
+const _hoisted_17$1 = {
   key: 2,
   class: "shared-settings__details"
 };
-const _hoisted_15$1 = { class: "shared-settings__badges" };
-const _hoisted_16$1 = { class: "text-body-2" };
-const _hoisted_17$1 = { class: "text-body-2" };
-const _hoisted_18$1 = { class: "text-caption" };
-const _hoisted_19$1 = {
+const _hoisted_18$1 = { class: "shared-settings__badges" };
+const _hoisted_19$1 = ["data-tone"];
+const _hoisted_20$1 = { class: "text-body-2" };
+const _hoisted_21$1 = { class: "text-body-2" };
+const _hoisted_22$1 = { class: "text-caption" };
+const _hoisted_23$1 = {
   key: 0,
   class: "text-caption"
 };
-const _hoisted_20$1 = { class: "shared-settings__id text-caption" };
-const _hoisted_21$1 = {
+const _hoisted_24$1 = { class: "shared-settings__id text-caption" };
+const _hoisted_25$1 = {
   key: 4,
   class: "shared-settings__records"
 };
-const _hoisted_22$1 = {
+const _hoisted_26$1 = {
   key: 0,
   class: "text-body-2 text-medium-emphasis"
 };
-const _hoisted_23$1 = { class: "shared-settings__badges" };
-const _hoisted_24$1 = { class: "text-body-2" };
-const _hoisted_25$1 = { class: "text-body-2" };
-const _hoisted_26$1 = { class: "text-body-2" };
-const _hoisted_27$1 = { class: "shared-settings__meta text-caption" };
-const _hoisted_28$1 = { class: "shared-settings__id text-caption" };
+const _hoisted_27$1 = { class: "shared-settings__badges" };
+const _hoisted_28$1 = ["data-tone"];
+const _hoisted_29$1 = { class: "text-body-2" };
+const _hoisted_30$1 = { class: "text-body-2" };
+const _hoisted_31$1 = { class: "text-body-2" };
+const _hoisted_32$1 = { class: "shared-settings__meta text-caption" };
+const _hoisted_33$1 = { class: "shared-settings__id text-caption" };
 
 const {onMounted: onMounted$1,ref: ref$1,watch: watch$1} = await importShared('vue');
 
@@ -1324,7 +1335,7 @@ return (_ctx, _cache) => {
   const _component_VTooltip = _resolveComponent$1("VTooltip");
   const _component_VTab = _resolveComponent$1("VTab");
   const _component_VTabs = _resolveComponent$1("VTabs");
-  const _component_VChip = _resolveComponent$1("VChip");
+  const _component_VIcon = _resolveComponent$1("VIcon");
 
   return (_openBlock$1(), _createElementBlock$1("section", _hoisted_1$1, [
     _cache[18] || (_cache[18] = _createElementVNode$1("div", { class: "text-subtitle-2" }, "Telegram 共享审批", -1)),
@@ -1543,48 +1554,34 @@ return (_ctx, _cache) => {
             }, [
               _createElementVNode$1("strong", null, _toDisplayString$1(row.title), 1),
               _createElementVNode$1("div", _hoisted_8$1, [
-                _createVNode$1(_component_VChip, {
-                  color: phaseColors[row.phase] || 'secondary',
-                  size: "small",
-                  variant: "tonal"
-                }, {
-                  default: _withCtx$1(() => [
-                    _createTextVNode$1(_toDisplayString$1(phaseNames[row.phase] || row.phase), 1)
-                  ]),
-                  _: 2
-                }, 1032, ["color"]),
-                _createVNode$1(_component_VChip, {
-                  color: "success",
-                  "prepend-icon": "mdi-check-circle-outline",
-                  size: "small",
-                  variant: "tonal"
-                }, {
-                  default: _withCtx$1(() => [
-                    _createTextVNode$1("批准 " + _toDisplayString$1(row.approved || 0), 1)
-                  ]),
-                  _: 2
-                }, 1024),
-                _createVNode$1(_component_VChip, {
-                  color: "error",
-                  "prepend-icon": "mdi-close-circle-outline",
-                  size: "small",
-                  variant: "tonal"
-                }, {
-                  default: _withCtx$1(() => [
-                    _createTextVNode$1("排除 " + _toDisplayString$1(row.rejected?.length || 0), 1)
-                  ]),
-                  _: 2
-                }, 1024),
-                _createElementVNode$1("span", _hoisted_9$1, "文件 " + _toDisplayString$1(row.file_count ?? row.files?.length ?? 0) + " · 完成 " + _toDisplayString$1(row.completed || 0), 1)
+                _createElementVNode$1("span", {
+                  class: "shared-settings__badge",
+                  "data-tone": phaseColors[row.phase] || 'secondary'
+                }, _toDisplayString$1(phaseNames[row.phase] || row.phase), 9, _hoisted_9$1),
+                _createElementVNode$1("span", _hoisted_10$1, [
+                  _createVNode$1(_component_VIcon, {
+                    icon: "mdi-check-circle-outline",
+                    size: "16"
+                  }),
+                  _createTextVNode$1("批准 " + _toDisplayString$1(row.approved || 0), 1)
+                ]),
+                _createElementVNode$1("span", _hoisted_11$1, [
+                  _createVNode$1(_component_VIcon, {
+                    icon: "mdi-close-circle-outline",
+                    size: "16"
+                  }),
+                  _createTextVNode$1("排除 " + _toDisplayString$1(row.rejected?.length || 0), 1)
+                ]),
+                _createElementVNode$1("span", _hoisted_12$1, "文件 " + _toDisplayString$1(row.file_count ?? row.files?.length ?? 0) + " · 完成 " + _toDisplayString$1(row.completed || 0), 1)
               ]),
-              _createElementVNode$1("div", _hoisted_10$1, [
+              _createElementVNode$1("div", _hoisted_13$1, [
                 _createElementVNode$1("span", null, "申请时间 " + _toDisplayString$1(timestamp(row.created)), 1),
                 _createElementVNode$1("span", null, "最近更新 " + _toDisplayString$1(timestamp(row.updated)), 1),
                 _createElementVNode$1("span", null, "任务 " + _toDisplayString$1(row.task_name || row.task_id || '-'), 1),
                 _createElementVNode$1("span", null, "下载器 " + _toDisplayString$1(row.downloader || '-'), 1)
               ]),
               (row.files?.length)
-                ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_11$1, [
+                ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_14$1, [
                     _createElementVNode$1("span", null, [
                       (row.files.length > 1)
                         ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 0 }, [
@@ -1593,11 +1590,11 @@ return (_ctx, _cache) => {
                         : _createCommentVNode$1("", true),
                       _createTextVNode$1(_toDisplayString$1(identity(row.files[0])), 1)
                     ]),
-                    _createElementVNode$1("span", _hoisted_12$1, _toDisplayString$1(specifications(row.files[0].specs)), 1)
+                    _createElementVNode$1("span", _hoisted_15$1, _toDisplayString$1(specifications(row.files[0].specs)), 1)
                   ]))
                 : _createCommentVNode$1("", true),
               (row.error)
-                ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_13$1, _toDisplayString$1(row.error), 1))
+                ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_16$1, _toDisplayString$1(row.error), 1))
                 : _createCommentVNode$1("", true),
               (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(row.rejected || [], (item, index) => {
                 return (_openBlock$1(), _createElementBlock$1("p", {
@@ -1613,30 +1610,24 @@ return (_ctx, _cache) => {
                 ]))
               }), 128)),
               (row.files?.length)
-                ? (_openBlock$1(), _createElementBlock$1("details", _hoisted_14$1, [
+                ? (_openBlock$1(), _createElementBlock$1("details", _hoisted_17$1, [
                     _createElementVNode$1("summary", null, "文件审批明细（" + _toDisplayString$1(row.files.length) + "）", 1),
                     (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(row.files, (file) => {
                       return (_openBlock$1(), _createElementBlock$1("div", {
                         key: file.id,
                         class: "shared-settings__file"
                       }, [
-                        _createElementVNode$1("div", _hoisted_15$1, [
-                          _createVNode$1(_component_VChip, {
-                            color: decisionColors[file.decision] || 'secondary',
-                            size: "small",
-                            variant: "tonal"
-                          }, {
-                            default: _withCtx$1(() => [
-                              _createTextVNode$1(_toDisplayString$1(decisionNames[file.decision] || '待审批'), 1)
-                            ]),
-                            _: 2
-                          }, 1032, ["color"]),
-                          _createElementVNode$1("span", _hoisted_16$1, _toDisplayString$1(identity(file)), 1)
+                        _createElementVNode$1("div", _hoisted_18$1, [
+                          _createElementVNode$1("span", {
+                            class: "shared-settings__badge",
+                            "data-tone": decisionColors[file.decision] || 'secondary'
+                          }, _toDisplayString$1(decisionNames[file.decision] || '待审批'), 9, _hoisted_19$1),
+                          _createElementVNode$1("span", _hoisted_20$1, _toDisplayString$1(identity(file)), 1)
                         ]),
-                        _createElementVNode$1("span", _hoisted_17$1, _toDisplayString$1(file.path), 1),
-                        _createElementVNode$1("span", _hoisted_18$1, _toDisplayString$1(specifications(file.specs)), 1),
+                        _createElementVNode$1("span", _hoisted_21$1, _toDisplayString$1(file.path), 1),
+                        _createElementVNode$1("span", _hoisted_22$1, _toDisplayString$1(specifications(file.specs)), 1),
                         (file.reason)
-                          ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_19$1, [
+                          ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_23$1, [
                               _createTextVNode$1(_toDisplayString$1(file.reason), 1),
                               (file.owner)
                                 ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 0 }, [
@@ -1649,7 +1640,7 @@ return (_ctx, _cache) => {
                     }), 128))
                   ]))
                 : _createCommentVNode$1("", true),
-              _createElementVNode$1("span", _hoisted_20$1, "申请编号 " + _toDisplayString$1(row.request_id), 1)
+              _createElementVNode$1("span", _hoisted_24$1, "申请编号 " + _toDisplayString$1(row.request_id), 1)
             ]))
           }), 128)),
           _createVNode$1(_component_VBtn, {
@@ -1664,9 +1655,9 @@ return (_ctx, _cache) => {
             _: 1
           }, 8, ["disabled"])
         ]))
-      : (_openBlock$1(), _createElementBlock$1("div", _hoisted_21$1, [
+      : (_openBlock$1(), _createElementBlock$1("div", _hoisted_25$1, [
           (!state.value.records?.length)
-            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_22$1, "暂无共享占位"))
+            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_26$1, "暂无共享占位"))
             : _createCommentVNode$1("", true),
           (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(state.value.records || [], (row) => {
             return (_openBlock$1(), _createElementBlock$1("article", {
@@ -1674,26 +1665,20 @@ return (_ctx, _cache) => {
               class: "shared-settings__record"
             }, [
               _createElementVNode$1("strong", null, _toDisplayString$1(row.title), 1),
-              _createElementVNode$1("div", _hoisted_23$1, [
-                _createVNode$1(_component_VChip, {
-                  color: phaseColors[row.state] || 'secondary',
-                  size: "small",
-                  variant: "tonal"
-                }, {
-                  default: _withCtx$1(() => [
-                    _createTextVNode$1(_toDisplayString$1(phaseNames[row.state] || row.state), 1)
-                  ]),
-                  _: 2
-                }, 1032, ["color"]),
-                _createElementVNode$1("span", _hoisted_24$1, "占位方 " + _toDisplayString$1(row.label || '-'), 1),
-                _createElementVNode$1("span", _hoisted_25$1, _toDisplayString$1(identity(row)), 1)
-              ]),
-              _createElementVNode$1("span", _hoisted_26$1, _toDisplayString$1(specifications(row.specs)), 1),
               _createElementVNode$1("div", _hoisted_27$1, [
+                _createElementVNode$1("span", {
+                  class: "shared-settings__badge",
+                  "data-tone": phaseColors[row.state] || 'secondary'
+                }, _toDisplayString$1(phaseNames[row.state] || row.state), 9, _hoisted_28$1),
+                _createElementVNode$1("span", _hoisted_29$1, "占位方 " + _toDisplayString$1(row.label || '-'), 1),
+                _createElementVNode$1("span", _hoisted_30$1, _toDisplayString$1(identity(row)), 1)
+              ]),
+              _createElementVNode$1("span", _hoisted_31$1, _toDisplayString$1(specifications(row.specs)), 1),
+              _createElementVNode$1("div", _hoisted_32$1, [
                 _createElementVNode$1("span", null, "占位时间 " + _toDisplayString$1(timestamp(row.created)), 1),
                 _createElementVNode$1("span", null, "最近更新 " + _toDisplayString$1(timestamp(row.updated)), 1)
               ]),
-              _createElementVNode$1("span", _hoisted_28$1, "占位编号 " + _toDisplayString$1(row.id), 1)
+              _createElementVNode$1("span", _hoisted_33$1, "占位编号 " + _toDisplayString$1(row.id), 1)
             ]))
           }), 128))
         ]))
@@ -1702,7 +1687,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-89586044"]]);
+const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-16b658da"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle} = await importShared('vue');
 
