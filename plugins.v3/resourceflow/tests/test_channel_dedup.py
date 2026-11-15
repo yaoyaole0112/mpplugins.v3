@@ -68,6 +68,7 @@ ed2k://|file|PSYREN -决战游戏-(2026)(tmdbid=297903).S01E05.WEB-DL.1080p.SDR.
         hdr = parse_specs("Show.S01E19.2160p.HDR.WEB-DL.mkv")
         self.assertEqual(vivid["effects"], "HDR")
         self.assertEqual(hdr["effects"], "HDR")
+        self.assertEqual(parse_specs("Show.HDR10+.mkv")["effects"], "HDR10+")
         self.assertTrue(same_release(
             {"tmdb_id": 297903, "season": 1, "episodes": [19], "specs": vivid},
             {"tmdb_id": 297903, "season": 1, "episodes": [19], "specs": hdr},

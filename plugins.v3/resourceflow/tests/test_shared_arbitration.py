@@ -273,6 +273,7 @@ class AdmissionTests(unittest.TestCase):
             {"index": 0, "name": "Show.S01E01.mkv", "size": 10, "progress": 0, "priority": 1},
             {"index": 1, "name": "Show.S01E02.mkv", "size": 10, "progress": 0, "priority": 0},
         ]
+
         helper = Mock()
         helper.get_service.return_value = SimpleNamespace(instance=self.downloader)
         helper.is_downloader.return_value = True
@@ -294,6 +295,21 @@ class AdmissionTests(unittest.TestCase):
         p._shared_exchange = Mock(side_effect=exchange)
         p._add_local_prechecked_torrent.side_effect = lambda *args: self.events.append("add") or "a" * 40
         self.downloader.start_torrents.side_effect = lambda value: self.events.append("start") or True
+
+    def test_shared_media_title_uses_chinese_tmdb_detail_and_caches_it(self):
+        self.plugin.chain = SimpleNamespace(recognize_media=Mock(return_value=SimpleNamespace(
+            tmdb_id=253372, title="The Institute", names=[]
+        )))
+        candidate = {
+            "tmdb_id": 253372, "media_type": "tv",
+            "path": "The.Institute.S02E02.720p.WEB-DL.H264.mkv",
+        }
+        cache = {}
+        with patch("resourceflow.shared_plugin.TmdbApi") as tmdb:
+            tmdb.return_value.get_info.return_value = {"name": "奥德赛", "names": ["奥德赛", "The Odyssey"]}
+            self.assertEqual(self.plugin._shared_media_title(candidate, cache), "奥德赛")
+            self.assertEqual(self.plugin._shared_media_title(candidate, cache), "奥德赛")
+            tmdb.return_value.get_info.assert_called_once()
 
     def add(self):
         return self.plugin._add_prechecked_torrent(b"torrent", None, self.task, self.downloader, Mock(),

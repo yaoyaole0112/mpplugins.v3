@@ -50,6 +50,10 @@ function specifications(specs = {}) {
   }).join(' · ') || '暂无规格'
 }
 
+function releaseDetails(row) {
+  return `${identity(row)} · ${specifications(row.specs)}`
+}
+
 async function load(reset = false) {
   const data = unwrapResponse(await props.api.get(`${props.pluginBase}/shared/status`))
   state.value = data
@@ -170,26 +174,26 @@ defineExpose({ save })
           <span>任务：{{ row.task_name || row.task_id || '-' }}</span><span>下载器：{{ row.downloader || '-' }}</span>
         </div>
         <div v-if="row.files?.length" class="shared-settings__preview text-body-2">
-          <span><template v-if="row.files.length > 1">首文件 · </template>{{ identity(row.files[0]) }}</span>
-          <span class="text-caption">{{ specifications(row.files[0].specs) }}</span>
+          <span>
+            <template v-if="row.files.length > 1">首文件 · </template>{{ releaseDetails(row.files[0]) }}
+          </span>
         </div>
         <p v-if="row.error" class="shared-settings__error text-body-2">{{ row.error }}</p>
         <p v-for="(item, index) in row.rejected || []" :key="index" class="shared-settings__reason text-body-2">
           {{ item.reason }}<template v-if="item.owner"> · 占位方 {{ item.owner }}</template>
         </p>
-        <details v-if="row.files?.length" class="shared-settings__details">
-          <summary>文件审批明细（{{ row.files.length }}）</summary>
-          <div v-for="file in row.files" :key="file.id" class="shared-settings__file">
+        <details class="shared-settings__details">
+          <summary>文件审批明细（{{ row.files?.length || 0 }}）</summary>
+          <div v-for="file in row.files || []" :key="file.id" class="shared-settings__file">
             <div class="shared-settings__badges">
               <span class="shared-settings__badge" :data-tone="decisionColors[file.decision] || 'secondary'">{{ decisionNames[file.decision] || '待审批' }}</span>
-              <span class="text-body-2">{{ identity(file) }}</span>
+              <span class="text-body-2">{{ releaseDetails(file) }}</span>
             </div>
             <span class="text-body-2">{{ file.path }}</span>
-            <span class="text-caption">{{ specifications(file.specs) }}</span>
             <span v-if="file.reason" class="text-caption">{{ file.reason }}<template v-if="file.owner"> · 占位方 {{ file.owner }}</template></span>
           </div>
+          <span class="shared-settings__id text-caption">申请编号：{{ row.request_id }}</span>
         </details>
-        <span class="shared-settings__id text-caption">申请编号 {{ row.request_id }}</span>
       </article>
       <VBtn prepend-icon="mdi-refresh" variant="text" :disabled="busy" @click="reconcile">核验未完成申请</VBtn>
     </div>
@@ -200,9 +204,8 @@ defineExpose({ save })
         <div class="shared-settings__badges">
           <span class="shared-settings__badge" :data-tone="phaseColors[row.state] || 'secondary'">{{ phaseNames[row.state] || row.state }}</span>
           <span class="text-body-2">下载方：{{ row.label || '-' }}</span>
-          <span class="text-body-2">{{ identity(row) }}</span>
+          <span class="text-body-2">{{ releaseDetails(row) }}</span>
         </div>
-        <span class="text-body-2">{{ specifications(row.specs) }}</span>
         <div class="shared-settings__meta shared-settings__claim-meta text-caption">
           <span>占位时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
           <span class="shared-settings__id">占位编号：{{ row.id }}</span>
@@ -229,7 +232,7 @@ defineExpose({ save })
 .shared-settings__badge[data-tone="error"] { --shared-badge-ink: 176, 32, 42; --shared-badge-fill: 255, 235, 238; }
 .shared-settings__badge[data-tone="info"] { --shared-badge-ink: 0, 88, 153; --shared-badge-fill: 227, 242, 253; }
 .shared-settings__badge[data-tone="warning"] { --shared-badge-ink: 133, 77, 14; --shared-badge-fill: 255, 248, 225; }
-.shared-settings__preview { display: flex; flex-direction: column; gap: 4px; }
+.shared-settings__preview { display: flex; flex-wrap: wrap; gap: 4px; }
 .shared-settings__meta, .shared-settings__id { color: rgba(var(--v-theme-on-surface), 0.72); }
 .shared-settings__error { margin: 0; color: rgb(var(--v-theme-error)); }
 .shared-settings__reason { margin: 0; }

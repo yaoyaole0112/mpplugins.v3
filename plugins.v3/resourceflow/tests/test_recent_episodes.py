@@ -41,7 +41,11 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         self.assertTrue(ResourceFlow._air_date_is_recent("2026-11-06", today))
         self.assertFalse(ResourceFlow._air_date_is_recent("2026-11-05", today, days=2))
         self.assertTrue(ResourceFlow._air_date_is_recent("2026-11-07", today, days=2))
-        self.assertEqual(BrushTaskPayload(recent_episodes_only=True).recent_episodes_days, 3)
+        self.assertEqual(
+            BrushTaskPayload(name="test", site_id=1, downloader="QB",
+                             recent_episodes_only=True).recent_episodes_days,
+            3,
+        )
 
     def test_video_filter_ignores_non_video_files(self):
         self.assertTrue(ResourceFlow._video_file("Season 2/E02.mkv"))

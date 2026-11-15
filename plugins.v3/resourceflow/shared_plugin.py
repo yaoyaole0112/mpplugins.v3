@@ -13,6 +13,7 @@ from app.sdk.config import settings
 from app.sdk.logging import logger
 from app.sdk.media import MetaInfo
 from app.sdk.services import DownloaderHelper
+from app.modules.themoviedb.tmdbapi import TmdbApi
 
 from .active_dedup import download_files, paths_agree
 from .channel_dedup import parse_candidate_file, parse_torrent_files
@@ -353,7 +354,9 @@ class SharedResourceMixin:
     def _shared_candidates(self, content, title, task, selection, spec_hint=""):
         paths = selection.get("accepted") if selection else None
         rows, rejected = [], []
-        display_titles = {}
+        display_titles = getattr(self, "_shared_media_title_cache", None)
+        if not isinstance(display_titles, dict):
+            display_titles = self._shared_media_title_cache = {}
         for item in parse_torrent_files(content):
             if not self._video_file(item["path"]) or paths is not None and item["path"] not in paths:
                 continue
@@ -375,8 +378,9 @@ class SharedResourceMixin:
         tmdb_id = candidate.get("tmdb_id")
         if not tmdb_id:
             return ""
-        if tmdb_id in cache:
-            return cache[tmdb_id]
+        cache_key = (candidate.get("media_type"), int(tmdb_id))
+        if cache_key in cache:
+            return cache[cache_key]
         path = candidate.get("path") or ""
         meta = MetaInfo(path.rsplit("/", 1)[-1])
         media_title = ""
@@ -384,7 +388,6 @@ class SharedResourceMixin:
             media = self.chain.recognize_media(meta=meta)
             recognized_id = getattr(media, "tmdb_id", None)
             if recognized_id and int(recognized_id) != int(tmdb_id):
-                cache[tmdb_id] = ""
                 return ""
             names = [
                 getattr(media, field, "")
@@ -399,14 +402,38 @@ class SharedResourceMixin:
         except Exception:
             pass
         if not media_title:
+            try:
+                media_type = {
+                    "tv": schemas.MediaType.TV,
+                    "movie": schemas.MediaType.MOVIE,
+                }.get(candidate.get("media_type"))
+                localized = TmdbApi(language="zh-CN").get_info(
+                    mtype=media_type, tmdbid=int(tmdb_id)
+                ) if media_type else None
+                localized_names = [
+                    localized.get("name") or localized.get("title") if isinstance(localized, dict) else "",
+                ]
+                if isinstance(localized, dict):
+                    localized_names.extend(localized.get("names") or [])
+                media_title = next(
+                    (str(name).strip() for name in localized_names
+                     if isinstance(name, str) and re.search(r"[\u3400-\u9fff]", name)),
+                    "",
+                )
+            except Exception:
+                pass
+        if not media_title:
             media_title = next(
                 (str(getattr(meta, field, "") or "").strip()
                  for field in ("cn_name", "name")
                  if re.search(r"[\u3400-\u9fff]", str(getattr(meta, field, "") or ""))),
                 "",
             )
-        cache[tmdb_id] = media_title[:120]
-        return cache[tmdb_id]
+        if media_title:
+            if len(cache) >= 1000:
+                cache.pop(next(iter(cache)))
+            cache[cache_key] = media_title[:120]
+        return media_title[:120]
 
     def _add_prechecked_torrent(self, content, cookies, task, downloader, service, expected_hash, selection, title,
                                spec_hint=""):

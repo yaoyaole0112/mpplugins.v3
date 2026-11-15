@@ -125,13 +125,16 @@ def normalize_effects(value: Any) -> Optional[str]:
     """Treat HDR Vivid as the same comparison class as ordinary HDR."""
     if value is None:
         return None
+    value = re.sub(r"(?i)HDR10\s*\+", "HDR10PLUS", str(value))
     effects = []
-    for item in str(value).split("+"):
+    for item in value.split("+"):
         item = item.strip()
         if not item:
             continue
         if re.fullmatch(r"(?i)HDR[ ._-]*VIVID|MAXPLUS", item):
             item = "HDR"
+        elif item.upper() == "HDR10PLUS":
+            item = "HDR10+"
         effects.append(item)
     return "+".join(sorted(set(effects))) or None
 

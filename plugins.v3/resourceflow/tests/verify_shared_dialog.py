@@ -59,7 +59,9 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert '任务：' in await first.inner_text()
             assert '下载器：' in await first.inner_text()
             assert '最近更新' in await first.inner_text()
-            assert '玫瑰战争 · TMDB 123 · S01E05' in await first.inner_text()
+            release = first.locator('.shared-settings__preview span')
+            release_text = (await release.inner_text()).removeprefix('首文件 · ')
+            assert release_text.startswith('玫瑰战争 · TMDB 123 · S01E05 · 分辨率 1080p'), release_text
             assert '23.976 FPS' in await first.inner_text()
             assert await first.locator('.shared-settings__meta').evaluate(
                 "element => getComputedStyle(element).color") == 'rgba(0, 0, 0, 0.72)'
@@ -67,6 +69,11 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await first.locator('.shared-settings__badge[data-tone="error"]').count() >= 1
             await first.locator('summary').click()
             await first.get_by_text('Show.S01E06.2026.1080p.WEB-DL.H264.AAC.mkv', exact=True).wait_for()
+            file_details = first.locator('.shared-settings__file').first
+            file_identity = await file_details.locator('.shared-settings__badges').inner_text()
+            assert '玫瑰战争 · TMDB 123 · S01E05 · 分辨率 1080p' in file_identity
+            assert await first.locator('.shared-settings__details .shared-settings__id').count() == 1
+            assert await first.locator('.shared-settings__id').count() == 1
             await verify_badge_colors(dialog)
             if host_css:
                 stylesheet = await page.add_style_tag(path=str(host_css))
@@ -137,7 +144,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert '最近更新' in await claim.inner_text()
             assert '下载方：朋友A' in await claim.inner_text()
             assert '占位编号：' in await claim.inner_text()
-            assert '玫瑰战争 · TMDB 123 · S01E05' in await claim.inner_text()
+            claim_identity = await claim.locator('.shared-settings__badges').inner_text()
+            assert '玫瑰战争 · TMDB 123 · S01E05 · 分辨率 1080p' in claim_identity
             assert await claim.locator('.shared-settings__claim-meta').evaluate(
                 "element => getComputedStyle(element).display") == 'grid'
             assert '23.976 FPS' in await claim.inner_text()
