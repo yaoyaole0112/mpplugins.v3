@@ -86,6 +86,8 @@ class ToolAction(BaseModel):
     operation: str
     path: str = ""
     cid: str = "0"
+    source_id: str = ""
+    destination_id: str = ""
     config_id: str = ""
     paths: List[str] = Field(default_factory=list)
     scan_token: str = ""
@@ -131,7 +133,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.80"
+    plugin_version = "2.10.81"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -963,22 +965,49 @@ class EmeTools(_PluginBase):
             "⚠️ 彻底删除不可恢复！确认前请核对回收站内容；执行前将再次核验。", command_origin)
         return {**result, "pending": True}
 
-    def _move_request(self, command_origin=None):
-        result = self._move_info(snapshot=True)
+    def _move_request(self, command_origin=None, *, copy_existing=False, copy_rule=None):
+        return self._request_move_confirmation(command_origin=command_origin,
+                                               copy_existing=copy_existing, copy_rule=copy_rule)
+
+    def _request_move_confirmation(self, command_origin=None, *, copy_existing=False, copy_rule=None):
+        if copy_existing and not copy_rule:
+            return {"ok": False, "message": "请选择要全量复制的复制规则"}
+        result = self._move_info(snapshot=True, copy_only=copy_existing)
+        if copy_rule:
+            source_id, destination_id = copy_rule
+            result["rules"] = [rule for rule in result["rules"]
+                               if rule["src_id"] == source_id and rule["dst_id"] == destination_id]
+            result["pending"] = {rule["src_id"]: result["pending"][rule["src_id"]]
+                                for rule in result["rules"]}
+            result["entries"] = {rule["src_id"]: result["entries"][rule["src_id"]]
+                                 for rule in result["rules"]}
+        if copy_existing and not result["rules"]:
+            return {"ok": False, "message": "没有已保存的复制规则"}
         if not result["rules"] or any(item["count"] < 0 for item in result["pending"].values()):
             return {"ok": False, "message": "未配置转存规则或部分源目录读取失败，请核实后重新预览"}
+        if copy_existing:
+            result["action"] = "copy_existing"
+            result["copy_rule"] = copy_rule
+            result["pending"] = {
+                rule["src_id"]: {"name": rule.get("src_name") or rule["src_id"],
+                                 "count": len(result["entries"][rule["src_id"]])}
+                for rule in result["rules"]
+            }
         if not any(item["count"] for item in result["pending"].values()):
             result.pop("entries", None)
             result.pop("copy_records", None)
-            return {**result, "empty": True, "message": "没有新增待转存项目"}
+            return {**result, "empty": True,
+                    "message": "没有可复制的已有项目" if copy_existing else "没有新增待转存项目"}
         token = self._remember("move", {"rules": result["rules"], "entries": result.pop("entries"),
                                         "copy_records": result.pop("copy_records"),
+                                        "copy_existing": copy_existing,
+                                        "copy_rule": copy_rule,
                                         "preview": copy.deepcopy(result)})
-        lines = [f"{'复制新增' if rule.get('mode') == 'copy' else '移动'}："
+        lines = [f"{'复制已有' if copy_existing else '复制新增' if rule.get('mode') == 'copy' else '移动'}："
                  f"{rule.get('src_name') or rule['src_id']} → {rule.get('dst_name') or rule['dst_id']}"
                  f"（{result['pending'][rule['src_id']]['count']} 项）" for rule in result["rules"]]
         self._publish_tool_confirmation(token, "move", "\n".join(lines) +
-            "\n仅执行已保存规则；规则或源目录项目变化后需重新预览。复制保留增量去重。", command_origin)
+            "\n仅执行已保存规则；规则或源目录项目变化后需重新预览。", command_origin)
         return {**result, "token": token, "pending_confirmation": True}
 
     def _data_request(self, scan, paths, command_origin=None):
@@ -1725,6 +1754,7 @@ class EmeTools(_PluginBase):
         return result
 
     _MOVE_COPY_RECORDS_KEY = "p115_move_copy_records"
+    _MOVE_COPY_BASELINES_KEY = "p115_move_copy_baselines"
 
     def _move_copy_record_key(self, source, destination):
         return f"copy:{source}:{destination}"
@@ -1746,15 +1776,26 @@ class EmeTools(_PluginBase):
             if value
         })
 
-    def _reset_move_copy_records(self):
-        records = self._load_move_copy_records()
-        self.save_data(self._MOVE_COPY_RECORDS_KEY, {})
-        logger.info("媒体增强 文件转存：已清理复制记录 %d 条规则", len(records))
-        return {"ok": True, "cleared": len(records), "message": "复制记录已清理，下次将重新复制源目录中的全部项目"}
+    def _load_move_copy_baselines(self):
+        baselines = self.get_data(self._MOVE_COPY_BASELINES_KEY)
+        if not isinstance(baselines, (list, tuple, set)):
+            return set()
+        return {str(item) for item in baselines}
 
-    def _move_info(self, *, snapshot=False):
+    def _seed_copy_baseline(self, record_key, identifiers, records, baselines):
+        if record_key in baselines:
+            return
+        records.setdefault(record_key, set()).update(str(item) for item in identifiers)
+        baselines.add(record_key)
+        self._save_move_copy_records(records)
+        self.save_data(self._MOVE_COPY_BASELINES_KEY, sorted(baselines))
+
+    def _move_info(self, *, snapshot=False, copy_only=False):
         rules = copy.deepcopy(self._schedule["p115_move"]["rules"])
+        if copy_only:
+            rules = [rule for rule in rules if (rule.get("mode") or "move") == "copy"]
         copy_records = self._load_move_copy_records()
+        baselines = self._load_move_copy_baselines()
         pending = {}
         entries = {}
         if rules:
@@ -1765,7 +1806,9 @@ class EmeTools(_PluginBase):
                         entries[rule["src_id"]] = self._move_fingerprint(files, folders)
                         identifiers = [str(item["fid"]) for item in files] + [str(item["cid"]) for item in folders]
                         if (rule.get("mode") or "move") == "copy":
-                            copied = copy_records.get(self._move_copy_record_key(rule["src_id"], rule["dst_id"]), set())
+                            record_key = self._move_copy_record_key(rule["src_id"], rule["dst_id"])
+                            self._seed_copy_baseline(record_key, identifiers, copy_records, baselines)
+                            copied = copy_records.get(record_key, set())
                             count = sum(identifier not in copied for identifier in identifiers)
                         else:
                             count = len(identifiers)
@@ -1788,11 +1831,25 @@ class EmeTools(_PluginBase):
         if not rules:
             logger.info("媒体增强 文件转存：未配置规则，跳过")
             return {"ok": False, "message": "请先保存转存规则"}
-        logger.info("媒体增强 文件转存：开始检查 %d 条转存规则", len(rules))
+        log_rules = rules
+        if expected and expected.get("copy_existing"):
+            copy_rule = expected.get("copy_rule")
+            log_rules = [rule for rule in rules if rule.get("mode") == "copy"
+                         and (not copy_rule or (rule["src_id"], rule["dst_id"]) == tuple(copy_rule))]
+        logger.info("媒体增强 文件转存：开始检查 %d 条转存规则", len(log_rules))
 
         def move():
-            if expected is not None and rules != expected["rules"]:
+            copy_existing = bool(expected and expected.get("copy_existing"))
+            expected_copy_rule = (expected or {}).get("copy_rule")
+            matching_copy_rules = [rule for rule in rules if rule.get("mode") == "copy"]
+            if expected_copy_rule:
+                matching_copy_rules = [rule for rule in matching_copy_rules
+                                       if (rule["src_id"], rule["dst_id"]) == tuple(expected_copy_rule)]
+            if expected is not None and (
+                    rules != expected["rules"] if not copy_existing else
+                    matching_copy_rules != expected["rules"]):
                 return {"ok": False, "message": "转存规则已变化，请重新预览并确认"}
+            run_rules = matching_copy_rules if copy_existing else rules
             if time.monotonic() < getattr(self, "_move_retry_after", 0):
                 return {"ok": False, "deferred": True, "moved": 0, "errors": [], "details": [],
                         "message": "115 目录接口暂不可用，退避等待中；5 分钟后自动复查"}
@@ -1803,6 +1860,7 @@ class EmeTools(_PluginBase):
                 return {"ok": False, "deferred": True, "moved": 0, "errors": [], "details": [],
                         "message": message}
             moved, errors, details, copy_records = 0, [], [], self._load_move_copy_records()
+            baselines = self._load_move_copy_baselines()
             if expected is not None and copy_records != expected["copy_records"]:
                 return {"ok": False, "message": "增量复制记录已变化，请重新预览并确认"}
             with self._client() as client:
@@ -1811,7 +1869,7 @@ class EmeTools(_PluginBase):
                         files, directories = client.list_children(source)
                         if self._move_fingerprint(files, directories) != fingerprint:
                             return {"ok": False, "message": "源目录内容已变化，请重新预览并确认"}
-                for rule in rules:
+                for rule in run_rules:
                     source, destination = rule["src_id"], rule["dst_id"]
                     mode = rule.get("mode") or "move"
                     action = client.copy_files if mode == "copy" else client.move_files
@@ -1826,6 +1884,9 @@ class EmeTools(_PluginBase):
                         if expected is not None and self._move_fingerprint(files, directories) != expected["entries"][source]:
                             raise ValueError("源目录内容已变化，已停止此规则，请重新预览")
                         identifiers = [item["fid"] for item in files] + [item["cid"] for item in directories]
+                        record_key = self._move_copy_record_key(source, destination)
+                        if mode == "copy":
+                            self._seed_copy_baseline(record_key, identifiers, copy_records, baselines)
                         logger.info("媒体增强 文件转存：%s %s → %s，源文件=%d，源目录=%d",
                                     "复制" if mode == "copy" else "移动",
                                     _log_label(detail["src_name"] or source),
@@ -1835,10 +1896,9 @@ class EmeTools(_PluginBase):
                                         _log_label(detail["src_name"] or source))
                             continue
                         if mode == "copy":
-                            record_key = self._move_copy_record_key(source, destination)
                             copied_ids = copy_records.setdefault(record_key, set())
-                            pending_identifiers = [identifier for identifier in identifiers
-                                                   if str(identifier) not in copied_ids]
+                            pending_identifiers = identifiers if copy_existing else [
+                                identifier for identifier in identifiers if str(identifier) not in copied_ids]
                             detail["skipped_count"] = len(identifiers) - len(pending_identifiers)
                             identifiers = pending_identifiers
                             if not identifiers:
@@ -2352,8 +2412,8 @@ class EmeTools(_PluginBase):
         labels = {"p115_dirs": "浏览115目录", "trash_info": "查询回收站", "trash_request": "预览回收站清空", "trash_clear": "清空回收站",
                   "cleanup_preview": "预览清理文件", "cleanup_request": "准备清理确认",
                   "cleanup_confirm": "确认清理文件", "move_info": "查询待转存", "move_run": "预览文件转存",
-                  "move_request": "预览文件转存", "move_confirm": "确认文件转存",
-                  "move_copy_reset": "清理复制记录"}
+                  "move_request": "预览文件转存", "move_existing_request": "预览复制已有项目",
+                  "move_confirm": "确认文件转存"}
         if action.operation not in labels:
             return await self._action_serial(action)
         saved = action.model_copy(deep=True)
@@ -2391,7 +2451,7 @@ class EmeTools(_PluginBase):
 
     async def _action_serial(self, action: ToolAction) -> dict:
         operation = action.operation
-        if operation not in {"dirs", "root_dirs", "rapid_files", "p115_dirs", "pending", "move_info", "move_copy_reset"}:
+        if operation not in {"dirs", "root_dirs", "rapid_files", "p115_dirs", "pending", "move_info"}:
             logger.info("媒体增强：页面操作 %s 开始", _log_label(operation))
         try:
             confirmation_kinds = {"trash_clear": "trash", "move_confirm": "move",
@@ -2471,10 +2531,11 @@ class EmeTools(_PluginBase):
                 return result
             if operation == "move_info":
                 return await asyncio.to_thread(self._move_info)
-            if operation == "move_copy_reset":
-                return await asyncio.to_thread(self._locked, "p115_move", self._reset_move_copy_records)
             if operation in {"move_request", "move_run"}:
                 return await asyncio.to_thread(self._move_request)
+            if operation == "move_existing_request":
+                rule = (action.source_id, action.destination_id) if action.source_id and action.destination_id else None
+                return await asyncio.to_thread(self._move_request, copy_existing=True, copy_rule=rule)
             raise HTTPException(status_code=400, detail="未知的工具操作")
         except HTTPException:
             if operation == "cleanup_confirm":

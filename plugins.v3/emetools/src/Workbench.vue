@@ -1231,22 +1231,27 @@ async function runMove() {
   if (moveConfigDirty.value) { error.value = '转存规则有未保存的修改，请先保存后再执行'; return }
   if (['processing', 'queued'].includes(moveInfo.value?.state)) return
   if (!moveInfo.value?.token) { await getMove(); return }
-  const modes = new Set(rules.value.map(rule => rule.mode === 'copy' ? '复制' : '移动'))
+  const copyExisting = moveInfo.value?.action === 'copy_existing'
+  const modes = new Set(rules.value
+    .filter(rule => !copyExisting || rule.mode === 'copy')
+    .map(rule => rule.mode === 'copy' ? (copyExisting ? '全量复制' : '增量复制') : '移动'))
   const modeSummary = [...modes].join('和') || '移动或复制'
-  if (!window.confirm(`按插件中已保存的转存规则立即${modeSummary}源目录内容？复制规则仅处理新增项目；未保存的修改不会生效。`)) return
+  const scope = copyExisting ? '仅复制预览中所列源目录当前全部已有项目' : '按插件中已保存的转存规则处理待转存项目'
+  if (!window.confirm(`${scope}（${modeSummary}）；未保存的修改不会生效。`)) return
   await work(async () => {
     const result = await execute('move_confirm', { token: moveInfo.value.token })
     notice.value = result.message || '转存完成'
     moveInfo.value = null
   })
 }
-async function resetMoveCopyRecords() {
+async function copyExistingMoveItems(rule) {
   if (!settingsLoaded.value) { error.value = '转存规则尚未加载，请刷新后重试'; return }
-  if (!window.confirm('确认清理所有复制规则的增量记录？清理后下次复制会重新提交源目录中的全部项目。')) return
+  if (moveConfigDirty.value) { error.value = '转存规则有未保存的修改，请先保存后再复制'; return }
   await work(async () => {
-    const result = await execute('move_copy_reset')
-    notice.value = result.message || '复制记录已清理'
-    moveInfo.value = null
+    moveInfo.value = await execute('move_existing_request', {
+      source_id: rule.src_id, destination_id: rule.dst_id,
+    })
+    notice.value = moveInfo.value.message || '请核对已有项目并确认复制'
   })
 }
 async function browse(type, index = 0) {
@@ -1589,10 +1594,10 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
         <section class="eme-card"><div class="eme-card-heading"><h3>定时清空</h3><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_trash')">保存任务</button></div><p v-if="scheduleDirty('p115_trash')" class="eme-message eme-warning">回收站定时清空任务有未保存的修改；请点击“保存任务”。</p><label class="eme-switch-label"><input v-model="schedule.p115_trash.enabled" class="eme-switch-input" type="checkbox" role="switch" /><span class="eme-switch-track" aria-hidden="true" /><span>启用定时清空（⚠️彻底删除，无法恢复）</span></label><label>执行周期（cron表达式）<input v-model.trim="schedule.p115_trash.cron" placeholder="0 3 * * *" /></label></section>
       </template>
       <template v-if="active === 'move'">
-        <section class="eme-card"><div class="eme-card-heading"><div><h3>文件转存规则</h3><p>每条规则可选择移动或复制；复制只提交尚未成功复制过的新增项目，可清除复制记录以重新复制全部项目。</p></div><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存规则</button></div>
+        <section class="eme-card"><div class="eme-card-heading"><div><h3>文件转存规则</h3><p>复制模式以首次扫描时的源目录为基线，此后仅复制新增项目；已有项目不会自动复制，可单独发起全量复制。</p></div><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存规则</button></div>
           <p v-if="moveConfigDirty" class="eme-message eme-warning">转存规则或监控配置有未保存的修改；请选择完整的源和目标目录并点击“保存规则”，才能查看或执行新规则。</p>
-          <div v-for="(rule, index) in rules" :key="index" class="eme-move-row"><span class="eme-move-label">源</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.src_name || '选择源目录'" @click="browse('src', index)">{{ rule.src_name || '选择源目录' }}</button><span class="eme-move-arrow" aria-hidden="true">→</span><span class="eme-move-label">目标</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.dst_name || '选择目标目录'" @click="browse('dst', index)">{{ rule.dst_name || '选择目标目录' }}</button><div class="eme-move-mode-options" role="group" :aria-label="`转存方式 ${index + 1}`"><button v-for="item in moveModeOptions" :key="item.value" type="button" class="eme-move-mode-button" :class="{ selected: rule.mode === item.value }" :aria-pressed="rule.mode === item.value" @click="selectMoveMode(index, item.value)">{{ item.title }}</button></div><button class="eme-button text eme-remove" type="button" :aria-label="`移除转存规则 ${index + 1}`" @click="rules.splice(index, 1)">✕</button></div>
-          <div class="eme-actions"><button class="eme-button secondary" @click="rules.push({ src_id: '', src_name: '', dst_id: '', dst_name: '', mode: 'move' })">添加规则</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !!moveInfo?.token" @click="getMove">预览待转存内容</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !rules.length" @click="runMove">{{ ['processing', 'queued'].includes(moveInfo?.state) ? '⌛️转存中' : moveInfo?.token ? '确认执行转存' : '预览并确认转存' }}</button><button v-if="moveInfo?.token" class="eme-button secondary" :disabled="busy || ['processing', 'queued'].includes(moveInfo.state)" @click="cancelConfirmation(moveInfo.token)">取消本次转存</button><button class="eme-button text" :disabled="busy || !settingsLoaded" @click="resetMoveCopyRecords">清理复制记录</button></div>
+          <div v-for="(rule, index) in rules" :key="index" class="eme-move-row"><span class="eme-move-label">源</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.src_name || '选择源目录'" @click="browse('src', index)">{{ rule.src_name || '选择源目录' }}</button><span class="eme-move-arrow" aria-hidden="true">→</span><span class="eme-move-label">目标</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.dst_name || '选择目标目录'" @click="browse('dst', index)">{{ rule.dst_name || '选择目标目录' }}</button><div class="eme-move-mode-options" role="group" :aria-label="`转存方式 ${index + 1}`"><button v-for="item in moveModeOptions" :key="item.value" type="button" class="eme-move-mode-button" :class="{ selected: rule.mode === item.value }" :aria-pressed="rule.mode === item.value" @click="selectMoveMode(index, item.value)">{{ item.title }}</button></div><button v-if="rule.mode === 'copy'" class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !!moveInfo?.token || !rule.src_id || !rule.dst_id" @click="copyExistingMoveItems(rule)">复制已有项目</button><button class="eme-button text eme-remove" type="button" :aria-label="`移除转存规则 ${index + 1}`" @click="rules.splice(index, 1)">✕</button></div>
+          <div class="eme-actions"><button class="eme-button secondary" @click="rules.push({ src_id: '', src_name: '', dst_id: '', dst_name: '', mode: 'move' })">添加规则</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !!moveInfo?.token" @click="getMove">预览待转存内容</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !rules.length" @click="runMove">{{ ['processing', 'queued'].includes(moveInfo?.state) ? '⌛️转存中' : moveInfo?.token ? (moveInfo.action === 'copy_existing' ? '确认复制已有项目' : '确认执行转存') : '预览并确认转存' }}</button><button v-if="moveInfo?.token" class="eme-button secondary" :disabled="busy || ['processing', 'queued'].includes(moveInfo.state)" @click="cancelConfirmation(moveInfo.token)">取消本次转存</button></div>
           <p class="eme-hint">手动转存需在网页或 TG 确认一次；两处同步状态。已启用的自动监控仍按保存的规则运行。</p>
           <p v-if="moveInfo" class="eme-hint">上次执行：{{ moveInfo.last_run || '暂无' }}；<span v-for="(item, key) in moveInfo.pending || {}" :key="key">{{ item.name }}：{{ item.count < 0 ? item.error : `${item.count} 项` }}；</span></p>
         </section>

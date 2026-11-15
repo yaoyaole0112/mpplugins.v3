@@ -164,6 +164,8 @@ class ScheduledNotificationTests(unittest.TestCase):
         context = MagicMock()
         context.__enter__.return_value = client
         self.plugin._client = MagicMock(return_value=context)
+        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: (
+            ["copy:1:2"] if key == self.plugin._MOVE_COPY_BASELINES_KEY else None)
         result = self.plugin._move_run()
         client.copy_files.assert_called_once_with(["11"], "2")
         client.move_files.assert_not_called()
@@ -181,8 +183,13 @@ class ScheduledNotificationTests(unittest.TestCase):
         context.__enter__.return_value = client
         self.plugin._client = MagicMock(return_value=context)
         records = {}
-        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: records if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
-        self.plugin.save_data.side_effect = lambda key, value, *args, **kwargs: records.update(value) if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
+        baselines = ["copy:1:2"]
+        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: (
+            records if key == self.plugin._MOVE_COPY_RECORDS_KEY else
+            baselines if key == self.plugin._MOVE_COPY_BASELINES_KEY else None)
+        self.plugin.save_data.side_effect = lambda key, value, *args, **kwargs: (
+            records.update(value) if key == self.plugin._MOVE_COPY_RECORDS_KEY else
+            baselines.__setitem__(slice(None), value) if key == self.plugin._MOVE_COPY_BASELINES_KEY else None)
 
         first = self.plugin._move_run()
         second = self.plugin._move_run()
@@ -193,6 +200,38 @@ class ScheduledNotificationTests(unittest.TestCase):
         self.assertEqual(second["skipped"], 1)
         self.assertEqual(second["details"][0]["status"], "unchanged")
 
+    def test_first_copy_scan_baselines_existing_items_then_copies_additions(self):
+        self.plugin._schedule["p115_move"]["rules"] = [
+            {"src_id": "1", "dst_id": "2", "mode": "copy"}]
+        client = MagicMock()
+        existing = [{"fid": "11", "size": 100}]
+        client.list_children.return_value = (existing, [])
+        client.copy_files.return_value = {"state": True}
+        context = MagicMock()
+        context.__enter__.return_value = client
+        self.plugin._client = MagicMock(return_value=context)
+        records = {}
+        baselines = []
+        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: (
+            records if key == self.plugin._MOVE_COPY_RECORDS_KEY else
+            baselines if key == self.plugin._MOVE_COPY_BASELINES_KEY else None)
+        def save_data(key, value, *args, **kwargs):
+            if key == self.plugin._MOVE_COPY_RECORDS_KEY:
+                records.clear()
+                records.update(value)
+            elif key == self.plugin._MOVE_COPY_BASELINES_KEY:
+                baselines[:] = value
+        self.plugin.save_data.side_effect = save_data
+
+        initial = self.plugin._move_run()
+        self.assertEqual(initial["copied"], 0)
+        client.copy_files.assert_not_called()
+
+        client.list_children.return_value = (existing + [{"fid": "12", "size": 200}], [])
+        added = self.plugin._move_run()
+        client.copy_files.assert_called_once_with(["12"], "2")
+        self.assertEqual(added["copied"], 1)
+
     def test_copy_rule_only_submits_new_items(self):
         self.plugin._schedule["p115_move"]["rules"] = [{"src_id": "1", "dst_id": "2", "mode": "copy"}]
         client = MagicMock()
@@ -202,7 +241,10 @@ class ScheduledNotificationTests(unittest.TestCase):
         context.__enter__.return_value = client
         self.plugin._client = MagicMock(return_value=context)
         records = {"copy:1:2": ["11"]}
-        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: records if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
+        baselines = ["copy:1:2"]
+        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: (
+            records if key == self.plugin._MOVE_COPY_RECORDS_KEY else
+            baselines if key == self.plugin._MOVE_COPY_BASELINES_KEY else None)
         self.plugin.save_data.side_effect = lambda key, value, *args, **kwargs: records.update(value) if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
 
         result = self.plugin._move_run()
@@ -220,8 +262,12 @@ class ScheduledNotificationTests(unittest.TestCase):
         context.__enter__.return_value = client
         self.plugin._client = MagicMock(return_value=context)
         records = {}
-        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: records if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
-        self.plugin.save_data.side_effect = lambda key, value, *args, **kwargs: records.update(value) if key == self.plugin._MOVE_COPY_RECORDS_KEY else None
+        baselines = ["copy:1:2"]
+        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: (
+            records if key == self.plugin._MOVE_COPY_RECORDS_KEY else
+            baselines if key == self.plugin._MOVE_COPY_BASELINES_KEY else None)
+        self.plugin.save_data.side_effect = lambda key, value, *args, **kwargs: (
+            records.update(value) if key == self.plugin._MOVE_COPY_RECORDS_KEY else None)
 
         result = self.plugin._move_run()
 
@@ -245,7 +291,9 @@ class ScheduledNotificationTests(unittest.TestCase):
         self.assertIn("HTTP 405", result["details"][0]["error"])
         client.list_children.assert_called_once_with("1")
         client.copy_files.assert_not_called()
-        self.plugin.save_data.assert_not_called()
+        self.assertFalse(any(call.args[0] in {
+            self.plugin._MOVE_COPY_RECORDS_KEY, self.plugin._MOVE_COPY_BASELINES_KEY}
+            for call in self.plugin.save_data.call_args_list))
         self.plugin._move_run()
         client.list_children.assert_called_once_with("1")
 

@@ -23,6 +23,8 @@ class SharedConfirmationTests(unittest.TestCase):
         self.client.list_children.return_value = ([{'fid': '222', 'name': 'test.mkv', 'size': 1024}], [])
         self.client.copy_files.return_value = {'state': True}
         self.client.move_files.return_value = {'state': True}
+        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: (
+            ['copy:111:333'] if key == self.plugin._MOVE_COPY_BASELINES_KEY else None)
 
     def api(self, operation, **kwargs):
         return asyncio.run(self.plugin.action(ToolAction(operation=operation, **kwargs)))
@@ -224,6 +226,26 @@ class SharedConfirmationTests(unittest.TestCase):
     def test_manual_move_run_compatibility_only_previews(self):
         self.assertTrue(self.api('move_run')['token'])
         self.client.copy_files.assert_not_called()
+        self.client.move_files.assert_not_called()
+
+    def test_copy_existing_request_confirms_all_current_copy_items(self):
+        self.plugin.get_data.side_effect = lambda key, *args, **kwargs: (
+            ['copy:111:333', 'copy:444:555'] if key == self.plugin._MOVE_COPY_BASELINES_KEY else None)
+        self.plugin._schedule['p115_move']['rules'].extend([
+            {'src_id': '444', 'src_name': '其他源', 'dst_id': '555',
+             'dst_name': '其他目标', 'mode': 'copy'},
+            {'src_id': '666', 'dst_id': '777', 'mode': 'move'},
+        ])
+        self.client.list_children.return_value = (
+            [{'fid': '222', 'name': 'existing.mkv', 'size': 1024},
+             {'fid': '223', 'name': 'new.mkv', 'size': 2048}], [])
+        preview = self.api('move_existing_request', source_id='111', destination_id='333')
+        self.assertEqual(preview['action'], 'copy_existing')
+        self.assertEqual(preview['pending']['111']['count'], 2)
+        self.assertEqual(self.client.copy_files.call_count, 0)
+        result = self.api('move_confirm', token=preview['token'])
+        self.assertEqual(result['copied'], 2)
+        self.client.copy_files.assert_called_once_with(['222', '223'], '333')
         self.client.move_files.assert_not_called()
 
     def test_new_preview_token_does_not_override_old_terminal_state(self):
