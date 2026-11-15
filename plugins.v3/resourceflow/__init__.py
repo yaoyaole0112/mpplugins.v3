@@ -267,7 +267,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.9"
+    plugin_version = "1.0.10"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -1795,7 +1795,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         try:
             with self._brush_lock, self._task_scope(task.id):
                 self._run_brush(task, report)
-            report["success"] = report.get("result") not in {"downloader_unavailable", "site_missing"}
+            report["success"] = report.get("result") not in {
+                "downloader_unavailable", "site_missing", "shared_approval_disabled",
+            }
         except Exception as err:
             report.update({"success": False, "error": str(err)})
             self._set_runtime(task.id, last_error=str(err))
@@ -1810,6 +1812,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
 
     def _run_brush(self, task: BrushTaskConfig, report: dict) -> None:
         """在已绑定任务上下文中执行刷流核心流程"""
+        if not self._shared_download_gate(task):
+            report["result"] = "shared_approval_disabled"
+            report["reason_counts"]["任务要求共享审批，但全局审批未启用"] += 1
+            return
         if self._shared_participates(task):
             self._sync_shared_policy()
         if not self._validate_task_reference(task) or not self.downloader:
@@ -3170,6 +3176,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         if not task or not torrent.enclosure:
             logger.error(f"获取种子下载链接失败：{torrent.title}")
             return None
+        if not self._shared_download_gate(task):
+            return None
         torrent_content: Union[str, bytes] = torrent.enclosure
         proxies = settings.PROXY if torrent.site_proxy else None
         cookies = torrent.site_cookie
@@ -3278,6 +3286,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         downloader: Any, service: ServiceInfo, expected_hash: str, recent_selection: Optional[dict], title: str,
     ) -> Optional[str]:
         """在去重及占位完成后保留原下载器添加、暂停选集和失败清理流程。"""
+        if not self._shared_add_authorized(task, expected_hash, recent_selection):
+            logger.warning(
+                f"共享审批门禁 [{task.name}] {title}：缺少与本次下载及选集一致的批准记录，"
+                f"禁止添加；下载器 {task.downloader}；Hash {expected_hash}"
+            )
+            return None
         up_speed = int(task.up_speed) if task.up_speed else None
         down_speed = int(task.dl_speed) if task.dl_speed else None
         downloader_helper = DownloaderHelper()

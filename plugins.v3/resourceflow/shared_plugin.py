@@ -335,6 +335,60 @@ class SharedResourceMixin:
     def _shared_participates(self, task):
         return bool(task.spec_dedup_enabled and getattr(self, "_shared_settings", SharedSettingsPayload()).enabled)
 
+    def _shared_download_gate(self, task):
+        """任务要求共享审批时，全局未启用不能静默降级为本地下载。"""
+        if not task.spec_dedup_enabled:
+            return True
+        config = getattr(self, "_shared_settings", None)
+        if config and config.enabled:
+            return True
+        logger.warning(
+            f"共享审批门禁 [{task.name}]：任务已开启共享下载审批，但全局审批未启用或配置缺失，"
+            "暂缓新增下载；不会退回本地下载"
+        )
+        return False
+
+    def _shared_add_authorized(self, task, torrent_hash, selection):
+        """下载器添加入口只接受本任务、本种子与精确获批文件的暂停清单。"""
+        if not task.spec_dedup_enabled:
+            return True
+        if not self._shared_download_gate(task) or not isinstance(selection, dict):
+            return False
+        if selection.get("hold_paused") is not True:
+            return False
+        tag = selection.get("shared_tag")
+        if not isinstance(tag, str) or not tag.startswith("resourceflow-claim-"):
+            return False
+        request_id = tag.removeprefix("resourceflow-claim-")
+        entry = getattr(self, "_shared_claims", {}).get(request_id)
+        if (not entry or entry.get("phase") != "adding" or not entry.get("approved")
+                or entry.get("task_id") != task.id or entry.get("downloader") != task.downloader
+                or entry.get("hash") != torrent_hash or entry.get("request_id") != request_id):
+            return False
+        approved_paths = {row["path"] for row in entry.get("files", [])
+                          if row["id"] in entry["approved"]}
+        return bool(approved_paths and approved_paths == set(selection.get("accepted") or []))
+
+    def _log_shared_decision(self, entry):
+        """记录实际申请、媒体身份、勾选规格及冲突下载方，避免只凭频道发帖时间猜测。"""
+        rejected = {row["id"]: row for row in entry.get("rejected", [])}
+        fields = entry["body"]["files"]
+        for row in fields:
+            conflict = rejected.get(row["id"])
+            decision = "批准" if row["id"] in entry.get("approved", {}) else "排除"
+            identity = (f"S{row['season']:02d}" + ",".join(f"E{ep:02d}" for ep in row["episodes"])
+                        if row["media_type"] == "tv" else "电影")
+            specs = ", ".join(f"{key}={value}" for key, value in sorted(row["specs"].items()))
+            reason = (f"；原因 {conflict.get('reason', '')}；下载方 {conflict.get('owner', '')}"
+                      f"；占位状态 {conflict.get('state', '')}" if conflict else "")
+            if decision == "排除" and not conflict:
+                reason = "；原因 整包审批未获准，不添加该文件"
+            logger.info(
+                f"共享审批文件{decision} {entry['title']}：TMDB {row['tmdb_id']} · {identity}；"
+                f"匹配规格 {specs}；任务 {entry['task_id']}；下载器 {entry['downloader']}；"
+                f"申请 {entry['request_id']}；Hash {entry['hash']}{reason}"
+            )
+
     def _shared_update(self, entry, updates, absent=False):
         body = {"op": "update", "updates": updates, "confirmed_absent": bool(absent)}
         action = {"id": digest([entry["request_id"], body])[:32], "body": body}
@@ -475,11 +529,19 @@ class SharedResourceMixin:
 
     def _add_prechecked_torrent(self, content, cookies, task, downloader, service, expected_hash, selection, title,
                                spec_hint=""):
-        if not self._shared_participates(task):
+        if not task.spec_dedup_enabled:
+            logger.info(
+                f"共享审批旁路 [{task.name}] {title}：任务开关关闭，仅执行本地规则，"
+                f"不参与跨设备去重；下载器 {task.downloader}；Hash {expected_hash}"
+            )
             return self._add_local_prechecked_torrent(
                 content, cookies, task, downloader, service, expected_hash, selection, title)
+        if not self._shared_download_gate(task):
+            return None
         with self._shared_rpc_lock, self._shared_lock:
             try:
+                if not self._shared_download_gate(task):
+                    return None
                 self._check_shared_available()
                 if not isinstance(content, bytes) or not self._channel_dedup_attributes:
                     raise SharedError("共享审批需要可核验的文件清单与至少一个规格字段")
@@ -578,6 +640,7 @@ class SharedResourceMixin:
         entry["rejected"] = rejected
         entry["done"] = []
         self._save_shared()
+        self._log_shared_decision(entry)
 
     def _shared_task_ready(self, task, existing_hash=None):
         if not (not self._shared_stopping and self._enabled and task.enabled and task.spec_dedup_enabled
@@ -592,6 +655,8 @@ class SharedResourceMixin:
         return f"resourceflow-claim-{entry['request_id']}"
 
     def _start_shared_download(self, entry, task, downloader):
+        if not entry.get("approved") or entry.get("phase") not in {"awaiting_start", "queued"}:
+            raise SharedError("共享申请未处于可启动阶段，禁止启动下载")
         if entry.get("selection_pending"):
             raise SharedError("文件清单暂不可用，等待重试选集后再启动")
         if not self._shared_task_ready(task, entry["hash"]):
@@ -621,6 +686,10 @@ class SharedResourceMixin:
         entry.setdefault("download_started_at", entry.get("start_attempt_at") or time.time())
         entry.pop("start_attempt_at", None)
         self._shared_phase(entry, "queued", error="")
+        logger.info(
+            f"共享审批启动确认 [{task.name}] {entry['title']}：申请 {entry['request_id']}；"
+            f"下载器 {entry['downloader']}；Hash {entry['hash']}"
+        )
 
     def reconcile_shared_claims(self):
         if self._shared_stopping or not self._shared_rpc_lock.acquire(blocking=False):

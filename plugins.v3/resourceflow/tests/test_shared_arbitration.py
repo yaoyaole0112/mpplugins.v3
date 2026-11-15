@@ -581,6 +581,10 @@ class TransportTests(unittest.TestCase):
 class PluginSetupTests(unittest.TestCase):
     def setUp(self):
         self.plugin = ResourceFlow.__new__(ResourceFlow)
+        self.plugin.chain = SimpleNamespace(recognize_media=Mock(return_value=None))
+        tmdb = patch("resourceflow.shared_plugin.TmdbApi")
+        tmdb.start().return_value.get_info.return_value = {}
+        self.addCleanup(tmdb.stop)
         self.plugin.get_data = Mock(return_value=None)
         self.plugin.save_data = Mock()
         self.plugin.update_config = Mock()

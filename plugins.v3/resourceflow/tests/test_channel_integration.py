@@ -274,6 +274,11 @@ class ChannelIntegrationTests(unittest.TestCase):
         downloader.add_torrent.assert_not_called()
 
     def prepare_download(self, recent=False, accepted=None):
+        # 本组验证共享审批之前的本地筛选，最终审批门禁由共享专项测试覆盖。
+        self.plugin._shared_download_gate = Mock(return_value=True)
+        self.plugin._shared_add_authorized = Mock(return_value=True)
+        self.plugin._add_prechecked_torrent = Mock(
+            side_effect=lambda *args, **kwargs: self.plugin._add_local_prechecked_torrent(*args))
         task = BrushTaskConfig({"name": "test", "downloader": "QB", "recent_episodes_only": recent})
         self.plugin._get_task_config = Mock(return_value=task)
         self.plugin._recent_episode_file_selection = Mock(return_value={"accepted": accepted})

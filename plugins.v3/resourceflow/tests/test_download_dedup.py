@@ -16,6 +16,7 @@ class DownloadDedupTest(unittest.TestCase):
         self.plugin = ResourceFlow.__new__(ResourceFlow)
         self.task = BrushTaskConfig({
             "name": "test", "downloader": "QB", "tag": "resourceflow-test",
+            "spec_dedup_enabled": False,
         })
         self.plugin._get_task_config = Mock(return_value=self.task)
         self.plugin._recent_episode_file_selection = Mock(return_value={"accepted": {"test.mkv"}})
