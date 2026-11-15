@@ -188,7 +188,7 @@ defineExpose({ save })
           <span v-if="row.timeout_at">超时处理：{{ timestamp(row.timeout_at) }}</span>
           <span>任务：{{ row.task_name || row.task_id || '-' }}</span><span>下载器：{{ row.downloader || '-' }}</span>
         </div>
-        <div v-if="row.files?.length" class="shared-settings__preview text-body-2">
+        <div v-if="row.files?.length" class="shared-settings__preview shared-settings__info text-body-2">
           <span>
             <template v-if="row.files.length > 1">首文件 · </template>{{ releaseDetails(row.files[0]) }}
           </span>
@@ -204,11 +204,16 @@ defineExpose({ save })
     <div v-else class="shared-settings__records">
       <div v-if="!state.records?.length" class="text-body-2 text-medium-emphasis">暂无共享占位</div>
       <article v-for="row in state.records || []" :key="row.id" class="shared-settings__record">
-        <strong>{{ row.title }}</strong>
-        <div class="shared-settings__badges">
-          <span class="shared-settings__badge" :data-tone="phaseColors[row.state] || 'secondary'">{{ phaseNames[row.state] || row.state }}</span>
-          <span class="text-body-2">下载方：{{ row.label || '-' }}</span>
-          <span class="text-body-2">{{ releaseDetails(row) }}</span>
+        <div class="shared-settings__record-head">
+          <strong>{{ row.title }}</strong>
+          <span class="shared-settings__badge" :data-tone="phaseColors[row.state] || 'secondary'">
+            <VIcon :icon="phaseIcons[row.state] || 'mdi-clock-outline'" size="16" />
+            {{ phaseNames[row.state] || row.state }}
+          </span>
+        </div>
+        <div class="shared-settings__claim-info text-body-2">
+          <span class="shared-settings__info">下载方：{{ row.label || '-' }}</span>
+          <span class="shared-settings__info">{{ releaseDetails(row) }}</span>
         </div>
         <div class="shared-settings__meta shared-settings__claim-meta text-caption">
           <span>占位时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
@@ -229,17 +234,19 @@ defineExpose({ save })
 .shared-settings__records { min-inline-size: 0; }
 .shared-settings__record { display: flex; flex-direction: column; gap: 10px; padding-block: 20px; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); overflow-wrap: anywhere; min-inline-size: 0; }
 .shared-settings__record-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; min-inline-size: 0; }
-.shared-settings__record-head strong { min-inline-size: 0; font-size: 14px; line-height: 1.6; }
-.shared-settings__badges, .shared-settings__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.shared-settings__record-head strong { flex: 1; min-inline-size: 0; font-size: 14px; line-height: 1.6; }
+.shared-settings__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 /* Native badges keep approval colors independent of host VChip/glass theme overrides. */
-.shared-settings__badge { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; max-inline-size: 52%; padding: 3px 8px; border: 1px solid rgba(var(--shared-badge-ink), 0.3); border-radius: 4px; font-size: 12px; font-weight: 600; line-height: 20px; color: rgb(var(--shared-badge-ink)); background-color: rgba(var(--shared-badge-fill), 0.2); --shared-badge-ink: 75, 85, 99; --shared-badge-fill: 243, 244, 246; }
-.shared-settings__record-head .shared-settings__badge { max-inline-size: 52%; }
+.shared-settings__badge { display: inline-flex; align-items: center; justify-content: center; gap: 4px; flex: 0 0 auto; max-inline-size: 52%; min-block-size: 32px; padding: 6px 10px; border: 0; border-radius: 7px; font-size: 13px; font-weight: 400; line-height: 20px; color: rgb(var(--shared-badge-ink)); background-color: rgba(var(--shared-badge-fill), 0.13); --shared-badge-ink: 139, 145, 155; --shared-badge-fill: 139, 145, 155; }
 .shared-settings__badge :deep(.v-icon) { flex: 0 0 auto; }
-.shared-settings__badge[data-tone="success"] { --shared-badge-ink: 21, 103, 52; --shared-badge-fill: 232, 245, 233; }
-.shared-settings__badge[data-tone="error"] { --shared-badge-ink: 176, 32, 42; --shared-badge-fill: 255, 235, 238; }
-.shared-settings__badge[data-tone="info"] { --shared-badge-ink: 0, 88, 153; --shared-badge-fill: 227, 242, 253; }
-.shared-settings__badge[data-tone="warning"] { --shared-badge-ink: 133, 77, 14; --shared-badge-fill: 255, 248, 225; }
+.shared-settings__badge[data-tone="success"] { --shared-badge-ink: 87, 185, 133; --shared-badge-fill: 60, 180, 110; }
+.shared-settings__badge[data-tone="error"] { --shared-badge-ink: 223, 123, 123; --shared-badge-fill: 220, 60, 60; }
+.shared-settings__badge[data-tone="info"] { --shared-badge-ink: 86, 160, 220; --shared-badge-fill: 60, 140, 220; }
+.shared-settings__badge[data-tone="warning"] { --shared-badge-ink: 219, 163, 75; --shared-badge-fill: 220, 150, 60; }
+.shared-settings__info { align-self: flex-start; inline-size: fit-content; max-inline-size: 100%; min-inline-size: 0; padding: 7px 10px; border-radius: 7px; background-color: rgba(var(--v-theme-on-surface), 0.06); overflow-wrap: anywhere; }
 .shared-settings__preview { display: flex; flex-wrap: wrap; gap: 4px; }
+.shared-settings__preview > span { min-inline-size: 0; }
+.shared-settings__claim-info { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
 .shared-settings__meta, .shared-settings__id { color: rgba(var(--v-theme-on-surface), 0.72); }
 .shared-settings__error { margin: 0; color: rgb(var(--v-theme-error)); }
 .shared-settings__reason { margin: 0; }

@@ -8,21 +8,48 @@ from playwright.async_api import async_playwright
 
 
 BADGE_COLORS = {
-    'success': ('rgb(21, 103, 52)', 'rgba(232, 245, 233, 0.2)'),
-    'error': ('rgb(176, 32, 42)', 'rgba(255, 235, 238, 0.2)'),
-    'info': ('rgb(0, 88, 153)', 'rgba(227, 242, 253, 0.2)'),
-    'warning': ('rgb(133, 77, 14)', 'rgba(255, 248, 225, 0.2)'),
-    'secondary': ('rgb(75, 85, 99)', 'rgba(243, 244, 246, 0.2)'),
+    'success': ('rgb(87, 185, 133)', 'rgba(60, 180, 110, 0.13)'),
+    'error': ('rgb(223, 123, 123)', 'rgba(220, 60, 60, 0.13)'),
+    'info': ('rgb(86, 160, 220)', 'rgba(60, 140, 220, 0.13)'),
+    'warning': ('rgb(219, 163, 75)', 'rgba(220, 150, 60, 0.13)'),
+    'secondary': ('rgb(139, 145, 155)', 'rgba(139, 145, 155, 0.13)'),
 }
 
 
-async def verify_badge_colors(dialog):
+async def verify_badge_colors(dialog, all_tones=True):
     badges = await dialog.locator('.shared-settings__badge').evaluate_all('''elements =>
         elements.map(element => ({tone: element.dataset.tone, text: element.textContent,
-            color: getComputedStyle(element).color, background: getComputedStyle(element).backgroundColor}))''')
-    assert set(BADGE_COLORS).issubset({badge['tone'] for badge in badges}), badges
+            color: getComputedStyle(element).color, background: getComputedStyle(element).backgroundColor,
+            border: getComputedStyle(element).borderTopWidth, radius: getComputedStyle(element).borderRadius}))''')
+    if all_tones:
+        assert set(BADGE_COLORS).issubset({badge['tone'] for badge in badges}), badges
     for badge in badges:
         assert (badge['color'], badge['background']) == BADGE_COLORS[badge['tone']], badge
+        assert badge['border'] == '0px' and badge['radius'] == '7px', badge
+
+
+async def verify_record_layout(dialog):
+    records = await dialog.locator('.shared-settings__record').evaluate_all('''elements => elements.map(element => {
+        const head = element.querySelector('.shared-settings__record-head')
+        const title = head.querySelector('strong').getBoundingClientRect()
+        const badge = head.querySelector('.shared-settings__badge').getBoundingClientRect()
+        const bounds = head.getBoundingClientRect()
+        return {single: element.querySelectorAll('.shared-settings__badge').length === 1,
+            right: Math.abs(badge.right - bounds.right) < 2, top: Math.abs(badge.top - bounds.top) < 2,
+            separate: title.right <= badge.left, fits: element.scrollWidth <= element.clientWidth + 1}
+    })''')
+    assert records and all(all(record.values()) for record in records), records
+    infos = await dialog.locator('.shared-settings__info').evaluate_all('''elements => elements.map(element => ({
+        background: getComputedStyle(element).backgroundColor,
+        padding: getComputedStyle(element).padding, radius: getComputedStyle(element).borderRadius,
+        fits: element.scrollWidth <= element.clientWidth + 1,
+        contained: element.getBoundingClientRect().right <= element.closest('article').getBoundingClientRect().right + 1
+    }))''')
+    assert infos, infos
+    for info in infos:
+        assert info['background'] in ('rgba(0, 0, 0, 0.06)', 'rgba(255, 255, 255, 0.06)'), info
+        assert info['padding'] == '7px 10px' and info['radius'] == '7px', info
+        assert info['fits'] and info['contained'], info
 
 
 async def verify(base_url, output, executable_path, host_css=None):
@@ -75,6 +102,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await first.locator('.shared-settings__id').count() == 1
             assert '申请编号：' in await first.inner_text()
             await verify_badge_colors(dialog)
+            await verify_record_layout(dialog)
             if host_css:
                 stylesheet = await page.add_style_tag(path=str(host_css))
                 for scheme in ('light', 'dark'):
@@ -86,6 +114,7 @@ async def verify(base_url, output, executable_path, host_css=None):
                         }
                     }''', scheme)
                     await verify_badge_colors(dialog)
+                    await verify_record_layout(dialog)
                     await first.scroll_into_view_if_needed()
                     await page.screenshot(path=str(output / f'shared-glass-{scheme}-{width}.png'), full_page=True)
                 await page.evaluate('() => window.resourceflowSetTheme("light")')
@@ -144,13 +173,40 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert '最近更新' in await claim.inner_text()
             assert '下载方：朋友A' in await claim.inner_text()
             assert '占位编号：' in await claim.inner_text()
-            claim_identity = await claim.locator('.shared-settings__badges').inner_text()
+            claim_identity = await claim.locator('.shared-settings__claim-info').inner_text()
             assert '玫瑰战争 · TMDB 123 · S01E05 · 分辨率 1080p' in claim_identity
+            assert await claim.locator('.shared-settings__claim-info .shared-settings__info').count() == 2
+            for label in ('已完成', '已入队', '已释放'):
+                assert await records.locator('.shared-settings__record-head .shared-settings__badge').filter(has_text=label).count() == 1
+            await verify_badge_colors(dialog, all_tones=False)
+            await verify_record_layout(dialog)
             assert await claim.locator('.shared-settings__claim-meta').evaluate(
                 "element => getComputedStyle(element).display") == 'grid'
             assert '23.976 FPS' in await claim.inner_text()
             await claim.scroll_into_view_if_needed()
             await page.screenshot(path=str(output / f"shared-claims-{width}.png"), full_page=True)
+            if host_css:
+                stylesheet = await page.add_style_tag(path=str(host_css))
+                for scheme in ('light', 'dark'):
+                    await page.evaluate('scheme => window.resourceflowSetTheme(scheme)', scheme)
+                    await page.evaluate('''scheme => {
+                        for (const element of [document.documentElement, document.body]) {
+                            element.dataset.theme = 'glass'
+                            element.dataset.glassColorScheme = scheme
+                        }
+                    }''', scheme)
+                    await verify_badge_colors(dialog, all_tones=False)
+                    await verify_record_layout(dialog)
+                    await claim.scroll_into_view_if_needed()
+                    await page.screenshot(path=str(output / f'shared-claims-glass-{scheme}-{width}.png'), full_page=True)
+                await page.evaluate('() => window.resourceflowSetTheme("light")')
+                await page.evaluate('''() => {
+                    for (const element of [document.documentElement, document.body]) {
+                        delete element.dataset.theme
+                        delete element.dataset.glassColorScheme
+                    }
+                }''')
+                await stylesheet.evaluate('element => element.remove()')
             await dialog.get_by_role("tab", name="本机共享申请", exact=True).click()
             await dialog.get_by_role("button", name="核验未完成申请", exact=True).click()
             await dialog.locator(".v-card-text").evaluate("element => { element.scrollTop = 0 }")
@@ -201,7 +257,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert not errors, errors
             await page.close()
         await browser.close()
-    print("Shared settings and task approval verified: 1440, 390 and 320; translucent badges; single request status; no channel polling")
+    print("Shared settings and task approval verified: 1440, 390 and 320; top-right tonal badges; responsive identity/owner backgrounds; no channel polling")
     if host_css:
         print('MoviePilot host stylesheet verified with glass light/dark overrides')
 

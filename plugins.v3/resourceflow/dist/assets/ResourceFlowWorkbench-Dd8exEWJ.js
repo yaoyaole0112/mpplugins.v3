@@ -1200,7 +1200,7 @@ const _hoisted_11$1 = { key: 0 };
 const _hoisted_12$1 = { key: 1 };
 const _hoisted_13$1 = {
   key: 0,
-  class: "shared-settings__preview text-body-2"
+  class: "shared-settings__preview shared-settings__info text-body-2"
 };
 const _hoisted_14$1 = {
   key: 1,
@@ -1215,12 +1215,13 @@ const _hoisted_17$1 = {
   key: 0,
   class: "text-body-2 text-medium-emphasis"
 };
-const _hoisted_18$1 = { class: "shared-settings__badges" };
+const _hoisted_18$1 = { class: "shared-settings__record-head" };
 const _hoisted_19$1 = ["data-tone"];
-const _hoisted_20$1 = { class: "text-body-2" };
-const _hoisted_21$1 = { class: "text-body-2" };
-const _hoisted_22$1 = { class: "shared-settings__meta shared-settings__claim-meta text-caption" };
-const _hoisted_23$1 = { class: "shared-settings__id" };
+const _hoisted_20$1 = { class: "shared-settings__claim-info text-body-2" };
+const _hoisted_21$1 = { class: "shared-settings__info" };
+const _hoisted_22$1 = { class: "shared-settings__info" };
+const _hoisted_23$1 = { class: "shared-settings__meta shared-settings__claim-meta text-caption" };
+const _hoisted_24$1 = { class: "shared-settings__id" };
 
 const {onMounted: onMounted$1,ref: ref$1,watch: watch$1} = await importShared('vue');
 
@@ -1658,19 +1659,27 @@ return (_ctx, _cache) => {
               key: row.id,
               class: "shared-settings__record"
             }, [
-              _createElementVNode$1("strong", null, _toDisplayString$1(row.title), 1),
               _createElementVNode$1("div", _hoisted_18$1, [
+                _createElementVNode$1("strong", null, _toDisplayString$1(row.title), 1),
                 _createElementVNode$1("span", {
                   class: "shared-settings__badge",
                   "data-tone": phaseColors[row.state] || 'secondary'
-                }, _toDisplayString$1(phaseNames[row.state] || row.state), 9, _hoisted_19$1),
-                _createElementVNode$1("span", _hoisted_20$1, "下载方：" + _toDisplayString$1(row.label || '-'), 1),
-                _createElementVNode$1("span", _hoisted_21$1, _toDisplayString$1(releaseDetails(row)), 1)
+                }, [
+                  _createVNode$1(_component_VIcon, {
+                    icon: phaseIcons[row.state] || 'mdi-clock-outline',
+                    size: "16"
+                  }, null, 8, ["icon"]),
+                  _createTextVNode$1(" " + _toDisplayString$1(phaseNames[row.state] || row.state), 1)
+                ], 8, _hoisted_19$1)
               ]),
-              _createElementVNode$1("div", _hoisted_22$1, [
+              _createElementVNode$1("div", _hoisted_20$1, [
+                _createElementVNode$1("span", _hoisted_21$1, "下载方：" + _toDisplayString$1(row.label || '-'), 1),
+                _createElementVNode$1("span", _hoisted_22$1, _toDisplayString$1(releaseDetails(row)), 1)
+              ]),
+              _createElementVNode$1("div", _hoisted_23$1, [
                 _createElementVNode$1("span", null, "占位时间：" + _toDisplayString$1(timestamp(row.created)), 1),
                 _createElementVNode$1("span", null, "最近更新：" + _toDisplayString$1(timestamp(row.updated)), 1),
-                _createElementVNode$1("span", _hoisted_23$1, "占位编号：" + _toDisplayString$1(row.id), 1)
+                _createElementVNode$1("span", _hoisted_24$1, "占位编号：" + _toDisplayString$1(row.id), 1)
               ])
             ]))
           }), 128))
@@ -1680,7 +1689,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-5dc642c0"]]);
+const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-e32b82bc"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle} = await importShared('vue');
 
