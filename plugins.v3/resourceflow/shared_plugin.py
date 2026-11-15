@@ -177,6 +177,8 @@ class SharedResourceMixin:
             "request_id": row["request_id"], "title": row["title"], "phase": row["phase"],
             "task_id": row["task_id"], "task_name": getattr(task, "name", None),
             "downloader": row.get("downloader"), "created": row.get("created"), "updated": row.get("updated"),
+            "download_started_at": row.get("download_started_at"),
+            "timeout_at": row.get("timeout_at"), "timeout_reason": row.get("timeout_reason", ""),
             "error": row.get("error", ""), "approved": len(approved), "rejected": rejected,
             "file_count": len(files), "completed": len(row.get("done") or []),
             "files": [{**{key: item.get(key) for key in
@@ -417,10 +419,12 @@ class SharedResourceMixin:
                         self._save_inflight_entries()
                 result = self._add_local_prechecked_torrent(
                     content, cookies, task, downloader, service, expected_hash,
-                    {"accepted": paths, "hold_paused": True, "shared_tag": self._shared_tag(entry)}, title)
+                    selection := {"accepted": paths, "hold_paused": True,
+                                  "shared_tag": self._shared_tag(entry)}, title)
                 if not result:
                     self._shared_phase(entry, "uncertain", error="添加或选集未确认，保留占位等待核验")
                     return None
+                entry["selection_pending"] = bool(selection.get("selection_pending"))
                 self._shared_phase(entry, "awaiting_start")
                 self._start_shared_download(entry, task, downloader)
                 logger.info(f"共享审批通过 {title}：批准 {len(paths)} 个文件，下载器已确认")
@@ -483,6 +487,8 @@ class SharedResourceMixin:
         return f"resourceflow-claim-{entry['request_id']}"
 
     def _start_shared_download(self, entry, task, downloader):
+        if entry.get("selection_pending"):
+            raise SharedError("文件清单暂不可用，等待重试选集后再启动")
         if not self._shared_task_ready(task, entry["hash"]):
             raise SharedError("任务已停用或关闭共享去重，保持暂停")
         service = DownloaderHelper().get_service(name=entry["downloader"])
@@ -503,8 +509,12 @@ class SharedResourceMixin:
                                     if file_id not in entry.get("done", [])])
         if not self._shared_task_ready(task, entry["hash"]):
             raise SharedError("确认期间设置已变更，保持暂停")
+        entry.setdefault("start_attempt_at", time.time())
+        self._save_shared()
         if not downloader.start_torrents(entry["hash"]):
             raise SharedError("下载器启动未确认，保留占位")
+        entry.setdefault("download_started_at", entry.get("start_attempt_at") or time.time())
+        entry.pop("start_attempt_at", None)
         self._shared_phase(entry, "queued", error="")
 
     def reconcile_shared_claims(self):
@@ -553,6 +563,9 @@ class SharedResourceMixin:
         if error:
             raise SharedError("下载器查询失败，保留共享占位")
         if not torrents:
+            if entry.get("timeout_cancel_pending"):
+                self._release_timed_out_claims(entry)
+                return
             if entry.get("attempted_add") and time.time() - entry["created"] < 300:
                 return
             entry["absent_checks"] = entry.get("absent_checks", 0) + 1
@@ -573,13 +586,17 @@ class SharedResourceMixin:
         if self._shared_tag(entry) not in {str(tag).strip() for tag in tags}:
             raise SharedError("任务缺少本申请归属标签，不自动操作或释放占位")
         approved = [row for row in entry["files"] if row["id"] in entry["approved"]]
-        if entry["phase"] in {"adding", "uncertain", "reserved", "requesting"}:
+        if entry.get("timeout_cancel_pending"):
+            self._cancel_timed_out_download(entry, downloader)
+            return
+        if entry["phase"] in {"adding", "uncertain", "reserved", "requesting"} or entry.get("selection_pending"):
             task = self._task_configs.get(entry["task_id"])
             if not task or not self._shared_task_ready(task, entry["hash"]):
                 raise SharedError("原任务不可运行，保留暂停任务等待核验")
             if not self._select_recent_episode_files(downloader, entry["hash"],
                     {"accepted": {row["path"] for row in approved}, "hold_paused": True}, kind, task.name):
                 raise SharedError("重启后选集未确认，保持暂停")
+            entry["selection_pending"] = False
             self._shared_phase(entry, "awaiting_start")
         snapshot = download_files(downloader.get_files(entry["hash"]), kind)
         if not snapshot:
@@ -602,10 +619,42 @@ class SharedResourceMixin:
             self._save_shared()
         if len(entry.get("done", [])) == len(approved):
             self._shared_phase(entry, "completed", error="")
-        elif entry["phase"] == "awaiting_start":
-            task = self._task_configs.get(entry["task_id"])
-            if not task:
-                raise SharedError("原任务已不存在，保持暂停等待核验")
-            self._start_shared_download(entry, task, downloader)
         else:
-            self._shared_phase(entry, "queued", error="")
+            if entry["phase"] == "queued" and not entry.get("download_started_at"):
+                # Existing queued claims get a fresh, durable observation baseline after upgrade.
+                entry["download_started_at"] = time.time()
+                self._save_shared()
+            if entry.get("download_started_at") and time.time() - entry["download_started_at"] >= 2 * 60 * 60:
+                entry["timeout_cancel_pending"] = True
+                entry["timeout_at"] = time.time()
+                entry["timeout_reason"] = "下载超过 2 小时，按获批文件判断后取消未完成部分"
+                self._shared_phase(entry, "timeout_cancel_pending",
+                                   error="超时取消进行中；确认下载器任务停止前不会释放占位")
+                self._cancel_timed_out_download(entry, downloader)
+            elif entry["phase"] == "awaiting_start":
+                task = self._task_configs.get(entry["task_id"])
+                if not task:
+                    raise SharedError("原任务已不存在，保持暂停等待核验")
+                self._start_shared_download(entry, task, downloader)
+            else:
+                self._shared_phase(entry, "queued", error="")
+
+    def _cancel_timed_out_download(self, entry, downloader):
+        """Stop and remove the owned torrent without data before releasing unfinished claims."""
+        if not downloader.stop_torrents(entry["hash"]):
+            raise SharedError("下载超过 2 小时，但下载器未确认停止；继续保留占位")
+        if not downloader.delete_torrents(ids=entry["hash"], delete_file=False):
+            raise SharedError("下载超过 2 小时，但下载器未确认移除任务；继续保留占位")
+        torrents, error = downloader.get_torrents(ids=[entry["hash"]])
+        if error or torrents:
+            raise SharedError("超时任务移除状态无法确认；继续保留占位")
+        self._release_timed_out_claims(entry)
+
+    def _release_timed_out_claims(self, entry):
+        remaining = [claim for file_id, claim in entry.get("approved", {}).items()
+                     if file_id not in entry.get("done", [])]
+        if remaining:
+            self._shared_update(entry, [{"claim": claim, "state": "released"} for claim in remaining],
+                                absent=True)
+        self._shared_phase(entry, "released",
+                           error="超过 2 小时仍有获批集未完成；下载任务已移除但数据保留，未完成集占位已释放")

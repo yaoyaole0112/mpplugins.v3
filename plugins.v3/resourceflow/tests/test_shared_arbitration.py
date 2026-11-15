@@ -284,6 +284,8 @@ class AdmissionTests(unittest.TestCase):
     def test_atomic_approval_then_paused_subset_then_queue_ack_then_start(self):
         self.assertEqual(self.add(), "a" * 40)
         self.assertEqual(self.events, ["reserve", "add", "update", "start"])
+        self.assertIn("download_started_at", self.entry())
+        self.assertNotIn("start_attempt_at", self.entry())
         selection = self.plugin._add_local_prechecked_torrent.call_args.args[6]
         self.assertEqual(selection["accepted"], {"Show.S01E01.mkv"})
         self.assertTrue(selection["hold_paused"])
@@ -331,6 +333,25 @@ class AdmissionTests(unittest.TestCase):
         self.assertIsNone(self.add())
         self.assertEqual(self.events, ["reserve"])
         self.assertEqual(self.entry()["phase"], "uncertain")
+
+    def test_temporary_file_list_failure_keeps_paused_task_and_retries_selection(self):
+        def add_with_pending_selection(*args):
+            args[6]["selection_pending"] = True
+            return "a" * 40
+
+        self.plugin._add_local_prechecked_torrent.side_effect = add_with_pending_selection
+        self.assertEqual(self.add(), "a" * 40)
+        self.assertTrue(self.entry()["selection_pending"])
+        self.assertEqual(self.entry()["phase"], "awaiting_start")
+        self.assertIn("等待重试选集", self.entry()["error"])
+
+        self.plugin._select_recent_episode_files = Mock(return_value=True)
+        snapshot = [{"index": 0, "name": "Show.S01E01.mkv", "size": 10, "progress": 0.2, "priority": 1},
+                    {"index": 1, "name": "Show.S01E02.mkv", "size": 10, "progress": 0, "priority": 0}]
+        self.reconcile(torrents=[{"tags": self.plugin._shared_tag(self.entry())}], files=snapshot)
+        self.plugin._select_recent_episode_files.assert_called_once()
+        self.assertFalse(self.entry()["selection_pending"])
+        self.assertEqual(self.entry()["phase"], "queued")
 
     def test_task_off_bypasses_shared_transport(self):
         self.task.spec_dedup_enabled = False
@@ -419,6 +440,53 @@ class AdmissionTests(unittest.TestCase):
         self.plugin._select_recent_episode_files.assert_called_once()
         self.assertEqual(self.events, ["update", "start"])
         self.assertEqual(self.entry()["phase"], "queued")
+
+    def test_timeout_releases_only_unfinished_approved_files_and_keeps_completed_claim(self):
+        self.add()
+        second_id = file_row(2, 2)["id"]
+        self.entry()["approved"][second_id] = "c" * 32
+        self.entry()["download_started_at"] = time.time() - 7201
+        snapshot = [
+            {"index": 0, "name": "Show.S01E01.mkv", "size": 10, "progress": 1, "priority": 1},
+            {"index": 1, "name": "Show.S01E02.mkv", "size": 10, "progress": 0.4, "priority": 1},
+        ]
+        owned = [{"tags": self.plugin._shared_tag(self.entry())}]
+        self.downloader.get_torrents.side_effect = [(owned, None), ([], None)]
+        self.downloader.stop_torrents.return_value = True
+        self.downloader.delete_torrents.return_value = True
+        self.reconcile(torrents=owned, files=snapshot)
+
+        updates = [call.args[1] for call in self.plugin._shared_exchange.call_args_list
+                   if call.args[1]["op"] == "update"]
+        flattened = [row for body in updates for row in body["updates"]]
+        self.assertEqual({(row["claim"], row["state"]) for row in flattened
+                          if row["state"] in {"completed", "released"}},
+                         {("b" * 32, "completed"), ("c" * 32, "released")})
+        release_body = next(body for body in updates
+                            if any(row["state"] == "released" for row in body["updates"]))
+        self.assertTrue(release_body["confirmed_absent"])
+        self.assertEqual(self.entry()["phase"], "released")
+        self.assertIn("数据保留", self.entry()["error"])
+        self.downloader.delete_torrents.assert_called_once_with(ids="a" * 40, delete_file=False)
+
+    def test_timeout_keeps_claims_when_task_removal_is_not_confirmed(self):
+        self.add()
+        self.entry()["download_started_at"] = time.time() - 7201
+        owned = [{"tags": self.plugin._shared_tag(self.entry())}]
+        snapshot = [{"index": 0, "name": "Show.S01E01.mkv", "size": 10,
+                     "progress": 0.4, "priority": 1}]
+        self.downloader.get_torrents.return_value = (owned, None)
+        self.downloader.stop_torrents.return_value = True
+        self.downloader.delete_torrents.return_value = False
+        with self.assertRaisesRegex(SharedError, "继续保留占位"):
+            self.reconcile(torrents=owned, files=snapshot)
+        self.assertEqual(self.entry()["phase"], "timeout_cancel_pending")
+        self.assertFalse(any(
+            row["state"] == "released"
+            for call in self.plugin._shared_exchange.call_args_list
+            if call.args[1]["op"] == "update"
+            for row in call.args[1]["updates"]
+        ))
 
 
 class TransportTests(unittest.TestCase):

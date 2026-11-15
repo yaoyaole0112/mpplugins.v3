@@ -129,6 +129,17 @@ class DownloadDedupTest(unittest.TestCase):
         self.assertIsNone(self.download())
         self.downloader.delete_torrents.assert_called_once_with(ids=self.expected_hash, delete_file=False)
 
+    def test_shared_selection_failure_keeps_paused_torrent_for_reconciliation(self):
+        self.task.recent_episodes_only = True
+        selection = {"accepted": {"test.mkv"}, "shared_tag": "resourceflow-claim-test"}
+        self.plugin._recent_episode_file_selection.return_value = selection
+        self.plugin._select_recent_episode_files.return_value = False
+
+        self.assertEqual(self.download(), self.expected_hash)
+        self.assertTrue(selection["selection_pending"])
+        self.downloader.delete_torrents.assert_not_called()
+        self.downloader.start_torrents.assert_not_called()
+
     def test_mismatched_tag_hash_is_not_modified(self):
         self.downloader.add_torrent.return_value = True
         self.downloader.get_torrent_id_by_tag.return_value = "f" * 40

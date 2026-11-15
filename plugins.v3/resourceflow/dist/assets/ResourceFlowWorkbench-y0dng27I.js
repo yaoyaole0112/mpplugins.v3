@@ -1235,11 +1235,12 @@ const error = ref$1('');
 const tab = ref$1('requests');
 const phaseNames = {
   requesting: '等待审批', reserved: '已获准', adding: '暂停添加中', awaiting_start: '等待入队确认',
+  timeout_cancel_pending: '超时取消中',
   queued: '已入队', completed: '已完成', released: '已释放', rejected: '已排除', uncertain: '待核验',
 };
 const phaseColors = {
   requesting: 'info', reserved: 'success', adding: 'info', awaiting_start: 'warning',
-  queued: 'info', completed: 'success', released: 'secondary', rejected: 'error', uncertain: 'warning',
+  queued: 'info', timeout_cancel_pending: 'warning', completed: 'success', released: 'secondary', rejected: 'error', uncertain: 'warning',
 };
 const specLabels = { resolution: '分辨率', effects: '特效', codec: '编码', source: '来源', fps: '帧率', size: '大小' };
 const decisionNames = { approved: '已批准', rejected: '已排除', not_approved: '未获批准', pending: '待审批' };
@@ -1577,6 +1578,12 @@ return (_ctx, _cache) => {
               _createElementVNode$1("div", _hoisted_13$1, [
                 _createElementVNode$1("span", null, "申请时间 " + _toDisplayString$1(timestamp(row.created)), 1),
                 _createElementVNode$1("span", null, "最近更新 " + _toDisplayString$1(timestamp(row.updated)), 1),
+                (row.download_started_at)
+                  ? (_openBlock$1(), _createElementBlock$1("span", { key: 0 }, "下载开始 " + _toDisplayString$1(timestamp(row.download_started_at)), 1))
+                  : _createCommentVNode$1("", true),
+                (row.timeout_at)
+                  ? (_openBlock$1(), _createElementBlock$1("span", { key: 1 }, "超时处理 " + _toDisplayString$1(timestamp(row.timeout_at)), 1))
+                  : _createCommentVNode$1("", true),
                 _createElementVNode$1("span", null, "任务 " + _toDisplayString$1(row.task_name || row.task_id || '-'), 1),
                 _createElementVNode$1("span", null, "下载器 " + _toDisplayString$1(row.downloader || '-'), 1)
               ]),

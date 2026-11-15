@@ -262,7 +262,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -3306,6 +3306,13 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             if recent_selection and not self._select_recent_episode_files(
                 downloader, torrent_hash, recent_selection, "qbittorrent", task.name
             ):
+                if recent_selection.get("shared_tag"):
+                    recent_selection["selection_pending"] = True
+                    try:
+                        downloader.remove_torrents_tag(ids=torrent_hash, tag=random_tag)
+                    except Exception as err:
+                        logger.warning(f"刷流任务 [{task.name}] 移除随机标签失败：{str(err)}")
+                    return torrent_hash
                 try:
                     downloader.delete_torrents(ids=torrent_hash, delete_file=False)
                 except Exception as err:
@@ -3333,6 +3340,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             if recent_selection and not self._select_recent_episode_files(
                 downloader, added_torrent.hashString, recent_selection, "transmission", task.name
             ):
+                if recent_selection.get("shared_tag"):
+                    recent_selection["selection_pending"] = True
+                    return added_torrent.hashString
                 try:
                     downloader.delete_torrents(ids=added_torrent.hashString, delete_file=False)
                 except Exception as err:
