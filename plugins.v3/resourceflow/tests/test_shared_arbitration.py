@@ -91,6 +91,27 @@ class StoreTests(unittest.TestCase):
         for field in ("sender", "instance", "request_id", "fingerprint", "response"):
             self.assertNotIn(field, row)
 
+    def test_claim_displays_chinese_media_title_and_migrates_existing_schema(self):
+        self.send(self.request([{
+            **file_row(),
+            "media_title": "玫瑰战争",
+        }]))
+        self.assertEqual(self.store.recent()[0]["media_title"], "玫瑰战争")
+
+        old_path = Path(self.temp.name) / "old-claims.sqlite3"
+        import sqlite3
+        with sqlite3.connect(old_path) as db:
+            db.execute("""CREATE TABLE claims (
+                id TEXT PRIMARY KEY, group_id TEXT NOT NULL, sender INTEGER NOT NULL,
+                instance TEXT NOT NULL, label TEXT NOT NULL, request_id TEXT NOT NULL,
+                file_id TEXT NOT NULL, media_type TEXT NOT NULL, tmdb_id INTEGER NOT NULL,
+                season INTEGER, episodes TEXT NOT NULL, specs TEXT NOT NULL,
+                title TEXT NOT NULL, state TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL
+            )""")
+        migrated = CoordinatorStore(old_path, "resources", ["resolution"], 5)
+        with migrated.connect() as db:
+            self.assertIn("media_title", {row["name"] for row in db.execute("PRAGMA table_info(claims)")})
+
     def test_selected_resolution_only_ignores_unknown_or_different_other_fields(self):
         self.assertTrue(self.send(self.request())["approved"])
         body = self.request([file_row(codec="H.265", effects="HDR10", fps=60)], instance="b" * 32)

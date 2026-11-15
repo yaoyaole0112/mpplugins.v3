@@ -14,7 +14,7 @@ class RecentEpisodeRuleTest(unittest.TestCase):
                      "_recent_episode_douban_id", "_douban_episode_air_dates"):
             getattr(ResourceFlow, name).cache_clear()
 
-    def select_files(self, paths, media, season_dates=()):
+    def select_files(self, paths, media, season_dates=(), days=3):
         plugin = ResourceFlow.__new__(ResourceFlow)
         plugin.chain = SimpleNamespace(recognize_media=Mock(return_value=media))
         with patch("resourceflow.TorrentHelper") as torrent_helper, patch("resourceflow.TmdbChain") as tmdb:
@@ -22,7 +22,7 @@ class RecentEpisodeRuleTest(unittest.TestCase):
             tmdb.return_value.tmdb_episodes.return_value = [
                 SimpleNamespace(episode_number=number, air_date=value) for number, value in season_dates
             ]
-            return plugin._recent_episode_file_selection(b"torrent", "test")
+            return plugin._recent_episode_file_selection(b"torrent", "test", days)
 
     def test_includes_cutoff_today_and_future_dates(self):
         today = date(2026, 11, 9)
@@ -35,6 +35,13 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         self.assertFalse(ResourceFlow._air_date_is_recent("2026-11-05", today))
         self.assertFalse(ResourceFlow._air_date_is_recent(None, today))
         self.assertFalse(ResourceFlow._air_date_is_recent("2026-02-30", today))
+
+    def test_custom_recent_days_changes_inclusive_cutoff_and_defaults_to_three(self):
+        today = date(2026, 11, 9)
+        self.assertTrue(ResourceFlow._air_date_is_recent("2026-11-06", today))
+        self.assertFalse(ResourceFlow._air_date_is_recent("2026-11-05", today, days=2))
+        self.assertTrue(ResourceFlow._air_date_is_recent("2026-11-07", today, days=2))
+        self.assertEqual(BrushTaskPayload(recent_episodes_only=True).recent_episodes_days, 3)
 
     def test_video_filter_ignores_non_video_files(self):
         self.assertTrue(ResourceFlow._video_file("Season 2/E02.mkv"))

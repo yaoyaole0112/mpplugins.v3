@@ -38,7 +38,8 @@ function timestamp(value) {
 function identity(row) {
   const episodes = (row.episodes || []).map(value => `E${String(value).padStart(2, '0')}`).join(', ')
   const type = row.media_type === 'movie' ? '电影' : `S${String(row.season ?? 0).padStart(2, '0')}${episodes}`
-  return `${row.tmdb_id ? `TMDB ${row.tmdb_id}` : '身份待确认'} · ${type}`
+  const title = row.media_title ? `${row.media_title} · ` : ''
+  return `${title}${row.tmdb_id ? `TMDB ${row.tmdb_id}` : '身份待确认'} · ${type}`
 }
 
 function specifications(specs = {}) {
@@ -163,10 +164,10 @@ defineExpose({ save })
           <span class="text-caption">文件 {{ row.file_count ?? row.files?.length ?? 0 }} · 完成 {{ row.completed || 0 }}</span>
         </div>
         <div class="shared-settings__meta text-caption">
-          <span>申请时间 {{ timestamp(row.created) }}</span><span>最近更新 {{ timestamp(row.updated) }}</span>
-          <span v-if="row.download_started_at">下载开始 {{ timestamp(row.download_started_at) }}</span>
-          <span v-if="row.timeout_at">超时处理 {{ timestamp(row.timeout_at) }}</span>
-          <span>任务 {{ row.task_name || row.task_id || '-' }}</span><span>下载器 {{ row.downloader || '-' }}</span>
+          <span>申请时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
+          <span v-if="row.download_started_at">下载开始：{{ timestamp(row.download_started_at) }}</span>
+          <span v-if="row.timeout_at">超时处理：{{ timestamp(row.timeout_at) }}</span>
+          <span>任务：{{ row.task_name || row.task_id || '-' }}</span><span>下载器：{{ row.downloader || '-' }}</span>
         </div>
         <div v-if="row.files?.length" class="shared-settings__preview text-body-2">
           <span><template v-if="row.files.length > 1">首文件 · </template>{{ identity(row.files[0]) }}</span>
@@ -198,14 +199,14 @@ defineExpose({ save })
         <strong>{{ row.title }}</strong>
         <div class="shared-settings__badges">
           <span class="shared-settings__badge" :data-tone="phaseColors[row.state] || 'secondary'">{{ phaseNames[row.state] || row.state }}</span>
-          <span class="text-body-2">占位方 {{ row.label || '-' }}</span>
+          <span class="text-body-2">下载方：{{ row.label || '-' }}</span>
           <span class="text-body-2">{{ identity(row) }}</span>
         </div>
         <span class="text-body-2">{{ specifications(row.specs) }}</span>
-        <div class="shared-settings__meta text-caption">
-          <span>占位时间 {{ timestamp(row.created) }}</span><span>最近更新 {{ timestamp(row.updated) }}</span>
+        <div class="shared-settings__meta shared-settings__claim-meta text-caption">
+          <span>占位时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
+          <span class="shared-settings__id">占位编号：{{ row.id }}</span>
         </div>
-        <span class="shared-settings__id text-caption">占位编号 {{ row.id }}</span>
       </article>
     </div>
   </section>
@@ -236,6 +237,8 @@ defineExpose({ save })
 .shared-settings__details summary:focus-visible { outline: 2px solid rgb(var(--v-theme-primary)); outline-offset: 2px; }
 .shared-settings__file { display: flex; flex-direction: column; gap: 6px; padding: 12px 0 12px 12px; margin-block-start: 8px; border-inline-start: 2px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .shared-settings__id { font-family: monospace; }
+.shared-settings__claim-meta { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr); }
+.shared-settings__claim-meta .shared-settings__id { overflow-wrap: anywhere; }
 @media (max-width: 599px) {
   .shared-settings__meta { flex-direction: column; align-items: flex-start; gap: 4px; }
   .shared-settings__status > div { flex-wrap: wrap; }

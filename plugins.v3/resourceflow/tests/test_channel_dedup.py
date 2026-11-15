@@ -63,6 +63,17 @@ ed2k://|file|PSYREN -决战游戏-(2026)(tmdbid=297903).S01E05.WEB-DL.1080p.SDR.
         candidate["specs"]["codec"] = "H.265"
         self.assertFalse(same_release(candidate, record, ["resolution", "codec"]))
 
+    def test_hdr_vivid_and_hdr_share_the_same_effect_comparison_value(self):
+        vivid = parse_specs("Show.S01E19.2160p.HDR Vivid.WEB-DL.mkv")
+        hdr = parse_specs("Show.S01E19.2160p.HDR.WEB-DL.mkv")
+        self.assertEqual(vivid["effects"], "HDR")
+        self.assertEqual(hdr["effects"], "HDR")
+        self.assertTrue(same_release(
+            {"tmdb_id": 297903, "season": 1, "episodes": [19], "specs": vivid},
+            {"tmdb_id": 297903, "season": 1, "episodes": [19], "specs": hdr},
+            ["resolution", "effects"],
+        ))
+
     def test_unknown_selected_attribute_fails_open(self):
         record = parse_channel_message("@channel", 1, 1794339396, self.message)
         candidate = parse_candidate_file("PSYREN 决战游戏.S01E05.1080p.WEB-DL.H264.mkv", 1000)

@@ -54,8 +54,12 @@ async def verify(base_url, output, executable_path, host_css=None):
             await first.get_by_text("申请时间", exact=False).wait_for()
             assert '2026' in await first.inner_text()
             assert '11:00:00' in await first.inner_text()
+            assert '申请时间：' in await first.inner_text()
+            assert '最近更新：' in await first.inner_text()
+            assert '任务：' in await first.inner_text()
+            assert '下载器：' in await first.inner_text()
             assert '最近更新' in await first.inner_text()
-            assert 'TMDB 123 · S01E05' in await first.inner_text()
+            assert '玫瑰战争 · TMDB 123 · S01E05' in await first.inner_text()
             assert '23.976 FPS' in await first.inner_text()
             assert await first.locator('.shared-settings__meta').evaluate(
                 "element => getComputedStyle(element).color") == 'rgba(0, 0, 0, 0.72)'
@@ -131,7 +135,11 @@ async def verify(base_url, output, executable_path, host_css=None):
             claim = dialog.locator('.shared-settings__records article').first
             assert '占位时间' in await claim.inner_text()
             assert '最近更新' in await claim.inner_text()
-            assert 'TMDB 123 · S01E05' in await claim.inner_text()
+            assert '下载方：朋友A' in await claim.inner_text()
+            assert '占位编号：' in await claim.inner_text()
+            assert '玫瑰战争 · TMDB 123 · S01E05' in await claim.inner_text()
+            assert await claim.locator('.shared-settings__claim-meta').evaluate(
+                "element => getComputedStyle(element).display") == 'grid'
             assert '23.976 FPS' in await claim.inner_text()
             await claim.scroll_into_view_if_needed()
             await page.screenshot(path=str(output / f"shared-claims-{width}.png"), full_page=True)

@@ -556,7 +556,7 @@ class ResourceDedupTests(unittest.TestCase):
         self.assertEqual(parse_specs('４Ｋ HEVC')['resolution'], '2160p')
         self.assertEqual(parse_specs('UHD H.265')['codec'], 'H.265')
         self.assertEqual(parse_specs('FHD AVC')['resolution'], '1080p')
-        self.assertEqual(parse_specs('HDR Vivid')['effects'], 'HDR Vivid')
+        self.assertEqual(parse_specs('HDR Vivid')['effects'], 'HDR')
         record = self.candidate('Ｓｈｏｗ．２０２６．(tmdbid=123)．Ｓ０１Ｅ０１．４Ｋ．ｍｋｖ')
         self.assertEqual((record['season'], record['episodes'], record['tmdb_id']), (1, [1], 123))
 

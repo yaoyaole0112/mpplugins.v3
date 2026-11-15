@@ -241,6 +241,19 @@ async function saveTask() {
                   <VSwitch v-model="localTask.site_hr_active" label="全站 H&R" color="primary" hide-details inset />
                   <VSwitch v-model="localTask.recent_episodes_only" label="仅下载最近播出剧集" color="primary" hide-details inset />
                 </div>
+                <VRow v-if="localTask.recent_episodes_only">
+                  <VCol cols="12" sm="6" md="4">
+                    <VTextField
+                      v-model.number="localTask.recent_episodes_days"
+                      type="number"
+                      min="1"
+                      max="365"
+                      step="1"
+                      label="最近播出天数"
+                      suffix="天"
+                    />
+                  </VCol>
+                </VRow>
                 <VSelect
                   v-model="localTask.blacklist_site_ids"
                   :items="sites"
@@ -433,8 +446,8 @@ async function saveTask() {
                     <VTextField
                       v-model="downloaderTag"
                       label="下载器标签（可选）"
-                      placeholder="默认：刷流-站点名"
-                      hint="下载器中的种子标签，留空自动使用「刷流-站点名」；同一站点存在多个任务时请设置为不同标签"
+                      placeholder="默认：资源刷流-站点名"
+                      hint="下载器中的种子标签，留空自动使用「资源刷流-站点名」；同一站点存在多个任务时请设置为不同标签"
                       persistent-hint
                     />
                   </VCol>

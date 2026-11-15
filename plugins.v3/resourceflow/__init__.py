@@ -102,6 +102,7 @@ TASK_CONFIG_FIELDS = (
     "qb_category",
     "site_hr_active",
     "recent_episodes_only",
+    "recent_episodes_days",
     "spec_dedup_enabled",
     "blacklist_site_ids",
     "download_types",
@@ -131,6 +132,7 @@ LEGACY_SITE_OVERRIDE_FIELDS = {
     "qb_category",
     "site_hr_active",
     "recent_episodes_only",
+    "recent_episodes_days",
     "blacklist_site_ids",
     "download_types",
     "site_skip_tips",
@@ -159,7 +161,7 @@ class BrushTaskConfig:
     def __init__(self, config: dict):
         """读取并标准化一项刷流任务配置"""
         self.id = str(config.get("id") or uuid.uuid4().hex)
-        self.name = str(config.get("name") or "刷流任务").strip()
+        self.name = str(config.get("name") or "资源刷流任务").strip()
         self.enabled = bool(config.get("enabled", True))
         self.notify = bool(config.get("notify", True))
         self.site_id = int(config.get("site_id") or 0)
@@ -201,6 +203,9 @@ class BrushTaskConfig:
         self.qb_category = self._clean_text(config.get("qb_category"))
         self.site_hr_active = bool(config.get("site_hr_active", False))
         self.recent_episodes_only = bool(config.get("recent_episodes_only", False))
+        self.recent_episodes_days = max(1, min(
+            int(self._parse_number(config.get("recent_episodes_days")) or 3), 365
+        ))
         self.spec_dedup_enabled = bool(task_spec_dedup_enabled(config))
         self.blacklist_site_ids = list(dict.fromkeys(
             int(site_id) for site_id in config.get("blacklist_site_ids", [])
@@ -262,7 +267,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -2431,15 +2436,15 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         self._save_current_task_data("unmanaged", unmanaged_tasks)
         if added_tasks:
             self.__log_and_send_torrent_task_update_message(
-                "【刷流任务种子加入】", "纳入刷流管理", "刷流任务标签匹配", added_tasks
+                "【资源刷流任务种子加入】", "纳入资源刷流管理", "资源刷流任务标签匹配", added_tasks
             )
         if removed_tasks:
             self.__log_and_send_torrent_task_update_message(
-                "【刷流任务种子移除】", "移除刷流管理", "刷流任务标签移除", removed_tasks
+                "【资源刷流任务种子移除】", "移除资源刷流管理", "资源刷流任务标签移除", removed_tasks
             )
         if reset_tasks:
             self.__log_and_send_torrent_task_update_message(
-                "【刷流任务状态更新】", "恢复为正常", "下载器中仍存在对应种子", reset_tasks
+                "【资源刷流任务状态更新】", "恢复为正常", "下载器中仍存在对应种子", reset_tasks
             )
 
     def _is_primary_task_for_torrent(self, task: BrushTaskConfig, torrent: Any) -> bool:
@@ -2838,9 +2843,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         task_names = "、".join(task.name for task in notified_tasks.values())
         self.post_message(
             mtype=NotificationType.SiteMessage,
-            title="【刷流任务全局动态删除】",
+            title="【资源刷流任务全局动态删除】",
             text=(
-                f"任务：{task_names}\n"
+                f"资源刷流任务：{task_names}\n"
                 f"删除：{len(deleted_entries)} 个种子\n"
                 f"当前做种：{self.__bytes_to_gb(remaining_size):.1f} GB"
             ),
@@ -3028,8 +3033,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 self.__send_delete_message(torrent_task, "触发动态删除阈值，系统按做种时间清理")
         if len(limits) > 1 and delete_hashes:
             self.__send_message(
-                "【刷流任务动态删除】",
-                f"任务：{task.name}\n删除：{len(delete_hashes)} 个种子\n当前做种：{self.__bytes_to_gb(total_size):.1f} GB",
+                "【资源刷流任务动态删除】",
+                f"资源刷流任务：{task.name}\n删除：{len(delete_hashes)} 个种子\n当前做种：{self.__bytes_to_gb(total_size):.1f} GB",
             )
         return delete_hashes
 
@@ -3052,7 +3057,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             deleted_tasks.append(torrent_task)
         if deleted_tasks:
             self.__log_and_send_torrent_task_update_message(
-                "【刷流任务状态更新】", "更新为已删除", "下载器中找不到对应种子", deleted_tasks
+                "【资源刷流任务状态更新】", "更新为已删除", "下载器中找不到对应种子", deleted_tasks
             )
 
     def __convert_torrent_info_to_task(self, torrent: Any) -> dict:
@@ -3228,7 +3233,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             return None
         recent_selection = None
         if task.recent_episodes_only:
-            recent_selection = self._recent_episode_file_selection(torrent_content, torrent.title)
+            recent_selection = self._recent_episode_file_selection(
+                torrent_content, torrent.title, task.recent_episodes_days
+            )
             if not recent_selection:
                 return None
         if self._resource_mode(task) != "off":
@@ -4166,12 +4173,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         }
 
     @staticmethod
-    def _air_date_is_recent(air_date: Optional[str], today: date) -> bool:
-        """三天前（含）至未来日期均属于可下载范围。"""
+    def _air_date_is_recent(air_date: Optional[str], today: date, days: int = 3) -> bool:
+        """Configured cutoff (inclusive) through future air dates are eligible."""
         if not air_date:
             return False
         try:
-            return datetime.strptime(air_date, "%Y-%m-%d").date() >= today - timedelta(days=3)
+            return datetime.strptime(air_date, "%Y-%m-%d").date() >= today - timedelta(days=days)
         except (TypeError, ValueError):
             return False
 
@@ -4192,7 +4199,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         match = re.search(r"\b(\d{4})\b", str(year or ""))
         return int(match.group(1)) if match else None
 
-    def _recent_episode_file_selection(self, torrent_content: Union[str, bytes], title: str) -> Optional[dict]:
+    def _recent_episode_file_selection(
+        self, torrent_content: Union[str, bytes], title: str, days: int = 3,
+    ) -> Optional[dict]:
         """预检种子内视频，返回符合近期播出规则的文件路径及其名称。"""
         if not isinstance(torrent_content, bytes):
             return None
@@ -4289,11 +4298,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 detail = ", ".join(
                     f"S{season:02d}E{number:02d}={dates[number]}({sources[number]})" for number in episodes
                 )
-                if all(self._air_date_is_recent(value, today) for value in air_dates):
+                cutoff = today - timedelta(days=days)
+                if all(self._air_date_is_recent(value, today, days) for value in air_dates):
                     accepted.append(path)
-                    logger.info(f"最近播出剧集规则通过文件 {path}：{detail}，日期下限 {today - timedelta(days=3)}")
+                    logger.info(f"最近播出剧集规则通过文件 {path}：{detail}，日期下限 {cutoff}")
                 else:
-                    logger.info(f"最近播出剧集规则排除文件 {path}：{detail}，早于日期下限 {today - timedelta(days=3)}")
+                    logger.info(f"最近播出剧集规则排除文件 {path}：{detail}，早于日期下限 {cutoff}")
             except Exception as err:
                 logger.info(f"最近播出剧集规则排除文件 {path}：{err}")
         if not accepted:
@@ -5146,12 +5156,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         if not task or not task.notify:
             return
         text = (
-            f"任务：{task.name}\n"
+            f"资源刷流任务：{task.name}\n"
             f"站点：{torrent_task.get('site_name') or '未知'}\n"
             f"标题：{torrent_task.get('title') or '未知'}\n"
             f"原因：{reason}"
         )
-        self.post_message(mtype=NotificationType.SiteMessage, title="【刷流任务种子删除】", text=text)
+        self.post_message(mtype=NotificationType.SiteMessage, title="【资源刷流任务种子删除】", text=text)
 
     @staticmethod
     def __build_add_message_text(torrent: Union[TorrentInfo, dict], task_name: str) -> str:
@@ -5160,7 +5170,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             """统一读取候选对象或字典字段"""
             return torrent.get(key, default) if isinstance(torrent, dict) else getattr(torrent, key, default)
 
-        lines = [f"任务：{task_name}"]
+        lines = [f"资源刷流任务：{task_name}"]
         labels = {
             "site_name": "站点",
             "title": "标题",
@@ -5186,7 +5196,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             return
         self.post_message(
             mtype=NotificationType.SiteMessage,
-            title="【刷流任务种子下载】",
+            title="【资源刷流任务种子下载】",
             text=self.__build_add_message_text(torrent, task.name),
         )
 
@@ -5209,7 +5219,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         task = self._get_task_config()
         first_title = torrent_tasks[0].get("title") or "未知种子"
         text = (
-            f"任务：{task.name if task else '未知'}\n"
+            f"资源刷流任务：{task.name if task else '未知'}\n"
             f"内容：{first_title} 等 {len(torrent_tasks)} 个种子已{status}\n"
             f"原因：{reason}"
         )

@@ -42,6 +42,7 @@ export const taskDefaults = {
   qb_category: null,
   site_hr_active: false,
   recent_episodes_only: false,
+  recent_episodes_days: 3,
   spec_dedup_enabled: true,
   blacklist_site_ids: [],
   download_types: [],
@@ -122,6 +123,7 @@ export function normalizeTask(task) {
   result.download_types = [...new Set(result.download_types || [])]
   result.brush_interval = Number(result.brush_interval || 10)
   result.check_interval = Number(result.check_interval || 5)
+  result.recent_episodes_days = Number(result.recent_episodes_days || 3)
   result.timezone_offset = Number(result.timezone_offset || 0)
   result.downloader_tag = result.tag
   return result

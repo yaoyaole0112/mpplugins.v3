@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 
-from .channel_dedup import specs_match
+from .channel_dedup import normalize_effects, specs_match
 from .shared_protocol import (
     MAX_PARTS, SharedError, canonical, decode, digest, encode, parse_part, policy,
 )
@@ -36,7 +36,8 @@ class CoordinatorStore:
                     instance TEXT NOT NULL, label TEXT NOT NULL, request_id TEXT NOT NULL,
                     file_id TEXT NOT NULL, media_type TEXT NOT NULL, tmdb_id INTEGER NOT NULL,
                     season INTEGER, episodes TEXT NOT NULL, specs TEXT NOT NULL,
-                    title TEXT NOT NULL, state TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
+                    title TEXT NOT NULL, media_title TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS claims_identity
                     ON claims(group_id, media_type, tmdb_id, season, state);
                 CREATE TABLE IF NOT EXISTS fragments (
@@ -45,6 +46,9 @@ class CoordinatorStore:
                     PRIMARY KEY(sender, request_id, part));
                 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(claims)")}
+            if "media_title" not in columns:
+                db.execute("ALTER TABLE claims ADD COLUMN media_title TEXT NOT NULL DEFAULT ''")
         self.path.chmod(0o600)
 
     @contextmanager
@@ -169,7 +173,8 @@ class CoordinatorStore:
                 label=str(body.get("label") or instance[:8])[:80], request_id=request_id,
                 file_id=item["id"], media_type=item["media_type"], tmdb_id=item["tmdb_id"],
                 season=item["season"], episodes=canonical(item["episodes"]), specs=canonical(item["specs"]),
-                title=item["title"], state="reserved", created=now, updated=now,
+                title=item["title"], media_title=item["media_title"],
+                state="reserved", created=now, updated=now,
             )
             pending.append(row)
             approved.append({"id": item["id"], "claim": claim})
@@ -177,7 +182,12 @@ class CoordinatorStore:
             return {"ok": True, "approved": [], "rejected": rejected,
                     "pack_rejected": True, "policy": self.policy}
         for row in pending:
-            db.execute("INSERT INTO claims VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tuple(row.values()))
+            db.execute(
+                "INSERT INTO claims "
+                "(id,group_id,sender,instance,label,request_id,file_id,media_type,tmdb_id,season,episodes,specs,"
+                "title,media_title,state,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                tuple(row.values()),
+            )
         return {"ok": True, "approved": approved, "rejected": rejected,
                 "pack_rejected": False, "policy": self.policy}
 
@@ -210,8 +220,14 @@ class CoordinatorStore:
                     raise SharedError("规格数值无效")
             elif not isinstance(value, str) or not 0 < len(value) <= 80:
                 raise SharedError("规格文本无效")
+        if "effects" in specs:
+            specs["effects"] = normalize_effects(specs["effects"])
+        media_title = row.get("media_title", "")
+        if not isinstance(media_title, str):
+            raise SharedError("媒体显示名称无效")
         return {"id": row["id"], "media_type": media_type, "tmdb_id": tmdb_id, "season": season,
-                "episodes": episodes, "specs": specs, "title": str(row.get("title", ""))[:160]}
+                "episodes": episodes, "specs": specs, "title": str(row.get("title", ""))[:160],
+                "media_title": media_title[:120]}
 
     def _update(self, db, sender, instance, body):
         updates = body.get("updates")
@@ -237,11 +253,17 @@ class CoordinatorStore:
 
     def recent(self, limit=100):
         with self.connect() as db:
-            rows = db.execute("SELECT id,label,title,media_type,tmdb_id,season,episodes,specs,state,created,updated "
+            rows = db.execute("SELECT id,label,title,media_title,media_type,tmdb_id,season,episodes,specs,state,created,updated "
                               "FROM claims WHERE group_id=? ORDER BY updated DESC LIMIT ?",
                               (self.group, min(int(limit), 100))).fetchall()
-        return [{**dict(row), "episodes": json.loads(row["episodes"]), "specs": json.loads(row["specs"])}
-                for row in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["episodes"], item["specs"] = json.loads(row["episodes"]), json.loads(row["specs"])
+            if item["specs"].get("effects"):
+                item["specs"]["effects"] = normalize_effects(item["specs"]["effects"])
+            result.append(item)
+        return result
 
     def has_unfinished(self):
         with self.connect() as db:

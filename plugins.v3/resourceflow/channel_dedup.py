@@ -121,6 +121,21 @@ def parse_size(value: Any) -> Optional[int]:
     return int(float(match.group(1)) * (1024 ** units[match.group(2).upper()]))
 
 
+def normalize_effects(value: Any) -> Optional[str]:
+    """Treat HDR Vivid as the same comparison class as ordinary HDR."""
+    if value is None:
+        return None
+    effects = []
+    for item in str(value).split("+"):
+        item = item.strip()
+        if not item:
+            continue
+        if re.fullmatch(r"(?i)HDR[ ._-]*VIVID|MAXPLUS", item):
+            item = "HDR"
+        effects.append(item)
+    return "+".join(sorted(set(effects))) or None
+
+
 def parse_specs(text: Any, size: Any = None) -> dict:
     value = normalize("NFKC", str(text or "")).upper()
     value = re.sub(r"(?<![A-Z0-9])(?:4K|UHD)(?![A-Z0-9])", "2160P", value)
@@ -140,6 +155,7 @@ def parse_specs(text: Any, size: Any = None) -> dict:
             effects.append(label)
     if "HDR Vivid" in effects and "HDR" in effects:
         effects.remove("HDR")
+    normalized_effects = normalize_effects("+".join(effects))
     codec = None
     for pattern, label in (
         (r"(?:H\.?\s*265|HEVC|X265|H265)", "H.265"),
@@ -181,7 +197,7 @@ def parse_specs(text: Any, size: Any = None) -> dict:
             pass
     return {
         "resolution": f"{resolution_match.group(1)}{resolution_match.group(2).lower()}" if resolution_match else None,
-        "effects": "+".join(sorted(set(effects))) if effects else None,
+        "effects": normalized_effects,
         "codec": codec,
         "source": source,
         "fps": fps,
@@ -386,6 +402,9 @@ def specs_match(candidate: dict, record: dict, attributes: Iterable[str], size_t
         left, right = candidate_specs.get(attribute), record_specs.get(attribute)
         if attribute == "size":
             if not _same_size(left, right, size_tolerance_pct):
+                return False
+        elif attribute == "effects":
+            if not left or not right or normalize_effects(left) != normalize_effects(right):
                 return False
         elif left is None or right is None or left != right:
             return False

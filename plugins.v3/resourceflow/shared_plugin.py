@@ -182,7 +182,7 @@ class SharedResourceMixin:
             "error": row.get("error", ""), "approved": len(approved), "rejected": rejected,
             "file_count": len(files), "completed": len(row.get("done") or []),
             "files": [{**{key: item.get(key) for key in
-                         ("id", "path", "media_type", "tmdb_id", "season", "episodes", "specs")},
+                         ("id", "path", "media_type", "tmdb_id", "media_title", "season", "episodes", "specs")},
                        "decision": "approved" if item.get("id") in approved else
                        "rejected" if item.get("id") in decisions else
                        "not_approved" if row["phase"] == "rejected" else "pending",
@@ -353,6 +353,7 @@ class SharedResourceMixin:
     def _shared_candidates(self, content, title, task, selection, spec_hint=""):
         paths = selection.get("accepted") if selection else None
         rows, rejected = [], []
+        display_titles = {}
         for item in parse_torrent_files(content):
             if not self._video_file(item["path"]) or paths is not None and item["path"] not in paths:
                 continue
@@ -366,8 +367,46 @@ class SharedResourceMixin:
                 continue
             candidate["id"] = hashlib.sha256(item["path"].encode()).hexdigest()[:24]
             candidate["title"] = title[:160]
+            candidate["media_title"] = self._shared_media_title(candidate, display_titles)
             rows.append(candidate)
         return rows, rejected
+
+    def _shared_media_title(self, candidate, cache):
+        tmdb_id = candidate.get("tmdb_id")
+        if not tmdb_id:
+            return ""
+        if tmdb_id in cache:
+            return cache[tmdb_id]
+        path = candidate.get("path") or ""
+        meta = MetaInfo(path.rsplit("/", 1)[-1])
+        media_title = ""
+        try:
+            media = self.chain.recognize_media(meta=meta)
+            recognized_id = getattr(media, "tmdb_id", None)
+            if recognized_id and int(recognized_id) != int(tmdb_id):
+                cache[tmdb_id] = ""
+                return ""
+            names = [
+                getattr(media, field, "")
+                for field in ("title", "cn_name", "hk_title", "tw_title", "sg_title")
+            ]
+            names.extend(getattr(media, "names", []) or [])
+            media_title = next(
+                (str(name).strip() for name in names
+                 if isinstance(name, str) and re.search(r"[\u3400-\u9fff]", name)),
+                "",
+            )
+        except Exception:
+            pass
+        if not media_title:
+            media_title = next(
+                (str(getattr(meta, field, "") or "").strip()
+                 for field in ("cn_name", "name")
+                 if re.search(r"[\u3400-\u9fff]", str(getattr(meta, field, "") or ""))),
+                "",
+            )
+        cache[tmdb_id] = media_title[:120]
+        return cache[tmdb_id]
 
     def _add_prechecked_torrent(self, content, cookies, task, downloader, service, expected_hash, selection, title,
                                spec_hint=""):
@@ -391,7 +430,8 @@ class SharedResourceMixin:
                 body = {"op": "reserve", "revision": current_policy["revision"],
                         "pack_policy": self._channel_dedup_pack_policy,
                         "files": [{**{key: row.get(key) for key in
-                                   ("id", "title", "media_type", "tmdb_id", "season", "episodes")},
+                                   ("id", "title", "media_type", "tmdb_id", "media_title",
+                                    "season", "episodes")},
                                    "specs": {key: row["specs"].get(key) for key in current_policy["attributes"]}}
                                   for row in candidates]}
                 entry = {"request_id": request_id, "body": body, "title": title[:160],
