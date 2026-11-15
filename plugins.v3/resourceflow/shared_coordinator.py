@@ -280,6 +280,7 @@ class BotWorker:
         self.thread = None
         self.last_error = ""
         self.last_ok = None
+        self.ready_event = threading.Event()
         self._sent_at = {}
 
     def call(self, method, payload):
@@ -334,6 +335,7 @@ class BotWorker:
                         if (self.call("getWebhookInfo", {}) or {}).get("url"):
                             raise SharedError("此 Bot 已设置 Webhook，请使用独立的协调 Bot")
                         verified = True
+                        self.ready_event.set()
                     self.poll_once()
                     self.last_ok, self.last_error = time.time(), ""
                 except Exception as error:

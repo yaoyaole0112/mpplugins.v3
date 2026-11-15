@@ -57,8 +57,7 @@ class SharedResourceMixin:
     def _sync_shared_policy(self):
         with self._shared_rpc_lock:
             if self._shared_settings.host_coordinator:
-                if not self._shared_store:
-                    raise SharedError("本机协调端尚未就绪，暂缓新增下载")
+                self._ensure_shared_worker()
                 self._apply_shared_policy(self._shared_store.policy)
             else:
                 response = self._shared_exchange(uuid.uuid4().hex, {"op": "policy"})
@@ -123,6 +122,7 @@ class SharedResourceMixin:
         self._shared_worker = None
         self._shared_store = None
         self._shared_stopping = False
+        self._shared_worker_retry_at = 0
         self._shared_error = self.get_data("shared_retry_error") or ""
         self._shared_last_ok = None
         raw = dict(config.get("shared") or {})
@@ -144,6 +144,7 @@ class SharedResourceMixin:
             return
         if not config.bot_token:
             self._shared_error = "协调端尚未配置 Bot Token"
+            self._shared_worker_retry_at = time.time() + 30
             return
         try:
             route = digest([config.bot_username, config.group])[:16]
@@ -157,8 +158,42 @@ class SharedResourceMixin:
                 proxies=settings.PROXY,
             )
             self._shared_worker.start()
-        except Exception:
-            self._shared_error = "协调服务启动失败，请检查配置与数据库目录"
+            self._shared_error = ""
+            self._shared_worker_retry_at = 0
+        except Exception as error:
+            self._shared_store = None
+            self._shared_worker = None
+            self._shared_worker_retry_at = time.time() + 30
+            detail = str(error).strip().replace("\n", " ")[:160]
+            cause = f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+            self._shared_error = f"协调服务启动失败（{cause}），30 秒后自动重试"
+
+    def _ensure_shared_worker(self):
+        if self._shared_stopping:
+            raise SharedError("本机协调端正在停止或重启，暂缓新增下载")
+        if not self._shared_settings.host_coordinator:
+            raise SharedError("当前实例未启用本机协调端")
+        worker = self._shared_worker
+        if worker and worker.thread and worker.thread.is_alive() and self._shared_store:
+            if worker.ready_event.is_set():
+                return
+            reason = worker.last_error or "协调 Bot 正在连接 Telegram"
+            raise SharedError(f"{reason}，暂缓新增下载")
+        if worker and worker.thread and not worker.thread.is_alive() and not self._shared_worker_retry_at:
+            self._shared_error = worker.last_error or "协调 Bot 接收线程已停止"
+            self._shared_worker_retry_at = time.time() + 30
+        if time.time() < self._shared_worker_retry_at:
+            reason = self._shared_error or "协调服务启动失败"
+            raise SharedError(f"{reason}，暂缓新增下载")
+        self._shared_worker = None
+        self._shared_store = None
+        self._start_shared_worker()
+        worker = self._shared_worker
+        if not self._shared_store or not worker or not worker.thread or not worker.thread.is_alive():
+            raise SharedError(f"{self._shared_error or '本机协调端启动失败'}，暂缓新增下载")
+        if not worker.ready_event.is_set():
+            reason = worker.last_error or "协调 Bot 正在连接 Telegram"
+            raise SharedError(f"{reason}，暂缓新增下载")
 
     def _stop_shared(self):
         self._shared_stopping = True
@@ -199,7 +234,9 @@ class SharedResourceMixin:
         claims = list(getattr(self, "_shared_claims", {}).values())
         return schemas.Response(success=True, data={
             **config, "token_configured": bool(token),
-            "coordinator_running": bool(worker and worker.thread and worker.thread.is_alive()),
+            "coordinator_running": bool(worker and worker.thread and worker.thread.is_alive()
+                                         and getattr(worker, "ready_event", None)
+                                         and worker.ready_event.is_set()),
             "last_error": self._shared_error or (worker.last_error if worker else ""),
             "last_ok": self._shared_last_ok, "coordinator_last_ok": worker.last_ok if worker else None,
             "retry_at": self._shared_retry_at,
@@ -238,6 +275,7 @@ class SharedResourceMixin:
                 self._shared_settings = payload
                 self._shared_stopping = False
                 self._shared_error = ""
+                self._shared_worker_retry_at = 0
                 self._save_config()
                 if restart:
                     self._start_shared_worker()

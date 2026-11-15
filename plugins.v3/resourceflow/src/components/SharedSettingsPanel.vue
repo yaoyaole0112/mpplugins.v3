@@ -22,8 +22,12 @@ const phaseColors = {
   queued: 'info', timeout_cancel_pending: 'warning', completed: 'success', released: 'secondary', rejected: 'error', uncertain: 'warning',
 }
 const specLabels = { resolution: '分辨率', effects: '特效', codec: '编码', source: '来源', fps: '帧率', size: '大小' }
-const decisionNames = { approved: '已批准', rejected: '已排除', not_approved: '未获批准', pending: '待审批' }
-const decisionColors = { approved: 'success', rejected: 'error', not_approved: 'warning', pending: 'info' }
+const phaseIcons = {
+  requesting: 'mdi-clock-outline', reserved: 'mdi-check-circle-outline', adding: 'mdi-clock-outline',
+  awaiting_start: 'mdi-clock-outline', timeout_cancel_pending: 'mdi-clock-alert-outline',
+  queued: 'mdi-check-circle-outline', completed: 'mdi-check-circle-outline',
+  released: 'mdi-minus-circle-outline', rejected: 'mdi-close-circle-outline', uncertain: 'mdi-help-circle-outline',
+}
 
 function timestamp(value) {
   if (!value) return '-'
@@ -52,6 +56,17 @@ function specifications(specs = {}) {
 
 function releaseDetails(row) {
   return `${identity(row)} · ${specifications(row.specs)}`
+}
+
+function requestSummary(row) {
+  const approved = Number(row.approved || 0)
+  const rejected = row.rejected?.length || 0
+  const completed = Number(row.completed || 0)
+  if (row.phase === 'rejected') return `已排除（${rejected || row.file_count || 0}）`
+  if (row.phase === 'queued' || row.phase === 'awaiting_start') return `已入队（${approved}）`
+  if (row.phase === 'completed') return `已完成（${completed || approved}）`
+  if (['reserved', 'adding'].includes(row.phase)) return `已批准（${approved}）`
+  return phaseNames[row.phase] || row.phase
 }
 
 async function load(reset = false) {
@@ -160,12 +175,12 @@ defineExpose({ save })
     <div v-if="tab === 'requests'" class="shared-settings__records">
       <div v-if="!state.requests?.length" class="text-body-2 text-medium-emphasis">暂无共享申请</div>
       <article v-for="row in state.requests || []" :key="row.request_id" class="shared-settings__record">
-        <strong>{{ row.title }}</strong>
-        <div class="shared-settings__badges">
-          <span class="shared-settings__badge" :data-tone="phaseColors[row.phase] || 'secondary'">{{ phaseNames[row.phase] || row.phase }}</span>
-          <span class="shared-settings__badge" data-tone="success"><VIcon icon="mdi-check-circle-outline" size="16" />批准 {{ row.approved || 0 }}</span>
-          <span class="shared-settings__badge" data-tone="error"><VIcon icon="mdi-close-circle-outline" size="16" />排除 {{ row.rejected?.length || 0 }}</span>
-          <span class="text-caption">文件 {{ row.file_count ?? row.files?.length ?? 0 }} · 完成 {{ row.completed || 0 }}</span>
+        <div class="shared-settings__record-head">
+          <strong>{{ row.title }}</strong>
+          <span class="shared-settings__badge" :data-tone="phaseColors[row.phase] || 'secondary'">
+            <VIcon :icon="phaseIcons[row.phase] || 'mdi-clock-outline'" size="16" />
+            {{ requestSummary(row) }}
+          </span>
         </div>
         <div class="shared-settings__meta text-caption">
           <span>申请时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
@@ -182,18 +197,7 @@ defineExpose({ save })
         <p v-for="(item, index) in row.rejected || []" :key="index" class="shared-settings__reason text-body-2">
           {{ item.reason }}<template v-if="item.owner"> · 占位方 {{ item.owner }}</template>
         </p>
-        <details class="shared-settings__details">
-          <summary>文件审批明细（{{ row.files?.length || 0 }}）</summary>
-          <div v-for="file in row.files || []" :key="file.id" class="shared-settings__file">
-            <div class="shared-settings__badges">
-              <span class="shared-settings__badge" :data-tone="decisionColors[file.decision] || 'secondary'">{{ decisionNames[file.decision] || '待审批' }}</span>
-              <span class="text-body-2">{{ releaseDetails(file) }}</span>
-            </div>
-            <span class="text-body-2">{{ file.path }}</span>
-            <span v-if="file.reason" class="text-caption">{{ file.reason }}<template v-if="file.owner"> · 占位方 {{ file.owner }}</template></span>
-          </div>
-          <span class="shared-settings__id text-caption">申请编号：{{ row.request_id }}</span>
-        </details>
+        <span class="shared-settings__id text-caption">申请编号：{{ row.request_id }}</span>
       </article>
       <VBtn prepend-icon="mdi-refresh" variant="text" :disabled="busy" @click="reconcile">核验未完成申请</VBtn>
     </div>
@@ -224,10 +228,13 @@ defineExpose({ save })
 .shared-settings__status dd { margin: 0; overflow-wrap: anywhere; text-align: end; }
 .shared-settings__records { min-inline-size: 0; }
 .shared-settings__record { display: flex; flex-direction: column; gap: 10px; padding-block: 20px; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); overflow-wrap: anywhere; min-inline-size: 0; }
-.shared-settings__record strong { font-size: 14px; line-height: 1.6; }
+.shared-settings__record-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; min-inline-size: 0; }
+.shared-settings__record-head strong { min-inline-size: 0; font-size: 14px; line-height: 1.6; }
 .shared-settings__badges, .shared-settings__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 /* Native badges keep approval colors independent of host VChip/glass theme overrides. */
-.shared-settings__badge { display: inline-flex; align-items: center; gap: 4px; max-inline-size: 100%; padding: 3px 8px; border: 1px solid rgba(var(--shared-badge-ink), 0.24); border-radius: 4px; font-size: 12px; font-weight: 600; line-height: 20px; color: rgb(var(--shared-badge-ink)); background-color: rgb(var(--shared-badge-fill)); --shared-badge-ink: 75, 85, 99; --shared-badge-fill: 243, 244, 246; }
+.shared-settings__badge { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; max-inline-size: 52%; padding: 3px 8px; border: 1px solid rgba(var(--shared-badge-ink), 0.3); border-radius: 4px; font-size: 12px; font-weight: 600; line-height: 20px; color: rgb(var(--shared-badge-ink)); background-color: rgba(var(--shared-badge-fill), 0.2); --shared-badge-ink: 75, 85, 99; --shared-badge-fill: 243, 244, 246; }
+.shared-settings__record-head .shared-settings__badge { max-inline-size: 52%; }
+.shared-settings__badge :deep(.v-icon) { flex: 0 0 auto; }
 .shared-settings__badge[data-tone="success"] { --shared-badge-ink: 21, 103, 52; --shared-badge-fill: 232, 245, 233; }
 .shared-settings__badge[data-tone="error"] { --shared-badge-ink: 176, 32, 42; --shared-badge-fill: 255, 235, 238; }
 .shared-settings__badge[data-tone="info"] { --shared-badge-ink: 0, 88, 153; --shared-badge-fill: 227, 242, 253; }
@@ -236,13 +243,12 @@ defineExpose({ save })
 .shared-settings__meta, .shared-settings__id { color: rgba(var(--v-theme-on-surface), 0.72); }
 .shared-settings__error { margin: 0; color: rgb(var(--v-theme-error)); }
 .shared-settings__reason { margin: 0; }
-.shared-settings__details summary { cursor: pointer; font-size: 13px; padding-block: 4px; }
-.shared-settings__details summary:focus-visible { outline: 2px solid rgb(var(--v-theme-primary)); outline-offset: 2px; }
-.shared-settings__file { display: flex; flex-direction: column; gap: 6px; padding: 12px 0 12px 12px; margin-block-start: 8px; border-inline-start: 2px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .shared-settings__id { font-family: monospace; }
 .shared-settings__claim-meta { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr); }
 .shared-settings__claim-meta .shared-settings__id { overflow-wrap: anywhere; }
 @media (max-width: 599px) {
+  .shared-settings__record-head { gap: 8px; }
+  .shared-settings__record-head .shared-settings__badge { max-inline-size: 56%; white-space: normal; }
   .shared-settings__meta { flex-direction: column; align-items: flex-start; gap: 4px; }
   .shared-settings__status > div { flex-wrap: wrap; }
   .shared-settings__status dd { margin-inline-start: auto; }

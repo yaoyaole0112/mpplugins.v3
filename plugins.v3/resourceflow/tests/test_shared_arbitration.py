@@ -595,6 +595,51 @@ class PluginSetupTests(unittest.TestCase):
         self.assertEqual(self.plugin._channel_dedup_channels, [])
         self.assertEqual(self.plugin._shared_claims, {})
 
+    def test_local_coordinator_is_recreated_before_admission_when_missing(self):
+        p = self.plugin
+        p._shared_settings = SharedSettingsPayload(
+            host_coordinator=True, bot_username="@testbot", bot_token="12345:" + "x" * 30,
+            allowed_users=[11],
+        )
+        worker = SimpleNamespace(thread=SimpleNamespace(is_alive=lambda: True),
+                                 ready_event=threading.Event(), last_error="")
+        worker.ready_event.set()
+        store = SimpleNamespace(policy=p._local_shared_policy())
+
+        def start():
+            p._shared_store = store
+            p._shared_worker = worker
+
+        p._start_shared_worker = Mock(side_effect=start)
+        p._ensure_shared_worker()
+        p._start_shared_worker.assert_called_once()
+        self.assertIs(p._shared_store, store)
+
+    def test_local_coordinator_start_failure_is_reported_and_rate_limited(self):
+        p = self.plugin
+        p._shared_settings = SharedSettingsPayload(
+            host_coordinator=True, bot_username="@testbot", bot_token="12345:" + "x" * 30,
+            allowed_users=[11],
+        )
+        p._shared_error = "协调服务启动失败（OperationalError）"
+        p._shared_worker_retry_at = time.time() + 30
+        p._start_shared_worker = Mock()
+        with self.assertRaisesRegex(SharedError, "OperationalError"):
+            p._ensure_shared_worker()
+        p._start_shared_worker.assert_not_called()
+
+    def test_local_coordinator_restart_window_does_not_spawn_another_worker(self):
+        p = self.plugin
+        p._shared_settings = SharedSettingsPayload(
+            host_coordinator=True, bot_username="@testbot", bot_token="12345:" + "x" * 30,
+            allowed_users=[11],
+        )
+        p._shared_stopping = True
+        p._start_shared_worker = Mock()
+        with self.assertRaisesRegex(SharedError, "正在停止或重启"):
+            p._ensure_shared_worker()
+        p._start_shared_worker.assert_not_called()
+
     def test_name_save_survives_reload_without_restarting_coordinator(self):
         p = self.plugin
         p._refresh_scheduler = Mock()

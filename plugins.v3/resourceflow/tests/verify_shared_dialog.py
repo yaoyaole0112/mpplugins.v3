@@ -8,11 +8,11 @@ from playwright.async_api import async_playwright
 
 
 BADGE_COLORS = {
-    'success': ('rgb(21, 103, 52)', 'rgb(232, 245, 233)'),
-    'error': ('rgb(176, 32, 42)', 'rgb(255, 235, 238)'),
-    'info': ('rgb(0, 88, 153)', 'rgb(227, 242, 253)'),
-    'warning': ('rgb(133, 77, 14)', 'rgb(255, 248, 225)'),
-    'secondary': ('rgb(75, 85, 99)', 'rgb(243, 244, 246)'),
+    'success': ('rgb(21, 103, 52)', 'rgba(232, 245, 233, 0.2)'),
+    'error': ('rgb(176, 32, 42)', 'rgba(255, 235, 238, 0.2)'),
+    'info': ('rgb(0, 88, 153)', 'rgba(227, 242, 253, 0.2)'),
+    'warning': ('rgb(133, 77, 14)', 'rgba(255, 248, 225, 0.2)'),
+    'secondary': ('rgb(75, 85, 99)', 'rgba(243, 244, 246, 0.2)'),
 }
 
 
@@ -59,21 +59,21 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert '任务：' in await first.inner_text()
             assert '下载器：' in await first.inner_text()
             assert '最近更新' in await first.inner_text()
+            assert '已入队（1）' in await first.locator('.shared-settings__record-head').inner_text()
+            assert await first.locator('.shared-settings__record-head .shared-settings__badge').count() == 1
+            assert '文件 2' not in await first.inner_text()
+            assert '完成 0' not in await first.inner_text()
             release = first.locator('.shared-settings__preview span')
             release_text = (await release.inner_text()).removeprefix('首文件 · ')
             assert release_text.startswith('玫瑰战争 · TMDB 123 · S01E05 · 分辨率 1080p'), release_text
             assert '23.976 FPS' in await first.inner_text()
             assert await first.locator('.shared-settings__meta').evaluate(
                 "element => getComputedStyle(element).color") == 'rgba(0, 0, 0, 0.72)'
-            assert await first.locator('.shared-settings__badge[data-tone="success"]').count() >= 1
-            assert await first.locator('.shared-settings__badge[data-tone="error"]').count() >= 1
-            await first.locator('summary').click()
-            await first.get_by_text('Show.S01E06.2026.1080p.WEB-DL.H264.AAC.mkv', exact=True).wait_for()
-            file_details = first.locator('.shared-settings__file').first
-            file_identity = await file_details.locator('.shared-settings__badges').inner_text()
-            assert '玫瑰战争 · TMDB 123 · S01E05 · 分辨率 1080p' in file_identity
-            assert await first.locator('.shared-settings__details .shared-settings__id').count() == 1
+            assert await dialog.locator('.shared-settings__badge[data-tone="success"]').count() >= 1
+            assert await dialog.locator('.shared-settings__badge[data-tone="error"]').count() >= 1
+            assert await first.locator('details').count() == 0
             assert await first.locator('.shared-settings__id').count() == 1
+            assert '申请编号：' in await first.inner_text()
             await verify_badge_colors(dialog)
             if host_css:
                 stylesheet = await page.add_style_tag(path=str(host_css))
@@ -185,6 +185,13 @@ async def verify(base_url, output, executable_path, host_css=None):
             await approval.check()
             await approval.scroll_into_view_if_needed()
             await page.screenshot(path=str(output / f'task-approval-{width}.png'), full_page=True)
+            await editor.get_by_role('tab', name='选种规则').click()
+            recent = editor.get_by_label('仅下载最近播出剧集', exact=True)
+            await recent.check()
+            recent_switches = editor.locator('.editor-switches').filter(has_text='仅下载最近播出剧集')
+            assert await recent_switches.count() == 1
+            assert await recent_switches.evaluate(
+                "element => element.nextElementSibling?.querySelector('input[type=number]') !== null")
             await editor.get_by_role('button', name='保存任务', exact=True).click()
             await page.wait_for_function('''window.resourceflowRequests.some(item =>
                 item.method === 'PUT' && item.body.spec_dedup_enabled === true)''')
@@ -194,7 +201,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert not errors, errors
             await page.close()
         await browser.close()
-    print("Shared settings and task approval verified: 1440, 390 and 320; rendered badge colors; no channel polling")
+    print("Shared settings and task approval verified: 1440, 390 and 320; translucent badges; single request status; no channel polling")
     if host_css:
         print('MoviePilot host stylesheet verified with glass light/dark overrides')
 

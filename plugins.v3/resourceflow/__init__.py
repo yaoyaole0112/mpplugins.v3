@@ -267,7 +267,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.8"
+    plugin_version = "1.0.9"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
