@@ -268,7 +268,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.15"
+    plugin_version = "1.0.16"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -3433,11 +3433,13 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         with self._inflight_lock:
             rows = getattr(self, "_identity_pending" if state == "pending" else "_resource_ledger", {})
             items = [{"key": key, **value} for key, value in rows.items()
-                     if (not media_type or value.get("media_type") == media_type)
-                     and matches_record(value, query)]
-            items.sort(key=lambda row: row.get("remembered_at", row.get("last_seen", 0)), reverse=True)
-            return schemas.Response(success=True, data={"total": len(items), "page": page,
-                "items": items[(page - 1) * page_size:page * page_size]})
+                     if not media_type or value.get("media_type") == media_type]
+        titles = self._resource_display_titles()
+        items = [{**row, "media_title": self._resource_record_title(row, titles)} for row in items]
+        items = [row for row in items if matches_record(row, query)]
+        items.sort(key=lambda row: row.get("remembered_at", row.get("last_seen", 0)), reverse=True)
+        return schemas.Response(success=True, data={"total": len(items), "page": page,
+            "items": items[(page - 1) * page_size:page * page_size]})
 
     def forget_resource(self, payload: ResourceLedgerDeletePayload) -> schemas.Response:
         with self._inflight_lock:

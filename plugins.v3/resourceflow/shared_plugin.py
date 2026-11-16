@@ -544,6 +544,57 @@ class SharedResourceMixin:
             cache[cache_key] = media_title[:120]
         return media_title[:120]
 
+    def _resource_display_titles(self):
+        """Reuse verified local titles; listing records must not trigger recognition/network calls."""
+        titles = {}
+        store_titles = getattr(getattr(self, "_shared_store", None), "media_titles", None)
+        if callable(store_titles):
+            try:
+                titles.update(store_titles())
+            except Exception:
+                pass
+        titles.update(getattr(self, "_shared_media_title_cache", {}) or {})
+        lock = getattr(self, "_shared_lock", None)
+        if lock:
+            with lock:
+                files = [dict(item) for row in getattr(self, "_shared_claims", {}).values()
+                         for item in row.get("files") or []]
+        else:
+            files = []
+        for row in files + list((getattr(self, "_channel_dedup_state", {}) or {}).get("records") or []):
+            title = row.get("media_title")
+            if not title and row.get("channel"):
+                title = row.get("title")
+            key = self._resource_title_key(row)
+            if key and isinstance(title, str) and re.search(r"[\u3400-\u9fff]", title):
+                titles[key] = title.strip()[:120]
+        return titles
+
+    @staticmethod
+    def _resource_title_key(row):
+        if row.get("media_type") not in {"tv", "movie"}:
+            return None
+        try:
+            return row["media_type"], int(row["tmdb_id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _resource_record_title(self, row, titles):
+        title = row.get("media_title")
+        if isinstance(title, str) and re.search(r"[\u3400-\u9fff]", title):
+            return title.strip()[:120]
+        title = titles.get(self._resource_title_key(row))
+        if isinstance(title, str) and re.search(r"[\u3400-\u9fff]", title):
+            return title.strip()[:120]
+        # Pending identities may only have a Chinese filename. This is a display hint, not a binding.
+        for value in (row.get("path"), row.get("title")):
+            if not isinstance(value, str) or not re.search(r"[\u3400-\u9fff]", value):
+                continue
+            name = getattr(MetaInfo(value.rsplit("/", 1)[-1]), "cn_name", "")
+            if isinstance(name, str) and re.search(r"[\u3400-\u9fff]", name):
+                return name.strip()[:120]
+        return ""
+
     def _add_prechecked_torrent(self, content, cookies, task, downloader, service, expected_hash, selection, title,
                                spec_hint=""):
         if not task.spec_dedup_enabled:

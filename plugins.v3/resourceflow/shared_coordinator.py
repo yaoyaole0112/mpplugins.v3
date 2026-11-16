@@ -287,6 +287,13 @@ class CoordinatorStore:
                     items.append(item)
         return record_page(items, page, page_size)
 
+    def media_titles(self):
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT media_type,tmdb_id,media_title FROM claims "
+                "WHERE group_id=? AND media_title<>'' ORDER BY updated", (self.group,))
+            return {(row["media_type"], row["tmdb_id"]): row["media_title"] for row in rows}
+
 
 class BotWorker:
     def __init__(self, store, token, username, allowed_users, proxies=None, call=None):

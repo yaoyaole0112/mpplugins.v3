@@ -118,7 +118,7 @@ async def verify_settings_layout(dialog, width):
         'element => element.scrollWidth <= element.clientWidth + 1')
 
 
-async def verify_record_search(page, dialog, tab, initial_height, output, width):
+async def verify_record_search(page, dialog, tab, initial_height, output, width, host_css=None):
     ledger = tab in ('长期账本', '身份待核验')
     selector = '.channel-dedup__record' if ledger else '.shared-settings__record'
     await page.evaluate('window.resourceflowExtraRecords = 125')
@@ -126,6 +126,52 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width)
     await page.wait_for_function("""selector =>
         [...document.querySelectorAll(selector)].filter(item => item.getBoundingClientRect().width > 0).length === 20
     """, arg=selector)
+    if ledger:
+        layout = await dialog.locator('.channel-dedup__records').evaluate('''element => {
+            const body = element.closest('.v-card-text')
+            const style = getComputedStyle(element)
+            return {max: style.maxHeight, overflow: style.overflowY,
+                height: element.getBoundingClientRect().height,
+                ownScroll: element.scrollHeight > element.clientHeight + 1,
+                bodyScroll: body.scrollHeight > body.clientHeight + 1}
+        }''')
+        assert layout['max'] == 'none' and layout['overflow'] == 'visible', (tab, width, layout)
+        assert layout['height'] > 400 and not layout['ownScroll'] and layout['bodyScroll'], (tab, width, layout)
+        assert '测试剧集 · S01' in await dialog.locator('.channel-dedup__record-identity').nth(1).inner_text()
+        await dialog.locator('.channel-dedup__record').last.scroll_into_view_if_needed()
+        last = await dialog.locator('.channel-dedup__record').last.bounding_box()
+        footer = await dialog.locator('.v-card-actions').bounding_box()
+        assert last['y'] + last['height'] <= footer['y'] + 1, (tab, width, last, footer)
+        await dialog.locator('.v-card-text').evaluate('element => { element.scrollTop = 0 }')
+        await page.screenshot(path=str(output / f'ledger-many-{tab}-{width}.png'), full_page=True)
+        if host_css:
+            stylesheet = await page.add_style_tag(path=str(host_css))
+            for scheme in ('light', 'dark'):
+                await page.evaluate('scheme => window.resourceflowSetTheme(scheme)', scheme)
+                await page.evaluate('''scheme => {
+                    for (const element of [document.documentElement, document.body]) {
+                        element.dataset.theme = 'glass'
+                        element.dataset.glassColorScheme = scheme
+                    }
+                }''', scheme)
+                assert await dialog.locator('.channel-dedup__records').evaluate('''element =>
+                    getComputedStyle(element).maxHeight === 'none'
+                    && getComputedStyle(element).overflowY === 'visible'
+                    && element.scrollHeight <= element.clientHeight + 1''')
+                await dialog.locator('.channel-dedup__record').last.scroll_into_view_if_needed()
+                last = await dialog.locator('.channel-dedup__record').last.bounding_box()
+                footer = await dialog.locator('.v-card-actions').bounding_box()
+                assert last['y'] + last['height'] <= footer['y'] + 1, (tab, width, scheme)
+                await dialog.locator('.v-card-text').evaluate('element => { element.scrollTop = 0 }')
+                await page.screenshot(path=str(output / f'ledger-many-{tab}-glass-{scheme}-{width}.png'), full_page=True)
+            await page.evaluate('() => window.resourceflowSetTheme("light")')
+            await page.evaluate('''() => {
+                for (const element of [document.documentElement, document.body]) {
+                    delete element.dataset.theme
+                    delete element.dataset.glassColorScheme
+                }
+            }''')
+            await stylesheet.evaluate('element => element.remove()')
     search = dialog.get_by_role('textbox', name='搜索记录')
     await search.scroll_into_view_if_needed()
     await dialog.locator('.v-pagination:visible .v-pagination__item button').nth(1).click()
@@ -257,11 +303,13 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label("剧名别名绑定（可选）", exact=True).count() == 0
             await dialog.get_by_role("tab", name="长期账本", exact=True).click()
             await dialog.get_by_text("Film Resource", exact=True).wait_for()
-            await verify_record_search(page, dialog, '长期账本', card_bounds['height'], output, width)
+            assert await dialog.get_by_text('测试电影 · 电影', exact=True).count() == 1
+            await verify_record_search(page, dialog, '长期账本', card_bounds['height'], output, width, host_css)
             await page.screenshot(path=str(output / f'ledger-{width}.png'), full_page=True)
             await dialog.get_by_role("tab", name="身份待核验", exact=True).click()
             await dialog.get_by_text("Unknown Resource", exact=True).wait_for()
-            await verify_record_search(page, dialog, '身份待核验', card_bounds['height'], output, width)
+            assert await dialog.get_by_text('待核验影片 · 电影', exact=True).count() == 1
+            await verify_record_search(page, dialog, '身份待核验', card_bounds['height'], output, width, host_css)
             await page.screenshot(path=str(output / f'pending-{width}.png'), full_page=True)
             await dialog.get_by_role("button", name="关闭", exact=True).click()
             assert not await page.evaluate("window.resourceflowRequests.some(item => item.method === 'POST')")

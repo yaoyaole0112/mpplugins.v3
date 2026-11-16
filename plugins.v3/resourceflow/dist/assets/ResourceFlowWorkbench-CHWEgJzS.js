@@ -1835,7 +1835,8 @@ const _hoisted_67 = {
 };
 const _hoisted_68 = { class: "channel-dedup__records" };
 const _hoisted_69 = { class: "channel-dedup__record-main" };
-const _hoisted_70 = { class: "channel-dedup__record-meta" };
+const _hoisted_70 = { class: "channel-dedup__record-identity" };
+const _hoisted_71 = { class: "channel-dedup__record-meta" };
 
 const {computed,inject,onMounted,onUnmounted,ref,watch} = await importShared('vue');
 
@@ -2260,6 +2261,11 @@ function channelRecordEpisodes(record) {
   const season = String(record.season || 0).padStart(2, '0');
   const episodes = (record.episodes || []).map(number => `E${String(number).padStart(2, '0')}`).join(', ');
   return `S${season} ${episodes}`
+}
+
+function resourceRecordIdentity(record) {
+  const name = record.media_title || '中文名待识别';
+  return `${name} · ${record.media_type === 'movie' ? '电影' : channelRecordEpisodes(record)}`
 }
 
 function channelRecordSpecs(record) {
@@ -3803,10 +3809,10 @@ return (_ctx, _cache) => {
                           }, [
                             _createElementVNode("div", _hoisted_69, [
                               _createElementVNode("strong", null, _toDisplayString(row.title || row.path || row.file_key || row.title_key), 1),
-                              _createElementVNode("span", null, _toDisplayString(row.media_type === 'movie' ? '电影' : channelRecordEpisodes(row)), 1),
+                              _createElementVNode("span", _hoisted_70, _toDisplayString(resourceRecordIdentity(row)), 1),
                               _createElementVNode("small", null, _toDisplayString(row.tmdb_id ? `TMDB ${row.tmdb_id}` : '身份待确认') + " · " + _toDisplayString(channelRecordSpecs(row)), 1)
                             ]),
-                            _createElementVNode("div", _hoisted_70, [
+                            _createElementVNode("div", _hoisted_71, [
                               _createElementVNode("span", null, _toDisplayString(row.reason || (row.evidence_source === 'channel' ? '频道已发布' : '下载已完成')), 1),
                               (resourceState.value === 'ledger')
                                 ? (_openBlock(), _createBlock(_component_VTooltip, {
@@ -4007,6 +4013,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-81ea735a"]]);
+const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0e82ede5"]]);
 
 export { ResourceFlowWorkbench as R };

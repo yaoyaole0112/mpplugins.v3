@@ -435,6 +435,11 @@ function channelRecordEpisodes(record) {
   return `S${season} ${episodes}`
 }
 
+function resourceRecordIdentity(record) {
+  const name = record.media_title || '中文名待识别'
+  return `${name} · ${record.media_type === 'movie' ? '电影' : channelRecordEpisodes(record)}`
+}
+
 function channelRecordSpecs(record) {
   const specs = record.specs || {}
   return channelDedupAttributes
@@ -1164,7 +1169,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               <div v-for="row in resourceRows.items" :key="row.key" class="channel-dedup__record">
                 <div class="channel-dedup__record-main">
                   <strong>{{ row.title || row.path || row.file_key || row.title_key }}</strong>
-                  <span>{{ row.media_type === 'movie' ? '电影' : channelRecordEpisodes(row) }}</span>
+                  <span class="channel-dedup__record-identity">{{ resourceRecordIdentity(row) }}</span>
                   <small>{{ row.tmdb_id ? `TMDB ${row.tmdb_id}` : '身份待确认' }} · {{ channelRecordSpecs(row) }}</small>
                 </div>
                 <div class="channel-dedup__record-meta">
@@ -1464,8 +1469,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
 .channel-dedup__records {
   display: grid;
-  max-block-size: 18rem;
-  overflow: auto;
+  align-content: start;
 }
 
 .channel-dedup__record {

@@ -119,6 +119,47 @@ class ApprovalSearchTests(unittest.TestCase):
             self.assertEqual(self.plugin.get_resource_ledger(state=state, media_type="movie").data["total"], 1)
             self.assertEqual(self.plugin.get_resource_ledger(state=state, query="missing").data["total"], 0)
 
+    def test_legacy_titles_enriched_from_verified_claims_without_changing_ledger_or_identity(self):
+        self.plugin.chain = SimpleNamespace(recognize_media=Mock(side_effect=AssertionError("No recognition calls")))
+        for state, records in (("ledger", self.plugin._resource_ledger), ("pending", self.plugin._identity_pending)):
+            for row in records.values():
+                row.pop("media_title")
+            original = copy.deepcopy(records)
+            result = self.plugin.get_resource_ledger(state=state, query="玫瑰 S01E01").data
+            self.assertEqual(result["total"], 1)
+            self.assertEqual(result["items"][0]["media_title"], "玫瑰战争")
+            self.assertEqual(records, original)
+        self.plugin.chain.recognize_media.assert_not_called()
+        self.plugin.save_data.assert_not_called()
+
+    def test_titles_never_cross_movie_tv_identity_and_missing_id_stays_pending(self):
+        self.plugin._shared_media_title_cache = {("movie", 123): "电影标题"}
+        self.plugin._shared_claims = {}
+        self.plugin._identity_pending = {"unknown": {"path": "Unknown.S01E01.mkv", "media_type": "tv",
+                                                    "season": 1, "episodes": [1]}}
+        for row in self.plugin._resource_ledger.values():
+            row.pop("media_title")
+        self.assertEqual(self.plugin.get_resource_ledger().data["items"][0]["media_title"], "")
+        result = self.plugin.get_resource_ledger(state="pending").data["items"][0]
+        self.assertEqual(result["media_title"], "")
+        self.assertNotIn("tmdb_id", result)
+
+    def test_pending_chinese_filename_is_only_display_hint(self):
+        self.plugin._identity_pending = {"unknown": {"path": "测试剧集.S01E05.1080p.mkv", "media_type": "tv",
+                                                    "season": 1, "episodes": [5]}}
+        result = self.plugin.get_resource_ledger(state="pending").data["items"][0]
+        self.assertEqual(result["media_title"], "测试剧集")
+        self.assertNotIn("tmdb_id", result)
+        self.assertNotIn("media_title", self.plugin._identity_pending["unknown"])
+
+    def test_localized_store_titles_and_existing_title_priority(self):
+        self.plugin._shared_claims = {}
+        self.plugin._shared_store = SimpleNamespace(media_titles=lambda: {("tv", 123): "共享中文剧名"})
+        self.plugin._resource_ledger["0"]["media_title"] = "记录自身中文名"
+        self.plugin._resource_ledger["1"].pop("media_title")
+        self.assertEqual(self.plugin.get_resource_ledger(query="记录自身中文名").data["total"], 1)
+        self.assertEqual(self.plugin.get_resource_ledger(query="共享中文剧名").data["total"], 1)
+
 
 class StoreSearchTests(unittest.TestCase):
     def setUp(self):
@@ -154,6 +195,12 @@ class StoreSearchTests(unittest.TestCase):
         self.assertEqual(page["items"][0]["id"], "104")
         self.assertEqual(self.store.search_records(query="' OR 1=1 --")["total"], 0)
         self.assertEqual(self.store.search_records(query="边城旧事 1080P")["total"], 125)
+
+    def test_media_titles_are_group_scoped_and_latest_wins(self):
+        with self.store.connect() as db:
+            db.execute("UPDATE claims SET media_title='其他共享组' WHERE group_id='other'")
+            db.execute("UPDATE claims SET media_title='最新中文名称' WHERE id='124'")
+        self.assertEqual(self.store.media_titles(), {("tv", 123): "最新中文名称"})
 
 
 if __name__ == "__main__":
