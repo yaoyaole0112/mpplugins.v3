@@ -68,8 +68,10 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.get_by_role("button", name="共享下载审批", exact=True).click()
             dialog = page.get_by_role("dialog")
             await dialog.get_by_text("Show S01E05", exact=True).wait_for()
-            assert await dialog.get_by_label("启用共享下载审批", exact=True).is_checked()
+            assert await dialog.get_by_label("启用共享下载审批", exact=True).count() == 0
             assert await dialog.get_by_label("参与跨实例共享审批", exact=True).count() == 0
+            assert await dialog.get_by_role("button", name="保存设置", exact=True).count() == 0
+            assert await dialog.get_by_role("tab").all_text_contents() == ['本机共享申请', '长期账本', '身份待核验']
             bounds = await dialog.bounding_box()
             assert bounds["width"] >= (1100 if width >= 1000 else width - 2), bounds
             assert bounds["height"] >= height * 0.88, bounds
@@ -130,17 +132,53 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await records.evaluate('element => element.clientHeight >= element.scrollHeight - 1')
             assert await dialog.get_by_label("启用频道监听", exact=True).count() == 0
             assert await dialog.get_by_role("button", name="立即同步", exact=True).count() == 0
-            assert await dialog.get_by_label("协调 Bot 用户名", exact=True).input_value() == "@testbot"
+            assert await dialog.get_by_label("协调 Bot 用户名", exact=True).count() == 0
             assert await dialog.get_by_text("全局去重字段", exact=True).count() == 0
             assert await dialog.get_by_text("资源去重规则", exact=True).count() == 0
+            assert await dialog.get_by_label("剧名别名绑定（可选）", exact=True).count() == 0
+            await dialog.get_by_role("tab", name="长期账本", exact=True).click()
+            await dialog.get_by_text("Film Resource", exact=True).wait_for()
+            await dialog.get_by_role("tab", name="身份待核验", exact=True).click()
+            await dialog.get_by_text("Unknown Resource", exact=True).wait_for()
+            await dialog.get_by_role("button", name="关闭", exact=True).click()
+            assert not await page.evaluate("window.resourceflowRequests.some(item => item.method === 'POST')")
+            await page.get_by_role("button", name="全局设置", exact=True).click()
+            await dialog.get_by_label("本机名称", exact=True).wait_for()
+            await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
+            assert await dialog.get_by_label("启用共享下载审批", exact=True).is_checked()
+            assert await dialog.get_by_label("协调 Bot 用户名", exact=True).input_value() == "@testbot"
+            assert await dialog.get_by_role("tab").count() == 0
+            assert await dialog.locator('.shared-settings__records').count() == 0
+            global_bounds = await dialog.bounding_box()
+            assert abs(global_bounds['width'] - bounds['width']) <= 1
+            assert abs(global_bounds['height'] - bounds['height']) <= 1
+            assert await dialog.get_by_label('启用插件', exact=True).is_checked()
+            assert await dialog.get_by_label('显示侧栏入口', exact=True).is_checked()
+            assert await dialog.get_by_label('全局保种体积（GB）', exact=True).count() == 1
+            assert await dialog.get_by_label('全局同时下载任务数', exact=True).count() == 1
+            assert await dialog.get_by_text("全局去重字段", exact=True).count() == 0
+            assert await dialog.get_by_text("资源去重规则", exact=True).count() == 0
+            assert await dialog.locator('.channel-dedup__body').evaluate('''element =>
+                element.querySelector('input[type=number]').compareDocumentPosition(
+                    element.querySelector('.shared-settings')) & Node.DOCUMENT_POSITION_FOLLOWING''')
             await dialog.get_by_label("本机名称", exact=True).fill("NAS A 修改后")
+            await dialog.get_by_label('全局保种体积（GB）', exact=True).fill('500')
+            await dialog.get_by_label('剧名别名绑定（可选）', exact=True).fill('玫瑰 = 123')
+            if width == 1440:
+                await page.wait_for_timeout(31000)
+                assert await dialog.get_by_label('全局保种体积（GB）', exact=True).input_value() == '500'
+                assert await dialog.get_by_label('剧名别名绑定（可选）', exact=True).input_value() == '玫瑰 = 123'
+                assert await dialog.get_by_label("本机名称", exact=True).input_value() == "NAS A 修改后"
             await dialog.get_by_role("button", name="保存设置", exact=True).click()
             await page.wait_for_function("""window.resourceflowRequests.some(item =>
-                item.path.endsWith('/shared/settings') && item.body.instance_label === 'NAS A 修改后')""")
+                item.path === 'plugin/ResourceFlow/settings' && item.body.global_disksize === 500)""")
+            await page.wait_for_function("!document.querySelector('button.v-btn--loading')")
             await dialog.get_by_role("button", name="关闭", exact=True).click()
-            await page.get_by_role("button", name="共享下载审批", exact=True).click()
+            await page.get_by_role("button", name="全局设置", exact=True).click()
             await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
             assert await dialog.get_by_label("本机名称", exact=True).input_value() == "NAS A 修改后"
+            assert await dialog.get_by_label('全局保种体积（GB）', exact=True).input_value() == '500'
+            assert await dialog.get_by_label('剧名别名绑定（可选）', exact=True).input_value() == '玫瑰 = 123'
             client_saves = await page.evaluate("""window.resourceflowRequests.filter(item =>
                 item.path.endsWith('/channel-dedup/settings'))""")
             assert client_saves and all("attributes" not in row["body"] for row in client_saves)
@@ -157,6 +195,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await token.get_attribute("type") == "password"
             await token.fill("123456:FAKE_TOKEN_FOR_UI_TEST_ONLY_12345")
             await dialog.get_by_label("允许的个人账号 ID", exact=True).fill("11\n22")
+            await dialog.get_by_label('全局同时下载任务数', exact=True).fill('6')
             await dialog.get_by_role("button", name="保存设置", exact=True).click()
             await page.wait_for_function("""window.resourceflowRequests.some(item =>
                 item.path.endsWith('/shared/settings') && item.body.host_coordinator === true
@@ -166,6 +205,46 @@ async def verify(base_url, output, executable_path, host_css=None):
                 && item.body.attributes[0] === 'resolution' && item.body.enabled === false
                 && item.body.channels === '' && item.body.size_tolerance_pct === 3)""")
             await page.wait_for_function("document.querySelector('input[type=password]').value === ''")
+            await page.wait_for_function("!document.querySelector('button.v-btn--loading')")
+            assert await dialog.get_by_label('全局同时下载任务数', exact=True).input_value() == '6'
+            await dialog.locator(".v-card-text").evaluate("element => { element.scrollTop = 0 }")
+            await page.screenshot(path=str(output / f"global-settings-{width}.png"), full_page=True)
+            await dialog.get_by_label("本机名称", exact=True).scroll_into_view_if_needed()
+            await page.screenshot(path=str(output / f"global-shared-{width}.png"), full_page=True)
+            await dialog.get_by_text("全局去重字段", exact=True).scroll_into_view_if_needed()
+            await page.screenshot(path=str(output / f"global-policy-{width}.png"), full_page=True)
+            if host_css:
+                stylesheet = await page.add_style_tag(path=str(host_css))
+                for scheme in ('light', 'dark'):
+                    await page.evaluate('scheme => window.resourceflowSetTheme(scheme)', scheme)
+                    await page.evaluate('''scheme => {
+                        for (const element of [document.documentElement, document.body]) {
+                            element.dataset.theme = 'glass'
+                            element.dataset.glassColorScheme = scheme
+                        }
+                    }''', scheme)
+                    await dialog.locator(".v-card-text").evaluate("element => { element.scrollTop = 0 }")
+                    await page.screenshot(path=str(output / f'global-glass-{scheme}-{width}.png'), full_page=True)
+                    await dialog.get_by_text("全局去重字段", exact=True).scroll_into_view_if_needed()
+                    await page.screenshot(path=str(output / f'global-policy-glass-{scheme}-{width}.png'), full_page=True)
+                    assert await dialog.locator(".v-card-text").evaluate("element => element.scrollWidth <= element.clientWidth + 1")
+                    clipped = await dialog.locator(".v-label, .v-btn__content").evaluate_all("""elements =>
+                        elements.filter(item => item.getBoundingClientRect().width > 0
+                            && item.scrollWidth > item.clientWidth + 2).map(item => item.textContent)""")
+                    assert not clipped, (width, scheme, clipped)
+                await page.evaluate('() => window.resourceflowSetTheme("light")')
+                await page.evaluate('''() => {
+                    for (const element of [document.documentElement, document.body]) {
+                        delete element.dataset.theme
+                        delete element.dataset.glassColorScheme
+                    }
+                }''')
+                await stylesheet.evaluate('element => element.remove()')
+            await dialog.get_by_role("button", name="关闭", exact=True).click()
+            await page.get_by_role("button", name="共享下载审批", exact=True).click()
+            await dialog.get_by_role("tab", name="共享占位记录", exact=True).wait_for()
+            assert await dialog.get_by_role("tab").all_text_contents() == [
+                '本机共享申请', '共享占位记录', '长期账本', '身份待核验']
             await dialog.get_by_role("tab", name="共享占位记录", exact=True).click()
             await dialog.get_by_text("朋友A", exact=False).wait_for()
             claim = dialog.locator('.shared-settings__records article').first
@@ -217,6 +296,9 @@ async def verify(base_url, output, executable_path, host_css=None):
                 elements.filter(item => item.getBoundingClientRect().width > 0
                     && item.scrollWidth > item.clientWidth + 2).map(item => item.textContent)""")
             assert not clipped, (width, clipped)
+            await dialog.get_by_role("button", name="关闭", exact=True).click()
+            await page.get_by_role("button", name="全局设置", exact=True).click()
+            await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
             await page.evaluate("window.resourceflowFailSave = true")
             before = await page.evaluate("""window.resourceflowRequests.filter(item =>
                 item.path.endsWith('/channel-dedup/settings')).length""")
@@ -226,6 +308,25 @@ async def verify(base_url, output, executable_path, host_css=None):
                 item.path.endsWith('/channel-dedup/settings')).length""")
             assert before == after
             assert await dialog.is_visible()
+            await page.evaluate("window.resourceflowFailSave = false")
+            for stage, message in (('policy', '模拟规则保存失败'), ('global', '模拟全局保存失败')):
+                await page.evaluate("stage => window.resourceflowFailStage = stage", stage)
+                before = await page.evaluate("""window.resourceflowRequests.filter(item =>
+                    item.path === 'plugin/ResourceFlow/settings').length""")
+                await dialog.get_by_role("button", name="保存设置", exact=True).click()
+                await dialog.get_by_text(f"全局设置未全部保存：{message}", exact=True).wait_for()
+                assert await dialog.is_visible()
+                after = await page.evaluate("""window.resourceflowRequests.filter(item =>
+                    item.path === 'plugin/ResourceFlow/settings').length""")
+                assert after == before + (stage == 'global'), (stage, before, after)
+            await dialog.get_by_role("button", name="关闭", exact=True).click()
+            await page.evaluate("window.resourceflowFailStage = ''; window.resourceflowFailSharedLoad = true")
+            await page.get_by_role("button", name="全局设置", exact=True).click()
+            await dialog.get_by_text('模拟共享读取失败', exact=True).wait_for()
+            before = await page.evaluate("window.resourceflowRequests.filter(item => item.method === 'POST').length")
+            await dialog.get_by_role("button", name="保存设置", exact=True).click()
+            await dialog.get_by_text('全局设置未全部保存：共享连接尚未加载，请关闭后重新打开全局设置', exact=True).wait_for()
+            assert before == await page.evaluate("window.resourceflowRequests.filter(item => item.method === 'POST').length")
             assert not errors, errors
             assert not await page.evaluate("window.resourceflowRequests.some(item => item.path.endsWith('/poll'))")
             await page.goto(f"{base_url}/tests/channel-dedup-smoke.html?task=traffic")
@@ -244,20 +345,37 @@ async def verify(base_url, output, executable_path, host_css=None):
             await editor.get_by_role('tab', name='选种规则').click()
             recent = editor.get_by_label('仅下载最近播出剧集', exact=True)
             await recent.check()
-            recent_switches = editor.locator('.editor-switches').filter(has_text='仅下载最近播出剧集')
-            assert await recent_switches.count() == 1
-            assert await recent_switches.evaluate(
-                "element => element.nextElementSibling?.querySelector('input[type=number]') !== null")
+            recent_row = editor.locator('.editor-recent-rule')
+            assert await recent_row.count() == 1
+            days = editor.get_by_label('最近播出天数', exact=True)
+            await days.fill('7')
+            await recent_row.scroll_into_view_if_needed()
+            assert await recent_row.evaluate('''element => {
+                const toggle = element.querySelector('.editor-recent-rule__switch').getBoundingClientRect()
+                const days = element.querySelector('.editor-recent-rule__days').getBoundingClientRect()
+                return days.left >= toggle.right && Math.abs(days.top + days.height / 2 - toggle.top - toggle.height / 2) < 2
+                    && element.scrollWidth <= element.clientWidth + 1
+            }''')
+            await page.screenshot(path=str(output / f'task-recent-days-{width}.png'), full_page=True)
+            await recent.uncheck()
+            assert await days.count() == 0
+            await recent.check()
+            assert await days.input_value() == '7'
             await editor.get_by_role('button', name='保存任务', exact=True).click()
             await page.wait_for_function('''window.resourceflowRequests.some(item =>
-                item.method === 'PUT' && item.body.spec_dedup_enabled === true)''')
+                item.method === 'PUT' && item.body.spec_dedup_enabled === true
+                && item.body.recent_episodes_days === 7)''')
             await editor.wait_for(state='hidden')
             await page.locator('button:has(.mdi-pencil-outline)').click()
             assert await editor.get_by_label('共享下载审批', exact=True).is_checked()
+            await editor.get_by_role('button', name='设置全局去重规则', exact=True).click()
+            global_dialog = page.get_by_role('dialog').filter(has=page.get_by_label('启用插件', exact=True))
+            await global_dialog.get_by_label('本机名称', exact=True).wait_for()
+            assert await global_dialog.get_by_role('tab', name='本机共享申请', exact=True).count() == 0
             assert not errors, errors
             await page.close()
         await browser.close()
-    print("Shared settings and task approval verified: 1440, 390 and 320; top-right tonal badges; responsive identity/owner backgrounds; no channel polling")
+    print("Verified 1440, 390 and 320: full-size global settings; records-only approval tabs; staged saves/failures; retained drafts; inline recent days; task settings link")
     if host_css:
         print('MoviePilot host stylesheet verified with glass light/dark overrides')
 

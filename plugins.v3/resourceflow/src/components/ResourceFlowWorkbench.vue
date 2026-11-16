@@ -44,13 +44,17 @@ const editorOpen = ref(false)
 const editorTask = ref(cloneTask())
 const deleteDialog = ref(false)
 const clearDialog = ref(false)
-const settingsMenu = ref(false)
+const settingsDialog = ref(false)
+const settingsError = ref('')
+const settingsReady = ref(false)
 const channelDedupDialog = ref(false)
 const channelDedupLoading = ref(false)
-const channelDedupSaving = ref(false)
 const channelDedupError = ref('')
 const sharedSettingsPanel = ref(null)
+const sharedRecordsPanel = ref(null)
 const sharedHost = ref(false)
+const sharedRecordsHost = ref(false)
+const approvalTab = ref('requests')
 const resourceRows = ref({ total: 0, items: [] })
 const resourceState = ref('ledger')
 const resourcePage = ref(1)
@@ -143,14 +147,14 @@ function notify(text, color = 'success') {
 }
 
 // 从插件状态接口加载全局设置和任务摘要。
-async function loadStatus({ preserveSelection = true, loadDetail = true } = {}) {
+async function loadStatus({ preserveSelection = true, loadDetail = true, resetDraft = false } = {}) {
   loading.value = true
   error.value = ''
   try {
     const data = unwrapResponse(await props.api.get(`${pluginBase.value}/status`))
     status.value = data || status.value
     statusLoaded.value = true
-    settingsDraft.value = {
+    if (!settingsDialog.value || resetDraft) settingsDraft.value = {
       enabled: Boolean(status.value.enabled),
       show_sidebar_nav: status.value.show_sidebar_nav !== false,
       global_disksize: status.value.global_disksize ?? null,
@@ -272,17 +276,29 @@ async function runOperation(operation) {
   }
 }
 
-// 保存全局插件与侧栏入口开关。
+async function openSettings() {
+  settingsError.value = ''
+  settingsReady.value = false
+  settingsDialog.value = true
+  await loadStatus({ loadDetail: false, resetDraft: true })
+  const loaded = await loadChannelDedup()
+  settingsReady.value = loaded && !error.value
+}
+
+// 依次保存共享连接、协调端规则及原全局设置；失败时保留弹窗。
 async function saveSettings() {
   saving.value = true
+  settingsError.value = ''
   try {
+    if (!settingsReady.value || !sharedSettingsPanel.value) throw new Error('全局设置尚未加载，请关闭后重试')
     const payload = normalizeSettings(settingsDraft.value)
+    const shared = await sharedSettingsPanel.value.save()
+    await saveChannelDedup(shared)
     status.value = unwrapResponse(await props.api.post(`${pluginBase.value}/settings`, payload))
-    settingsMenu.value = false
-    await loadStatus()
+    await loadStatus({ resetDraft: true })
     notify('全局设置已保存')
   } catch (err) {
-    notify(err?.message || '保存全局设置失败', 'error')
+    settingsError.value = `全局设置未全部保存：${err?.message || '保存失败'}`
   } finally {
     saving.value = false
   }
@@ -310,14 +326,18 @@ async function loadChannelDedup({ resetDraft = true } = {}) {
         movie_identity_aliases: Object.entries(data?.movie_identity_aliases || {}).map(([name, id]) => `${name} = ${id}`).join('\n'),
       }
     }
+    return true
   } catch (err) {
     channelDedupError.value = err?.message || '读取资源去重设置失败'
+    return false
   } finally {
     channelDedupLoading.value = false
   }
 }
 
 async function openChannelDedup() {
+  approvalTab.value = 'requests'
+  sharedRecordsHost.value = false
   channelDedupDialog.value = true
   await loadChannelDedup()
   await loadResourceRows()
@@ -337,6 +357,18 @@ async function loadResourceRows() {
 }
 
 watch(resourceState, () => { resourcePage.value = 1; loadResourceRows() })
+watch(approvalTab, value => {
+  if (['ledger', 'pending'].includes(value)) {
+    if (resourceState.value === value) loadResourceRows()
+    else resourceState.value = value
+  }
+})
+
+async function refreshApprovalRecords() {
+  await sharedRecordsPanel.value?.refresh()
+  await loadChannelDedup({ resetDraft: false })
+  await loadResourceRows()
+}
 
 async function forgetResource() {
   try {
@@ -349,37 +381,24 @@ async function forgetResource() {
   }
 }
 
-async function saveChannelDedup() {
-  channelDedupSaving.value = true
-  channelDedupError.value = ''
-  try {
-    if (!sharedSettingsPanel.value) throw new Error('共享连接尚未加载')
-    const shared = await sharedSettingsPanel.value.save()
-    const data = unwrapResponse(await props.api.post(`${pluginBase.value}/channel-dedup/settings`, {
-      enabled: false,
-      cancel_downloading: false,
-      ...(shared.host_coordinator ? {
-        inflight_enabled: channelDedupDraft.value.inflight_enabled,
-        pack_dedup_enabled: channelDedupDraft.value.pack_dedup_enabled,
-        pack_policy: channelDedupDraft.value.pack_policy,
-        identity_policy: channelDedupDraft.value.identity_policy,
-        attributes: channelDedupDraft.value.attributes,
-        size_tolerance_pct: channelDedupDraft.value.size_tolerance_pct,
-        unknown_policy: channelDedupDraft.value.unknown_policy,
-      } : {}),
-      channels: '',
-      identity_aliases: channelDedupDraft.value.identity_aliases,
-      movie_identity_aliases: channelDedupDraft.value.movie_identity_aliases,
-    }))
-    channelDedup.value = data || channelDedup.value
-    await loadChannelDedup()
-    await loadStatus()
-    notify('共享下载审批设置已保存')
-  } catch (err) {
-    channelDedupError.value = err?.message || '保存资源去重设置失败'
-  } finally {
-    channelDedupSaving.value = false
-  }
+async function saveChannelDedup(shared) {
+  const data = unwrapResponse(await props.api.post(`${pluginBase.value}/channel-dedup/settings`, {
+    enabled: false,
+    cancel_downloading: false,
+    ...(shared.host_coordinator ? {
+      inflight_enabled: channelDedupDraft.value.inflight_enabled,
+      pack_dedup_enabled: channelDedupDraft.value.pack_dedup_enabled,
+      pack_policy: channelDedupDraft.value.pack_policy,
+      identity_policy: channelDedupDraft.value.identity_policy,
+      attributes: channelDedupDraft.value.attributes,
+      size_tolerance_pct: channelDedupDraft.value.size_tolerance_pct,
+      unknown_policy: channelDedupDraft.value.unknown_policy,
+    } : {}),
+    channels: '',
+    identity_aliases: channelDedupDraft.value.identity_aliases,
+    movie_identity_aliases: channelDedupDraft.value.movie_identity_aliases,
+  }))
+  channelDedup.value = data || channelDedup.value
 }
 
 function formatChannelTimestamp(value) {
@@ -487,7 +506,7 @@ onMounted(async () => {
   await loadStatus({ preserveSelection: false })
   refreshTimer = window.setInterval(() => {
     if (!editorOpen.value && document.visibilityState === 'visible') loadStatus()
-    if (channelDedupDialog.value && document.visibilityState === 'visible') loadChannelDedup({ resetDraft: false })
+    if (channelDedupDialog.value && document.visibilityState === 'visible') refreshApprovalRecords()
   }, 30000)
 })
 
@@ -524,76 +543,12 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             />
           </template>
         </VTooltip>
-        <VMenu v-model="settingsMenu" :close-on-content-click="false" location="bottom end">
-          <template #activator="{ props: menuProps }">
-            <VBtn v-bind="menuProps" icon="mdi-tune-variant" variant="text" aria-label="全局设置" />
+        <VTooltip text="全局设置">
+          <template #activator="{ props: tooltipProps }">
+            <VBtn v-bind="tooltipProps" icon="mdi-tune-variant" variant="text" aria-label="全局设置"
+              @click="openSettings" />
           </template>
-          <VCard class="resourceflow-settings-menu" title="全局设置">
-            <VCardText class="settings-menu__body">
-              <VSwitch v-model="settingsDraft.enabled" label="启用插件" color="primary" hide-details inset />
-              <VSwitch
-                v-model="settingsDraft.show_sidebar_nav"
-                label="显示侧栏入口"
-                color="primary"
-                hide-details
-                inset
-              />
-              <VDivider />
-              <VSwitch
-                v-model="settingsDraft.global_proxy_delete"
-                label="全局动态删种"
-                color="primary"
-                hide-details
-                inset
-              />
-              <VTextField
-                v-if="settingsDraft.global_proxy_delete"
-                v-model="settingsDraft.global_delete_size_range"
-                label="全局动态删种阈值（GB）"
-                placeholder="50-100"
-                clearable
-                hide-details
-              />
-              <VDivider />
-              <VTextField
-                v-model.number="settingsDraft.global_disksize"
-                type="number"
-                min="0"
-                label="全局保种体积（GB）"
-                clearable
-                hide-details
-              />
-              <VTextField
-                v-model.number="settingsDraft.global_maxdlcount"
-                type="number"
-                min="0"
-                label="全局同时下载任务数"
-                clearable
-                hide-details
-              />
-              <VTextField
-                v-model.number="settingsDraft.global_maxupspeed"
-                type="number"
-                min="0"
-                label="全局总上传带宽（KB/s）"
-                clearable
-                hide-details
-              />
-              <VTextField
-                v-model.number="settingsDraft.global_maxdlspeed"
-                type="number"
-                min="0"
-                label="全局总下载带宽（KB/s）"
-                clearable
-                hide-details
-              />
-            </VCardText>
-            <VCardActions>
-              <VSpacer />
-              <VBtn color="primary" variant="flat" :loading="saving" @click="saveSettings">保存</VBtn>
-            </VCardActions>
-          </VCard>
-        </VMenu>
+        </VTooltip>
         <VBtn v-if="showClose" icon="mdi-close" variant="text" aria-label="关闭" @click="emit('close')" />
       </div>
     </header>
@@ -1008,8 +963,103 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
       :global-dynamic-delete="Boolean(status.global_proxy_delete)"
       :saving="saving"
       @save="saveTask"
-      @dedup-settings="openChannelDedup"
+      @dedup-settings="openSettings"
     />
+
+    <VDialog v-model="settingsDialog" :width="$vuetify.display.xs ? '100vw' : '94vw'"
+      :max-width="$vuetify.display.xs ? '100vw' : '80rem'"
+      :fullscreen="$vuetify.display.xs" :persistent="saving" scrollable>
+      <VCard class="channel-dedup__card">
+        <VCardTitle class="channel-dedup__title">
+          <VIcon icon="mdi-tune-variant" color="primary" />
+          <span>全局设置</span>
+        </VCardTitle>
+        <VCardText class="channel-dedup__body">
+          <VAlert v-if="settingsError || channelDedupError" type="error" variant="tonal" density="compact">
+            {{ settingsError || channelDedupError }}
+          </VAlert>
+          <VProgressLinear v-if="loading || channelDedupLoading" indeterminate />
+          <div class="channel-dedup__section">
+            <VSwitch v-model="settingsDraft.enabled" label="启用插件" color="primary" hide-details inset />
+            <VSwitch v-model="settingsDraft.show_sidebar_nav" label="显示侧栏入口"
+              color="primary" hide-details inset />
+            <VDivider />
+            <VSwitch v-model="settingsDraft.global_proxy_delete" label="全局动态删种"
+              color="primary" hide-details inset />
+            <VTextField v-if="settingsDraft.global_proxy_delete" v-model="settingsDraft.global_delete_size_range"
+              label="全局动态删种阈值（GB）" placeholder="50-100" clearable hide-details />
+            <VDivider />
+            <VRow>
+              <VCol cols="12" sm="6">
+                <VTextField v-model.number="settingsDraft.global_disksize" type="number" min="0"
+                  label="全局保种体积（GB）" clearable hide-details />
+              </VCol>
+              <VCol cols="12" sm="6">
+                <VTextField v-model.number="settingsDraft.global_maxdlcount" type="number" min="0"
+                  label="全局同时下载任务数" clearable hide-details />
+              </VCol>
+              <VCol cols="12" sm="6">
+                <VTextField v-model.number="settingsDraft.global_maxupspeed" type="number" min="0"
+                  label="全局总上传带宽（KB/s）" clearable hide-details />
+              </VCol>
+              <VCol cols="12" sm="6">
+                <VTextField v-model.number="settingsDraft.global_maxdlspeed" type="number" min="0"
+                  label="全局总下载带宽（KB/s）" clearable hide-details />
+              </VCol>
+            </VRow>
+          </div>
+          <VDivider />
+          <SharedSettingsPanel v-if="settingsDialog" ref="sharedSettingsPanel" mode="settings"
+            :api="api" :plugin-base="pluginBase"
+            @host-change="sharedHost = $event" @policy-synced="loadChannelDedup()" />
+          <template v-if="sharedHost">
+            <VDivider />
+            <div class="channel-dedup__section">
+              <div class="text-subtitle-2">全局去重字段</div>
+              <div class="channel-dedup__attributes">
+                <VCheckbox v-for="attribute in channelDedupAttributes" :key="attribute.value"
+                  v-model="channelDedupDraft.attributes" :label="attribute.title" :value="attribute.value"
+                  color="primary" density="compact" hide-details />
+              </div>
+            </div>
+            <VTextField v-if="channelDedupDraft.attributes.includes('size')"
+              v-model.number="channelDedupDraft.size_tolerance_pct" type="number" min="0" max="20" step="1"
+              suffix="%" label="单集文件大小容差"
+              hint="按种子内单个视频文件大小比较，不使用整包总大小" persistent-hint />
+            <VSelect v-model="channelDedupDraft.unknown_policy" :items="channelUnknownPolicies"
+              label="候选缺少勾选规格时" :disabled="!channelDedupDraft.attributes.length" hide-details />
+            <VDivider />
+            <div class="text-subtitle-2">资源去重规则</div>
+            <VSwitch v-model="channelDedupDraft.inflight_enabled" label="排除已入队的同规格资源"
+              color="primary" hide-details inset />
+            <VSwitch v-model="channelDedupDraft.pack_dedup_enabled" label="排除同一种子包内的同规格重复文件"
+              color="primary" hide-details inset />
+            <VSelect v-model="channelDedupDraft.pack_policy" label="整包处理方式"
+              :items="[
+                { title: '逐文件排除，仅下载剩余文件', value: 'partial' },
+                { title: '存在不合格文件则排除整包', value: 'exclude' },
+              ]" hide-details />
+            <VSelect v-model="channelDedupDraft.identity_policy" label="资源身份未确认时"
+              :items="[
+                { title: '等待核验，不下载', value: 'defer' },
+                { title: '按未命中放行', value: 'allow' },
+              ]" hide-details />
+          </template>
+          <VDivider />
+          <div class="text-subtitle-2">别名绑定</div>
+          <VTextarea v-model="channelDedupDraft.identity_aliases" label="剧名别名绑定（可选）"
+            placeholder="剧名别名 = TMDB剧集ID" rows="2" auto-grow hide-details />
+          <VTextarea v-model="channelDedupDraft.movie_identity_aliases" label="电影别名绑定（可选）"
+            placeholder="电影别名 = TMDB电影ID" rows="2" auto-grow hide-details />
+        </VCardText>
+        <VCardActions>
+          <VSpacer />
+          <VBtn variant="text" :disabled="saving" @click="settingsDialog = false">关闭</VBtn>
+          <VBtn color="primary" variant="flat" :loading="saving" :disabled="!settingsReady || channelDedupLoading"
+            @click="saveSettings">保存设置</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
 
     <VDialog v-model="channelDedupDialog" :width="$vuetify.display.xs ? '100vw' : '94vw'"
       :max-width="$vuetify.display.xs ? '100vw' : '80rem'"
@@ -1026,107 +1076,26 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VAlert v-if="channelDedup.last_error" type="warning" variant="tonal" density="compact">
             {{ channelDedup.last_error }}
           </VAlert>
-          <SharedSettingsPanel ref="sharedSettingsPanel" :api="api" :plugin-base="pluginBase"
-            @host-change="sharedHost = $event" @policy-synced="loadChannelDedup()" />
-          <template v-if="sharedHost">
-          <VDivider />
-          <div class="channel-dedup__section">
-            <div class="text-subtitle-2">全局去重字段</div>
-            <div class="channel-dedup__attributes">
-              <VCheckbox
-                v-for="attribute in channelDedupAttributes"
-                :key="attribute.value"
-                v-model="channelDedupDraft.attributes"
-                :label="attribute.title"
-                :value="attribute.value"
-                color="primary"
-                density="compact"
-                hide-details
-              />
-            </div>
-          </div>
-          <VTextField
-            v-if="channelDedupDraft.attributes.includes('size')"
-            v-model.number="channelDedupDraft.size_tolerance_pct"
-            type="number"
-            min="0"
-            max="20"
-            step="1"
-            suffix="%"
-            label="单集文件大小容差"
-            hint="按种子内单个视频文件大小比较，不使用整包总大小"
-            persistent-hint
-          />
-          <VSelect
-            v-model="channelDedupDraft.unknown_policy"
-            :items="channelUnknownPolicies"
-            label="候选缺少勾选规格时"
-            :disabled="!channelDedupDraft.attributes.length"
-            hide-details
-          />
-          <VDivider />
-          <div class="text-subtitle-2">资源去重规则</div>
-          <VSwitch
-            v-model="channelDedupDraft.inflight_enabled"
-            label="排除已入队的同规格资源"
-            color="primary" hide-details inset
-          />
-          <VSwitch
-            v-model="channelDedupDraft.pack_dedup_enabled"
-            label="排除同一种子包内的同规格重复文件"
-            color="primary" hide-details inset
-          />
-          <VSelect
-            v-model="channelDedupDraft.pack_policy"
-            label="整包处理方式"
-            :items="[
-              { title: '逐文件排除，仅下载剩余文件', value: 'partial' },
-              { title: '存在不合格文件则排除整包', value: 'exclude' },
-            ]"
-            hide-details
-          />
-          <VSelect
-            v-model="channelDedupDraft.identity_policy"
-            label="资源身份未确认时"
-            :items="[
-              { title: '等待核验，不下载', value: 'defer' },
-              { title: '按未命中放行', value: 'allow' },
-            ]"
-            hide-details
-          />
-          </template>
-          <VDivider />
-          <div class="text-subtitle-2">别名绑定</div>
-          <VTextarea
-            v-model="channelDedupDraft.identity_aliases"
-            label="剧名别名绑定（可选）"
-            placeholder="剧名别名 = TMDB剧集ID"
-            rows="2"
-            auto-grow
-            hide-details
-          />
-          <VTextarea
-            v-model="channelDedupDraft.movie_identity_aliases"
-            label="电影别名绑定（可选）"
-            placeholder="电影别名 = TMDB电影ID"
-            rows="2" auto-grow hide-details
-          />
-          <VDivider />
           <div class="channel-dedup__status">
             <div><span>长期资源账本</span><strong>{{ channelDedup.ledger_count || 0 }}</strong></div>
             <div><span>身份待核验</span><strong>{{ channelDedup.pending_count || 0 }}</strong></div>
             <VTooltip text="刷新本地账本">
               <template #activator="{ props: tooltipProps }">
                 <VBtn v-bind="tooltipProps" icon="mdi-refresh" variant="text" aria-label="刷新本地账本"
-                  :loading="channelDedupLoading" @click="loadChannelDedup({ resetDraft: false })" />
+                  :loading="channelDedupLoading" @click="refreshApprovalRecords" />
               </template>
             </VTooltip>
           </div>
-          <div class="channel-dedup__section">
-            <VTabs v-model="resourceState" density="compact">
-              <VTab value="ledger">长期账本</VTab>
-              <VTab value="pending">身份待核验</VTab>
-            </VTabs>
+          <VTabs v-model="approvalTab" density="compact">
+            <VTab value="requests">本机共享申请</VTab>
+            <VTab v-if="sharedRecordsHost" value="records">共享占位记录</VTab>
+            <VTab value="ledger">长期账本</VTab>
+            <VTab value="pending">身份待核验</VTab>
+          </VTabs>
+          <SharedSettingsPanel v-if="channelDedupDialog" v-show="['requests', 'records'].includes(approvalTab)"
+            ref="sharedRecordsPanel" :api="api" :plugin-base="pluginBase" :record-tab="approvalTab"
+            @host-change="sharedRecordsHost = $event" />
+          <div v-if="['ledger', 'pending'].includes(approvalTab)" class="channel-dedup__section">
             <VProgressLinear v-if="ledgerLoading" indeterminate />
             <div v-else-if="!resourceRows.items?.length" class="text-body-2 text-medium-emphasis">暂无记录</div>
             <div class="channel-dedup__records">
@@ -1154,7 +1123,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
         <VCardActions>
           <VSpacer />
           <VBtn variant="text" @click="channelDedupDialog = false">关闭</VBtn>
-          <VBtn color="primary" variant="flat" :loading="channelDedupSaving" @click="saveChannelDedup">保存设置</VBtn>
         </VCardActions>
       </VCard>
     </VDialog>
@@ -1271,17 +1239,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 .resourceflow-mobile-torrent__meta {
   flex-wrap: wrap;
   gap: 8px;
-}
-
-.settings-menu__body {
-  display: grid;
-  gap: 8px;
-  max-block-size: min(70vh, 34rem);
-  overflow-y: auto;
-}
-
-.resourceflow-settings-menu {
-  inline-size: min(25rem, calc(100vw - 24px));
 }
 
 .channel-dedup__title {

@@ -2,7 +2,12 @@
 import { onMounted, ref, watch } from 'vue'
 import { formatBytes, unwrapResponse } from '../utils'
 
-const props = defineProps({ api: { type: Object, required: true }, pluginBase: { type: String, required: true } })
+const props = defineProps({
+  api: { type: Object, required: true },
+  pluginBase: { type: String, required: true },
+  mode: { type: String, default: 'records' },
+  recordTab: { type: String, default: 'requests' },
+})
 const emit = defineEmits(['host-change', 'policy-synced'])
 const state = ref({ requests: [], records: [] })
 const draft = ref({
@@ -10,8 +15,8 @@ const draft = ref({
   instance_label: '我的资源刷流', bot_token: '', allowed_users: '',
 })
 const busy = ref(false)
+const ready = ref(false)
 const error = ref('')
-const tab = ref('requests')
 const phaseNames = {
   requesting: '等待审批', reserved: '已获准', adding: '暂停添加中', awaiting_start: '等待入队确认',
   timeout_cancel_pending: '超时取消中',
@@ -72,6 +77,8 @@ function requestSummary(row) {
 async function load(reset = false) {
   const data = unwrapResponse(await props.api.get(`${props.pluginBase}/shared/status`))
   state.value = data
+  ready.value = true
+  if (props.mode === 'records') emit('host-change', Boolean(data.host_coordinator))
   if (reset) draft.value = {
     enabled: Boolean(data.enabled), host_coordinator: Boolean(data.host_coordinator),
     bot_username: data.bot_username || '', group: data.group || 'resources',
@@ -91,6 +98,7 @@ async function save() {
   busy.value = true
   error.value = ''
   try {
+    if (!ready.value) throw new Error('共享连接尚未加载，请关闭后重新打开全局设置')
     const users = draft.value.allowed_users.split(/[\s,，]+/).filter(Boolean)
     if (users.some(value => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) <= 0)) {
       throw new Error('白名单须为个人账号数字 ID')
@@ -121,15 +129,18 @@ function reconcile() {
 }
 
 onMounted(() => perform(() => load(true)))
-watch(() => draft.value.host_coordinator, value => emit('host-change', value), { immediate: true })
-defineExpose({ save })
+watch(() => draft.value.host_coordinator, value => {
+  if (props.mode === 'settings') emit('host-change', value)
+}, { immediate: true })
+defineExpose({ save, refresh: () => perform(() => load()) })
 </script>
 
 <template>
   <section class="shared-settings">
-    <div class="text-subtitle-2">Telegram 共享审批</div>
     <VAlert v-if="error" type="error" variant="tonal" density="compact">{{ error }}</VAlert>
     <VAlert v-if="state.last_error" type="warning" variant="tonal" density="compact">{{ state.last_error }}</VAlert>
+    <template v-if="mode === 'settings'">
+    <div class="text-subtitle-2">Telegram 共享审批</div>
     <VSwitch v-model="draft.enabled" label="启用共享下载审批" color="primary" hide-details inset />
     <VRow>
       <VCol cols="12" sm="6">
@@ -168,11 +179,9 @@ defineExpose({ save })
       <div v-if="state.probe?.user_id"><dt>本机 Telegram ID</dt><dd>{{ state.probe.user_id }}</dd></div>
       <div v-if="state.probe?.policy"><dt>协调端规则版本</dt><dd>{{ state.probe.policy.revision.slice(0, 12) }}</dd></div>
     </dl>
-    <VTabs v-model="tab" density="compact">
-      <VTab value="requests">本机共享申请</VTab>
-      <VTab v-if="state.host_coordinator" value="records">共享占位记录</VTab>
-    </VTabs>
-    <div v-if="tab === 'requests'" class="shared-settings__records">
+    </template>
+    <template v-else>
+    <div v-if="recordTab === 'requests'" class="shared-settings__records">
       <div v-if="!state.requests?.length" class="text-body-2 text-medium-emphasis">暂无共享申请</div>
       <article v-for="row in state.requests || []" :key="row.request_id" class="shared-settings__record">
         <div class="shared-settings__record-head">
@@ -201,7 +210,7 @@ defineExpose({ save })
       </article>
       <VBtn prepend-icon="mdi-refresh" variant="text" :disabled="busy" @click="reconcile">核验未完成申请</VBtn>
     </div>
-    <div v-else class="shared-settings__records">
+    <div v-else-if="recordTab === 'records' && state.host_coordinator" class="shared-settings__records">
       <div v-if="!state.records?.length" class="text-body-2 text-medium-emphasis">暂无共享占位</div>
       <article v-for="row in state.records || []" :key="row.id" class="shared-settings__record">
         <div class="shared-settings__record-head">
@@ -221,6 +230,7 @@ defineExpose({ save })
         </div>
       </article>
     </div>
+    </template>
   </section>
 </template>
 

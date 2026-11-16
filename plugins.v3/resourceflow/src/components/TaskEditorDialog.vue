@@ -240,22 +240,22 @@ async function saveTask() {
                   <VSwitch v-model="localTask.except_subscribe" label="排除订阅" color="primary" hide-details inset />
                   <VSwitch v-model="localTask.site_hr_active" label="全站 H&R" color="primary" hide-details inset />
                 </div>
-                <div class="editor-switches">
-                  <VSwitch v-model="localTask.recent_episodes_only" label="仅下载最近播出剧集" color="primary" hide-details inset />
-                </div>
-                <VRow v-if="localTask.recent_episodes_only">
-                  <VCol cols="12" sm="6" md="4">
+                <div class="editor-recent-rule">
+                  <VSwitch v-model="localTask.recent_episodes_only" class="editor-recent-rule__switch"
+                    label="仅下载最近播出剧集" color="primary" hide-details inset />
                     <VTextField
+                      v-if="localTask.recent_episodes_only"
                       v-model.number="localTask.recent_episodes_days"
+                      class="editor-recent-rule__days"
                       type="number"
                       min="1"
                       max="365"
                       step="1"
                       label="最近播出天数"
                       suffix="天"
+                      hide-details
                     />
-                  </VCol>
-                </VRow>
+                </div>
                 <VSelect
                   v-model="localTask.blacklist_site_ids"
                   :items="sites"
@@ -536,6 +536,29 @@ async function saveTask() {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 24px;
+}
+
+.editor-recent-rule {
+  display: flex;
+  align-items: center;
+  gap: 12px 24px;
+  min-inline-size: 0;
+}
+
+.editor-recent-rule__switch {
+  flex: 0 1 auto;
+  min-inline-size: 0;
+}
+
+.editor-recent-rule__days {
+  flex: 0 0 148px;
+  max-inline-size: 148px;
+  min-inline-size: 0;
+}
+
+@media (max-width: 599px) {
+  .editor-recent-rule { gap: 8px; }
+  .editor-recent-rule__days { flex-basis: 100px; max-inline-size: 100px; }
 }
 
 .editor-dedup-settings {
