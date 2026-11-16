@@ -77,7 +77,7 @@ const channelDedupAttributes = [
   { value: 'codec', title: '编码' },
   { value: 'source', title: '来源' },
   { value: 'fps', title: '帧率' },
-  { value: 'size', title: '文件大小' },
+  { value: 'size', title: '大小' },
 ]
 const settingsDraft = ref({
   enabled: false,
@@ -985,24 +985,23 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 color="primary" density="compact" hide-details inset />
               <VSwitch v-model="settingsDraft.show_sidebar_nav" label="显示侧栏入口"
                 color="primary" density="compact" hide-details inset />
-            </div>
-            <VDivider />
-            <div class="global-settings__grid">
               <VSwitch v-model="settingsDraft.global_proxy_delete" label="全局动态删种"
                 color="primary" density="compact" hide-details inset />
-              <VTextField v-if="settingsDraft.global_proxy_delete" v-model="settingsDraft.global_delete_size_range"
-                label="全局动态删种阈值（GB）" placeholder="50-100" density="compact" clearable hide-details />
+            </div>
+            <div v-if="settingsDraft.global_proxy_delete" class="global-settings__grid">
+              <VTextField v-model="settingsDraft.global_delete_size_range"
+                label="全局动态删种阈值（GB）" placeholder="50-100" density="comfortable" clearable hide-details />
             </div>
             <VDivider />
             <div class="global-settings__grid global-settings__limits">
               <VTextField v-model.number="settingsDraft.global_disksize" type="number" min="0"
-                label="全局保种体积（GB）" density="compact" clearable hide-details />
+                label="全局保种体积（GB）" density="comfortable" clearable hide-details />
               <VTextField v-model.number="settingsDraft.global_maxdlcount" type="number" min="0"
-                label="全局同时下载任务数" density="compact" clearable hide-details />
+                label="全局同时下载任务数" density="comfortable" clearable hide-details />
               <VTextField v-model.number="settingsDraft.global_maxupspeed" type="number" min="0"
-                label="全局总上传带宽（KB/s）" density="compact" clearable hide-details />
+                label="全局总上传带宽（KB/s）" density="comfortable" clearable hide-details />
               <VTextField v-model.number="settingsDraft.global_maxdlspeed" type="number" min="0"
-                label="全局总下载带宽（KB/s）" density="compact" clearable hide-details />
+                label="全局总下载带宽（KB/s）" density="comfortable" clearable hide-details />
             </div>
           </div>
           <VDivider />
@@ -1013,18 +1012,21 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             <VDivider />
             <div class="channel-dedup__section">
               <div class="text-subtitle-2">全局去重字段</div>
-              <div class="channel-dedup__attributes">
-                <VCheckbox v-for="attribute in channelDedupAttributes" :key="attribute.value"
-                  v-model="channelDedupDraft.attributes" :label="attribute.title" :value="attribute.value"
-                  color="primary" density="compact" hide-details />
+              <div class="global-settings__spec-row">
+                <div class="global-settings__attributes">
+                  <VCheckbox v-for="attribute in channelDedupAttributes" :key="attribute.value"
+                    v-model="channelDedupDraft.attributes" :label="attribute.title" :value="attribute.value"
+                    color="primary" density="compact" hide-details />
+                </div>
+                <VSelect v-model="channelDedupDraft.unknown_policy" :items="channelUnknownPolicies"
+                  class="global-settings__unknown" label="候选缺少勾选规格时" density="comfortable"
+                  :disabled="!channelDedupDraft.attributes.length" hide-details />
               </div>
             </div>
-            <div class="global-settings__grid">
-              <VSelect v-model="channelDedupDraft.unknown_policy" :items="channelUnknownPolicies"
-                label="候选缺少勾选规格时" density="compact" :disabled="!channelDedupDraft.attributes.length" hide-details />
-              <VTextField v-if="channelDedupDraft.attributes.includes('size')"
+            <div v-if="channelDedupDraft.attributes.includes('size')" class="global-settings__grid">
+              <VTextField
                 v-model.number="channelDedupDraft.size_tolerance_pct" type="number" min="0" max="20" step="1"
-                suffix="%" label="单集文件大小容差" density="compact"
+                suffix="%" label="单集文件大小容差" density="comfortable"
                 hint="按种子内单个视频文件大小比较，不使用整包总大小" persistent-hint />
             </div>
             <VDivider />
@@ -1038,29 +1040,50 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 :items="[
                   { title: '逐文件排除，仅下载剩余文件', value: 'partial' },
                   { title: '存在不合格文件则排除整包', value: 'exclude' },
-                ]" density="compact" hide-details />
+                ]" density="comfortable" hide-details />
               <VSelect v-model="channelDedupDraft.identity_policy" label="资源身份未确认时"
                 :items="[
                   { title: '等待核验，不下载', value: 'defer' },
                   { title: '按未命中放行', value: 'allow' },
-                ]" density="compact" hide-details />
+                ]" density="comfortable" hide-details />
             </div>
           </template>
           <VDivider />
           <div class="text-subtitle-2">别名绑定</div>
           <div class="global-settings__grid global-settings__aliases">
             <VTextarea v-model="channelDedupDraft.identity_aliases" label="剧名别名绑定（可选）"
-              placeholder="剧名别名 = TMDB剧集ID" rows="2" density="compact" auto-grow hide-details />
+              placeholder="剧名别名 = TMDB剧集ID" rows="2" density="comfortable" auto-grow hide-details />
             <VTextarea v-model="channelDedupDraft.movie_identity_aliases" label="电影别名绑定（可选）"
-              placeholder="电影别名 = TMDB电影ID" rows="2" density="compact" auto-grow hide-details />
+              placeholder="电影别名 = TMDB电影ID" rows="2" density="comfortable" auto-grow hide-details />
           </div>
         </VCardText>
-        <VCardActions>
-          <VSpacer />
-          <VBtn variant="text" :disabled="saving" @click="settingsDialog = false">关闭</VBtn>
-          <VBtn color="primary" variant="flat" :loading="saving" :disabled="!settingsReady || channelDedupLoading"
-            @click="saveSettings">保存设置</VBtn>
-        </VCardActions>
+        <footer class="global-settings__footer">
+          <div class="global-settings__footer-group">
+            <VTooltip text="测试审批连接">
+              <template #activator="{ props: tip }">
+                <VBtn v-bind="tip" aria-label="测试审批连接" variant="text"
+                  :icon="$vuetify.display.xs ? 'mdi-connection' : undefined"
+                  :prepend-icon="$vuetify.display.xs ? undefined : 'mdi-connection'"
+                  :disabled="saving || !sharedSettingsPanel?.ready || sharedSettingsPanel?.busy || !sharedSettingsPanel?.canTest"
+                  @click="sharedSettingsPanel?.test()">
+                  <VIcon v-if="$vuetify.display.xs" icon="mdi-connection" />
+                  <template v-else>测试审批连接</template>
+                </VBtn>
+              </template>
+            </VTooltip>
+            <VTooltip text="刷新共享状态">
+              <template #activator="{ props: tip }">
+                <VBtn v-bind="tip" icon="mdi-refresh" aria-label="刷新共享状态" variant="text"
+                  :disabled="saving || sharedSettingsPanel?.busy" @click="sharedSettingsPanel?.refresh()" />
+              </template>
+            </VTooltip>
+          </div>
+          <div class="global-settings__footer-group">
+            <VBtn variant="text" :disabled="saving || sharedSettingsPanel?.busy" @click="settingsDialog = false">关闭</VBtn>
+            <VBtn color="primary" variant="flat" :loading="saving"
+              :disabled="!settingsReady || channelDedupLoading || sharedSettingsPanel?.busy" @click="saveSettings">保存设置</VBtn>
+          </div>
+        </footer>
       </VCard>
     </VDialog>
 
@@ -1277,11 +1300,70 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 }
 
 .global-settings__toggles {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  max-inline-size: 26rem;
+  gap: 4px 24px;
+}
+
+.global-settings__toggles > * {
+  flex: 0 0 auto;
+  min-inline-size: 0;
+}
+
+.global-settings__spec-row,
+.global-settings__attributes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  min-inline-size: 0;
+}
+
+.global-settings__attributes > * {
+  flex: 0 0 auto;
+}
+
+.global-settings__unknown {
+  flex: 0 1 18rem;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+
+.global-settings__footer {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+}
+
+.global-settings__footer-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-inline-size: 0;
+}
+
+@media (max-width: 599px) {
+  .global-settings__toggles {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: start;
+    gap: 8px;
+  }
+  .channel-dedup__body .global-settings__toggles :deep(.v-selection-control) {
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .channel-dedup__body .global-settings__toggles :deep(.v-label) {
+    margin-inline: 0;
+    text-align: center;
+  }
+  .global-settings__footer { padding: 8px; gap: 4px; }
+  .global-settings__footer-group { gap: 0; }
 }
 
 @media (min-width: 600px) {

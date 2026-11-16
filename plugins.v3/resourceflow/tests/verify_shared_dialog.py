@@ -54,12 +54,14 @@ async def verify_record_layout(dialog):
 
 async def verify_settings_layout(dialog, width):
     toggles = await dialog.locator('.global-settings__toggles').evaluate('''element => {
-        const [enabled, sidebar] = [...element.children].map(child => child.getBoundingClientRect())
-        return {inline: sidebar.left >= enabled.right,
-            centered: Math.abs(enabled.top + enabled.height / 2 - sidebar.top - sidebar.height / 2) < 2,
+        const boxes = [...element.children].map(child => child.getBoundingClientRect())
+        return {inline: boxes.every((box, index) => !index || box.left >= boxes[index - 1].right),
+            aligned: boxes.every(box => Math.abs(box.top - boxes[0].top) < 2),
             fits: element.scrollWidth <= element.clientWidth + 1}
     }''')
     assert all(toggles.values()), (width, toggles)
+    assert await dialog.locator('.global-settings__toggles label').all_text_contents() == [
+        '启用插件', '显示侧栏入口', '全局动态删种']
     for selector in ('.global-settings__aliases', '.shared-settings__credentials'):
         layout = await dialog.locator(selector).evaluate('''element => {
             const [first, second] = [...element.children].map(child => child.getBoundingClientRect())
@@ -82,6 +84,36 @@ async def verify_settings_layout(dialog, width):
     assert rows == (1 if width >= 960 else 2 if width >= 600 else 4), (width, limits)
     if width >= 960:
         assert all(item['width'] < 320 for item in limits), limits
+    heights = await dialog.locator('.global-settings__limits .v-field').evaluate_all(
+        'elements => elements.map(element => element.getBoundingClientRect().height)')
+    assert all(value >= 48 for value in heights), (width, heights)
+    status = await dialog.locator('.shared-settings__status').evaluate('''element =>
+        [...element.children].slice(0, 3).map(child => child.getBoundingClientRect().top)''')
+    if width >= 600:
+        assert max(status) - min(status) < 2, (width, status)
+    specs = await dialog.locator('.global-settings__spec-row').evaluate('''element => {
+        const attributes = element.querySelector('.global-settings__attributes').getBoundingClientRect()
+        const policy = element.querySelector('.global-settings__unknown').getBoundingClientRect()
+        return {inline: policy.left >= attributes.right,
+            centered: Math.abs(policy.top + policy.height / 2 - attributes.top - attributes.height / 2) < 2,
+            fits: element.scrollWidth <= element.clientWidth + 1}
+    }''')
+    assert specs['fits'] and (width < 960 or all(specs.values())), (width, specs)
+    footer = await dialog.locator('.global-settings__footer').evaluate('''element => {
+        const buttons = [...element.querySelectorAll('button')].map(button => button.getBoundingClientRect())
+        const groups = [...element.children].map(child => child.getBoundingClientRect())
+        const bounds = element.getBoundingClientRect()
+        const style = getComputedStyle(element)
+        return {count: buttons.length, aligned: buttons.every(box =>
+            Math.abs(box.top + box.height / 2 - buttons[0].top - buttons[0].height / 2) < 2),
+            separate: groups[0].right <= groups[1].left,
+            left: Math.abs(groups[0].left - bounds.left - parseFloat(style.paddingLeft)) < 2,
+            right: Math.abs(bounds.right - groups[1].right - parseFloat(style.paddingRight)) < 2,
+            fits: element.scrollWidth <= element.clientWidth + 1}
+    }''')
+    assert footer['count'] == 4 and all(footer[key] for key in ('aligned', 'separate', 'left', 'right', 'fits')), (width, footer)
+    assert await dialog.locator('.global-settings__body button[aria-label="测试审批连接"]').count() == 0
+    assert await dialog.locator('.global-settings__footer button[aria-label="测试审批连接"] .mdi-connection').count() == 1
     assert await dialog.locator('.v-card-text').evaluate(
         'element => element.scrollWidth <= element.clientWidth + 1')
 
@@ -223,12 +255,24 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_text("全局去重字段", exact=True).wait_for()
             await dialog.get_by_text("资源去重规则", exact=True).wait_for()
             assert await dialog.get_by_label("分辨率", exact=True).is_checked()
-            for label in ("特效", "编码", "来源", "帧率", "文件大小"):
+            for label in ("特效", "编码", "来源", "帧率", "大小"):
                 assert not await dialog.get_by_label(label, exact=True).is_checked()
             token = dialog.get_by_label("协调 Bot Token（已保存）", exact=True)
             assert await token.get_attribute("type") == "password"
             await token.fill("123456:FAKE_TOKEN_FOR_UI_TEST_ONLY_12345")
-            await dialog.get_by_label("允许的个人账号 ID", exact=True).fill("11\n22")
+            users = dialog.get_by_label("允许的个人账号 ID", exact=True)
+            for invalid in ('11;abc', '-22', '1.5', '9007199254740992'):
+                await users.fill(invalid)
+                before = await page.evaluate("window.resourceflowRequests.filter(item => item.method === 'POST').length")
+                await dialog.get_by_role('button', name='保存设置', exact=True).click()
+                await dialog.get_by_text('全局设置未全部保存：白名单须为个人账号数字 ID', exact=True).wait_for()
+                assert before == await page.evaluate("window.resourceflowRequests.filter(item => item.method === 'POST').length")
+            mixed_users = "11,22;11；22、11 22\n11\t22，11"
+            await users.fill(mixed_users)
+            await dialog.get_by_role('button', name='刷新共享状态', exact=True).click()
+            await page.wait_for_function("!document.querySelector('.global-settings__footer button:disabled')")
+            assert await users.input_value() == mixed_users
+            assert await token.input_value() == '123456:FAKE_TOKEN_FOR_UI_TEST_ONLY_12345'
             await dialog.get_by_label('全局同时下载任务数', exact=True).fill('6')
             await dialog.get_by_role("button", name="保存设置", exact=True).click()
             await page.wait_for_function("""window.resourceflowRequests.some(item =>
@@ -240,11 +284,16 @@ async def verify(base_url, output, executable_path, host_css=None):
                 && item.body.channels === '' && item.body.size_tolerance_pct === 3)""")
             await page.wait_for_function("document.querySelector('input[type=password]').value === ''")
             await page.wait_for_function("!document.querySelector('button.v-btn--loading')")
+            assert await users.input_value() == '11, 22'
             assert await dialog.get_by_label('全局同时下载任务数', exact=True).input_value() == '6'
             await verify_settings_layout(dialog, width)
-            await dialog.get_by_label('文件大小', exact=True).check()
+            await dialog.get_by_label('全局动态删种', exact=True).check()
+            await dialog.get_by_label('全局动态删种阈值（GB）', exact=True).fill('50-100')
+            await dialog.get_by_label('全局动态删种', exact=True).uncheck()
+            assert await dialog.get_by_label('全局动态删种阈值（GB）', exact=True).count() == 0
+            await dialog.get_by_label('大小', exact=True).check()
             await dialog.get_by_label('单集文件大小容差', exact=True).wait_for()
-            await dialog.get_by_label('文件大小', exact=True).uncheck()
+            await dialog.get_by_label('大小', exact=True).uncheck()
             await dialog.locator(".v-card-text").evaluate("element => { element.scrollTop = 0 }")
             await page.screenshot(path=str(output / f"global-settings-{width}.png"), full_page=True)
             await dialog.get_by_label("本机名称", exact=True).scroll_into_view_if_needed()

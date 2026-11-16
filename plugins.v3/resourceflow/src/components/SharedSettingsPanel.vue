@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { formatBytes, unwrapResponse } from '../utils'
 
 const props = defineProps({
@@ -16,6 +16,7 @@ const draft = ref({
 })
 const busy = ref(false)
 const ready = ref(false)
+const canTest = computed(() => Boolean(state.value.bot_username))
 const error = ref('')
 const phaseNames = {
   requesting: '等待审批', reserved: '已获准', adding: '暂停添加中', awaiting_start: '等待入队确认',
@@ -83,7 +84,7 @@ async function load(reset = false) {
     enabled: Boolean(data.enabled), host_coordinator: Boolean(data.host_coordinator),
     bot_username: data.bot_username || '', group: data.group || 'resources',
     instance_label: data.instance_label || '我的资源刷流', bot_token: '',
-    allowed_users: (data.allowed_users || []).join('\n'),
+    allowed_users: (data.allowed_users || []).join(', '),
   }
 }
 
@@ -99,11 +100,11 @@ async function save() {
   error.value = ''
   try {
     if (!ready.value) throw new Error('共享连接尚未加载，请关闭后重新打开全局设置')
-    const users = draft.value.allowed_users.split(/[\s,，]+/).filter(Boolean)
+    const users = draft.value.allowed_users.split(/[\s,，;；、]+/).filter(Boolean)
     if (users.some(value => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) <= 0)) {
       throw new Error('白名单须为个人账号数字 ID')
     }
-    const payload = { ...draft.value, allowed_users: users.map(Number) }
+    const payload = { ...draft.value, allowed_users: [...new Set(users.map(Number))] }
     if (!payload.bot_token) delete payload.bot_token
     unwrapResponse(await props.api.post(`${props.pluginBase}/shared/settings`, payload))
     await load(true)
@@ -132,7 +133,7 @@ onMounted(() => perform(() => load(true)))
 watch(() => draft.value.host_coordinator, value => {
   if (props.mode === 'settings') emit('host-change', value)
 }, { immediate: true })
-defineExpose({ save, refresh: () => perform(() => load()) })
+defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => load()) })
 </script>
 
 <template>
@@ -144,25 +145,17 @@ defineExpose({ save, refresh: () => perform(() => load()) })
     <div class="shared-settings__grid">
       <VSwitch v-model="draft.enabled" label="启用共享下载审批" color="primary" density="compact" hide-details inset />
       <VSwitch v-model="draft.host_coordinator" label="在本机运行协调端" color="primary" density="compact" hide-details inset />
-      <VTextField v-model="draft.bot_username" label="协调 Bot 用户名" placeholder="@resource_bot" density="compact" hide-details />
-      <VTextField v-model="draft.group" label="共享组" density="compact" hide-details />
-      <VTextField v-model="draft.instance_label" label="本机名称" maxlength="80" density="compact" hide-details />
+      <VTextField v-model="draft.bot_username" label="协调 Bot 用户名" placeholder="@resource_bot" density="comfortable" hide-details />
+      <VTextField v-model="draft.group" label="共享组" density="comfortable" hide-details />
+      <VTextField v-model="draft.instance_label" label="本机名称" maxlength="80" density="comfortable" hide-details />
       <VTextField :model-value="state.instance_id || '-'" label="本机实例 ID"
-        class="shared-settings__instance" readonly density="compact" hide-details />
+        class="shared-settings__instance" readonly density="comfortable" hide-details />
     </div>
     <div v-if="draft.host_coordinator" class="shared-settings__grid shared-settings__credentials">
       <VTextField v-model="draft.bot_token" type="password" autocomplete="new-password"
-        :label="state.token_configured ? '协调 Bot Token（已保存）' : '协调 Bot Token'" density="compact" hide-details />
-      <VTextarea v-model="draft.allowed_users" label="允许的个人账号 ID" rows="2" density="compact" auto-grow hide-details />
-    </div>
-    <div class="shared-settings__actions">
-      <VBtn prepend-icon="mdi-connection" :disabled="busy || !state.bot_username" variant="text" @click="test">测试审批连接</VBtn>
-      <VTooltip text="刷新共享状态">
-        <template #activator="{ props: tip }">
-          <VBtn v-bind="tip" icon="mdi-refresh" aria-label="刷新共享状态" variant="text"
-            :disabled="busy" @click="perform(() => load())" />
-        </template>
-      </VTooltip>
+        :label="state.token_configured ? '协调 Bot Token（已保存）' : '协调 Bot Token'" density="comfortable" hide-details />
+      <VTextarea v-model="draft.allowed_users" label="允许的个人账号 ID" rows="1" density="comfortable"
+        placeholder="123456789, 987654321; 112233445" auto-grow hide-details />
     </div>
     <dl class="shared-settings__status">
       <div><dt>账号来源</dt><dd>自动生成ED2K链接 · 个人账号</dd></div>
@@ -231,16 +224,16 @@ defineExpose({ save, refresh: () => perform(() => load()) })
 .shared-settings--compact { gap: 12px; }
 .shared-settings__grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 12px 20px; min-inline-size: 0; }
 .shared-settings__grid > * { min-inline-size: 0; }
-.shared-settings__actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .shared-settings__instance :deep(input) { font-family: monospace; font-size: 11px; }
 .shared-settings__status { margin: 0; display: grid; gap: 10px; }
 .shared-settings__status > div { display: flex; justify-content: space-between; gap: 12px; }
 .shared-settings__status dd { margin: 0; overflow-wrap: anywhere; text-align: end; }
 .shared-settings--compact .shared-settings__status { gap: 8px 20px; font-size: 13px; }
-.shared-settings--compact .shared-settings__status > div { min-inline-size: 0; }
+.shared-settings--compact .shared-settings__status > div { min-inline-size: 0; justify-content: flex-start; gap: 8px; flex-wrap: wrap; }
 .shared-settings--compact .shared-settings__status dt { flex-shrink: 0; }
 @media (min-width: 600px) {
-  .shared-settings__grid, .shared-settings--compact .shared-settings__status { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .shared-settings__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .shared-settings--compact .shared-settings__status { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 .shared-settings__records { min-inline-size: 0; }
 .shared-settings__record { display: flex; flex-direction: column; gap: 10px; padding-block: 20px; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); overflow-wrap: anywhere; min-inline-size: 0; }
