@@ -974,39 +974,36 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VIcon icon="mdi-tune-variant" color="primary" />
           <span>全局设置</span>
         </VCardTitle>
-        <VCardText class="channel-dedup__body">
+        <VCardText class="channel-dedup__body global-settings__body">
           <VAlert v-if="settingsError || channelDedupError" type="error" variant="tonal" density="compact">
             {{ settingsError || channelDedupError }}
           </VAlert>
           <VProgressLinear v-if="loading || channelDedupLoading" indeterminate />
           <div class="channel-dedup__section">
-            <VSwitch v-model="settingsDraft.enabled" label="启用插件" color="primary" hide-details inset />
-            <VSwitch v-model="settingsDraft.show_sidebar_nav" label="显示侧栏入口"
-              color="primary" hide-details inset />
+            <div class="global-settings__toggles">
+              <VSwitch v-model="settingsDraft.enabled" label="启用插件"
+                color="primary" density="compact" hide-details inset />
+              <VSwitch v-model="settingsDraft.show_sidebar_nav" label="显示侧栏入口"
+                color="primary" density="compact" hide-details inset />
+            </div>
             <VDivider />
-            <VSwitch v-model="settingsDraft.global_proxy_delete" label="全局动态删种"
-              color="primary" hide-details inset />
-            <VTextField v-if="settingsDraft.global_proxy_delete" v-model="settingsDraft.global_delete_size_range"
-              label="全局动态删种阈值（GB）" placeholder="50-100" clearable hide-details />
+            <div class="global-settings__grid">
+              <VSwitch v-model="settingsDraft.global_proxy_delete" label="全局动态删种"
+                color="primary" density="compact" hide-details inset />
+              <VTextField v-if="settingsDraft.global_proxy_delete" v-model="settingsDraft.global_delete_size_range"
+                label="全局动态删种阈值（GB）" placeholder="50-100" density="compact" clearable hide-details />
+            </div>
             <VDivider />
-            <VRow>
-              <VCol cols="12" sm="6">
-                <VTextField v-model.number="settingsDraft.global_disksize" type="number" min="0"
-                  label="全局保种体积（GB）" clearable hide-details />
-              </VCol>
-              <VCol cols="12" sm="6">
-                <VTextField v-model.number="settingsDraft.global_maxdlcount" type="number" min="0"
-                  label="全局同时下载任务数" clearable hide-details />
-              </VCol>
-              <VCol cols="12" sm="6">
-                <VTextField v-model.number="settingsDraft.global_maxupspeed" type="number" min="0"
-                  label="全局总上传带宽（KB/s）" clearable hide-details />
-              </VCol>
-              <VCol cols="12" sm="6">
-                <VTextField v-model.number="settingsDraft.global_maxdlspeed" type="number" min="0"
-                  label="全局总下载带宽（KB/s）" clearable hide-details />
-              </VCol>
-            </VRow>
+            <div class="global-settings__grid global-settings__limits">
+              <VTextField v-model.number="settingsDraft.global_disksize" type="number" min="0"
+                label="全局保种体积（GB）" density="compact" clearable hide-details />
+              <VTextField v-model.number="settingsDraft.global_maxdlcount" type="number" min="0"
+                label="全局同时下载任务数" density="compact" clearable hide-details />
+              <VTextField v-model.number="settingsDraft.global_maxupspeed" type="number" min="0"
+                label="全局总上传带宽（KB/s）" density="compact" clearable hide-details />
+              <VTextField v-model.number="settingsDraft.global_maxdlspeed" type="number" min="0"
+                label="全局总下载带宽（KB/s）" density="compact" clearable hide-details />
+            </div>
           </div>
           <VDivider />
           <SharedSettingsPanel v-if="settingsDialog" ref="sharedSettingsPanel" mode="settings"
@@ -1022,35 +1019,41 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                   color="primary" density="compact" hide-details />
               </div>
             </div>
-            <VTextField v-if="channelDedupDraft.attributes.includes('size')"
-              v-model.number="channelDedupDraft.size_tolerance_pct" type="number" min="0" max="20" step="1"
-              suffix="%" label="单集文件大小容差"
-              hint="按种子内单个视频文件大小比较，不使用整包总大小" persistent-hint />
-            <VSelect v-model="channelDedupDraft.unknown_policy" :items="channelUnknownPolicies"
-              label="候选缺少勾选规格时" :disabled="!channelDedupDraft.attributes.length" hide-details />
+            <div class="global-settings__grid">
+              <VSelect v-model="channelDedupDraft.unknown_policy" :items="channelUnknownPolicies"
+                label="候选缺少勾选规格时" density="compact" :disabled="!channelDedupDraft.attributes.length" hide-details />
+              <VTextField v-if="channelDedupDraft.attributes.includes('size')"
+                v-model.number="channelDedupDraft.size_tolerance_pct" type="number" min="0" max="20" step="1"
+                suffix="%" label="单集文件大小容差" density="compact"
+                hint="按种子内单个视频文件大小比较，不使用整包总大小" persistent-hint />
+            </div>
             <VDivider />
             <div class="text-subtitle-2">资源去重规则</div>
-            <VSwitch v-model="channelDedupDraft.inflight_enabled" label="排除已入队的同规格资源"
-              color="primary" hide-details inset />
-            <VSwitch v-model="channelDedupDraft.pack_dedup_enabled" label="排除同一种子包内的同规格重复文件"
-              color="primary" hide-details inset />
-            <VSelect v-model="channelDedupDraft.pack_policy" label="整包处理方式"
-              :items="[
-                { title: '逐文件排除，仅下载剩余文件', value: 'partial' },
-                { title: '存在不合格文件则排除整包', value: 'exclude' },
-              ]" hide-details />
-            <VSelect v-model="channelDedupDraft.identity_policy" label="资源身份未确认时"
-              :items="[
-                { title: '等待核验，不下载', value: 'defer' },
-                { title: '按未命中放行', value: 'allow' },
-              ]" hide-details />
+            <div class="global-settings__grid global-settings__rules">
+              <VSwitch v-model="channelDedupDraft.inflight_enabled" label="排除已入队的同规格资源"
+                color="primary" density="compact" hide-details inset />
+              <VSwitch v-model="channelDedupDraft.pack_dedup_enabled" label="排除同一种子包内的同规格重复文件"
+                color="primary" density="compact" hide-details inset />
+              <VSelect v-model="channelDedupDraft.pack_policy" label="整包处理方式"
+                :items="[
+                  { title: '逐文件排除，仅下载剩余文件', value: 'partial' },
+                  { title: '存在不合格文件则排除整包', value: 'exclude' },
+                ]" density="compact" hide-details />
+              <VSelect v-model="channelDedupDraft.identity_policy" label="资源身份未确认时"
+                :items="[
+                  { title: '等待核验，不下载', value: 'defer' },
+                  { title: '按未命中放行', value: 'allow' },
+                ]" density="compact" hide-details />
+            </div>
           </template>
           <VDivider />
           <div class="text-subtitle-2">别名绑定</div>
-          <VTextarea v-model="channelDedupDraft.identity_aliases" label="剧名别名绑定（可选）"
-            placeholder="剧名别名 = TMDB剧集ID" rows="2" auto-grow hide-details />
-          <VTextarea v-model="channelDedupDraft.movie_identity_aliases" label="电影别名绑定（可选）"
-            placeholder="电影别名 = TMDB电影ID" rows="2" auto-grow hide-details />
+          <div class="global-settings__grid global-settings__aliases">
+            <VTextarea v-model="channelDedupDraft.identity_aliases" label="剧名别名绑定（可选）"
+              placeholder="剧名别名 = TMDB剧集ID" rows="2" density="compact" auto-grow hide-details />
+            <VTextarea v-model="channelDedupDraft.movie_identity_aliases" label="电影别名绑定（可选）"
+              placeholder="电影别名 = TMDB电影ID" rows="2" density="compact" auto-grow hide-details />
+          </div>
         </VCardText>
         <VCardActions>
           <VSpacer />
@@ -1259,6 +1262,34 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
 .channel-dedup__card {
   block-size: 92dvh;
+}
+
+.global-settings__body {
+  gap: 12px;
+}
+
+.global-settings__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 12px 20px;
+  min-inline-size: 0;
+}
+
+.global-settings__toggles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: 12px;
+  max-inline-size: 26rem;
+}
+
+@media (min-width: 600px) {
+  .global-settings__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (min-width: 960px) {
+  .global-settings__limits { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
 @media (max-width: 599px) {

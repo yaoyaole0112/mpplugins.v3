@@ -52,12 +52,46 @@ async def verify_record_layout(dialog):
         assert info['fits'] and info['contained'], info
 
 
+async def verify_settings_layout(dialog, width):
+    toggles = await dialog.locator('.global-settings__toggles').evaluate('''element => {
+        const [enabled, sidebar] = [...element.children].map(child => child.getBoundingClientRect())
+        return {inline: sidebar.left >= enabled.right,
+            centered: Math.abs(enabled.top + enabled.height / 2 - sidebar.top - sidebar.height / 2) < 2,
+            fits: element.scrollWidth <= element.clientWidth + 1}
+    }''')
+    assert all(toggles.values()), (width, toggles)
+    for selector in ('.global-settings__aliases', '.shared-settings__credentials'):
+        layout = await dialog.locator(selector).evaluate('''element => {
+            const [first, second] = [...element.children].map(child => child.getBoundingClientRect())
+            return {inline: second.left >= first.right && Math.abs(first.top - second.top) < 2,
+                stacked: second.top >= first.bottom, fits: element.scrollWidth <= element.clientWidth + 1}
+        }''')
+        assert layout['inline' if width >= 600 else 'stacked'] and layout['fits'], (width, selector, layout)
+    rules = await dialog.locator('.global-settings__rules').evaluate('''element => {
+        const [first, second] = [...element.children].slice(2).map(child => child.getBoundingClientRect())
+        return {inline: second.left >= first.right && Math.abs(first.top - second.top) < 2,
+            stacked: second.top >= first.bottom, fits: element.scrollWidth <= element.clientWidth + 1}
+    }''')
+    assert rules['inline' if width >= 600 else 'stacked'] and rules['fits'], (width, rules)
+    limits = await dialog.locator('.global-settings__limits').evaluate('''element =>
+        [...element.children].map(child => {
+            const box = child.getBoundingClientRect()
+            return {top: box.top, width: box.width}
+        })''')
+    rows = len({round(item['top']) for item in limits})
+    assert rows == (1 if width >= 960 else 2 if width >= 600 else 4), (width, limits)
+    if width >= 960:
+        assert all(item['width'] < 320 for item in limits), limits
+    assert await dialog.locator('.v-card-text').evaluate(
+        'element => element.scrollWidth <= element.clientWidth + 1')
+
+
 async def verify(base_url, output, executable_path, host_css=None):
     output.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True, executable_path=executable_path,
                                                    args=["--no-sandbox"])
-        for width, height in ((1440, 1000), (390, 844), (320, 720)):
+        for width, height in ((1440, 1000), (768, 1024), (390, 844), (320, 720)):
             page = await browser.new_page(viewport={"width": width, "height": height}, locale="zh-CN",
                                           timezone_id="Asia/Shanghai")
             errors = []
@@ -73,11 +107,11 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_role("button", name="保存设置", exact=True).count() == 0
             assert await dialog.get_by_role("tab").all_text_contents() == ['本机共享申请', '长期账本', '身份待核验']
             bounds = await dialog.bounding_box()
-            assert bounds["width"] >= (1100 if width >= 1000 else width - 2), bounds
+            assert bounds["width"] >= (1100 if width >= 1000 else width * 0.9 if width >= 600 else width - 2), bounds
             assert bounds["height"] >= height * 0.88, bounds
             await page.wait_for_timeout(300)
             card_bounds = await dialog.locator('.channel-dedup__card').bounding_box()
-            assert card_bounds["width"] >= (1100 if width >= 1000 else width - 2), card_bounds
+            assert card_bounds["width"] >= (1100 if width >= 1000 else width * 0.9 if width >= 600 else width - 2), card_bounds
             records = dialog.locator('.shared-settings__records')
             first = records.locator('article').first
             await first.get_by_text("申请时间", exact=False).wait_for()
@@ -207,12 +241,18 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.wait_for_function("document.querySelector('input[type=password]').value === ''")
             await page.wait_for_function("!document.querySelector('button.v-btn--loading')")
             assert await dialog.get_by_label('全局同时下载任务数', exact=True).input_value() == '6'
+            await verify_settings_layout(dialog, width)
+            await dialog.get_by_label('文件大小', exact=True).check()
+            await dialog.get_by_label('单集文件大小容差', exact=True).wait_for()
+            await dialog.get_by_label('文件大小', exact=True).uncheck()
             await dialog.locator(".v-card-text").evaluate("element => { element.scrollTop = 0 }")
             await page.screenshot(path=str(output / f"global-settings-{width}.png"), full_page=True)
             await dialog.get_by_label("本机名称", exact=True).scroll_into_view_if_needed()
             await page.screenshot(path=str(output / f"global-shared-{width}.png"), full_page=True)
             await dialog.get_by_text("全局去重字段", exact=True).scroll_into_view_if_needed()
             await page.screenshot(path=str(output / f"global-policy-{width}.png"), full_page=True)
+            await dialog.locator('.global-settings__aliases').scroll_into_view_if_needed()
+            await page.screenshot(path=str(output / f"global-aliases-{width}.png"), full_page=True)
             if host_css:
                 stylesheet = await page.add_style_tag(path=str(host_css))
                 for scheme in ('light', 'dark'):
@@ -227,6 +267,7 @@ async def verify(base_url, output, executable_path, host_css=None):
                     await page.screenshot(path=str(output / f'global-glass-{scheme}-{width}.png'), full_page=True)
                     await dialog.get_by_text("全局去重字段", exact=True).scroll_into_view_if_needed()
                     await page.screenshot(path=str(output / f'global-policy-glass-{scheme}-{width}.png'), full_page=True)
+                    await verify_settings_layout(dialog, width)
                     assert await dialog.locator(".v-card-text").evaluate("element => element.scrollWidth <= element.clientWidth + 1")
                     clipped = await dialog.locator(".v-label, .v-btn__content").evaluate_all("""elements =>
                         elements.filter(item => item.getBoundingClientRect().width > 0
@@ -375,7 +416,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert not errors, errors
             await page.close()
         await browser.close()
-    print("Verified 1440, 390 and 320: full-size global settings; records-only approval tabs; staged saves/failures; retained drafts; inline recent days; task settings link")
+    print("Verified 1440, 768, 390 and 320: compact responsive settings; inline plugin/sidebar switches; paired rules/aliases/credentials; staged saves/failures; retained drafts; approval records; task settings link")
     if host_css:
         print('MoviePilot host stylesheet verified with glass light/dark overrides')
 

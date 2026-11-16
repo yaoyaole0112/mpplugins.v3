@@ -136,33 +136,25 @@ defineExpose({ save, refresh: () => perform(() => load()) })
 </script>
 
 <template>
-  <section class="shared-settings">
+  <section class="shared-settings" :class="{ 'shared-settings--compact': mode === 'settings' }">
     <VAlert v-if="error" type="error" variant="tonal" density="compact">{{ error }}</VAlert>
     <VAlert v-if="state.last_error" type="warning" variant="tonal" density="compact">{{ state.last_error }}</VAlert>
     <template v-if="mode === 'settings'">
     <div class="text-subtitle-2">Telegram 共享审批</div>
-    <VSwitch v-model="draft.enabled" label="启用共享下载审批" color="primary" hide-details inset />
-    <VRow>
-      <VCol cols="12" sm="6">
-        <VTextField v-model="draft.bot_username" label="协调 Bot 用户名" placeholder="@resource_bot" hide-details />
-      </VCol>
-      <VCol cols="12" sm="6">
-        <VTextField v-model="draft.group" label="共享组" hide-details />
-      </VCol>
-      <VCol cols="12" sm="6">
-        <VTextField v-model="draft.instance_label" label="本机名称" maxlength="80" hide-details />
-      </VCol>
-      <VCol cols="12" sm="6">
-        <VTextField :model-value="state.instance_id || '-'" label="本机实例 ID"
-          class="shared-settings__instance" readonly hide-details />
-      </VCol>
-    </VRow>
-    <VSwitch v-model="draft.host_coordinator" label="在本机运行协调端" color="primary" hide-details inset />
-    <template v-if="draft.host_coordinator">
+    <div class="shared-settings__grid">
+      <VSwitch v-model="draft.enabled" label="启用共享下载审批" color="primary" density="compact" hide-details inset />
+      <VSwitch v-model="draft.host_coordinator" label="在本机运行协调端" color="primary" density="compact" hide-details inset />
+      <VTextField v-model="draft.bot_username" label="协调 Bot 用户名" placeholder="@resource_bot" density="compact" hide-details />
+      <VTextField v-model="draft.group" label="共享组" density="compact" hide-details />
+      <VTextField v-model="draft.instance_label" label="本机名称" maxlength="80" density="compact" hide-details />
+      <VTextField :model-value="state.instance_id || '-'" label="本机实例 ID"
+        class="shared-settings__instance" readonly density="compact" hide-details />
+    </div>
+    <div v-if="draft.host_coordinator" class="shared-settings__grid shared-settings__credentials">
       <VTextField v-model="draft.bot_token" type="password" autocomplete="new-password"
-        :label="state.token_configured ? '协调 Bot Token（已保存）' : '协调 Bot Token'" hide-details />
-      <VTextarea v-model="draft.allowed_users" label="允许的个人账号 ID" rows="2" auto-grow hide-details />
-    </template>
+        :label="state.token_configured ? '协调 Bot Token（已保存）' : '协调 Bot Token'" density="compact" hide-details />
+      <VTextarea v-model="draft.allowed_users" label="允许的个人账号 ID" rows="2" density="compact" auto-grow hide-details />
+    </div>
     <div class="shared-settings__actions">
       <VBtn prepend-icon="mdi-connection" :disabled="busy || !state.bot_username" variant="text" @click="test">测试审批连接</VBtn>
       <VTooltip text="刷新共享状态">
@@ -236,11 +228,20 @@ defineExpose({ save, refresh: () => perform(() => load()) })
 
 <style scoped>
 .shared-settings { display: flex; flex-direction: column; gap: 16px; min-inline-size: 0; }
+.shared-settings--compact { gap: 12px; }
+.shared-settings__grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 12px 20px; min-inline-size: 0; }
+.shared-settings__grid > * { min-inline-size: 0; }
 .shared-settings__actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .shared-settings__instance :deep(input) { font-family: monospace; font-size: 11px; }
 .shared-settings__status { margin: 0; display: grid; gap: 10px; }
 .shared-settings__status > div { display: flex; justify-content: space-between; gap: 12px; }
 .shared-settings__status dd { margin: 0; overflow-wrap: anywhere; text-align: end; }
+.shared-settings--compact .shared-settings__status { gap: 8px 20px; font-size: 13px; }
+.shared-settings--compact .shared-settings__status > div { min-inline-size: 0; }
+.shared-settings--compact .shared-settings__status dt { flex-shrink: 0; }
+@media (min-width: 600px) {
+  .shared-settings__grid, .shared-settings--compact .shared-settings__status { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .shared-settings__records { min-inline-size: 0; }
 .shared-settings__record { display: flex; flex-direction: column; gap: 10px; padding-block: 20px; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); overflow-wrap: anywhere; min-inline-size: 0; }
 .shared-settings__record-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; min-inline-size: 0; }
