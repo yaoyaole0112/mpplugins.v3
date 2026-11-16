@@ -52,6 +52,7 @@ from .models import (
     ChannelDedupSettingsPayload, ResourceLedgerDeletePayload, migrated_identity_policy, task_spec_dedup_enabled,
 )
 from .resource_dedup import evidence_key, index_records, resource_slot
+from .record_search import matches_record
 from .active_dedup import download_complete, download_files, download_state, paths_agree
 from .channel_dedup import (
     filename_title_aliases, long_title_prefix_matches, normalize_title,
@@ -267,7 +268,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.14"
+    plugin_version = "1.0.15"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -477,6 +478,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         return [
             {"path": "/shared/status", "endpoint": self.get_shared_status, "methods": ["GET"],
              "auth": "bear", "summary": "共享审批与协调端状态"},
+            {"path": "/shared/records", "endpoint": self.get_shared_records, "methods": ["GET"],
+             "auth": "bear", "summary": "搜索筛选共享申请与占位记录"},
             {"path": "/shared/settings", "endpoint": self.update_shared_settings, "methods": ["POST"],
              "auth": "bear", "summary": "保存 Telegram 共享审批设置"},
             {"path": "/shared/test", "endpoint": self.test_shared_connection, "methods": ["POST"],
@@ -3425,11 +3428,13 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 self._resource_ledger = ledger
 
     def get_resource_ledger(self, page: int = 1, page_size: int = 50,
-                            state: str = "ledger") -> schemas.Response:
+                            state: str = "ledger", query: str = "", media_type: str = "") -> schemas.Response:
         page, page_size = max(int(page), 1), min(max(int(page_size), 1), 100)
         with self._inflight_lock:
             rows = getattr(self, "_identity_pending" if state == "pending" else "_resource_ledger", {})
-            items = [{"key": key, **value} for key, value in rows.items()]
+            items = [{"key": key, **value} for key, value in rows.items()
+                     if (not media_type or value.get("media_type") == media_type)
+                     and matches_record(value, query)]
             items.sort(key=lambda row: row.get("remembered_at", row.get("last_seen", 0)), reverse=True)
             return schemas.Response(success=True, data={"total": len(items), "page": page,
                 "items": items[(page - 1) * page_size:page * page_size]})

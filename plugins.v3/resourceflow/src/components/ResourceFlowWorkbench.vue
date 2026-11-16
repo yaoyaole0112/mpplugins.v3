@@ -58,6 +58,15 @@ const approvalTab = ref('requests')
 const resourceRows = ref({ total: 0, items: [] })
 const resourceState = ref('ledger')
 const resourcePage = ref(1)
+const resourceFilters = ref({
+  ledger: { query: '', media_type: '' }, pending: { query: '', media_type: '' },
+})
+const activeResourceFilter = computed(() => resourceFilters.value[resourceState.value])
+const resourceTypes = [
+  { value: '', title: '全部类型' }, { value: 'tv', title: '剧集' }, { value: 'movie', title: '电影' },
+]
+let resourceSearchTimer
+let resourceGeneration = 0
 const forgetKey = ref('')
 const ledgerLoading = ref(false)
 const channelDedup = ref({ enabled: false, channels: [], attributes: [], records: [] })
@@ -344,19 +353,33 @@ async function openChannelDedup() {
 }
 
 async function loadResourceRows() {
+  clearTimeout(resourceSearchTimer)
+  const generation = ++resourceGeneration
   ledgerLoading.value = true
+  const params = new URLSearchParams({
+    state: resourceState.value, page: String(resourcePage.value), page_size: '20',
+    query: activeResourceFilter.value.query || '', media_type: activeResourceFilter.value.media_type || '',
+  })
   try {
-    resourceRows.value = unwrapResponse(await props.api.get(
-      `${pluginBase.value}/resource-ledger?state=${resourceState.value}&page=${resourcePage.value}&page_size=20`,
-    )) || { total: 0, items: [] }
+    const data = unwrapResponse(await props.api.get(`${pluginBase.value}/resource-ledger?${params}`))
+    if (generation === resourceGeneration) resourceRows.value = data || { total: 0, items: [] }
   } catch (err) {
-    channelDedupError.value = err?.message || '读取资源账本失败'
+    if (generation === resourceGeneration) channelDedupError.value = err?.message || '读取资源账本失败'
   } finally {
-    ledgerLoading.value = false
+    if (generation === resourceGeneration) ledgerLoading.value = false
   }
 }
 
-watch(resourceState, () => { resourcePage.value = 1; loadResourceRows() })
+watch(() => [resourceState.value, activeResourceFilter.value.query, activeResourceFilter.value.media_type],
+  (values, previous) => {
+    clearTimeout(resourceSearchTimer)
+    resourceGeneration += 1
+    resourcePage.value = 1
+    resourceRows.value = { total: 0, items: [] }
+    ledgerLoading.value = true
+    const delay = values[0] === previous[0] && values[2] === previous[2] ? 300 : 0
+    resourceSearchTimer = setTimeout(loadResourceRows, delay)
+  })
 watch(approvalTab, value => {
   if (['ledger', 'pending'].includes(value)) {
     if (resourceState.value === value) loadResourceRows()
@@ -511,6 +534,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  clearTimeout(resourceSearchTimer)
+  resourceGeneration += 1
   if (refreshTimer) window.clearInterval(refreshTimer)
   if (channelRefreshTimer) window.clearTimeout(channelRefreshTimer)
 })
@@ -968,6 +993,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
     <VDialog v-model="settingsDialog" :width="$vuetify.display.xs ? '100vw' : '94vw'"
       :max-width="$vuetify.display.xs ? '100vw' : '80rem'"
+      :height="$vuetify.display.xs ? '100dvh' : '92dvh'"
       :fullscreen="$vuetify.display.xs" :persistent="saving" scrollable>
       <VCard class="channel-dedup__card">
         <VCardTitle class="channel-dedup__title">
@@ -1089,6 +1115,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
     <VDialog v-model="channelDedupDialog" :width="$vuetify.display.xs ? '100vw' : '94vw'"
       :max-width="$vuetify.display.xs ? '100vw' : '80rem'"
+      :height="$vuetify.display.xs ? '100dvh' : '92dvh'"
       :fullscreen="$vuetify.display.xs" scrollable>
       <VCard class="channel-dedup__card">
         <VCardTitle class="channel-dedup__title">
@@ -1122,8 +1149,17 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             ref="sharedRecordsPanel" :api="api" :plugin-base="pluginBase" :record-tab="approvalTab"
             @host-change="sharedRecordsHost = $event" />
           <div v-if="['ledger', 'pending'].includes(approvalTab)" class="channel-dedup__section">
+            <div class="channel-dedup__search">
+              <VTextField v-model="activeResourceFilter.query" label="搜索记录" prepend-inner-icon="mdi-magnify"
+                clearable maxlength="200" density="comfortable" hide-details />
+              <VSelect v-model="activeResourceFilter.media_type" label="类型筛选" :items="resourceTypes"
+                density="comfortable" hide-details />
+            </div>
             <VProgressLinear v-if="ledgerLoading" indeterminate />
-            <div v-else-if="!resourceRows.items?.length" class="text-body-2 text-medium-emphasis">暂无记录</div>
+            <div v-else class="text-caption text-medium-emphasis">共 {{ resourceRows.total }} 条</div>
+            <div v-if="!ledgerLoading && !resourceRows.items?.length" class="text-body-2 text-medium-emphasis">
+              {{ activeResourceFilter.query || activeResourceFilter.media_type ? '无匹配记录' : '暂无记录' }}
+            </div>
             <div class="channel-dedup__records">
               <div v-for="row in resourceRows.items" :key="row.key" class="channel-dedup__record">
                 <div class="channel-dedup__record-main">
@@ -1285,7 +1321,13 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
 .channel-dedup__card {
   block-size: 92dvh;
+  min-block-size: 92dvh;
+  max-block-size: 92dvh;
+  flex-shrink: 0;
 }
+
+.channel-dedup__search { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 12px; }
+.channel-dedup__search > * { min-inline-size: 0; }
 
 .global-settings__body {
   gap: 12px;
@@ -1375,7 +1417,8 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 }
 
 @media (max-width: 599px) {
-  .channel-dedup__card { block-size: 100dvh; }
+  .channel-dedup__card { block-size: 100dvh; min-block-size: 100dvh; max-block-size: 100dvh; }
+  .channel-dedup__search { grid-template-columns: minmax(0, 1fr); }
 }
 
 .channel-dedup__body :deep(.v-input) {

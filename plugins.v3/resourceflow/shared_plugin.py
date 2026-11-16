@@ -18,6 +18,7 @@ from app.modules.themoviedb.tmdbapi import TmdbApi
 from .active_dedup import download_files, paths_agree
 from .channel_dedup import parse_candidate_file, parse_torrent_files
 from .models import ChannelDedupSettingsPayload
+from .record_search import matches_record, record_page
 from .shared_coordinator import BotWorker, CoordinatorStore
 from .shared_models import SharedSettingsPayload
 from .shared_protocol import RULE_DEFAULTS, SharedError, digest, policy
@@ -247,6 +248,22 @@ class SharedResourceMixin:
             "records": self._shared_store.recent() if self._shared_store else [],
             "probe": self._shared_probe,
         })
+
+    def get_shared_records(self, kind: str = "requests", query: str = "", status: str = "",
+                           page: int = 1, page_size: int = 20) -> schemas.Response:
+        if kind not in {"requests", "records"}:
+            return schemas.Response(success=False, message="无效的记录类别")
+        if kind == "records":
+            store = getattr(self, "_shared_store", None)
+            data = store.search_records(query, status, page, page_size) if store else record_page([], page, page_size)
+        else:
+            with self._shared_lock:
+                rows = [self._shared_request_status(row) for row in self._shared_claims.values()
+                        if not status or row.get("phase") == status]
+            rows = [row for row in rows if matches_record(row, query)]
+            rows.sort(key=lambda row: row.get("updated") or 0, reverse=True)
+            data = record_page(rows, page, page_size)
+        return schemas.Response(success=True, data=data)
 
     def update_shared_settings(self, payload: SharedSettingsPayload) -> schemas.Response:
         try:

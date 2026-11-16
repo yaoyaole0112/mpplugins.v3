@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { formatBytes, unwrapResponse } from '../utils'
 
 const props = defineProps({
@@ -18,6 +18,15 @@ const busy = ref(false)
 const ready = ref(false)
 const canTest = computed(() => Boolean(state.value.bot_username))
 const error = ref('')
+const recordRows = ref({ items: [], total: 0 })
+const recordPage = ref(1)
+const recordsLoading = ref(false)
+const recordFilters = ref({
+  requests: { query: '', status: '' }, records: { query: '', status: '' },
+})
+const activeFilter = computed(() => recordFilters.value[props.recordTab])
+let searchTimer
+let recordsGeneration = 0
 const phaseNames = {
   requesting: '等待审批', reserved: '已获准', adding: '暂停添加中', awaiting_start: '等待入队确认',
   timeout_cancel_pending: '超时取消中',
@@ -33,6 +42,39 @@ const phaseIcons = {
   awaiting_start: 'mdi-clock-outline', timeout_cancel_pending: 'mdi-clock-alert-outline',
   queued: 'mdi-check-circle-outline', completed: 'mdi-check-circle-outline',
   released: 'mdi-minus-circle-outline', rejected: 'mdi-close-circle-outline', uncertain: 'mdi-help-circle-outline',
+}
+const statusOptions = computed(() => [
+  { value: '', title: '全部状态' },
+  ...Object.entries(phaseNames).filter(([key]) =>
+    props.recordTab === 'requests' || ['reserved', 'queued', 'completed', 'released'].includes(key),
+  ).map(([value, title]) => ({ value, title })),
+])
+
+function rejectionReason(item) {
+  const reason = item.reason === '同规格已占位或已完成' ? '资源已完成/已下载' : item.reason
+  return `${reason || ''}${item.owner ? ` · 下载方：${item.owner}` : ''}`
+}
+
+async function loadRecords() {
+  if (props.mode !== 'records' || !activeFilter.value) return
+  clearTimeout(searchTimer)
+  const generation = ++recordsGeneration
+  recordsLoading.value = true
+  error.value = ''
+  const params = new URLSearchParams({
+    kind: props.recordTab, query: activeFilter.value.query || '', status: activeFilter.value.status || '',
+    page: String(recordPage.value), page_size: '20',
+  })
+  try {
+    const data = unwrapResponse(await props.api.get(`${props.pluginBase}/shared/records?${params}`))
+    if (generation !== recordsGeneration) return
+    recordRows.value = data || { items: [], total: 0 }
+    recordPage.value = data?.page || 1
+  } catch (failure) {
+    if (generation === recordsGeneration) error.value = failure?.message || '读取共享记录失败'
+  } finally {
+    if (generation === recordsGeneration) recordsLoading.value = false
+  }
 }
 
 function timestamp(value) {
@@ -86,6 +128,7 @@ async function load(reset = false) {
     instance_label: data.instance_label || '我的资源刷流', bot_token: '',
     allowed_users: (data.allowed_users || []).join(', '),
   }
+  await loadRecords()
 }
 
 async function perform(action) {
@@ -133,6 +176,19 @@ onMounted(() => perform(() => load(true)))
 watch(() => draft.value.host_coordinator, value => {
   if (props.mode === 'settings') emit('host-change', value)
 }, { immediate: true })
+watch(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.status], (values, previous) => {
+  if (props.mode !== 'records') return
+  clearTimeout(searchTimer)
+  recordsGeneration += 1
+  recordsLoading.value = false
+  recordRows.value = { items: [], total: 0 }
+  recordPage.value = 1
+  if (!activeFilter.value) return
+  const delay = values[0] === previous[0] && values[2] === previous[2] ? 300 : 0
+  recordsLoading.value = true
+  searchTimer = setTimeout(loadRecords, delay)
+})
+onUnmounted(() => { clearTimeout(searchTimer); recordsGeneration += 1 })
 defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => load()) })
 </script>
 
@@ -166,9 +222,19 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
     </dl>
     </template>
     <template v-else>
+    <div v-if="activeFilter" class="shared-settings__search">
+      <VTextField v-model="activeFilter.query" label="搜索记录" prepend-inner-icon="mdi-magnify"
+        clearable maxlength="200" density="comfortable" hide-details />
+      <VSelect v-model="activeFilter.status" label="状态筛选" :items="statusOptions"
+        density="comfortable" hide-details />
+    </div>
+    <VProgressLinear v-if="recordsLoading" indeterminate />
+    <div v-else-if="activeFilter" class="text-caption text-medium-emphasis">共 {{ recordRows.total }} 条</div>
     <div v-if="recordTab === 'requests'" class="shared-settings__records">
-      <div v-if="!state.requests?.length" class="text-body-2 text-medium-emphasis">暂无共享申请</div>
-      <article v-for="row in state.requests || []" :key="row.request_id" class="shared-settings__record">
+      <div v-if="!recordsLoading && !recordRows.items.length" class="text-body-2 text-medium-emphasis">
+        {{ activeFilter.query || activeFilter.status ? '无匹配记录' : '暂无共享申请' }}
+      </div>
+      <article v-for="row in recordRows.items" :key="row.request_id" class="shared-settings__record">
         <div class="shared-settings__record-head">
           <strong>{{ row.title }}</strong>
           <span class="shared-settings__badge" :data-tone="phaseColors[row.phase] || 'secondary'">
@@ -189,15 +255,17 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
         </div>
         <p v-if="row.error" class="shared-settings__error text-body-2">{{ row.error }}</p>
         <p v-for="(item, index) in row.rejected || []" :key="index" class="shared-settings__reason text-body-2">
-          {{ item.reason }}<template v-if="item.owner"> · 占位方 {{ item.owner }}</template>
+          {{ rejectionReason(item) }}
         </p>
         <span class="shared-settings__id text-caption">申请编号：{{ row.request_id }}</span>
       </article>
       <VBtn prepend-icon="mdi-refresh" variant="text" :disabled="busy" @click="reconcile">核验未完成申请</VBtn>
     </div>
     <div v-else-if="recordTab === 'records' && state.host_coordinator" class="shared-settings__records">
-      <div v-if="!state.records?.length" class="text-body-2 text-medium-emphasis">暂无共享占位</div>
-      <article v-for="row in state.records || []" :key="row.id" class="shared-settings__record">
+      <div v-if="!recordsLoading && !recordRows.items.length" class="text-body-2 text-medium-emphasis">
+        {{ activeFilter.query || activeFilter.status ? '无匹配记录' : '暂无共享占位' }}
+      </div>
+      <article v-for="row in recordRows.items" :key="row.id" class="shared-settings__record">
         <div class="shared-settings__record-head">
           <strong>{{ row.title }}</strong>
           <span class="shared-settings__badge" :data-tone="phaseColors[row.state] || 'secondary'">
@@ -215,6 +283,8 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
         </div>
       </article>
     </div>
+    <VPagination v-if="activeFilter && recordRows.total > 20" v-model="recordPage"
+      :length="Math.ceil(recordRows.total / 20)" :total-visible="3" @update:model-value="loadRecords" />
     </template>
   </section>
 </template>
@@ -222,6 +292,8 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 <style scoped>
 .shared-settings { display: flex; flex-direction: column; gap: 16px; min-inline-size: 0; }
 .shared-settings--compact { gap: 12px; }
+.shared-settings__search { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 12px; }
+.shared-settings__search > * { min-inline-size: 0; }
 .shared-settings__grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 12px 20px; min-inline-size: 0; }
 .shared-settings__grid > * { min-inline-size: 0; }
 .shared-settings__instance :deep(input) { font-family: monospace; font-size: 11px; }
@@ -258,6 +330,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 .shared-settings__claim-meta { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr); }
 .shared-settings__claim-meta .shared-settings__id { overflow-wrap: anywhere; }
 @media (max-width: 599px) {
+  .shared-settings__search { grid-template-columns: minmax(0, 1fr); }
   .shared-settings__record-head { gap: 8px; }
   .shared-settings__record-head .shared-settings__badge { max-inline-size: 56%; white-space: normal; }
   .shared-settings__meta { flex-direction: column; align-items: flex-start; gap: 4px; }

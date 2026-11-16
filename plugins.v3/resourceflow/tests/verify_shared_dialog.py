@@ -118,6 +118,56 @@ async def verify_settings_layout(dialog, width):
         'element => element.scrollWidth <= element.clientWidth + 1')
 
 
+async def verify_record_search(page, dialog, tab, initial_height, output, width):
+    ledger = tab in ('长期账本', '身份待核验')
+    selector = '.channel-dedup__record' if ledger else '.shared-settings__record'
+    await page.evaluate('window.resourceflowExtraRecords = 125')
+    await dialog.get_by_role('button', name='刷新本地账本', exact=True).click()
+    await page.wait_for_function("""selector =>
+        [...document.querySelectorAll(selector)].filter(item => item.getBoundingClientRect().width > 0).length === 20
+    """, arg=selector)
+    search = dialog.get_by_role('textbox', name='搜索记录')
+    await search.scroll_into_view_if_needed()
+    await dialog.locator('.v-pagination:visible .v-pagination__item button').nth(1).click()
+    await page.wait_for_timeout(400)
+    prefix = 'Search Ledger item-' if ledger else 'Search Record item-'
+    await search.fill(f'{prefix}124')
+    await dialog.get_by_text(f'{prefix}124', exact=True).wait_for()
+    assert await dialog.locator(f'{selector}:visible').count() == 1
+    assert await dialog.locator('.v-pagination:visible').count() == 0
+    await search.fill('not-a-record-[]_%')
+    await dialog.get_by_text('无匹配记录', exact=True).wait_for()
+    bounds = await dialog.locator('.channel-dedup__card').bounding_box()
+    assert abs(bounds['height'] - initial_height) <= 1, (tab, width, bounds)
+    await page.screenshot(path=str(output / f'search-empty-{tab}-{width}.png'), full_page=True)
+    await page.evaluate('window.resourceflowSlowSearch = true')
+    await search.fill('Slow')
+    await page.wait_for_timeout(450)
+    await search.fill(f'{prefix}124')
+    await dialog.get_by_text(f'{prefix}124', exact=True).wait_for()
+    await page.wait_for_timeout(1100)
+    assert await dialog.get_by_text(f'{prefix}124', exact=True).is_visible()
+    await page.evaluate('window.resourceflowSlowSearch = false; window.resourceflowExtraRecords = 0')
+    await search.fill('')
+    toolbar = dialog.locator('.channel-dedup__search:visible, .shared-settings__search:visible')
+    value = '电影' if ledger else '已排除' if tab == '本机共享申请' else '已完成'
+    await toolbar.locator('.v-select').click()
+    await page.get_by_role('option', name=value, exact=True).click()
+    await page.wait_for_function("""selector =>
+        [...document.querySelectorAll(selector)].filter(item => item.getBoundingClientRect().width > 0).length === 1
+    """, arg=selector)
+    await search.fill('not-a-record')
+    await dialog.get_by_text('无匹配记录', exact=True).wait_for()
+    await toolbar.locator('.v-select').click()
+    await page.get_by_role('option', name='全部类型' if ledger else '全部状态', exact=True).click()
+    await search.fill('')
+    await page.wait_for_timeout(600)
+    bounds = await dialog.locator('.channel-dedup__card').bounding_box()
+    assert abs(bounds['height'] - initial_height) <= 1, (tab, width, bounds)
+    assert await dialog.locator('.v-card-text').evaluate(
+        'element => element.scrollWidth <= element.clientWidth + 1')
+
+
 async def verify(base_url, output, executable_path, host_css=None):
     output.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as playwright:
@@ -169,8 +219,11 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await first.locator('details').count() == 0
             assert await first.locator('.shared-settings__id').count() == 1
             assert '申请编号：' in await first.inner_text()
+            assert '资源已完成/已下载 · 下载方：朋友A' in await first.inner_text()
+            assert '占位方' not in await first.inner_text()
             await verify_badge_colors(dialog)
             await verify_record_layout(dialog)
+            await verify_record_search(page, dialog, '本机共享申请', card_bounds['height'], output, width)
             if host_css:
                 stylesheet = await page.add_style_tag(path=str(host_css))
                 for scheme in ('light', 'dark'):
@@ -204,8 +257,12 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label("剧名别名绑定（可选）", exact=True).count() == 0
             await dialog.get_by_role("tab", name="长期账本", exact=True).click()
             await dialog.get_by_text("Film Resource", exact=True).wait_for()
+            await verify_record_search(page, dialog, '长期账本', card_bounds['height'], output, width)
+            await page.screenshot(path=str(output / f'ledger-{width}.png'), full_page=True)
             await dialog.get_by_role("tab", name="身份待核验", exact=True).click()
             await dialog.get_by_text("Unknown Resource", exact=True).wait_for()
+            await verify_record_search(page, dialog, '身份待核验', card_bounds['height'], output, width)
+            await page.screenshot(path=str(output / f'pending-{width}.png'), full_page=True)
             await dialog.get_by_role("button", name="关闭", exact=True).click()
             assert not await page.evaluate("window.resourceflowRequests.some(item => item.method === 'POST')")
             await page.get_by_role("button", name="全局设置", exact=True).click()
@@ -349,6 +406,7 @@ async def verify(base_url, output, executable_path, host_css=None):
                 assert await records.locator('.shared-settings__record-head .shared-settings__badge').filter(has_text=label).count() == 1
             await verify_badge_colors(dialog, all_tones=False)
             await verify_record_layout(dialog)
+            await verify_record_search(page, dialog, '共享占位记录', card_bounds['height'], output, width)
             assert await claim.locator('.shared-settings__claim-meta').evaluate(
                 "element => getComputedStyle(element).display") == 'grid'
             assert '23.976 FPS' in await claim.inner_text()
@@ -465,7 +523,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert not errors, errors
             await page.close()
         await browser.close()
-    print("Verified 1440, 768, 390 and 320: compact responsive settings; inline plugin/sidebar switches; paired rules/aliases/credentials; staged saves/failures; retained drafts; approval records; task settings link")
+    print("Verified 1440, 768, 390 and 320: all four record tabs keep dialog height; full-history search, filters, pagination and stale-response guards; duplicate reason text; global settings and task editor regressions")
     if host_css:
         print('MoviePilot host stylesheet verified with glass light/dark overrides')
 

@@ -12,6 +12,7 @@ import time
 import uuid
 
 from .channel_dedup import normalize_effects, specs_match
+from .record_search import matches_record, record_page
 from .shared_protocol import (
     MAX_PARTS, SharedError, canonical, decode, digest, encode, parse_part, policy,
 )
@@ -269,6 +270,22 @@ class CoordinatorStore:
         with self.connect() as db:
             return bool(db.execute("SELECT 1 FROM claims WHERE group_id=? AND state IN ('reserved','queued') LIMIT 1",
                                    (self.group,)).fetchone())
+
+    def search_records(self, query="", status="", page=1, page_size=20):
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id,label,title,media_title,media_type,tmdb_id,season,episodes,specs,state,created,updated "
+                "FROM claims WHERE group_id=? AND (?='' OR state=?) ORDER BY updated DESC, id",
+                (self.group, status, status))
+            items = []
+            for row in rows:
+                item = dict(row)
+                item["episodes"], item["specs"] = json.loads(row["episodes"]), json.loads(row["specs"])
+                if item["specs"].get("effects"):
+                    item["specs"]["effects"] = normalize_effects(item["specs"]["effects"])
+                if matches_record(item, query):
+                    items.append(item)
+        return record_page(items, page, page_size)
 
 
 class BotWorker:

@@ -47,6 +47,7 @@
   window.resourceflowFailSave = false
   window.resourceflowFailStage = ''
   window.resourceflowFailSharedLoad = false
+  window.resourceflowSlowSearch = false
   let shared = {
     enabled: true, host_coordinator: false, bot_username: '@testbot', group: 'resources',
     last_ok: 1794711660,
@@ -85,11 +86,36 @@
         specs: { resolution: '1080p', effects: 'SDR', codec: 'H.264', source: 'WEB-DL', size: 1501017826 },
       }))],
   }
+  function recordPage(items, path) {
+    const params = new URLSearchParams(path.split('?')[1])
+    const query = (params.get('query') || '').toLowerCase().split(/\s+/).filter(Boolean)
+    const status = params.get('status')
+    const media = params.get('media_type')
+    items = items.filter(row => (!status || (row.phase || row.state) === status)
+      && (!media || row.media_type === media)
+      && query.every(word => JSON.stringify(row).toLowerCase().includes(word)))
+    const page = Math.max(1, Number(params.get('page') || 1))
+    return { total: items.length, page, items: items.slice((page - 1) * 20, page * 20) }
+  }
+  window.resourceflowExtraRecords = 0
   const api = {
     get: async path => {
       window.resourceflowRequests.push({ method: 'GET', path })
       if (path.endsWith('/shared/status')) return window.resourceflowFailSharedLoad
         ? { success: false, message: '模拟共享读取失败' } : { success: true, data: structuredClone(shared) }
+      if (path.includes('/shared/records?')) {
+        const params = new URLSearchParams(path.split('?')[1])
+        const kind = params.get('kind')
+        const items = [...structuredClone(shared[kind]), ...Array.from({ length: window.resourceflowExtraRecords },
+          (_, index) => ({ request_id: `search-${index}`, id: `search-${index}`, title: `Search Record item-${index}`,
+            phase: 'completed', state: 'completed', media_type: 'tv', label: '搜索下载方', files: [], rejected: [],
+          }))]
+        const data = recordPage(items, path)
+        if (window.resourceflowSlowSearch && params.get('query') === 'Slow') {
+          await new Promise(resolve => setTimeout(resolve, 900))
+        }
+        return { success: true, data }
+      }
       if (path.includes('/tasks/')) return { success: true, data: {
         task: structuredClone(savedTask), runs: [], torrents: { items: [], total: 0, page_size: 50 },
       } }
@@ -98,11 +124,19 @@
           state: 'idle', next_run_at: null }] : [],
       } }
       if (path.includes('/resource-ledger?')) {
-        return { success: true, data: { total: 1, items: [{ key: 'a'.repeat(64),
+        const items = [{ key: 'a'.repeat(64),
           title: path.includes('state=pending') ? 'Unknown Resource' : 'Film Resource',
           path: 'Film.2026.mkv', media_type: 'movie', tmdb_id: path.includes('state=pending') ? null : 123,
           specs: { resolution: '2160p' }, evidence_source: 'completed',
-        }] } }
+        }, ...Array.from({ length: window.resourceflowExtraRecords }, (_, index) => ({
+          key: `ledger-${index}`, title: `Search Ledger item-${index}`, media_type: 'tv', season: 1, episodes: [index + 1],
+          tmdb_id: 333, specs: { resolution: '1080p' }, evidence_source: 'completed',
+        }))]
+        const data = recordPage(items, path)
+        if (window.resourceflowSlowSearch && new URLSearchParams(path.split('?')[1]).get('query') === 'Slow') {
+          await new Promise(resolve => setTimeout(resolve, 900))
+        }
+        return { success: true, data }
       }
       return { success: true, data: structuredClone(path.endsWith('/status') ? status : settings) }
     },
