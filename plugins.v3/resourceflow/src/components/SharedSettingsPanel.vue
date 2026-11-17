@@ -52,7 +52,7 @@ const statusOptions = computed(() => [
 
 function rejectionReason(item) {
   const reason = item.reason === '同规格已占位或已完成' ? '资源已完成/已下载' : item.reason
-  return `${reason || ''}${item.owner ? ` · 下载方：${item.owner}` : ''}`
+  return `${reason || ''}${item.owner ? ` · 下载方：${item.owner}` : ''}${item.claim ? ` · 命中占位：${item.claim}` : ''}`
 }
 
 async function loadRecords() {
@@ -121,7 +121,7 @@ async function load(reset = false) {
   const data = unwrapResponse(await props.api.get(`${props.pluginBase}/shared/status`))
   state.value = data
   ready.value = true
-  if (props.mode === 'records') emit('host-change', Boolean(data.host_coordinator))
+  if (props.mode === 'records') emit('host-change', Boolean(data.host_coordinator || data.enabled))
   if (reset) draft.value = {
     enabled: Boolean(data.enabled), host_coordinator: Boolean(data.host_coordinator),
     bot_username: data.bot_username || '', group: data.group || 'resources',
@@ -196,6 +196,13 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
   <section class="shared-settings" :class="{ 'shared-settings--compact': mode === 'settings' }">
     <VAlert v-if="error" type="error" variant="tonal" density="compact">{{ error }}</VAlert>
     <VAlert v-if="state.last_error" type="warning" variant="tonal" density="compact">{{ state.last_error }}</VAlert>
+    <VAlert v-if="state.integrity_error" type="error" variant="tonal" density="compact">{{ state.integrity_error }}</VAlert>
+    <VAlert v-if="state.history_sync?.pending" type="warning" variant="tonal" density="compact">
+      历史完成证据待同步：{{ state.history_sync.pending }} 条；同步确认前暂缓新增下载。
+    </VAlert>
+    <VAlert v-if="state.history_sync?.unverified" type="warning" variant="tonal" density="compact">
+      历史证据待核验：{{ state.history_sync.unverified }} 条，未作为共享完成记录导入。
+    </VAlert>
     <template v-if="mode === 'settings'">
     <div class="text-subtitle-2">Telegram 共享审批</div>
     <div class="shared-settings__grid">
@@ -254,14 +261,18 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
           </span>
         </div>
         <p v-if="row.error" class="shared-settings__error text-body-2">{{ row.error }}</p>
+        <p v-if="row.integrity_error" class="shared-settings__error text-body-2">{{ row.integrity_error }}</p>
         <p v-for="(item, index) in row.rejected || []" :key="index" class="shared-settings__reason text-body-2">
           {{ rejectionReason(item) }}
         </p>
         <span class="shared-settings__id text-caption">申请编号：{{ row.request_id }}</span>
+        <span v-if="row.claim_links?.length" class="shared-settings__id text-caption">
+          关联占位：{{ row.claim_links.join(' · ') }}
+        </span>
       </article>
       <VBtn prepend-icon="mdi-refresh" variant="text" :disabled="busy" @click="reconcile">核验未完成申请</VBtn>
     </div>
-    <div v-else-if="recordTab === 'records' && state.host_coordinator" class="shared-settings__records">
+    <div v-else-if="recordTab === 'records' && (state.host_coordinator || state.enabled)" class="shared-settings__records">
       <div v-if="!recordsLoading && !recordRows.items.length" class="text-body-2 text-medium-emphasis">
         {{ activeFilter.query || activeFilter.status ? '无匹配记录' : '暂无共享占位' }}
       </div>
@@ -281,6 +292,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
           <span>占位时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
           <span class="shared-settings__id">占位编号：{{ row.id }}</span>
         </div>
+        <span v-if="row.request_id" class="shared-settings__id text-caption">关联申请：{{ row.request_id }}</span>
       </article>
     </div>
     <VPagination v-if="activeFilter && recordRows.total > 20" v-model="recordPage"

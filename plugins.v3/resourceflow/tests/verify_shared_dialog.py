@@ -122,7 +122,7 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
     ledger = tab in ('长期账本', '身份待核验')
     selector = '.channel-dedup__record' if ledger else '.shared-settings__record'
     await page.evaluate('window.resourceflowExtraRecords = 125')
-    await dialog.get_by_role('button', name='刷新本地账本', exact=True).click()
+    await dialog.get_by_role('button', name='刷新资源记录', exact=True).click()
     await page.wait_for_function("""selector =>
         [...document.querySelectorAll(selector)].filter(item => item.getBoundingClientRect().width > 0).length === 20
     """, arg=selector)
@@ -233,7 +233,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label("启用共享下载审批", exact=True).count() == 0
             assert await dialog.get_by_label("参与跨实例共享审批", exact=True).count() == 0
             assert await dialog.get_by_role("button", name="保存设置", exact=True).count() == 0
-            assert await dialog.get_by_role("tab").all_text_contents() == ['本机共享申请', '长期账本', '身份待核验']
+            assert await dialog.get_by_role("tab").all_text_contents() == [
+                '本机共享申请', '共享占位记录', '长期账本', '身份待核验']
             bounds = await dialog.bounding_box()
             assert bounds["width"] >= (1100 if width >= 1000 else width * 0.9 if width >= 600 else width - 2), bounds
             assert bounds["height"] >= height * 0.88, bounds
@@ -569,6 +570,29 @@ async def verify(base_url, output, executable_path, host_css=None):
             await global_dialog.get_by_label('本机名称', exact=True).wait_for()
             assert await global_dialog.get_by_role('tab', name='本机共享申请', exact=True).count() == 0
             assert not errors, errors
+            await page.close()
+        for width, height in ((1440, 1000), (390, 844)):
+            page = await browser.new_page(viewport={"width": width, "height": height}, locale="zh-CN")
+            await page.goto(f"{base_url}/tests/channel-dedup-smoke.html?authority=1")
+            await page.wait_for_function("window.resourceflowReady === true")
+            await page.get_by_role("button", name="共享下载审批", exact=True).click()
+            dialog = page.get_by_role("dialog")
+            await dialog.get_by_text("协调端共享记录", exact=True).wait_for()
+            assert await dialog.get_by_role("tab").all_text_contents() == [
+                '本机共享申请', '共享占位记录', '共享已完成', '身份待核验']
+            await dialog.get_by_text("共享占位关联异常 1 个，暂缓新增下载", exact=True).wait_for()
+            await dialog.get_by_text("历史完成证据待同步：2 条；同步确认前暂缓新增下载。", exact=True).wait_for()
+            await dialog.get_by_text("历史证据待核验：3 条，未作为共享完成记录导入。", exact=True).wait_for()
+            await dialog.get_by_text(f"关联占位：{'9' * 32}", exact=True).wait_for()
+            assert f"命中占位：{'8' * 32}" in await dialog.inner_text()
+            await dialog.get_by_role("tab", name="共享占位记录", exact=True).click()
+            await dialog.get_by_text(f"关联申请：{'b' * 32}", exact=True).wait_for()
+            await dialog.get_by_role("tab", name="共享已完成", exact=True).click()
+            await dialog.get_by_text("共享已完成 · 下载方：边城旧事", exact=False).wait_for()
+            assert await dialog.get_by_role("button", name="移除长期证据", exact=True).count() == 0
+            assert await dialog.locator(".v-card-text").evaluate(
+                "element => element.scrollWidth <= element.clientWidth + 1")
+            await page.screenshot(path=str(output / f"shared-authority-{width}.png"), full_page=True)
             await page.close()
         await browser.close()
     print("Verified 1440, 768, 390 and 320: all four record tabs keep dialog height; full-history search, filters, pagination and stale-response guards; duplicate reason text; global settings and task editor regressions")

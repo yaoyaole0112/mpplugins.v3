@@ -25,7 +25,7 @@ class ResourceFlowReleaseTests(unittest.TestCase):
         self.save_manifest()
         for name in ("models.py", "channel_dedup.py", "active_dedup.py", "resource_dedup.py",
                      "shared_protocol.py", "shared_coordinator.py", "shared_plugin.py", "shared_models.py",
-                     "telegram_rpc.py", "record_search.py"):
+                     "telegram_rpc.py", "record_search.py", "shared_history.py"):
             (self.plugin / name).touch()
         (self.plugin / "dist/assets").mkdir(parents=True)
         (self.plugin / "dist/assets/remoteEntry.js").write_text("// built")
@@ -47,6 +47,7 @@ class ResourceFlowReleaseTests(unittest.TestCase):
         with zipfile.ZipFile(archive) as bundle:
             self.assertIn("resource_dedup.py", bundle.namelist())
             self.assertIn("record_search.py", bundle.namelist())
+            self.assertIn("shared_history.py", bundle.namelist())
             self.assertIn("dist/assets/remoteEntry.js", bundle.namelist())
             self.assertNotIn("tests/private.json", bundle.namelist())
             self.assertNotIn("plugins.v3/resourceflow/__init__.py", bundle.namelist())

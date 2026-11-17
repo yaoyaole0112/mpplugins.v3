@@ -43,6 +43,8 @@
       specs: { resolution: '1080p', effects: 'SDR', codec: 'H.264', source: 'WEB-DL', fps: 24, size: 1251017826 },
     })),
   }
+  const authoritative = new URLSearchParams(location.search).get('authority') === '1'
+  settings.shared_authority = authoritative
   window.resourceflowRequests = []
   window.resourceflowFailSave = false
   window.resourceflowFailStage = ''
@@ -86,6 +88,13 @@
         specs: { resolution: '1080p', effects: 'SDR', codec: 'H.264', source: 'WEB-DL', size: 1501017826 },
       }))],
   }
+  if (authoritative) {
+    shared.requests[0].claim_links = ['9'.repeat(32)]
+    shared.requests[0].rejected[0].claim = '8'.repeat(32)
+    shared.records[0].request_id = 'b'.repeat(32)
+    shared.integrity_error = '共享占位关联异常 1 个，暂缓新增下载'
+    shared.history_sync = { pending: 2, unverified: 3 }
+  }
   function recordPage(items, path) {
     const params = new URLSearchParams(path.split('?')[1])
     const query = (params.get('query') || '').toLowerCase().split(/\s+/).filter(Boolean)
@@ -124,6 +133,12 @@
           state: 'idle', next_run_at: null }] : [],
       } }
       if (path.includes('/resource-ledger?')) {
+        if (authoritative && !path.includes('state=pending')) {
+          const items = shared.records.filter(row => row.state === 'completed').map(row => ({
+            ...row, key: row.id, evidence_source: 'shared',
+          }))
+          return { success: true, data: { ...recordPage(items, path), shared_authority: true } }
+        }
         const items = [{ key: 'a'.repeat(64),
           title: path.includes('state=pending') ? 'Unknown Resource' : 'Film Resource',
           media_title: path.includes('state=pending') ? '待核验影片' : '测试电影',

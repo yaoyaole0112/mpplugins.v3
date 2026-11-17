@@ -262,6 +262,7 @@ class AdmissionTests(unittest.TestCase):
         p._inflight_key = lambda downloader, torrent_hash: f"{downloader}:{torrent_hash}"
         p._channel_dedup_attributes, p._channel_dedup_size_tolerance_pct = ["resolution"], 5
         p._channel_dedup_pack_policy = "partial"
+        p._sync_shared_history = Mock()
         p._shared_candidates = Mock(return_value=([{**file_row(), "path": "Show.S01E01.mkv"},
                                                   {**file_row(2, 2), "path": "Show.S01E02.mkv"}], []))
         p.save_data = Mock()
@@ -712,7 +713,8 @@ class PluginSetupTests(unittest.TestCase):
         rules = {**RULE_DEFAULTS, "pack_policy": "exclude", "inflight_enabled": False,
                  "unknown_policy": "allow", "identity_policy": "allow", "pack_dedup_enabled": False}
         expected = policy(["resolution"], 3, rules)
-        p._shared_exchange = Mock(return_value={"ok": True, "policy": expected, "user_id": 11})
+        p._shared_exchange = Mock(return_value={"ok": True, "policy": expected, "user_id": 11,
+                                              "authority_version": 2, "authority_id": "f" * 32})
         p._sync_shared_policy()
         self.assertEqual(p._local_shared_policy(), expected)
         self.assertEqual(p.update_config.call_args.args[0]["channel_dedup_pack_policy"], "exclude")

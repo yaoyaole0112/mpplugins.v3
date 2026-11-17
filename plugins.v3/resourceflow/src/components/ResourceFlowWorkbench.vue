@@ -1135,11 +1135,12 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             {{ channelDedup.last_error }}
           </VAlert>
           <div class="channel-dedup__status">
-            <div><span>长期资源账本</span><strong>{{ channelDedup.ledger_count || 0 }}</strong></div>
+            <div><span>{{ channelDedup.shared_authority ? '去重依据' : '长期资源账本' }}</span>
+              <strong>{{ channelDedup.shared_authority ? '协调端共享记录' : channelDedup.ledger_count || 0 }}</strong></div>
             <div><span>身份待核验</span><strong>{{ channelDedup.pending_count || 0 }}</strong></div>
-            <VTooltip text="刷新本地账本">
+            <VTooltip text="刷新资源记录">
               <template #activator="{ props: tooltipProps }">
-                <VBtn v-bind="tooltipProps" icon="mdi-refresh" variant="text" aria-label="刷新本地账本"
+                <VBtn v-bind="tooltipProps" icon="mdi-refresh" variant="text" aria-label="刷新资源记录"
                   :loading="channelDedupLoading" @click="refreshApprovalRecords" />
               </template>
             </VTooltip>
@@ -1147,7 +1148,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VTabs v-model="approvalTab" density="compact">
             <VTab value="requests">本机共享申请</VTab>
             <VTab v-if="sharedRecordsHost" value="records">共享占位记录</VTab>
-            <VTab value="ledger">长期账本</VTab>
+            <VTab value="ledger">{{ channelDedup.shared_authority ? '共享已完成' : '长期账本' }}</VTab>
             <VTab value="pending">身份待核验</VTab>
           </VTabs>
           <SharedSettingsPanel v-if="channelDedupDialog" v-show="['requests', 'records'].includes(approvalTab)"
@@ -1173,8 +1174,9 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                   <small>{{ row.tmdb_id ? `TMDB ${row.tmdb_id}` : '身份待确认' }} · {{ channelRecordSpecs(row) }}</small>
                 </div>
                 <div class="channel-dedup__record-meta">
-                  <span>{{ row.reason || (row.evidence_source === 'channel' ? '频道已发布' : '下载已完成') }}</span>
-                  <VTooltip v-if="resourceState === 'ledger'" text="移除长期证据">
+                  <span>{{ row.evidence_source === 'shared' ? `共享已完成 · 下载方：${row.label || '-'} · 占位编号：${row.id}` :
+                    row.reason || (row.evidence_source === 'channel' ? '频道已发布' : '下载已完成') }}</span>
+                  <VTooltip v-if="resourceState === 'ledger' && !resourceRows.shared_authority" text="移除长期证据">
                     <template #activator="{ props: tooltipProps }">
                       <VBtn v-bind="tooltipProps" icon="mdi-delete-outline" size="small" variant="text"
                         aria-label="移除长期证据" @click="forgetKey = row.key" />

@@ -1207,22 +1207,34 @@ const _hoisted_16$1 = {
   key: 1,
   class: "shared-settings__error text-body-2"
 };
-const _hoisted_17$1 = { class: "shared-settings__id text-caption" };
-const _hoisted_18$1 = {
+const _hoisted_17$1 = {
+  key: 2,
+  class: "shared-settings__error text-body-2"
+};
+const _hoisted_18$1 = { class: "shared-settings__id text-caption" };
+const _hoisted_19$1 = {
+  key: 3,
+  class: "shared-settings__id text-caption"
+};
+const _hoisted_20$1 = {
   key: 4,
   class: "shared-settings__records"
 };
-const _hoisted_19$1 = {
+const _hoisted_21$1 = {
   key: 0,
   class: "text-body-2 text-medium-emphasis"
 };
-const _hoisted_20$1 = { class: "shared-settings__record-head" };
-const _hoisted_21$1 = ["data-tone"];
-const _hoisted_22$1 = { class: "shared-settings__claim-info text-body-2" };
-const _hoisted_23$1 = { class: "shared-settings__info" };
-const _hoisted_24$1 = { class: "shared-settings__info" };
-const _hoisted_25$1 = { class: "shared-settings__meta shared-settings__claim-meta text-caption" };
-const _hoisted_26$1 = { class: "shared-settings__id" };
+const _hoisted_22$1 = { class: "shared-settings__record-head" };
+const _hoisted_23$1 = ["data-tone"];
+const _hoisted_24$1 = { class: "shared-settings__claim-info text-body-2" };
+const _hoisted_25$1 = { class: "shared-settings__info" };
+const _hoisted_26$1 = { class: "shared-settings__info" };
+const _hoisted_27$1 = { class: "shared-settings__meta shared-settings__claim-meta text-caption" };
+const _hoisted_28$1 = { class: "shared-settings__id" };
+const _hoisted_29$1 = {
+  key: 0,
+  class: "shared-settings__id text-caption"
+};
 
 const {computed: computed$1,onMounted: onMounted$1,onUnmounted: onUnmounted$1,ref: ref$1,watch: watch$1} = await importShared('vue');
 
@@ -1283,7 +1295,7 @@ const statusOptions = computed$1(() => [
 
 function rejectionReason(item) {
   const reason = item.reason === '同规格已占位或已完成' ? '资源已完成/已下载' : item.reason;
-  return `${reason || ''}${item.owner ? ` · 下载方：${item.owner}` : ''}`
+  return `${reason || ''}${item.owner ? ` · 下载方：${item.owner}` : ''}${item.claim ? ` · 命中占位：${item.claim}` : ''}`
 }
 
 async function loadRecords() {
@@ -1352,7 +1364,7 @@ async function load(reset = false) {
   const data = unwrapResponse(await props.api.get(`${props.pluginBase}/shared/status`));
   state.value = data;
   ready.value = true;
-  if (props.mode === 'records') emit('host-change', Boolean(data.host_coordinator));
+  if (props.mode === 'records') emit('host-change', Boolean(data.host_coordinator || data.enabled));
   if (reset) draft.value = {
     enabled: Boolean(data.enabled), host_coordinator: Boolean(data.host_coordinator),
     bot_username: data.bot_username || '', group: data.group || 'resources',
@@ -1462,8 +1474,47 @@ return (_ctx, _cache) => {
           _: 1
         }))
       : _createCommentVNode$1("", true),
+    (state.value.integrity_error)
+      ? (_openBlock$1(), _createBlock$1(_component_VAlert, {
+          key: 2,
+          type: "error",
+          variant: "tonal",
+          density: "compact"
+        }, {
+          default: _withCtx$1(() => [
+            _createTextVNode$1(_toDisplayString$1(state.value.integrity_error), 1)
+          ]),
+          _: 1
+        }))
+      : _createCommentVNode$1("", true),
+    (state.value.history_sync?.pending)
+      ? (_openBlock$1(), _createBlock$1(_component_VAlert, {
+          key: 3,
+          type: "warning",
+          variant: "tonal",
+          density: "compact"
+        }, {
+          default: _withCtx$1(() => [
+            _createTextVNode$1(" 历史完成证据待同步：" + _toDisplayString$1(state.value.history_sync.pending) + " 条；同步确认前暂缓新增下载。 ", 1)
+          ]),
+          _: 1
+        }))
+      : _createCommentVNode$1("", true),
+    (state.value.history_sync?.unverified)
+      ? (_openBlock$1(), _createBlock$1(_component_VAlert, {
+          key: 4,
+          type: "warning",
+          variant: "tonal",
+          density: "compact"
+        }, {
+          default: _withCtx$1(() => [
+            _createTextVNode$1(" 历史证据待核验：" + _toDisplayString$1(state.value.history_sync.unverified) + " 条，未作为共享完成记录导入。 ", 1)
+          ]),
+          _: 1
+        }))
+      : _createCommentVNode$1("", true),
     (__props.mode === 'settings')
-      ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 2 }, [
+      ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 5 }, [
           _cache[15] || (_cache[15] = _createElementVNode$1("div", { class: "text-subtitle-2" }, "Telegram 共享审批", -1)),
           _createElementVNode$1("div", _hoisted_1$1, [
             _createVNode$1(_component_VSwitch, {
@@ -1566,7 +1617,7 @@ return (_ctx, _cache) => {
               : _createCommentVNode$1("", true)
           ])
         ], 64))
-      : (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 3 }, [
+      : (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 6 }, [
           (activeFilter.value)
             ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_6$1, [
                 _createVNode$1(_component_VTextField, {
@@ -1647,13 +1698,19 @@ return (_ctx, _cache) => {
                     (row.error)
                       ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_16$1, _toDisplayString$1(row.error), 1))
                       : _createCommentVNode$1("", true),
+                    (row.integrity_error)
+                      ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_17$1, _toDisplayString$1(row.integrity_error), 1))
+                      : _createCommentVNode$1("", true),
                     (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(row.rejected || [], (item, index) => {
                       return (_openBlock$1(), _createElementBlock$1("p", {
                         key: index,
                         class: "shared-settings__reason text-body-2"
                       }, _toDisplayString$1(rejectionReason(item)), 1))
                     }), 128)),
-                    _createElementVNode$1("span", _hoisted_17$1, "申请编号：" + _toDisplayString$1(row.request_id), 1)
+                    _createElementVNode$1("span", _hoisted_18$1, "申请编号：" + _toDisplayString$1(row.request_id), 1),
+                    (row.claim_links?.length)
+                      ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_19$1, " 关联占位：" + _toDisplayString$1(row.claim_links.join(' · ')), 1))
+                      : _createCommentVNode$1("", true)
                   ]))
                 }), 128)),
                 _createVNode$1(_component_VBtn, {
@@ -1668,17 +1725,17 @@ return (_ctx, _cache) => {
                   _: 1
                 }, 8, ["disabled"])
               ]))
-            : (__props.recordTab === 'records' && state.value.host_coordinator)
-              ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_18$1, [
+            : (__props.recordTab === 'records' && (state.value.host_coordinator || state.value.enabled))
+              ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_20$1, [
                   (!recordsLoading.value && !recordRows.value.items.length)
-                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_19$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.status ? '无匹配记录' : '暂无共享占位'), 1))
+                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_21$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.status ? '无匹配记录' : '暂无共享占位'), 1))
                     : _createCommentVNode$1("", true),
                   (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(recordRows.value.items, (row) => {
                     return (_openBlock$1(), _createElementBlock$1("article", {
                       key: row.id,
                       class: "shared-settings__record"
                     }, [
-                      _createElementVNode$1("div", _hoisted_20$1, [
+                      _createElementVNode$1("div", _hoisted_22$1, [
                         _createElementVNode$1("strong", null, _toDisplayString$1(row.title), 1),
                         _createElementVNode$1("span", {
                           class: "shared-settings__badge",
@@ -1689,17 +1746,20 @@ return (_ctx, _cache) => {
                             size: "16"
                           }, null, 8, ["icon"]),
                           _createTextVNode$1(" " + _toDisplayString$1(phaseNames[row.state] || row.state), 1)
-                        ], 8, _hoisted_21$1)
+                        ], 8, _hoisted_23$1)
                       ]),
-                      _createElementVNode$1("div", _hoisted_22$1, [
-                        _createElementVNode$1("span", _hoisted_23$1, "下载方：" + _toDisplayString$1(row.label || '-'), 1),
-                        _createElementVNode$1("span", _hoisted_24$1, _toDisplayString$1(releaseDetails(row)), 1)
+                      _createElementVNode$1("div", _hoisted_24$1, [
+                        _createElementVNode$1("span", _hoisted_25$1, "下载方：" + _toDisplayString$1(row.label || '-'), 1),
+                        _createElementVNode$1("span", _hoisted_26$1, _toDisplayString$1(releaseDetails(row)), 1)
                       ]),
-                      _createElementVNode$1("div", _hoisted_25$1, [
+                      _createElementVNode$1("div", _hoisted_27$1, [
                         _createElementVNode$1("span", null, "占位时间：" + _toDisplayString$1(timestamp(row.created)), 1),
                         _createElementVNode$1("span", null, "最近更新：" + _toDisplayString$1(timestamp(row.updated)), 1),
-                        _createElementVNode$1("span", _hoisted_26$1, "占位编号：" + _toDisplayString$1(row.id), 1)
-                      ])
+                        _createElementVNode$1("span", _hoisted_28$1, "占位编号：" + _toDisplayString$1(row.id), 1)
+                      ]),
+                      (row.request_id)
+                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_29$1, "关联申请：" + _toDisplayString$1(row.request_id), 1))
+                        : _createCommentVNode$1("", true)
                     ]))
                   }), 128))
                 ]))
@@ -1722,7 +1782,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-5e1b10a6"]]);
+const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-aab3007d"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle,vShow:_vShow,withDirectives:_withDirectives} = await importShared('vue');
 
@@ -3699,19 +3759,19 @@ return (_ctx, _cache) => {
                   : _createCommentVNode("", true),
                 _createElementVNode("div", _hoisted_63, [
                   _createElementVNode("div", null, [
-                    _cache[110] || (_cache[110] = _createElementVNode("span", null, "长期资源账本", -1)),
-                    _createElementVNode("strong", null, _toDisplayString(channelDedup.value.ledger_count || 0), 1)
+                    _createElementVNode("span", null, _toDisplayString(channelDedup.value.shared_authority ? '去重依据' : '长期资源账本'), 1),
+                    _createElementVNode("strong", null, _toDisplayString(channelDedup.value.shared_authority ? '协调端共享记录' : channelDedup.value.ledger_count || 0), 1)
                   ]),
                   _createElementVNode("div", null, [
-                    _cache[111] || (_cache[111] = _createElementVNode("span", null, "身份待核验", -1)),
+                    _cache[110] || (_cache[110] = _createElementVNode("span", null, "身份待核验", -1)),
                     _createElementVNode("strong", null, _toDisplayString(channelDedup.value.pending_count || 0), 1)
                   ]),
-                  _createVNode(_component_VTooltip, { text: "刷新本地账本" }, {
+                  _createVNode(_component_VTooltip, { text: "刷新资源记录" }, {
                     activator: _withCtx(({ props: tooltipProps }) => [
                       _createVNode(_component_VBtn, _mergeProps(tooltipProps, {
                         icon: "mdi-refresh",
                         variant: "text",
-                        "aria-label": "刷新本地账本",
+                        "aria-label": "刷新资源记录",
                         loading: channelDedupLoading.value,
                         onClick: refreshApprovalRecords
                       }), null, 16, ["loading"])
@@ -3726,7 +3786,7 @@ return (_ctx, _cache) => {
                 }, {
                   default: _withCtx(() => [
                     _createVNode(_component_VTab, { value: "requests" }, {
-                      default: _withCtx(() => [...(_cache[112] || (_cache[112] = [
+                      default: _withCtx(() => [...(_cache[111] || (_cache[111] = [
                         _createTextVNode("本机共享申请", -1)
                       ]))]),
                       _: 1
@@ -3736,20 +3796,20 @@ return (_ctx, _cache) => {
                           key: 0,
                           value: "records"
                         }, {
-                          default: _withCtx(() => [...(_cache[113] || (_cache[113] = [
+                          default: _withCtx(() => [...(_cache[112] || (_cache[112] = [
                             _createTextVNode("共享占位记录", -1)
                           ]))]),
                           _: 1
                         }))
                       : _createCommentVNode("", true),
                     _createVNode(_component_VTab, { value: "ledger" }, {
-                      default: _withCtx(() => [...(_cache[114] || (_cache[114] = [
-                        _createTextVNode("长期账本", -1)
-                      ]))]),
+                      default: _withCtx(() => [
+                        _createTextVNode(_toDisplayString(channelDedup.value.shared_authority ? '共享已完成' : '长期账本'), 1)
+                      ]),
                       _: 1
                     }),
                     _createVNode(_component_VTab, { value: "pending" }, {
-                      default: _withCtx(() => [...(_cache[115] || (_cache[115] = [
+                      default: _withCtx(() => [...(_cache[113] || (_cache[113] = [
                         _createTextVNode("身份待核验", -1)
                       ]))]),
                       _: 1
@@ -3813,8 +3873,9 @@ return (_ctx, _cache) => {
                               _createElementVNode("small", null, _toDisplayString(row.tmdb_id ? `TMDB ${row.tmdb_id}` : '身份待确认') + " · " + _toDisplayString(channelRecordSpecs(row)), 1)
                             ]),
                             _createElementVNode("div", _hoisted_71, [
-                              _createElementVNode("span", null, _toDisplayString(row.reason || (row.evidence_source === 'channel' ? '频道已发布' : '下载已完成')), 1),
-                              (resourceState.value === 'ledger')
+                              _createElementVNode("span", null, _toDisplayString(row.evidence_source === 'shared' ? `共享已完成 · 下载方：${row.label || '-'} · 占位编号：${row.id}` :
+                    row.reason || (row.evidence_source === 'channel' ? '频道已发布' : '下载已完成')), 1),
+                              (resourceState.value === 'ledger' && !resourceRows.value.shared_authority)
                                 ? (_openBlock(), _createBlock(_component_VTooltip, {
                                     key: 0,
                                     text: "移除长期证据"
@@ -3859,7 +3920,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[38] || (_cache[38] = $event => (channelDedupDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[116] || (_cache[116] = [
+                  default: _withCtx(() => [...(_cache[114] || (_cache[114] = [
                     _createTextVNode("关闭", -1)
                   ]))]),
                   _: 1
@@ -3882,7 +3943,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_VCard, { title: "移除长期证据" }, {
           default: _withCtx(() => [
             _createVNode(_component_VCardText, null, {
-              default: _withCtx(() => [...(_cache[117] || (_cache[117] = [
+              default: _withCtx(() => [...(_cache[115] || (_cache[115] = [
                 _createTextVNode("移除后，本地这条长期证据不再参与匹配。共享占位及在队任务不受影响。", -1)
               ]))]),
               _: 1
@@ -3893,7 +3954,7 @@ return (_ctx, _cache) => {
                 _createVNode(_component_VBtn, {
                   onClick: _cache[40] || (_cache[40] = $event => (forgetKey.value = ''))
                 }, {
-                  default: _withCtx(() => [...(_cache[118] || (_cache[118] = [
+                  default: _withCtx(() => [...(_cache[116] || (_cache[116] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -3902,7 +3963,7 @@ return (_ctx, _cache) => {
                   color: "error",
                   onClick: forgetResource
                 }, {
-                  default: _withCtx(() => [...(_cache[119] || (_cache[119] = [
+                  default: _withCtx(() => [...(_cache[117] || (_cache[117] = [
                     _createTextVNode("确认移除", -1)
                   ]))]),
                   _: 1
@@ -3937,7 +3998,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[42] || (_cache[42] = $event => (deleteDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[120] || (_cache[120] = [
+                  default: _withCtx(() => [...(_cache[118] || (_cache[118] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -3948,7 +4009,7 @@ return (_ctx, _cache) => {
                   loading: saving.value,
                   onClick: confirmDeleteTask
                 }, {
-                  default: _withCtx(() => [...(_cache[121] || (_cache[121] = [
+                  default: _withCtx(() => [...(_cache[119] || (_cache[119] = [
                     _createTextVNode("删除", -1)
                   ]))]),
                   _: 1
@@ -3971,7 +4032,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_VCard, { title: "清除任务数据" }, {
           default: _withCtx(() => [
             _createVNode(_component_VCardText, null, {
-              default: _withCtx(() => [...(_cache[122] || (_cache[122] = [
+              default: _withCtx(() => [...(_cache[120] || (_cache[120] = [
                 _createTextVNode("将清除当前任务的统计、运行诊断、托管和归档记录，下载器内的种子与文件不会删除。", -1)
               ]))]),
               _: 1
@@ -3983,7 +4044,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[44] || (_cache[44] = $event => (clearDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[123] || (_cache[123] = [
+                  default: _withCtx(() => [...(_cache[121] || (_cache[121] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -3994,7 +4055,7 @@ return (_ctx, _cache) => {
                   loading: saving.value,
                   onClick: confirmClearTask
                 }, {
-                  default: _withCtx(() => [...(_cache[124] || (_cache[124] = [
+                  default: _withCtx(() => [...(_cache[122] || (_cache[122] = [
                     _createTextVNode("清除", -1)
                   ]))]),
                   _: 1
@@ -4013,6 +4074,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0e82ede5"]]);
+const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-b9c110d7"]]);
 
 export { ResourceFlowWorkbench as R };

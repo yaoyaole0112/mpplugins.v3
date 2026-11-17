@@ -13,6 +13,7 @@ import uuid
 
 from .channel_dedup import normalize_effects, specs_match
 from .record_search import matches_record, record_page
+from .shared_history import AUTHORITY_VERSION
 from .shared_protocol import (
     MAX_PARTS, SharedError, canonical, decode, digest, encode, parse_part, policy,
 )
@@ -46,10 +47,15 @@ class CoordinatorStore:
                     total INTEGER NOT NULL, body TEXT NOT NULL, created REAL NOT NULL,
                     PRIMARY KEY(sender, request_id, part));
                 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS completion_imports (
+                    group_id TEXT NOT NULL, instance TEXT NOT NULL, evidence_id TEXT NOT NULL,
+                    revision TEXT NOT NULL, claim_id TEXT NOT NULL,
+                    PRIMARY KEY(group_id, instance, evidence_id, revision));
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(claims)")}
             if "media_title" not in columns:
                 db.execute("ALTER TABLE claims ADD COLUMN media_title TEXT NOT NULL DEFAULT ''")
+            db.execute("INSERT OR IGNORE INTO meta VALUES ('authority_id', ?)", (canonical(uuid.uuid4().hex),))
         self.path.chmod(0o600)
 
     @contextmanager
@@ -127,11 +133,22 @@ class CoordinatorStore:
         if owner and owner["sender"] != sender:
             raise SharedError("实例已经绑定其他 Telegram 账号")
         db.execute("INSERT OR IGNORE INTO owners VALUES (?,?)", (instance, sender))
+        db.execute("UPDATE claims SET sender=? WHERE group_id=? AND instance=? AND sender=0",
+                   (sender, self.group, instance))
         op = body.get("op")
         if op == "policy":
-            return {"ok": True, "policy": self.policy, "user_id": sender}
+            return {"ok": True, "policy": self.policy, "user_id": sender, **self.authority()}
+        if op == "records":
+            return {"ok": True, **self.authority(), "records": self.search_records(
+                str(body.get("query", ""))[:200], str(body.get("status", "")),
+                body.get("page", 1), min(int(body.get("page_size", 20)), 20),
+                str(body.get("media_type", "")))}
+        if op == "inspect":
+            return self._inspect(db, sender, instance, body)
         if op == "update":
             return self._update(db, sender, instance, body)
+        if op == "import_completed":
+            return self._import_completed(db, sender, instance, request_id, body)
         if op != "reserve" or body.get("revision") != self.policy["revision"]:
             raise SharedError("共享规则版本不一致，请同步协调端规格设置")
         files = body.get("files")
@@ -166,7 +183,9 @@ class CoordinatorStore:
                     break
             if conflict:
                 rejected.append({"id": item["id"], "reason": "同规格已占位或已完成",
-                                 "owner": conflict["label"], "state": conflict["state"]})
+                                 "owner": conflict["label"], "state": conflict["state"],
+                                 "claim": conflict["id"], "created": conflict["created"],
+                                 "updated": conflict["updated"]})
                 continue
             claim = uuid.uuid4().hex
             row = dict(
@@ -181,7 +200,7 @@ class CoordinatorStore:
             approved.append({"id": item["id"], "claim": claim})
         if rejected and body["pack_policy"] == "exclude":
             return {"ok": True, "approved": [], "rejected": rejected,
-                    "pack_rejected": True, "policy": self.policy}
+                    "pack_rejected": True, "policy": self.policy, **self.authority()}
         for row in pending:
             db.execute(
                 "INSERT INTO claims "
@@ -190,7 +209,104 @@ class CoordinatorStore:
                 tuple(row.values()),
             )
         return {"ok": True, "approved": approved, "rejected": rejected,
-                "pack_rejected": False, "policy": self.policy}
+                "pack_rejected": False, "policy": self.policy, **self.authority()}
+
+    def authority(self):
+        return {"authority_version": AUTHORITY_VERSION, "authority_id": self.meta("authority_id")}
+
+    def seed_completed(self, instance, label, files):
+        """Import the coordinator's own verified legacy evidence before accepting requests."""
+        body = {"files": files, "label": label, "revision": self.policy["revision"]}
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            owner = db.execute("SELECT sender FROM owners WHERE instance=?", (instance,)).fetchone()
+            return self._import_completed(db, owner["sender"] if owner else 0, instance,
+                                          uuid.uuid4().hex, body)
+
+    def _import_completed(self, db, sender, instance, request_id, body):
+        if body.get("revision") != self.policy["revision"]:
+            raise SharedError("历史完成证据规则已变更，请重新同步")
+        files = body.get("files")
+        if not isinstance(files, list) or not 1 <= len(files) <= 100:
+            raise SharedError("每批历史完成证据须包含 1 至 100 个文件")
+        imported = []
+        for source in files:
+            item = self._file(source)
+            completed_at = source.get("completed_at")
+            if (type(completed_at) not in {int, float} or not math.isfinite(completed_at)
+                    or not 0 < completed_at <= time.time() + 300
+                    or item["media_type"] == "tv" and len(item["episodes"]) != 1
+                    and not source.get("original_claim")):
+                raise SharedError("历史完成证据的时间或逐集信息无效")
+            old = db.execute(
+                "SELECT claim_id FROM completion_imports WHERE group_id=? AND instance=? AND evidence_id=? AND revision=?",
+                (self.group, instance, item["id"], self.policy["revision"])).fetchone()
+            original = source.get("original_claim")
+            linked = db.execute("SELECT * FROM claims WHERE id=?", (original,)).fetchone() if original else None
+            if linked and (linked["group_id"] != self.group or linked["instance"] != instance
+                           or linked["request_id"] != source.get("original_request")
+                           or linked["file_id"] != source.get("original_file")
+                           or linked["state"] == "released"
+                           or not self._same_identity_file(item, linked)
+                           or set(item["episodes"]) != set(json.loads(linked["episodes"]))):
+                raise SharedError("历史完成证据与原占位身份或归属不一致")
+            if linked:
+                claim = linked["id"]
+                db.execute("UPDATE claims SET state='completed',updated=? WHERE id=?", (time.time(), claim))
+            elif old and db.execute("SELECT 1 FROM claims WHERE id=? AND state='completed'",
+                                    (old["claim_id"],)).fetchone():
+                claim = old["claim_id"]
+            else:
+                matches = db.execute(
+                    "SELECT * FROM claims WHERE group_id=? AND media_type=? AND tmdb_id=? "
+                    "AND season IS ? AND state='completed'",
+                    (self.group, item["media_type"], item["tmdb_id"], item["season"])).fetchall()
+                match = next((row for row in matches if self._same_identity_file(item, row)), None)
+                # An original request must retain its original claim link, even after DB recovery.
+                claim = original or (match["id"] if match else uuid.uuid4().hex)
+                if original or not match:
+                    if original and (not re.fullmatch(r"[a-f0-9]{32}", str(original))
+                                     or not re.fullmatch(r"[a-f0-9]{32}", str(source.get("original_request", "")))
+                                     or not re.fullmatch(r"[a-f0-9]{24}", str(source.get("original_file", "")))):
+                        raise SharedError("原占位关联字段无效")
+                    db.execute(
+                        "INSERT INTO claims "
+                        "(id,group_id,sender,instance,label,request_id,file_id,media_type,tmdb_id,season,episodes,specs,"
+                        "title,media_title,state,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (claim, self.group, sender, instance, str(body.get("label") or instance[:8])[:80],
+                         source.get("original_request") or request_id, source.get("original_file") or item["id"],
+                         item["media_type"], item["tmdb_id"], item["season"], canonical(item["episodes"]),
+                         canonical(item["specs"]), item["title"], item["media_title"], "completed",
+                         completed_at, time.time()))
+            db.execute("INSERT OR REPLACE INTO completion_imports VALUES (?,?,?,?,?)",
+                       (self.group, instance, item["id"], self.policy["revision"], claim))
+            imported.append({"id": item["id"], "claim": claim})
+        return {"ok": True, "imported": imported, **self.authority()}
+
+    def _same_identity_file(self, item, row, overlap=False):
+        return ((item["media_type"], item["tmdb_id"], item["season"]) ==
+                (row["media_type"], row["tmdb_id"], row["season"])
+                and (item["media_type"] == "movie" or
+                     (bool(set(item["episodes"]) & set(json.loads(row["episodes"]))) if overlap
+                      else set(item["episodes"]).issubset(json.loads(row["episodes"]))))
+                and specs_match(item, {"specs": json.loads(row["specs"])},
+                                self.policy["attributes"], self.policy["size_tolerance_pct"]))
+
+    def _inspect(self, db, sender, instance, body):
+        requested = body.get("claims")
+        if not isinstance(requested, list) or not 1 <= len(requested) <= 100:
+            raise SharedError("无效的占位核验清单")
+        results = []
+        for item in requested:
+            if not isinstance(item, dict):
+                raise SharedError("无效的占位核验项")
+            row = db.execute(
+                "SELECT * FROM claims WHERE id=? AND group_id=? AND sender=? AND instance=? "
+                "AND request_id=? AND file_id=?",
+                (item.get("claim"), self.group, sender, instance,
+                 item.get("request_id"), item.get("file_id"))).fetchone()
+            results.append({"claim": item.get("claim"), "state": row["state"] if row else "missing"})
+        return {"ok": True, "claims": results, **self.authority()}
 
     def _file(self, row):
         if not isinstance(row, dict) or not re.fullmatch(r"[a-f0-9]{24}", str(row.get("id", ""))):
@@ -248,9 +364,17 @@ class CoordinatorStore:
                 raise SharedError("释放占位必须确认下载器不存在任务")
             if current == "completed" and target != "completed" or current == "released" and target != "released":
                 raise SharedError("不能回退已完成或已释放的占位")
+            if target == "queued":
+                completed = db.execute(
+                    "SELECT * FROM claims WHERE group_id=? AND media_type=? AND tmdb_id=? "
+                    "AND season IS ? AND state='completed' AND id!=?",
+                    (self.group, row["media_type"], row["tmdb_id"], row["season"], row["id"])).fetchall()
+                candidate = {**dict(row), "episodes": json.loads(row["episodes"]), "specs": json.loads(row["specs"])}
+                if any(self._same_identity_file(candidate, other, overlap=True) for other in completed):
+                    raise SharedError("启动前核验发现同规格资源已完成，保持暂停，不重复下载")
             changes.append((target, time.time(), row["id"]))
         db.executemany("UPDATE claims SET state=?, updated=? WHERE id=?", changes)
-        return {"ok": True, "updated": len(changes)}
+        return {"ok": True, "updated": len(changes), **self.authority()}
 
     def recent(self, limit=100):
         with self.connect() as db:
@@ -271,15 +395,20 @@ class CoordinatorStore:
             return bool(db.execute("SELECT 1 FROM claims WHERE group_id=? AND state IN ('reserved','queued') LIMIT 1",
                                    (self.group,)).fetchone())
 
-    def search_records(self, query="", status="", page=1, page_size=20):
+    def search_records(self, query="", status="", page=1, page_size=20, media_type=""):
         with self.connect() as db:
             rows = db.execute(
-                "SELECT id,label,title,media_title,media_type,tmdb_id,season,episodes,specs,state,created,updated "
+                "SELECT id,label,title,media_title,media_type,tmdb_id,season,episodes,specs,state,created,updated,request_id,file_id "
                 "FROM claims WHERE group_id=? AND (?='' OR state=?) ORDER BY updated DESC, id",
                 (self.group, status, status))
             items = []
             for row in rows:
                 item = dict(row)
+                for field, length in (("request_id", 32), ("file_id", 24)):
+                    if not re.fullmatch(rf"[a-f0-9]{{{length}}}", str(item[field])):
+                        item.pop(field)
+                if media_type and item["media_type"] != media_type:
+                    continue
                 item["episodes"], item["specs"] = json.loads(row["episodes"]), json.loads(row["specs"])
                 if item["specs"].get("effects"):
                     item["specs"]["effects"] = normalize_effects(item["specs"]["effects"])

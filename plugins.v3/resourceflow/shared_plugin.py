@@ -20,6 +20,7 @@ from .channel_dedup import parse_candidate_file, parse_torrent_files
 from .models import ChannelDedupSettingsPayload
 from .record_search import matches_record, record_page
 from .shared_coordinator import BotWorker, CoordinatorStore
+from .shared_history import AUTHORITY_VERSION, completion_rows
 from .shared_models import SharedSettingsPayload
 from .shared_protocol import RULE_DEFAULTS, SharedError, digest, policy
 from .telegram_rpc import TelegramRPC, ed2k_account
@@ -60,10 +61,140 @@ class SharedResourceMixin:
             if self._shared_settings.host_coordinator:
                 self._ensure_shared_worker()
                 self._apply_shared_policy(self._shared_store.policy)
+                response = {"policy": self._shared_store.policy, **self._shared_store.authority()}
             else:
                 response = self._shared_exchange(uuid.uuid4().hex, {"op": "policy"})
                 self._apply_shared_policy(response.get("policy"))
-                self._shared_probe = response
+            self._shared_probe = response
+            self._shared_policy_checked_at = time.time()
+            self._require_shared_authority(response)
+            self._sync_shared_history(store=self._shared_store if self._shared_settings.host_coordinator else None)
+            self._audit_shared_links()
+
+    @staticmethod
+    def _require_shared_authority(response):
+        if (response.get("authority_version", 0) < AUTHORITY_VERSION
+                or not re.fullmatch(r"[a-f0-9]{32}", str(response.get("authority_id", "")))):
+            raise SharedError("请先将协调端更新至 1.0.17 或以上，再启用统一共享资源记录")
+
+    def _shared_history_rows(self):
+        records = [*getattr(self, "_resource_ledger", {}).values(),
+                   *getattr(self, "_shared_completed_outbox", {}).values()]
+        changed = False
+        with self._shared_lock:
+            for entry in getattr(self, "_shared_claims", {}).values():
+                completed = set(entry.get("done", [])) | set(entry.get("observed_completed", []))
+                for row in entry.get("files", []):
+                    if row.get("id") not in completed or row.get("id") not in entry.get("approved", {}):
+                        continue
+                    times = entry.setdefault("file_completed_at", {})
+                    if row["id"] not in times:
+                        times[row["id"]] = entry.get("completed_at") or entry.get("updated") or entry.get("created")
+                        changed = True
+                    records.append({
+                        **row, "evidence_source": "completed", "remembered_at": times[row["id"]],
+                        "original_claim": entry["approved"][row["id"]],
+                        "original_request": entry["request_id"], "original_file": row["id"],
+                    })
+            if changed:
+                self._save_shared()
+        return completion_rows(records, self._channel_dedup_attributes)
+
+    def _sync_shared_history(self, store=None):
+        """Acknowledged local history is an archive, never a second admission authority."""
+        response = store.authority() if store else getattr(self, "_shared_probe", None) or {}
+        self._require_shared_authority(response)
+        scope = digest([self._shared_settings.bot_username.lower(), self._shared_settings.group,
+                        response["authority_id"], self._local_shared_policy()["revision"],
+                        self._shared_instance_id])
+        progress = getattr(self, "_shared_history", {})
+        previous = digest({key: value for key, value in progress.items() if key != "last_sync_at"})
+        if progress.get("scope") != scope:
+            progress = self._shared_history = {"scope": scope, "acknowledged": {},
+                                               "repair": progress.get("repair", "")}
+        rows, skipped = self._shared_history_rows()
+        progress["unverified"] = skipped
+        waiting = [row for row in rows if row["id"] not in progress["acknowledged"]]
+        progress["pending"] = len(waiting)
+        for start in range(0, len(waiting), 100):
+            batch = waiting[start:start + 100]
+            body = {"op": "import_completed", "revision": self._local_shared_policy()["revision"],
+                    "files": batch, "repair": progress.get("repair", "")}
+            if store:
+                result = store.seed_completed(self._shared_instance_id,
+                                              self._shared_settings.instance_label, batch)
+            else:
+                result = self._shared_exchange(digest([scope, body])[:32], body)
+            imported = result.get("imported")
+            if (not isinstance(imported, list) or len(imported) != len(batch)
+                    or {row.get("id") for row in imported} != {row["id"] for row in batch}
+                    or any(not re.fullmatch(r"[a-f0-9]{32}", str(row.get("claim", ""))) for row in imported)):
+                raise SharedError("历史完成证据回执不完整，暂缓新增下载")
+            progress["acknowledged"].update({row["id"]: row["claim"] for row in imported})
+            progress["pending"] -= len(batch)
+            self.save_data("shared_history", progress)
+        progress["last_sync_at"] = time.time()
+        self._shared_history = progress
+        if waiting or previous != digest({key: value for key, value in progress.items() if key != "last_sync_at"}):
+            self.save_data("shared_history", progress)
+
+    def _capture_shared_completed(self, task, torrent_hash, records):
+        """Keep a durable outbox only for verified completed files lacking an approval."""
+        with self._shared_lock:
+            approved_paths = {item["path"] for entry in self._shared_claims.values()
+                              if entry["hash"] == torrent_hash and entry["downloader"] == task.downloader
+                              for item in entry.get("files", []) if item["id"] in entry.get("approved", {})}
+            outbox = dict(getattr(self, "_shared_completed_outbox", {}))
+            for row in records:
+                if any(paths_agree(row["path"], path) for path in approved_paths):
+                    continue
+                value = {**copy.deepcopy(row), "evidence_source": "completed"}
+                key = digest(value)
+                if key not in outbox:
+                    outbox[key] = {**value, "remembered_at": time.time()}
+            self._shared_completed_outbox = outbox
+            self.save_data("shared_completed_outbox", outbox)
+
+    def _audit_shared_links(self, force=False):
+        if not force and time.time() - getattr(self, "_shared_audit_at", 0) < 600:
+            return
+        requested, owners = [], {}
+        for entry in self._shared_claims.values():
+            for file_id, claim in entry.get("approved", {}).items():
+                requested.append({"claim": claim, "request_id": entry["request_id"], "file_id": file_id})
+                owners[claim] = entry
+        problems = []
+        for start in range(0, len(requested), 100):
+            batch = requested[start:start + 100]
+            response = self._shared_exchange(uuid.uuid4().hex, {"op": "inspect", "claims": batch})
+            states = response.get("claims")
+            if (not isinstance(states, list) or len(states) != len(batch)
+                    or {item.get("claim") for item in states} != {item["claim"] for item in batch}):
+                raise SharedError("共享占位核验回复不完整，暂缓新增下载")
+            for item in states:
+                entry = owners[item["claim"]]
+                file_id = next(key for key, claim in entry["approved"].items() if claim == item["claim"])
+                expected = ("completed" if file_id in entry.get("done", []) else
+                            "released" if entry["phase"] == "released" else None)
+                if (item["state"] == "missing" or expected and item["state"] != expected
+                        or item["state"] == "released" and entry["phase"] != "released"):
+                    problems.append(item["claim"])
+                    entry["integrity_error"] = "共享占位缺失或状态不一致，等待核验；不会重新申请"
+                elif item["state"] not in {"reserved", "queued", "completed", "released"}:
+                    raise SharedError("共享占位状态无效")
+                elif item["state"] == "completed":
+                    entry["done"] = sorted(set(entry.get("done", [])) | {file_id})
+        self._shared_integrity_error = f"共享占位关联异常 {len(problems)} 个，暂缓新增下载" if problems else ""
+        if not problems:
+            for entry in self._shared_claims.values():
+                entry.pop("integrity_error", None)
+        self._save_shared()
+        if problems:
+            # Force a replay of confirmed completion evidence on the next attempt.
+            self._shared_history = {"repair": uuid.uuid4().hex}
+            self.save_data("shared_history", self._shared_history)
+            raise SharedError(self._shared_integrity_error)
+        self._shared_audit_at = time.time()
 
     def update_channel_dedup_settings(self, payload: ChannelDedupSettingsPayload) -> schemas.Response:
         with getattr(self, "_shared_rpc_lock", threading.RLock()):
@@ -131,6 +262,10 @@ class SharedResourceMixin:
         self._shared_instance_id = instance_id if isinstance(instance_id, str) and len(instance_id) == 32 else uuid.uuid4().hex
         self._shared_settings = SharedSettingsPayload.model_validate(raw)
         self._shared_claims = self.get_data("shared_claims") or {}
+        self._shared_history = self.get_data("shared_history") or {}
+        self._shared_completed_outbox = self.get_data("shared_completed_outbox") or {}
+        self._shared_integrity_error = ""
+        self._shared_audit_at = 0
         self._shared_retry_at = float(self.get_data("shared_retry_at") or 0)
         self._shared_probe = None
         self._start_shared_worker()
@@ -154,6 +289,7 @@ class SharedResourceMixin:
                 self._channel_dedup_attributes, self._channel_dedup_size_tolerance_pct,
                 self._shared_rules(),
             )
+            self._sync_shared_history(store=self._shared_store)
             self._shared_worker = BotWorker(
                 self._shared_store, config.bot_token, config.bot_username, config.allowed_users,
                 proxies=settings.PROXY,
@@ -217,6 +353,7 @@ class SharedResourceMixin:
             "download_started_at": row.get("download_started_at"),
             "timeout_at": row.get("timeout_at"), "timeout_reason": row.get("timeout_reason", ""),
             "error": row.get("error", ""), "approved": len(approved), "rejected": rejected,
+            "integrity_error": row.get("integrity_error", ""),
             "file_count": len(files), "completed": len(row.get("done") or []),
             "files": [{**{key: item.get(key) for key in
                          ("id", "path", "media_type", "tmdb_id", "media_title", "season", "episodes", "specs")},
@@ -226,6 +363,7 @@ class SharedResourceMixin:
                        "reason": decisions.get(item.get("id"), {}).get("reason", ""),
                        "owner": decisions.get(item.get("id"), {}).get("owner", "")}
                       for item in files],
+            "claim_links": list(approved.values()),
         }
 
     def get_shared_status(self) -> schemas.Response:
@@ -247,15 +385,31 @@ class SharedResourceMixin:
                          for row in sorted(claims, key=lambda row: row.get("updated", 0), reverse=True)[:100]],
             "records": self._shared_store.recent() if self._shared_store else [],
             "probe": self._shared_probe,
+            "history_sync": {key: value for key, value in getattr(self, "_shared_history", {}).items()
+                             if key != "acknowledged"},
+            "integrity_error": getattr(self, "_shared_integrity_error", ""),
         })
 
     def get_shared_records(self, kind: str = "requests", query: str = "", status: str = "",
-                           page: int = 1, page_size: int = 20) -> schemas.Response:
+                           page: int = 1, page_size: int = 20, media_type: str = "") -> schemas.Response:
         if kind not in {"requests", "records"}:
             return schemas.Response(success=False, message="无效的记录类别")
         if kind == "records":
             store = getattr(self, "_shared_store", None)
-            data = store.search_records(query, status, page, page_size) if store else record_page([], page, page_size)
+            if store:
+                data = store.search_records(query, status, page, page_size, media_type)
+            elif getattr(self, "_shared_settings", None) and self._shared_settings.enabled:
+                try:
+                    with self._shared_rpc_lock:
+                        response = self._shared_exchange(uuid.uuid4().hex, {
+                            "op": "records", "query": query[:200], "status": status,
+                            "page": page, "page_size": min(page_size, 20), "media_type": media_type})
+                    self._require_shared_authority(response)
+                    data = response["records"]
+                except SharedError as error:
+                    return schemas.Response(success=False, message=str(error))
+            else:
+                data = record_page([], page, page_size)
         else:
             with self._shared_lock:
                 rows = [self._shared_request_status(row) for row in self._shared_claims.values()
@@ -306,6 +460,7 @@ class SharedResourceMixin:
             with self._shared_rpc_lock:
                 response = self._shared_exchange(uuid.uuid4().hex, {"op": "policy"})
                 self._apply_shared_policy(response.get("policy"))
+                self._require_shared_authority(response)
                 self._shared_probe = response
             return self.get_shared_status()
         except SharedError as error:
@@ -328,6 +483,14 @@ class SharedResourceMixin:
         try:
             account = ed2k_account(settings.PROXY)
             result = TelegramRPC(account, config.bot_username).exchange(request_id, body)
+            if value.get("op") != "policy":
+                self._require_shared_authority(result)
+                previous = (getattr(self, "_shared_probe", None) or {}).get("authority_id")
+                if previous and previous != result["authority_id"]:
+                    self._shared_probe = None
+                    self._shared_policy_checked_at = 0
+                    self._shared_integrity_error = "协调端资源库已变更，等待历史同步及关联核验"
+                    raise SharedError(self._shared_integrity_error)
             self._shared_last_ok, self._shared_error = time.time(), ""
             if self._shared_retry_at:
                 self._shared_retry_at = 0
@@ -346,6 +509,8 @@ class SharedResourceMixin:
         self.save_data("shared_claims", self._shared_claims)
 
     def _shared_phase(self, entry, phase, **changes):
+        if phase == "completed":
+            entry.setdefault("completed_at", time.time())
         entry.update(phase=phase, updated=time.time(), **changes)
         self._save_shared()
 
@@ -611,6 +776,9 @@ class SharedResourceMixin:
                 if not self._shared_download_gate(task):
                     return None
                 self._check_shared_available()
+                self._sync_shared_history(store=self._shared_store if self._shared_settings.host_coordinator else None)
+                if getattr(self, "_shared_integrity_error", ""):
+                    self._audit_shared_links(force=True)
                 if not isinstance(content, bytes) or not self._channel_dedup_attributes:
                     raise SharedError("共享审批需要可核验的文件清单与至少一个规格字段")
                 if any(row["hash"] == expected_hash and row["downloader"] == task.downloader
@@ -764,6 +932,21 @@ class SharedResourceMixin:
             return
         try:
             with self._shared_lock:
+                if self._shared_settings.enabled:
+                    try:
+                        response = getattr(self, "_shared_probe", None)
+                        if not response or time.time() - getattr(self, "_shared_policy_checked_at", 0) >= 600:
+                            response = self._shared_exchange(uuid.uuid4().hex, {"op": "policy"})
+                            self._shared_policy_checked_at = time.time()
+                        self._apply_shared_policy(response.get("policy"))
+                        self._require_shared_authority(response)
+                        self._shared_probe = response
+                        self._sync_shared_history(store=self._shared_store
+                                                  if self._shared_settings.host_coordinator else None)
+                        self._audit_shared_links()
+                    except SharedError as error:
+                        self._shared_error = str(error)
+                        return
                 pending = [row for row in self._shared_claims.values()
                            if row["phase"] not in {"released", "completed", "rejected"}
                            and time.time() - row.get("checked_at", 0) >= 30]

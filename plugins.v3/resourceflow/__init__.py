@@ -268,7 +268,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.16"
+    plugin_version = "1.0.17"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -1144,6 +1144,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 "identity_aliases": dict(getattr(self, "_channel_dedup_identity_aliases", {})),
                 "movie_identity_aliases": dict(getattr(self, "_channel_dedup_movie_identity_aliases", {})),
                 "ledger_count": len(getattr(self, "_resource_ledger", {})),
+                "shared_authority": bool(getattr(self, "_shared_settings", None)
+                                         and self._shared_settings.enabled),
                 "pending_count": len(getattr(self, "_identity_pending", {})),
                 "retention_hours": 72,
                 "last_poll_at": state.get("last_poll_at"),
@@ -3249,7 +3251,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             )
             if not recent_selection:
                 return None
-        if self._resource_mode(task) != "off":
+        if self._resource_mode(task) != "off" and not self._shared_participates(task):
             dedup_selection = self._channel_dedup_file_selection(
                 torrent_content,
                 torrent.title,
@@ -3429,6 +3431,16 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
 
     def get_resource_ledger(self, page: int = 1, page_size: int = 50,
                             state: str = "ledger", query: str = "", media_type: str = "") -> schemas.Response:
+        if (state == "ledger" and getattr(self, "_shared_settings", None)
+                and self._shared_settings.enabled):
+            response = self.get_shared_records("records", query, "completed", page, min(page_size, 20), media_type)
+            if response.success:
+                data = dict(response.data)
+                data["items"] = [{**row, "key": row["id"], "evidence_source": "shared"}
+                                 for row in data["items"]]
+                data["shared_authority"] = True
+                return schemas.Response(success=True, data=data)
+            return response
         page, page_size = max(int(page), 1), min(max(int(page_size), 1), 100)
         with self._inflight_lock:
             rows = getattr(self, "_identity_pending" if state == "pending" else "_resource_ledger", {})
@@ -3442,6 +3454,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             "items": items[(page - 1) * page_size:page * page_size]})
 
     def forget_resource(self, payload: ResourceLedgerDeletePayload) -> schemas.Response:
+        if getattr(self, "_shared_settings", None) and self._shared_settings.enabled:
+            return schemas.Response(success=False, message="共享模式仅使用协调端完成记录，不能通过移除本地证据绕过去重")
         with self._inflight_lock:
             ledger = dict(getattr(self, "_resource_ledger", {}))
             ledger.pop(payload.key, None)
@@ -3543,7 +3557,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                             self._resolve_pending_identity(candidate, task)
                         else:
                             self._pending_identity(candidate, row.get("title", ""), task, "已完成文件身份待核验，账本尚未记全")
-                self._remember_resources(records, "completed")
+                if self._shared_participates(task):
+                    self._capture_shared_completed(task, torrent_hash, records)
+                else:
+                    self._remember_resources(records, "completed")
                 if self._torrent_complete(row) and records and len(records) == len(wanted_videos):
                     row["resource_ledger_recorded"] = True
             except Exception as err:
@@ -4078,7 +4095,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     ) -> Iterator[dict]:
         """匹配和持久化占位原子化；添加及选集完成后提交，失败核实后回滚。"""
         outcome = {"blocked": False, "selection": selection, "added": False}
-        if (self._resource_mode(task) == "off" or not getattr(self, "_channel_dedup_inflight_enabled", True)
+        if (self._shared_participates(task) or self._resource_mode(task) == "off"
+                or not getattr(self, "_channel_dedup_inflight_enabled", True)
                 or not isinstance(content, bytes)):
             yield outcome
             return
