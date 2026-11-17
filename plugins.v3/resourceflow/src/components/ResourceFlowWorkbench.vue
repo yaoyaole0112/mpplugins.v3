@@ -1108,6 +1108,12 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VIcon icon="mdi-send" color="primary" />
           <span>共享下载审批</span>
           <VSpacer />
+          <VTooltip text="刷新资源记录">
+            <template #activator="{ props: tip }">
+              <VBtn v-bind="tip" icon="mdi-refresh" variant="text" aria-label="刷新资源记录"
+                :loading="channelDedupLoading" @click="refreshApprovalRecords" />
+            </template>
+          </VTooltip>
           <VTooltip text="关闭">
             <template #activator="{ props: tip }">
               <VBtn v-bind="tip" icon="mdi-close" variant="text" aria-label="关闭共享下载审批"
@@ -1122,23 +1128,12 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VAlert v-if="channelDedup.last_error" type="warning" variant="tonal" density="compact">
             {{ channelDedup.last_error }}
           </VAlert>
-          <div class="channel-dedup__status">
-            <div><span>{{ channelDedup.shared_authority ? '去重依据' : '长期资源账本' }}</span>
-              <strong>{{ channelDedup.shared_authority ? '全部参与设备的共享下载记录' : channelDedup.ledger_count || 0 }}</strong></div>
-            <div><span>身份待核验</span><strong>{{ channelDedup.pending_count || 0 }}</strong></div>
-            <VTooltip text="刷新资源记录">
-              <template #activator="{ props: tooltipProps }">
-                <VBtn v-bind="tooltipProps" icon="mdi-refresh" variant="text" aria-label="刷新资源记录"
-                  :loading="channelDedupLoading" @click="refreshApprovalRecords" />
-              </template>
-            </VTooltip>
-          </div>
           <VTabs v-model="approvalTab" density="compact">
             <VTab value="requests">本机下载申请</VTab>
             <VTab v-if="sharedRecordsHost" value="records">共享下载记录</VTab>
             <VTab value="pending">身份待核验</VTab>
           </VTabs>
-          <SharedSettingsPanel v-if="channelDedupDialog" v-show="['requests', 'records'].includes(approvalTab)"
+          <SharedSettingsPanel v-if="channelDedupDialog"
             ref="sharedRecordsPanel" :api="api" :plugin-base="pluginBase" :record-tab="approvalTab"
             @host-change="sharedRecordsHost = $event" />
           <div v-if="approvalTab === 'pending'" class="channel-dedup__section">
@@ -1415,20 +1410,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   gap: 2px 12px;
 }
 
-.channel-dedup__status {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px 20px;
-}
-
-.channel-dedup__status > div {
-  display: grid;
-  gap: 2px;
-  min-inline-size: 6rem;
-}
-
-.channel-dedup__status span,
 .channel-dedup__record-meta {
   color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
   font-size: 0.8rem;

@@ -1,11 +1,12 @@
 {
   "name": "moviepilot-resourceflow-plugin",
   "private": true,
-  "version": "1.0.19",
+  "version": "1.0.20",
   "type": "module",
   "scripts": {
     "dev": "vite build --watch",
-    "build": "vite build"
+    "build": "vite build",
+    "test:display": "node --test tests/test_shared_record_display.mjs"
   },
   "dependencies": {
     "vue": "^3.5.13",

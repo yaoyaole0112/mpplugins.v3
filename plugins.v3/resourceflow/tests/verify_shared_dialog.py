@@ -31,7 +31,7 @@ async def verify_badge_colors(dialog, all_tones=True):
 async def verify_record_layout(dialog):
     records = await dialog.locator('.shared-settings__record').evaluate_all('''elements => elements.map(element => {
         const head = element.querySelector('.shared-settings__record-head')
-        const title = head.querySelector('strong').getBoundingClientRect()
+        const title = head.querySelector('.shared-settings__heading, strong').getBoundingClientRect()
         const badge = head.querySelector('.shared-settings__badge').getBoundingClientRect()
         const bounds = head.getBoundingClientRect()
         return {single: element.querySelectorAll('.shared-settings__badge').length === 1,
@@ -245,6 +245,11 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert close_bounds["y"] < card_bounds["y"] + 70, close_bounds
             assert close_bounds["x"] > card_bounds["x"] + card_bounds["width"] - 80, close_bounds
             assert await dialog.locator('.v-card-actions').count() == 0
+            assert await dialog.locator('.channel-dedup__status').count() == 0
+            refresh_bounds = await dialog.get_by_role('button', name='刷新资源记录', exact=True).bounding_box()
+            assert refresh_bounds['x'] + refresh_bounds['width'] <= close_bounds['x'], refresh_bounds
+            assert abs(refresh_bounds['y'] - close_bounds['y']) < 2, (refresh_bounds, close_bounds)
+            assert await dialog.get_by_text('去重依据', exact=True).count() == 0
             assert card_bounds["width"] >= (1100 if width >= 1000 else width * 0.9 if width >= 600 else width - 2), card_bounds
             records = dialog.locator('.shared-settings__records')
             first = records.locator('article').first
@@ -261,8 +266,15 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert '文件 2' not in await first.inner_text()
             assert '完成 0' not in await first.inner_text()
             release = first.locator('.shared-settings__preview span')
-            release_text = (await release.inner_text()).removeprefix('首文件 · ')
-            assert release_text.startswith('玫瑰战争 · TMDB 123 · S01E05 · 分辨率 1080p'), release_text
+            release_text = await release.inner_text()
+            assert release_text.startswith('玫瑰战争 · S01E05-06 · TMDB 123 · 分辨率 1080p'), release_text
+            assert release_text.endswith('大小 2.3 GB'), release_text
+            assert '首文件' not in release_text
+            assert await first.evaluate('''element => {
+                const summary = element.querySelector('.shared-settings__preview').getBoundingClientRect()
+                const title = element.querySelector('.shared-settings__torrent-title').getBoundingClientRect()
+                return summary.bottom <= title.top
+            }''')
             assert '23.976 FPS' in await first.inner_text()
             assert await first.locator('.shared-settings__meta').evaluate(
                 "element => getComputedStyle(element).color") == 'rgba(0, 0, 0, 0.72)'
@@ -271,7 +283,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await first.locator('details').count() == 0
             assert await first.locator('.shared-settings__id').count() == 1
             assert '申请编号：' in await first.inner_text()
-            assert '资源已完成/已下载 · 下载方：朋友A' in await first.inner_text()
+            assert await first.locator('.shared-settings__reason').all_text_contents() == ['资源已下载 · 下载方：朋友A']
+            assert '命中占位' not in await first.inner_text()
             assert '占位方' not in await first.inner_text()
             await verify_badge_colors(dialog)
             await verify_record_layout(dialog)
@@ -452,7 +465,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert '下载方：朋友A' in await claim.inner_text()
             assert '占位编号：' in await claim.inner_text()
             claim_identity = await claim.locator('.shared-settings__claim-info').inner_text()
-            assert '玫瑰战争 · TMDB 123 · S01E05 · 分辨率 1080p' in claim_identity
+            assert '玫瑰战争 · S01E05 · TMDB 123 · 分辨率 1080p' in claim_identity
             assert await claim.locator('.shared-settings__claim-info .shared-settings__info').count() == 2
             for label in ('已完成', '已入队', '已释放'):
                 assert await records.locator('.shared-settings__record-head .shared-settings__badge').filter(has_text=label).count() == 1
@@ -580,14 +593,19 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.wait_for_function("window.resourceflowReady === true")
             await page.get_by_role("button", name="共享下载审批", exact=True).click()
             dialog = page.get_by_role("dialog")
-            await dialog.get_by_text("全部参与设备的共享下载记录", exact=True).wait_for()
+            await dialog.get_by_text("Show S01E05", exact=True).wait_for()
+            assert await dialog.get_by_text("全部参与设备的共享下载记录", exact=True).count() == 0
             assert await dialog.get_by_role("tab").all_text_contents() == [
                 '本机下载申请', '共享下载记录', '身份待核验']
             await dialog.get_by_text("共享占位关联异常 1 个，暂缓新增下载", exact=True).wait_for()
             await dialog.get_by_text("历史完成证据待同步：2 条；同步确认前暂缓新增下载。", exact=True).wait_for()
-            await dialog.get_by_text("历史证据待核验：3 条，未作为共享完成记录导入。", exact=True).wait_for()
+            assert await dialog.get_by_text("历史完成证据不完整", exact=False).count() == 0
             await dialog.get_by_text(f"关联占位：{'9' * 32}", exact=True).wait_for()
-            assert f"命中占位：{'8' * 32}" in await dialog.inner_text()
+            assert "命中占位" not in await dialog.inner_text()
+            await dialog.get_by_role("tab", name="身份待核验", exact=True).click()
+            await dialog.get_by_text("历史完成证据不完整：3 条，未导入共享记录。", exact=False).wait_for()
+            assert await dialog.get_by_text("历史完成证据不完整", exact=False).evaluate(
+                "element => element.classList.contains('v-alert--variant-tonal') || !!element.closest('.v-alert')")
             await dialog.get_by_role("tab", name="共享下载记录", exact=True).click()
             await dialog.get_by_text(f"关联申请：{'b' * 32}", exact=True).wait_for()
             toolbar = dialog.locator('.shared-settings__search:visible')
@@ -604,6 +622,25 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.locator(".v-card-text").evaluate(
                 "element => element.scrollWidth <= element.clientWidth + 1")
             await page.screenshot(path=str(output / f"shared-authority-{width}.png"), full_page=True)
+            await page.close()
+        for width, height in ((1440, 1000), (390, 844), (320, 720)):
+            page = await browser.new_page(viewport={"width": width, "height": height}, locale="zh-CN")
+            await page.goto(f"{base_url}/tests/channel-dedup-smoke.html?pack=1")
+            await page.wait_for_function("window.resourceflowReady === true")
+            await page.get_by_role("button", name="共享下载审批", exact=True).click()
+            dialog = page.get_by_role("dialog")
+            first = dialog.locator('.shared-settings__record').first
+            await first.get_by_text('Phoenix Rising S01E01-E06', exact=True).wait_for()
+            summary = first.locator('.shared-settings__preview')
+            assert await summary.count() == 1
+            text = await summary.inner_text()
+            assert text.startswith('凤起微月 · S01E01-06 · TMDB 342129'), text
+            assert text.endswith('大小 6.0 GB'), text
+            assert await first.locator('.shared-settings__reason').all_text_contents() == ['资源已下载 · 下载方：设备B']
+            assert '首文件' not in await first.inner_text()
+            assert '命中占位' not in await first.inner_text()
+            await verify_record_layout(dialog)
+            await page.screenshot(path=str(output / f'pack-summary-{width}.png'), full_page=True)
             await page.close()
         await browser.close()
     print("Verified 1440, 768, 390 and 320: three record tabs keep dialog height; completed filter replaces separate ledger tab; pending search, filters, pagination and stale-response guards; global settings and task editor regressions")

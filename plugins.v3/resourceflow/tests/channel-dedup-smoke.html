@@ -95,6 +95,20 @@
     shared.integrity_error = '共享占位关联异常 1 个，暂缓新增下载'
     shared.history_sync = { pending: 2, unverified: 3 }
   }
+  if (new URLSearchParams(location.search).get('pack') === '1') {
+    shared.requests = [{
+      request_id: 'a'.repeat(32), title: 'Phoenix Rising S01E01-E06', phase: 'rejected', approved: 0,
+      created: 1794711600, updated: 1794711660, task_name: 'Pack Site', downloader: 'QB', file_count: 6,
+      files: Array.from({ length: 6 }, (_, index) => ({
+        id: `file-${index}`, path: `Phoenix.S01E0${index + 1}.mkv`,
+        media_title: '凤起微月', tmdb_id: 342129, media_type: 'tv', season: 1, episodes: [index + 1],
+        specs: { resolution: '2160p', effects: 'HDR', codec: 'H.265', source: 'WEB-DL', fps: 60, size: 1024 ** 3 },
+      })),
+      rejected: Array.from({ length: 6 }, (_, index) => ({
+        id: `file-${index}`, reason: '同规格已占位或已完成', owner: '设备B', state: 'completed', claim: String(index).repeat(32),
+      })),
+    }]
+  }
   function recordPage(items, path) {
     const params = new URLSearchParams(path.split('?')[1])
     const query = (params.get('query') || '').toLowerCase().split(/\s+/).filter(Boolean)

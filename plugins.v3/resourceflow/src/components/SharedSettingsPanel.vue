@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { formatBytes, unwrapResponse } from '../utils'
+import { unwrapResponse } from '../utils'
+import { releaseDetails, requestMediaSummaries, rejectionSummaries } from '../sharedRecordDisplay'
 
 const props = defineProps({
   api: { type: Object, required: true },
@@ -19,6 +20,9 @@ const ready = ref(false)
 const canTest = computed(() => Boolean(state.value.bot_username))
 const error = ref('')
 const recordRows = ref({ items: [], total: 0 })
+const requestRows = computed(() => recordRows.value.items.map(row => ({
+  ...row, mediaSummaries: requestMediaSummaries(row), rejectionSummaries: rejectionSummaries(row),
+})))
 const recordPage = ref(1)
 const recordsLoading = ref(false)
 const recordFilters = ref({
@@ -36,7 +40,6 @@ const phaseColors = {
   requesting: 'info', reserved: 'success', adding: 'info', awaiting_start: 'warning',
   queued: 'info', timeout_cancel_pending: 'warning', completed: 'success', released: 'secondary', rejected: 'error', uncertain: 'warning',
 }
-const specLabels = { resolution: '分辨率', effects: '特效', codec: '编码', source: '来源', fps: '帧率', size: '大小' }
 const phaseIcons = {
   requesting: 'mdi-clock-outline', reserved: 'mdi-check-circle-outline', adding: 'mdi-clock-outline',
   awaiting_start: 'mdi-clock-outline', timeout_cancel_pending: 'mdi-clock-alert-outline',
@@ -49,11 +52,6 @@ const statusOptions = computed(() => [
     props.recordTab === 'requests' || ['reserved', 'queued', 'completed', 'released'].includes(key),
   ).map(([value, title]) => ({ value, title })),
 ])
-
-function rejectionReason(item) {
-  const reason = item.reason === '同规格已占位或已完成' ? '资源已完成/已下载' : item.reason
-  return `${reason || ''}${item.owner ? ` · 下载方：${item.owner}` : ''}${item.claim ? ` · 命中占位：${item.claim}` : ''}`
-}
 
 async function loadRecords() {
   if (props.mode !== 'records' || !activeFilter.value) return
@@ -85,25 +83,6 @@ function timestamp(value) {
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
     hourCycle: 'h23',
   }).format(date)
-}
-
-function identity(row) {
-  const episodes = (row.episodes || []).map(value => `E${String(value).padStart(2, '0')}`).join(', ')
-  const type = row.media_type === 'movie' ? '电影' : `S${String(row.season ?? 0).padStart(2, '0')}${episodes}`
-  const title = row.media_title ? `${row.media_title} · ` : ''
-  return `${title}${row.tmdb_id ? `TMDB ${row.tmdb_id}` : '身份待确认'} · ${type}`
-}
-
-function specifications(specs = {}) {
-  return Object.entries(specLabels).flatMap(([key, label]) => {
-    const value = specs?.[key]
-    if (value === undefined || value === null || value === '') return []
-    return [`${label} ${key === 'size' ? formatBytes(value) : key === 'fps' ? `${value} FPS` : value}`]
-  }).join(' · ') || '暂无规格'
-}
-
-function releaseDetails(row) {
-  return `${identity(row)} · ${specifications(row.specs)}`
 }
 
 function requestSummary(row) {
@@ -200,8 +179,10 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
     <VAlert v-if="state.history_sync?.pending" type="warning" variant="tonal" density="compact">
       历史完成证据待同步：{{ state.history_sync.pending }} 条；同步确认前暂缓新增下载。
     </VAlert>
-    <VAlert v-if="state.history_sync?.unverified" type="warning" variant="tonal" density="compact">
-      历史证据待核验：{{ state.history_sync.unverified }} 条，未作为共享完成记录导入。
+    <VAlert v-if="state.history_sync?.unverified && (mode === 'settings' || recordTab === 'pending')"
+      type="info" variant="tonal" density="compact">
+      历史完成证据不完整：{{ state.history_sync.unverified }} 条，未导入共享记录。
+      缺少身份、已勾规格或有效时间的旧证据会保留，补齐后才可重新校验；这不是正在等待同步的任务。
     </VAlert>
     <template v-if="mode === 'settings'">
     <div class="text-subtitle-2">Telegram 共享审批</div>
@@ -241,29 +222,31 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
       <div v-if="!recordsLoading && !recordRows.items.length" class="text-body-2 text-medium-emphasis">
         {{ activeFilter.query || activeFilter.status ? '无匹配记录' : '暂无共享申请' }}
       </div>
-      <article v-for="row in recordRows.items" :key="row.request_id" class="shared-settings__record">
+      <article v-for="row in requestRows" :key="row.request_id" class="shared-settings__record">
         <div class="shared-settings__record-head">
-          <strong>{{ row.title }}</strong>
+          <div v-if="row.mediaSummaries.length" class="shared-settings__heading">
+            <div v-for="(summary, index) in row.mediaSummaries" :key="index"
+              class="shared-settings__preview shared-settings__info text-body-2">
+              <span>{{ summary }}</span>
+            </div>
+          </div>
+          <strong v-else>{{ row.title }}</strong>
           <span class="shared-settings__badge" :data-tone="phaseColors[row.phase] || 'secondary'">
             <VIcon :icon="phaseIcons[row.phase] || 'mdi-clock-outline'" size="16" />
             {{ requestSummary(row) }}
           </span>
         </div>
+        <strong v-if="row.mediaSummaries.length" class="shared-settings__torrent-title">{{ row.title }}</strong>
         <div class="shared-settings__meta text-caption">
           <span>申请时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
           <span v-if="row.download_started_at">下载开始：{{ timestamp(row.download_started_at) }}</span>
           <span v-if="row.timeout_at">超时处理：{{ timestamp(row.timeout_at) }}</span>
           <span>任务：{{ row.task_name || row.task_id || '-' }}</span><span>下载器：{{ row.downloader || '-' }}</span>
         </div>
-        <div v-if="row.files?.length" class="shared-settings__preview shared-settings__info text-body-2">
-          <span>
-            <template v-if="row.files.length > 1">首文件 · </template>{{ releaseDetails(row.files[0]) }}
-          </span>
-        </div>
         <p v-if="row.error" class="shared-settings__error text-body-2">{{ row.error }}</p>
         <p v-if="row.integrity_error" class="shared-settings__error text-body-2">{{ row.integrity_error }}</p>
-        <p v-for="(item, index) in row.rejected || []" :key="index" class="shared-settings__reason text-body-2">
-          {{ rejectionReason(item) }}
+        <p v-for="(reason, index) in row.rejectionSummaries" :key="index" class="shared-settings__reason text-body-2">
+          {{ reason }}
         </p>
         <span class="shared-settings__id text-caption">申请编号：{{ row.request_id }}</span>
         <span v-if="row.claim_links?.length" class="shared-settings__id text-caption">
@@ -323,6 +306,8 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 .shared-settings__record { display: flex; flex-direction: column; gap: 10px; padding-block: 20px; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); overflow-wrap: anywhere; min-inline-size: 0; }
 .shared-settings__record-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; min-inline-size: 0; }
 .shared-settings__record-head strong { flex: 1; min-inline-size: 0; font-size: 14px; line-height: 1.6; }
+.shared-settings__heading { display: flex; flex: 1; flex-direction: column; gap: 8px; min-inline-size: 0; }
+.shared-settings__torrent-title { font-size: 14px; line-height: 1.6; }
 .shared-settings__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 /* Native badges keep approval colors independent of host VChip/glass theme overrides. */
 .shared-settings__badge { display: inline-flex; align-items: center; justify-content: center; gap: 4px; flex: 0 0 auto; max-inline-size: 52%; min-block-size: 32px; padding: 6px 10px; border: 0; border-radius: 7px; font-size: 13px; font-weight: 400; line-height: 20px; color: rgb(var(--shared-badge-ink)); background-color: rgba(var(--shared-badge-fill), 0.13); --shared-badge-ink: 139, 145, 155; --shared-badge-fill: 139, 145, 155; }
