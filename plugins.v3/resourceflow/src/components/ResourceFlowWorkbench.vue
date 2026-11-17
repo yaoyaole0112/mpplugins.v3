@@ -54,6 +54,7 @@ const sharedSettingsPanel = ref(null)
 const sharedRecordsPanel = ref(null)
 const sharedHost = ref(false)
 const sharedRecordsHost = ref(false)
+const sharedRecordsLoading = ref(false)
 const approvalTab = ref('requests')
 const resourceRows = ref({ total: 0, items: [] })
 const resourcePage = ref(1)
@@ -64,6 +65,9 @@ const resourceTypes = [
 let resourceSearchTimer
 let resourceGeneration = 0
 const ledgerLoading = ref(false)
+const approvalLoading = computed(() => (
+  channelDedupLoading.value || sharedRecordsLoading.value || ledgerLoading.value
+))
 const channelDedup = ref({ enabled: false, channels: [], attributes: [], records: [] })
 const channelDedupDraft = ref({
   enabled: false, channels: '', attributes: [], size_tolerance_pct: 5,
@@ -1112,10 +1116,16 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VIcon icon="mdi-send" color="primary" />
           <span>共享下载审批</span>
           <VSpacer />
+          <VTooltip v-if="approvalLoading" text="加载中">
+            <template #activator="{ props: tip }">
+              <VProgressCircular v-bind="tip" indeterminate color="primary" :size="20" :width="2"
+                aria-label="加载中" class="channel-dedup__loading" />
+            </template>
+          </VTooltip>
           <VTooltip text="刷新资源记录">
             <template #activator="{ props: tip }">
               <VBtn v-bind="tip" icon="mdi-refresh" variant="text" aria-label="刷新资源记录"
-                :loading="channelDedupLoading" @click="refreshApprovalRecords" />
+                @click="refreshApprovalRecords" />
             </template>
           </VTooltip>
           <VTooltip text="关闭">
@@ -1139,7 +1149,8 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           </VTabs>
           <SharedSettingsPanel v-if="channelDedupDialog"
             ref="sharedRecordsPanel" :api="api" :plugin-base="pluginBase" :record-tab="approvalTab"
-            @host-change="sharedRecordsHost = $event" />
+            @host-change="sharedRecordsHost = $event"
+            @loading-change="sharedRecordsLoading = $event" />
           <div v-if="approvalTab === 'pending'" class="channel-dedup__section">
             <div class="channel-dedup__search">
               <VTextField v-model="activeResourceFilter.query" label="搜索记录" prepend-inner-icon="mdi-magnify"
@@ -1147,8 +1158,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               <VSelect v-model="activeResourceFilter.media_type" label="类型筛选" :items="resourceTypes"
                 density="comfortable" hide-details />
             </div>
-            <VProgressLinear v-if="ledgerLoading" indeterminate />
-            <div v-else class="text-caption text-medium-emphasis">共 {{ resourceRows.total }} 条</div>
+            <div class="text-caption text-medium-emphasis">共 {{ resourceRows.total }} 条</div>
             <div v-if="!ledgerLoading && !resourceRows.items?.length" class="text-body-2 text-medium-emphasis">
               {{ activeResourceFilter.query || activeResourceFilter.media_type ? '无匹配记录' : '暂无记录' }}
             </div>

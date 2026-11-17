@@ -9,7 +9,7 @@ const props = defineProps({
   mode: { type: String, default: 'records' },
   recordTab: { type: String, default: 'requests' },
 })
-const emit = defineEmits(['host-change', 'policy-synced'])
+const emit = defineEmits(['host-change', 'policy-synced', 'loading-change'])
 const state = ref({ requests: [], records: [] })
 const draft = ref({
   enabled: false, host_coordinator: false, bot_username: '', group: 'resources',
@@ -151,6 +151,7 @@ onMounted(() => perform(() => load(true)))
 watch(() => draft.value.host_coordinator, value => {
   if (props.mode === 'settings') emit('host-change', value)
 }, { immediate: true })
+watch(recordsLoading, value => emit('loading-change', value), { immediate: true })
 watch(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.status], (values, previous) => {
   if (props.mode !== 'records') return
   clearTimeout(searchTimer)
@@ -214,7 +215,6 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
       <VSelect v-model="activeFilter.status" label="状态筛选" :items="statusOptions"
         density="comfortable" hide-details />
     </div>
-    <VProgressLinear v-if="recordsLoading" indeterminate />
     <div v-if="recordTab === 'requests'" class="shared-settings__records">
       <div v-if="!recordsLoading && !recordRows.items.length" class="text-body-2 text-medium-emphasis">
         {{ activeFilter.query || activeFilter.status ? '无匹配记录' : '暂无共享申请' }}
@@ -271,9 +271,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
         </div>
         <strong class="shared-settings__torrent-title">{{ row.title }}</strong>
         <div class="shared-settings__meta shared-settings__claim-meta text-caption">
-          <span>占位时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
-        </div>
-        <div class="shared-settings__claim-info text-body-2">
+          <span>下载时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
           <span class="shared-settings__claim-owner">下载方：{{ row.label || '-' }}</span>
         </div>
         <div class="shared-settings__ids">
