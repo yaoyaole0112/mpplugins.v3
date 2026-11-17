@@ -19,6 +19,8 @@ def ed2k_account(proxy=None):
 
 
 class TelegramRPC:
+    _last_send = {}
+
     def __init__(self, account, username, timeout=60):
         self.account, self.username, self.timeout = account, username, timeout
 
@@ -32,8 +34,11 @@ class TelegramRPC:
             raise
         except Exception as error:
             if type(error).__name__ in {"FloodWaitError", "SlowModeWaitError", "FloodPremiumWaitError"}:
-                failure = SharedError("Telegram 要求限速等待，本次暂缓下载")
-                failure.retry_after = max(60, int(getattr(error, "seconds", 300))) + 1
+                wait = max(60, int(getattr(error, "seconds", 300))) + 1
+                method = type(getattr(error, "request", None)).__name__
+                method = method if method.endswith("Request") and method.isidentifier() else "审批请求"
+                failure = SharedError(f"Telegram 要求限速等待，约 {wait} 秒后重试（{method}），本次暂缓下载")
+                failure.retry_after = wait
                 raise failure from None
             raise SharedError("Telegram 审批请求未确认，保留申请并暂缓下载") from None
 
@@ -47,13 +52,18 @@ class TelegramRPC:
             me = await client.get_me()
             if not me or getattr(me, "bot", False):
                 raise SharedError("共享审批必须使用个人账号")
-            peer = await client.get_entity(self.username)
+            # Resolve cached input peers first; get_entity(username) always resolves the username.
+            target = await client.get_input_entity(self.username)
+            peer = await client.get_entity(target)
             if not getattr(peer, "bot", False) or str(getattr(peer, "username", "")).lower() != self.username.lstrip("@").lower():
                 raise SharedError("协调目标不是指定的 Telegram Bot")
             first_id = None
-            for index, text in enumerate(encode(body, request_id)):
-                if index:
-                    await asyncio.sleep(1.1)
+            session = (str(self.account.session_path), peer.id)
+            for text in encode(body, request_id):
+                delay = self._last_send.get(session, 0) + 1.1 - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                self._last_send[session] = time.monotonic()
                 message = await client.send_message(peer, text, parse_mode=None, link_preview=False)
                 first_id = first_id or message.id
             parts, expected, cursor = {}, None, first_id

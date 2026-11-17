@@ -528,11 +528,15 @@ class AdmissionTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
+    def setUp(self):
+        TelegramRPC._last_send.clear()
+
     def account(self, reply_ok=True):
         rid = "a" * 32
         peer = SimpleNamespace(bot=True, username="testbot", id=99)
         client = SimpleNamespace(connect=AsyncMock(), is_user_authorized=AsyncMock(return_value=True),
                                  get_me=AsyncMock(return_value=SimpleNamespace(bot=False)),
+                                 get_input_entity=AsyncMock(return_value=peer),
                                  get_entity=AsyncMock(return_value=peer),
                                  send_message=AsyncMock(return_value=SimpleNamespace(id=10)))
         replies = [SimpleNamespace(id=11, out=False, sender_id=88, message="irrelevant")]
@@ -545,7 +549,8 @@ class TransportTests(unittest.TestCase):
                 yield row
 
         client.iter_messages = messages
-        account = SimpleNamespace(_credentials=Mock(return_value={}), _client=Mock(return_value=client),
+        account = SimpleNamespace(session_path=Path("/tmp/test-resourceflow.session"),
+                                  _credentials=Mock(return_value={}), _client=Mock(return_value=client),
                                   _disconnect=AsyncMock(), locked=False)
 
         @contextmanager
@@ -565,6 +570,39 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(TelegramRPC(account, "@testbot").exchange("a" * 32, {"op": "policy"})["answer"], 42)
         self.assertFalse(account.locked)
         account._disconnect.assert_awaited_once_with(client)
+        client.get_input_entity.assert_awaited_once_with("@testbot")
+        client.get_entity.assert_awaited_once_with(client.get_input_entity.return_value)
+
+    def test_separate_exchanges_share_send_pacing_under_the_session_lock(self):
+        account, client = self.account()
+        with patch("resourceflow.telegram_rpc.asyncio.sleep", new=AsyncMock()) as sleep, patch(
+                "resourceflow.telegram_rpc.time.monotonic", return_value=100):
+            for _ in range(2):
+                TelegramRPC(account, "@testbot").exchange("a" * 32, {"op": "policy"})
+            self.assertEqual(client.send_message.await_count, 2)
+            self.assertTrue(any(call.args[0] > 1 for call in sleep.await_args_list))
+
+    def test_flood_wait_preserves_server_delay_and_method_without_secret(self):
+        account, client = self.account()
+        flood = type("FloodWaitError", (Exception,), {})("must-not-leak-secret")
+        flood.seconds = 125
+        flood.request = type("ResolveUsernameRequest", (), {})()
+        client.get_input_entity.side_effect = flood
+        with self.assertRaises(SharedError) as caught:
+            TelegramRPC(account, "@testbot").exchange("a" * 32, {"op": "policy"})
+        self.assertEqual(caught.exception.retry_after, 126)
+        self.assertIn("ResolveUsernameRequest", str(caught.exception))
+        self.assertNotIn("secret", str(caught.exception))
+        self.assertFalse(account.locked)
+        client.send_message.assert_not_awaited()
+        account._disconnect.assert_awaited_once()
+
+    def test_cached_peer_still_requires_correct_bot_identity(self):
+        account, client = self.account()
+        client.get_entity.return_value = SimpleNamespace(id=99, bot=True, username="wrongbot")
+        with self.assertRaisesRegex(SharedError, "不是指定"):
+            TelegramRPC(account, "@testbot").exchange("a" * 32, {"op": "policy"})
+        client.send_message.assert_not_awaited()
 
     def test_definitive_denial_and_transport_failure_are_distinguishable(self):
         account, client = self.account(False)
@@ -719,9 +757,54 @@ class PluginSetupTests(unittest.TestCase):
         self.assertEqual(p._local_shared_policy(), expected)
         self.assertEqual(p.update_config.call_args.args[0]["channel_dedup_pack_policy"], "exclude")
         p._shared_exchange.return_value = {"ok": True, "policy": policy(["resolution"], 3)}
+        p._shared_policy_checked_at = 0
         with self.assertRaisesRegex(SharedError, "更新"):
             p._sync_shared_policy()
         self.assertEqual(p._local_shared_policy(), expected)
+
+    def test_policy_cache_does_not_slide_and_never_skips_history_or_audit(self):
+        p = self.plugin
+        p._sync_shared_history = Mock()
+        p._audit_shared_links = Mock()
+        reply = {"ok": True, "policy": p._local_shared_policy(),
+                 "authority_version": 2, "authority_id": "f" * 32}
+        p._shared_exchange = Mock(return_value=reply)
+        with patch("resourceflow.shared_plugin.time.time", return_value=1000):
+            p._sync_shared_policy()
+        with patch("resourceflow.shared_plugin.time.time", return_value=1599):
+            p._sync_shared_policy()
+        self.assertEqual(p._shared_exchange.call_count, 1)
+        self.assertEqual(p._shared_policy_checked_at, 1000)
+        self.assertEqual(p._sync_shared_history.call_count, 2)
+        self.assertEqual(p._audit_shared_links.call_count, 2)
+        with patch("resourceflow.shared_plugin.time.time", return_value=1600):
+            p._sync_shared_policy()
+        self.assertEqual(p._shared_exchange.call_count, 2)
+        p._shared_retry_at = time.time() + 60
+        with self.assertRaisesRegex(SharedError, "退避等待"):
+            p._sync_shared_policy()
+        self.assertEqual(p._shared_exchange.call_count, 2)
+
+    def test_valid_rejected_replay_clears_previous_transient_error(self):
+        p = self.plugin
+        row = file_row()
+        entry = {"request_id": "a" * 32, "title": "Show", "task_id": "t", "files": [row],
+                 "approved": {}, "phase": "requesting", "error": "共享审批退避等待",
+                 "downloader": "QB", "hash": "b" * 40,
+                 "body": {"revision": p._local_shared_policy()["revision"], "pack_policy": "partial",
+                          "files": [row]}}
+        p._shared_claims = {entry["request_id"]: entry}
+        p._shared_exchange = Mock(return_value={
+            "approved": [], "rejected": [{"id": row["id"], "reason": "duplicate"}],
+            "pack_rejected": False, "policy": p._local_shared_policy(),
+        })
+        p._reconcile_shared_entry(entry)
+        self.assertEqual(entry["phase"], "rejected")
+        self.assertEqual(entry["error"], "")
+        entry["error"] = "旧版本残留退避等待"
+        self.assertEqual(p._shared_request_status(entry)["error"], "")
+        entry["rejected"] = []
+        self.assertEqual(p._shared_request_status(entry)["error"], entry["error"])
 
     def test_client_with_empty_legacy_fields_adopts_policy_and_rejects_tampering(self):
         p = self.plugin

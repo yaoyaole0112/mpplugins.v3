@@ -3706,7 +3706,19 @@ return (_ctx, _cache) => {
                   icon: "mdi-send",
                   color: "primary"
                 }),
-                _cache[107] || (_cache[107] = _createElementVNode("span", null, "共享下载审批", -1))
+                _cache[107] || (_cache[107] = _createElementVNode("span", null, "共享下载审批", -1)),
+                _createVNode(_component_VSpacer),
+                _createVNode(_component_VTooltip, { text: "关闭" }, {
+                  activator: _withCtx(({ props: tip }) => [
+                    _createVNode(_component_VBtn, _mergeProps(tip, {
+                      icon: "mdi-close",
+                      variant: "text",
+                      "aria-label": "关闭共享下载审批",
+                      onClick: _cache[33] || (_cache[33] = $event => (channelDedupDialog.value = false))
+                    }), null, 16)
+                  ]),
+                  _: 1
+                })
               ]),
               _: 1
             }),
@@ -3741,7 +3753,7 @@ return (_ctx, _cache) => {
                 _createElementVNode("div", _hoisted_63, [
                   _createElementVNode("div", null, [
                     _createElementVNode("span", null, _toDisplayString(channelDedup.value.shared_authority ? '去重依据' : '长期资源账本'), 1),
-                    _createElementVNode("strong", null, _toDisplayString(channelDedup.value.shared_authority ? '协调端共享记录' : channelDedup.value.ledger_count || 0), 1)
+                    _createElementVNode("strong", null, _toDisplayString(channelDedup.value.shared_authority ? '全部参与设备的共享下载记录' : channelDedup.value.ledger_count || 0), 1)
                   ]),
                   _createElementVNode("div", null, [
                     _cache[108] || (_cache[108] = _createElementVNode("span", null, "身份待核验", -1)),
@@ -3762,13 +3774,13 @@ return (_ctx, _cache) => {
                 ]),
                 _createVNode(_component_VTabs, {
                   modelValue: approvalTab.value,
-                  "onUpdate:modelValue": _cache[33] || (_cache[33] = $event => ((approvalTab).value = $event)),
+                  "onUpdate:modelValue": _cache[34] || (_cache[34] = $event => ((approvalTab).value = $event)),
                   density: "compact"
                 }, {
                   default: _withCtx(() => [
                     _createVNode(_component_VTab, { value: "requests" }, {
                       default: _withCtx(() => [...(_cache[109] || (_cache[109] = [
-                        _createTextVNode("本机共享申请", -1)
+                        _createTextVNode("本机下载申请", -1)
                       ]))]),
                       _: 1
                     }),
@@ -3778,7 +3790,7 @@ return (_ctx, _cache) => {
                           value: "records"
                         }, {
                           default: _withCtx(() => [...(_cache[110] || (_cache[110] = [
-                            _createTextVNode("共享占位记录", -1)
+                            _createTextVNode("共享下载记录", -1)
                           ]))]),
                           _: 1
                         }))
@@ -3800,7 +3812,7 @@ return (_ctx, _cache) => {
                       api: __props.api,
                       "plugin-base": pluginBase.value,
                       "record-tab": approvalTab.value,
-                      onHostChange: _cache[34] || (_cache[34] = $event => (sharedRecordsHost.value = $event))
+                      onHostChange: _cache[35] || (_cache[35] = $event => (sharedRecordsHost.value = $event))
                     }, null, 8, ["api", "plugin-base", "record-tab"])), [
                       [_vShow, ['requests', 'records'].includes(approvalTab.value)]
                     ])
@@ -3810,7 +3822,7 @@ return (_ctx, _cache) => {
                       _createElementVNode("div", _hoisted_65, [
                         _createVNode(_component_VTextField, {
                           modelValue: activeResourceFilter.value.query,
-                          "onUpdate:modelValue": _cache[35] || (_cache[35] = $event => ((activeResourceFilter.value.query) = $event)),
+                          "onUpdate:modelValue": _cache[36] || (_cache[36] = $event => ((activeResourceFilter.value.query) = $event)),
                           label: "搜索记录",
                           "prepend-inner-icon": "mdi-magnify",
                           clearable: "",
@@ -3820,7 +3832,7 @@ return (_ctx, _cache) => {
                         }, null, 8, ["modelValue"]),
                         _createVNode(_component_VSelect, {
                           modelValue: activeResourceFilter.value.media_type,
-                          "onUpdate:modelValue": _cache[36] || (_cache[36] = $event => ((activeResourceFilter.value.media_type) = $event)),
+                          "onUpdate:modelValue": _cache[37] || (_cache[37] = $event => ((activeResourceFilter.value.media_type) = $event)),
                           label: "类型筛选",
                           items: resourceTypes,
                           density: "comfortable",
@@ -3858,7 +3870,7 @@ return (_ctx, _cache) => {
                             key: 3,
                             modelValue: resourcePage.value,
                             "onUpdate:modelValue": [
-                              _cache[37] || (_cache[37] = $event => ((resourcePage).value = $event)),
+                              _cache[38] || (_cache[38] = $event => ((resourcePage).value = $event)),
                               loadResourceRows
                             ],
                             length: Math.ceil(resourceRows.value.total / 20),
@@ -3867,21 +3879,6 @@ return (_ctx, _cache) => {
                         : _createCommentVNode("", true)
                     ]))
                   : _createCommentVNode("", true)
-              ]),
-              _: 1
-            }),
-            _createVNode(_component_VCardActions, null, {
-              default: _withCtx(() => [
-                _createVNode(_component_VSpacer),
-                _createVNode(_component_VBtn, {
-                  variant: "text",
-                  onClick: _cache[38] || (_cache[38] = $event => (channelDedupDialog.value = false))
-                }, {
-                  default: _withCtx(() => [...(_cache[112] || (_cache[112] = [
-                    _createTextVNode("关闭", -1)
-                  ]))]),
-                  _: 1
-                })
               ]),
               _: 1
             })
@@ -3912,7 +3909,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[40] || (_cache[40] = $event => (deleteDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[113] || (_cache[113] = [
+                  default: _withCtx(() => [...(_cache[112] || (_cache[112] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -3923,7 +3920,7 @@ return (_ctx, _cache) => {
                   loading: saving.value,
                   onClick: confirmDeleteTask
                 }, {
-                  default: _withCtx(() => [...(_cache[114] || (_cache[114] = [
+                  default: _withCtx(() => [...(_cache[113] || (_cache[113] = [
                     _createTextVNode("删除", -1)
                   ]))]),
                   _: 1
@@ -3946,7 +3943,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_VCard, { title: "清除任务数据" }, {
           default: _withCtx(() => [
             _createVNode(_component_VCardText, null, {
-              default: _withCtx(() => [...(_cache[115] || (_cache[115] = [
+              default: _withCtx(() => [...(_cache[114] || (_cache[114] = [
                 _createTextVNode("将清除当前任务的统计、运行诊断、托管和归档记录，下载器内的种子与文件不会删除。", -1)
               ]))]),
               _: 1
@@ -3958,7 +3955,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[42] || (_cache[42] = $event => (clearDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[116] || (_cache[116] = [
+                  default: _withCtx(() => [...(_cache[115] || (_cache[115] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -3969,7 +3966,7 @@ return (_ctx, _cache) => {
                   loading: saving.value,
                   onClick: confirmClearTask
                 }, {
-                  default: _withCtx(() => [...(_cache[117] || (_cache[117] = [
+                  default: _withCtx(() => [...(_cache[116] || (_cache[116] = [
                     _createTextVNode("清除", -1)
                   ]))]),
                   _: 1
@@ -3988,6 +3985,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-96108a86"]]);
+const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-4001b1b1"]]);
 
 export { ResourceFlowWorkbench as R };

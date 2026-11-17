@@ -58,15 +58,20 @@ class SharedResourceMixin:
 
     def _sync_shared_policy(self):
         with self._shared_rpc_lock:
+            self._check_shared_available()
             if self._shared_settings.host_coordinator:
                 self._ensure_shared_worker()
                 self._apply_shared_policy(self._shared_store.policy)
                 response = {"policy": self._shared_store.policy, **self._shared_store.authority()}
             else:
-                response = self._shared_exchange(uuid.uuid4().hex, {"op": "policy"})
+                response = getattr(self, "_shared_probe", None)
+                if not response or time.time() - getattr(self, "_shared_policy_checked_at", 0) >= 600:
+                    response = self._shared_exchange(uuid.uuid4().hex, {"op": "policy"})
+                    self._shared_policy_checked_at = time.time()
                 self._apply_shared_policy(response.get("policy"))
             self._shared_probe = response
-            self._shared_policy_checked_at = time.time()
+            if self._shared_settings.host_coordinator:
+                self._shared_policy_checked_at = time.time()
             self._require_shared_authority(response)
             self._sync_shared_history(store=self._shared_store if self._shared_settings.host_coordinator else None)
             self._audit_shared_links()
@@ -352,7 +357,8 @@ class SharedResourceMixin:
             "downloader": row.get("downloader"), "created": row.get("created"), "updated": row.get("updated"),
             "download_started_at": row.get("download_started_at"),
             "timeout_at": row.get("timeout_at"), "timeout_reason": row.get("timeout_reason", ""),
-            "error": row.get("error", ""), "approved": len(approved), "rejected": rejected,
+            "error": "" if row["phase"] == "rejected" and rejected else row.get("error", ""),
+            "approved": len(approved), "rejected": rejected,
             "integrity_error": row.get("integrity_error", ""),
             "file_count": len(files), "completed": len(row.get("done") or []),
             "files": [{**{key: item.get(key) for key in
@@ -499,7 +505,9 @@ class SharedResourceMixin:
             return result
         except SharedError as error:
             self._shared_error = str(error)
-            if not getattr(error, "definitive", False):
+            if getattr(error, "definitive", False):
+                self._shared_policy_checked_at = 0
+            else:
                 self._shared_retry_at = time.time() + max(15, getattr(error, "retry_after", 15))
                 self.save_data("shared_retry_at", self._shared_retry_at)
                 self.save_data("shared_retry_error", self._shared_error)
@@ -875,6 +883,7 @@ class SharedResourceMixin:
         entry["approved"] = pairs
         entry["rejected"] = rejected
         entry["done"] = []
+        entry["error"] = ""
         self._save_shared()
         self._log_shared_decision(entry)
 
@@ -970,7 +979,7 @@ class SharedResourceMixin:
             response = self._shared_exchange(entry["request_id"], entry["body"])
             self._accept_shared_reply(entry, response)
             if not entry["approved"]:
-                self._shared_phase(entry, "rejected")
+                self._shared_phase(entry, "rejected", error="")
                 return
         observed = [file_id for file_id in entry.get("observed_completed", [])
                     if file_id in entry["approved"] and file_id not in entry.get("done", [])]

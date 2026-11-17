@@ -1107,6 +1107,13 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
         <VCardTitle class="channel-dedup__title">
           <VIcon icon="mdi-send" color="primary" />
           <span>共享下载审批</span>
+          <VSpacer />
+          <VTooltip text="关闭">
+            <template #activator="{ props: tip }">
+              <VBtn v-bind="tip" icon="mdi-close" variant="text" aria-label="关闭共享下载审批"
+                @click="channelDedupDialog = false" />
+            </template>
+          </VTooltip>
         </VCardTitle>
         <VCardText class="channel-dedup__body">
           <VAlert v-if="channelDedupError" type="error" variant="tonal" density="compact">
@@ -1117,7 +1124,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           </VAlert>
           <div class="channel-dedup__status">
             <div><span>{{ channelDedup.shared_authority ? '去重依据' : '长期资源账本' }}</span>
-              <strong>{{ channelDedup.shared_authority ? '协调端共享记录' : channelDedup.ledger_count || 0 }}</strong></div>
+              <strong>{{ channelDedup.shared_authority ? '全部参与设备的共享下载记录' : channelDedup.ledger_count || 0 }}</strong></div>
             <div><span>身份待核验</span><strong>{{ channelDedup.pending_count || 0 }}</strong></div>
             <VTooltip text="刷新资源记录">
               <template #activator="{ props: tooltipProps }">
@@ -1127,8 +1134,8 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             </VTooltip>
           </div>
           <VTabs v-model="approvalTab" density="compact">
-            <VTab value="requests">本机共享申请</VTab>
-            <VTab v-if="sharedRecordsHost" value="records">共享占位记录</VTab>
+            <VTab value="requests">本机下载申请</VTab>
+            <VTab v-if="sharedRecordsHost" value="records">共享下载记录</VTab>
             <VTab value="pending">身份待核验</VTab>
           </VTabs>
           <SharedSettingsPanel v-if="channelDedupDialog" v-show="['requests', 'records'].includes(approvalTab)"
@@ -1162,10 +1169,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               :length="Math.ceil(resourceRows.total / 20)" :total-visible="3" @update:model-value="loadResourceRows" />
           </div>
         </VCardText>
-        <VCardActions>
-          <VSpacer />
-          <VBtn variant="text" @click="channelDedupDialog = false">关闭</VBtn>
-        </VCardActions>
       </VCard>
     </VDialog>
 

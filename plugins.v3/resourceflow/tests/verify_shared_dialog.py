@@ -140,8 +140,8 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
         assert '测试剧集 · S01' in await dialog.locator('.channel-dedup__record-identity').nth(1).inner_text()
         await dialog.locator('.channel-dedup__record').last.scroll_into_view_if_needed()
         last = await dialog.locator('.channel-dedup__record').last.bounding_box()
-        footer = await dialog.locator('.v-card-actions').bounding_box()
-        assert last['y'] + last['height'] <= footer['y'] + 1, (tab, width, last, footer)
+        body = await dialog.locator('.v-card-text').bounding_box()
+        assert last['y'] + last['height'] <= body['y'] + body['height'] + 1, (tab, width, last, body)
         await dialog.locator('.v-card-text').evaluate('element => { element.scrollTop = 0 }')
         await page.screenshot(path=str(output / f'ledger-many-{tab}-{width}.png'), full_page=True)
         if host_css:
@@ -160,8 +160,8 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
                     && element.scrollHeight <= element.clientHeight + 1''')
                 await dialog.locator('.channel-dedup__record').last.scroll_into_view_if_needed()
                 last = await dialog.locator('.channel-dedup__record').last.bounding_box()
-                footer = await dialog.locator('.v-card-actions').bounding_box()
-                assert last['y'] + last['height'] <= footer['y'] + 1, (tab, width, scheme)
+                body = await dialog.locator('.v-card-text').bounding_box()
+                assert last['y'] + last['height'] <= body['y'] + body['height'] + 1, (tab, width, scheme)
                 await dialog.locator('.v-card-text').evaluate('element => { element.scrollTop = 0 }')
                 await page.screenshot(path=str(output / f'ledger-many-{tab}-glass-{scheme}-{width}.png'), full_page=True)
             await page.evaluate('() => window.resourceflowSetTheme("light")')
@@ -196,7 +196,7 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
     await page.evaluate('window.resourceflowSlowSearch = false; window.resourceflowExtraRecords = 0')
     await search.fill('')
     toolbar = dialog.locator('.channel-dedup__search:visible, .shared-settings__search:visible')
-    value = '电影' if ledger else '已排除' if tab == '本机共享申请' else '已完成'
+    value = '电影' if ledger else '已排除' if tab == '本机下载申请' else '已完成'
     await toolbar.locator('.v-select').click()
     await page.get_by_role('option', name=value, exact=True).click()
     await page.wait_for_function("""selector =>
@@ -234,12 +234,17 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label("参与跨实例共享审批", exact=True).count() == 0
             assert await dialog.get_by_role("button", name="保存设置", exact=True).count() == 0
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机共享申请', '共享占位记录', '身份待核验']
+                '本机下载申请', '共享下载记录', '身份待核验']
             bounds = await dialog.bounding_box()
             assert bounds["width"] >= (1100 if width >= 1000 else width * 0.9 if width >= 600 else width - 2), bounds
             assert bounds["height"] >= height * 0.88, bounds
             await page.wait_for_timeout(300)
             card_bounds = await dialog.locator('.channel-dedup__card').bounding_box()
+            close_button = dialog.get_by_role("button", name="关闭共享下载审批", exact=True)
+            close_bounds = await close_button.bounding_box()
+            assert close_bounds["y"] < card_bounds["y"] + 70, close_bounds
+            assert close_bounds["x"] > card_bounds["x"] + card_bounds["width"] - 80, close_bounds
+            assert await dialog.locator('.v-card-actions').count() == 0
             assert card_bounds["width"] >= (1100 if width >= 1000 else width * 0.9 if width >= 600 else width - 2), card_bounds
             records = dialog.locator('.shared-settings__records')
             first = records.locator('article').first
@@ -270,7 +275,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert '占位方' not in await first.inner_text()
             await verify_badge_colors(dialog)
             await verify_record_layout(dialog)
-            await verify_record_search(page, dialog, '本机共享申请', card_bounds['height'], output, width)
+            await verify_record_search(page, dialog, '本机下载申请', card_bounds['height'], output, width)
             if host_css:
                 stylesheet = await page.add_style_tag(path=str(host_css))
                 for scheme in ('light', 'dark'):
@@ -309,7 +314,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_text('待核验影片 · 电影', exact=True).count() == 1
             await verify_record_search(page, dialog, '身份待核验', card_bounds['height'], output, width, host_css)
             await page.screenshot(path=str(output / f'pending-{width}.png'), full_page=True)
-            await dialog.get_by_role("button", name="关闭", exact=True).click()
+            assert await close_button.is_visible()
+            await close_button.click()
             assert not await page.evaluate("window.resourceflowRequests.some(item => item.method === 'POST')")
             await page.get_by_role("button", name="全局设置", exact=True).click()
             await dialog.get_by_label("本机名称", exact=True).wait_for()
@@ -435,10 +441,10 @@ async def verify(base_url, output, executable_path, host_css=None):
                 await stylesheet.evaluate('element => element.remove()')
             await dialog.get_by_role("button", name="关闭", exact=True).click()
             await page.get_by_role("button", name="共享下载审批", exact=True).click()
-            await dialog.get_by_role("tab", name="共享占位记录", exact=True).wait_for()
+            await dialog.get_by_role("tab", name="共享下载记录", exact=True).wait_for()
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机共享申请', '共享占位记录', '身份待核验']
-            await dialog.get_by_role("tab", name="共享占位记录", exact=True).click()
+                '本机下载申请', '共享下载记录', '身份待核验']
+            await dialog.get_by_role("tab", name="共享下载记录", exact=True).click()
             await dialog.get_by_text("朋友A", exact=False).wait_for()
             claim = dialog.locator('.shared-settings__records article').first
             assert '占位时间' in await claim.inner_text()
@@ -452,7 +458,7 @@ async def verify(base_url, output, executable_path, host_css=None):
                 assert await records.locator('.shared-settings__record-head .shared-settings__badge').filter(has_text=label).count() == 1
             await verify_badge_colors(dialog, all_tones=False)
             await verify_record_layout(dialog)
-            await verify_record_search(page, dialog, '共享占位记录', card_bounds['height'], output, width)
+            await verify_record_search(page, dialog, '共享下载记录', card_bounds['height'], output, width)
             assert await claim.locator('.shared-settings__claim-meta').evaluate(
                 "element => getComputedStyle(element).display") == 'grid'
             assert '23.976 FPS' in await claim.inner_text()
@@ -480,7 +486,7 @@ async def verify(base_url, output, executable_path, host_css=None):
                     }
                 }''')
                 await stylesheet.evaluate('element => element.remove()')
-            await dialog.get_by_role("tab", name="本机共享申请", exact=True).click()
+            await dialog.get_by_role("tab", name="本机下载申请", exact=True).click()
             await dialog.get_by_role("button", name="核验未完成申请", exact=True).click()
             await dialog.locator(".v-card-text").evaluate("element => { element.scrollTop = 0 }")
             await page.wait_for_timeout(300)
@@ -490,7 +496,7 @@ async def verify(base_url, output, executable_path, host_css=None):
                 elements.filter(item => item.getBoundingClientRect().width > 0
                     && item.scrollWidth > item.clientWidth + 2).map(item => item.textContent)""")
             assert not clipped, (width, clipped)
-            await dialog.get_by_role("button", name="关闭", exact=True).click()
+            await close_button.click()
             await page.get_by_role("button", name="全局设置", exact=True).click()
             await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
             await page.evaluate("window.resourceflowFailSave = true")
@@ -565,7 +571,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             await editor.get_by_role('button', name='设置全局去重规则', exact=True).click()
             global_dialog = page.get_by_role('dialog').filter(has=page.get_by_label('启用插件', exact=True))
             await global_dialog.get_by_label('本机名称', exact=True).wait_for()
-            assert await global_dialog.get_by_role('tab', name='本机共享申请', exact=True).count() == 0
+            assert await global_dialog.get_by_role('tab', name='本机下载申请', exact=True).count() == 0
             assert not errors, errors
             await page.close()
         for width, height in ((1440, 1000), (390, 844)):
@@ -574,15 +580,15 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.wait_for_function("window.resourceflowReady === true")
             await page.get_by_role("button", name="共享下载审批", exact=True).click()
             dialog = page.get_by_role("dialog")
-            await dialog.get_by_text("协调端共享记录", exact=True).wait_for()
+            await dialog.get_by_text("全部参与设备的共享下载记录", exact=True).wait_for()
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机共享申请', '共享占位记录', '身份待核验']
+                '本机下载申请', '共享下载记录', '身份待核验']
             await dialog.get_by_text("共享占位关联异常 1 个，暂缓新增下载", exact=True).wait_for()
             await dialog.get_by_text("历史完成证据待同步：2 条；同步确认前暂缓新增下载。", exact=True).wait_for()
             await dialog.get_by_text("历史证据待核验：3 条，未作为共享完成记录导入。", exact=True).wait_for()
             await dialog.get_by_text(f"关联占位：{'9' * 32}", exact=True).wait_for()
             assert f"命中占位：{'8' * 32}" in await dialog.inner_text()
-            await dialog.get_by_role("tab", name="共享占位记录", exact=True).click()
+            await dialog.get_by_role("tab", name="共享下载记录", exact=True).click()
             await dialog.get_by_text(f"关联申请：{'b' * 32}", exact=True).wait_for()
             toolbar = dialog.locator('.shared-settings__search:visible')
             await toolbar.locator('.v-select').click()
