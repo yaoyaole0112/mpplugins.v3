@@ -144,13 +144,6 @@ function test() {
   })
 }
 
-function reconcile() {
-  return perform(async () => {
-    unwrapResponse(await props.api.post(`${props.pluginBase}/shared/reconcile`, {}))
-    await load()
-  })
-}
-
 onMounted(() => perform(() => load(true)))
 watch(() => draft.value.host_coordinator, value => {
   if (props.mode === 'settings') emit('host-change', value)
@@ -217,7 +210,6 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
         density="comfortable" hide-details />
     </div>
     <VProgressLinear v-if="recordsLoading" indeterminate />
-    <div v-else-if="activeFilter" class="text-caption text-medium-emphasis">共 {{ recordRows.total }} 条</div>
     <div v-if="recordTab === 'requests'" class="shared-settings__records">
       <div v-if="!recordsLoading && !recordRows.items.length" class="text-body-2 text-medium-emphasis">
         {{ activeFilter.query || activeFilter.status ? '无匹配记录' : '暂无共享申请' }}
@@ -226,7 +218,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
         <div class="shared-settings__record-head">
           <div v-if="row.mediaSummaries.length" class="shared-settings__heading">
             <div v-for="(summary, index) in row.mediaSummaries" :key="index"
-              class="shared-settings__preview shared-settings__info text-body-2">
+              class="shared-settings__preview shared-settings__media-summary shared-settings__info text-body-2">
               <span>{{ summary }}</span>
             </div>
           </div>
@@ -248,12 +240,13 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
         <p v-for="(reason, index) in row.rejectionSummaries" :key="index" class="shared-settings__reason text-body-2">
           {{ reason }}
         </p>
-        <span class="shared-settings__id text-caption">申请编号：{{ row.request_id }}</span>
-        <span v-if="row.claim_links?.length" class="shared-settings__id text-caption">
-          关联占位：{{ row.claim_links.join(' · ') }}
-        </span>
+        <div class="shared-settings__ids">
+          <span class="shared-settings__id text-caption">申请编号：{{ row.request_id }}</span>
+          <span v-if="row.claim_links?.length" class="shared-settings__id text-caption">
+            关联占位：{{ row.claim_links.join(' · ') }}
+          </span>
+        </div>
       </article>
-      <VBtn prepend-icon="mdi-refresh" variant="text" :disabled="busy" @click="reconcile">核验未完成申请</VBtn>
     </div>
     <div v-else-if="recordTab === 'records' && (state.host_coordinator || state.enabled)" class="shared-settings__records">
       <div v-if="!recordsLoading && !recordRows.items.length" class="text-body-2 text-medium-emphasis">
@@ -261,26 +254,35 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
       </div>
       <article v-for="row in recordRows.items" :key="row.id" class="shared-settings__record">
         <div class="shared-settings__record-head">
-          <strong>{{ row.title }}</strong>
+          <div class="shared-settings__heading">
+            <div class="shared-settings__preview shared-settings__media-summary shared-settings__info text-body-2">
+              <span>{{ releaseDetails(row) }}</span>
+            </div>
+          </div>
           <span class="shared-settings__badge" :data-tone="phaseColors[row.state] || 'secondary'">
             <VIcon :icon="phaseIcons[row.state] || 'mdi-clock-outline'" size="16" />
             {{ phaseNames[row.state] || row.state }}
           </span>
         </div>
-        <div class="shared-settings__claim-info text-body-2">
-          <span class="shared-settings__info">下载方：{{ row.label || '-' }}</span>
-          <span class="shared-settings__info">{{ releaseDetails(row) }}</span>
-        </div>
+        <strong class="shared-settings__torrent-title">{{ row.title }}</strong>
         <div class="shared-settings__meta shared-settings__claim-meta text-caption">
           <span>占位时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
-          <span class="shared-settings__id">占位编号：{{ row.id }}</span>
         </div>
-        <span v-if="row.request_id" class="shared-settings__id text-caption">关联申请：{{ row.request_id }}</span>
+        <div class="shared-settings__claim-info text-body-2">
+          <span class="shared-settings__info">下载方：{{ row.label || '-' }}</span>
+        </div>
+        <div class="shared-settings__ids">
+          <span class="shared-settings__id text-caption">占位编号：{{ row.id }}</span>
+          <span v-if="row.request_id" class="shared-settings__id text-caption">关联申请：{{ row.request_id }}</span>
+        </div>
       </article>
     </div>
-    <VPagination v-if="activeFilter && recordRows.total > 20" v-model="recordPage"
-      :length="Math.ceil(recordRows.total / 20)" :total-visible="3" @update:model-value="loadRecords" />
-    </template>
+    <div v-if="activeFilter" class="shared-settings__pagination">
+      <VPagination v-if="recordRows.total > 20" v-model="recordPage"
+        :length="Math.ceil(recordRows.total / 20)" :total-visible="3" @update:model-value="loadRecords" />
+      <span class="shared-settings__total text-caption text-medium-emphasis">共 {{ recordRows.total }} 条</span>
+    </div>
+  </template>
   </section>
 </template>
 
@@ -308,7 +310,8 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 .shared-settings__record-head strong { flex: 1; min-inline-size: 0; font-size: 14px; line-height: 1.6; }
 .shared-settings__heading { display: flex; flex: 1; flex-direction: column; gap: 8px; min-inline-size: 0; }
 .shared-settings__torrent-title { font-size: 14px; line-height: 1.6; }
-.shared-settings__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.shared-settings__media-summary { font-size: 16px; font-weight: 600; line-height: 1.55; }
+.shared-settings__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-size: 14px !important; line-height: 1.55; }
 /* Native badges keep approval colors independent of host VChip/glass theme overrides. */
 .shared-settings__badge { display: inline-flex; align-items: center; justify-content: center; gap: 4px; flex: 0 0 auto; max-inline-size: 52%; min-block-size: 32px; padding: 6px 10px; border: 0; border-radius: 7px; font-size: 13px; font-weight: 400; line-height: 20px; color: rgb(var(--shared-badge-ink)); background-color: rgba(var(--shared-badge-fill), 0.13); --shared-badge-ink: 139, 145, 155; --shared-badge-fill: 139, 145, 155; }
 .shared-settings__badge :deep(.v-icon) { flex: 0 0 auto; }
@@ -324,13 +327,17 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 .shared-settings__error { margin: 0; color: rgb(var(--v-theme-error)); }
 .shared-settings__reason { margin: 0; }
 .shared-settings__id { font-family: monospace; }
-.shared-settings__claim-meta { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr); }
-.shared-settings__claim-meta .shared-settings__id { overflow-wrap: anywhere; }
+.shared-settings__ids { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 18px; min-inline-size: 0; }
+.shared-settings__claim-meta { display: flex; flex-wrap: wrap; }
+.shared-settings__pagination { display: flex; align-items: center; justify-content: flex-end; gap: 18px; min-block-size: 52px; margin-block-start: 8px; }
+.shared-settings__total { flex: 0 0 auto; white-space: nowrap; }
 @media (max-width: 599px) {
   .shared-settings__search { grid-template-columns: minmax(0, 1fr); }
   .shared-settings__record-head { gap: 8px; }
   .shared-settings__record-head .shared-settings__badge { max-inline-size: 56%; white-space: normal; }
   .shared-settings__meta { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .shared-settings__media-summary { font-size: 15px; }
+  .shared-settings__pagination { justify-content: space-between; gap: 8px; }
   .shared-settings__status > div { flex-wrap: wrap; }
   .shared-settings__status dd { margin-inline-start: auto; }
 }

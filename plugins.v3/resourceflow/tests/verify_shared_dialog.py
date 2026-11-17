@@ -126,6 +126,9 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
     await page.wait_for_function("""selector =>
         [...document.querySelectorAll(selector)].filter(item => item.getBoundingClientRect().width > 0).length === 20
     """, arg=selector)
+    if not ledger:
+        expected_total = {'本机下载申请': 130, '共享下载记录': 129}[tab]
+        assert await dialog.locator('.shared-settings__pagination .shared-settings__total').inner_text() == f'共 {expected_total} 条'
     if ledger:
         layout = await dialog.locator('.channel-dedup__records').evaluate('''element => {
             const body = element.closest('.v-card-text')
@@ -286,6 +289,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await first.locator('.shared-settings__reason').all_text_contents() == ['资源已下载 · 下载方：朋友A']
             assert '命中占位' not in await first.inner_text()
             assert '占位方' not in await first.inner_text()
+            assert await dialog.get_by_role("button", name="核验未完成申请", exact=True).count() == 0
             await verify_badge_colors(dialog)
             await verify_record_layout(dialog)
             await verify_record_search(page, dialog, '本机下载申请', card_bounds['height'], output, width)
@@ -464,16 +468,17 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert '最近更新' in await claim.inner_text()
             assert '下载方：朋友A' in await claim.inner_text()
             assert '占位编号：' in await claim.inner_text()
-            claim_identity = await claim.locator('.shared-settings__claim-info').inner_text()
+            claim_identity = await claim.locator('.shared-settings__preview').inner_text()
             assert '玫瑰战争 · S01E05 · TMDB 123 · 分辨率 1080p' in claim_identity
-            assert await claim.locator('.shared-settings__claim-info .shared-settings__info').count() == 2
+            assert await claim.locator('.shared-settings__claim-info .shared-settings__info').count() == 1
+            assert await claim.locator('.shared-settings__preview.shared-settings__info').count() == 1
             for label in ('已完成', '已入队', '已释放'):
                 assert await records.locator('.shared-settings__record-head .shared-settings__badge').filter(has_text=label).count() == 1
             await verify_badge_colors(dialog, all_tones=False)
             await verify_record_layout(dialog)
             await verify_record_search(page, dialog, '共享下载记录', card_bounds['height'], output, width)
             assert await claim.locator('.shared-settings__claim-meta').evaluate(
-                "element => getComputedStyle(element).display") == 'grid'
+                "element => getComputedStyle(element).display") == 'flex'
             assert '23.976 FPS' in await claim.inner_text()
             await claim.scroll_into_view_if_needed()
             await page.screenshot(path=str(output / f"shared-claims-{width}.png"), full_page=True)
@@ -500,7 +505,6 @@ async def verify(base_url, output, executable_path, host_css=None):
                 }''')
                 await stylesheet.evaluate('element => element.remove()')
             await dialog.get_by_role("tab", name="本机下载申请", exact=True).click()
-            await dialog.get_by_role("button", name="核验未完成申请", exact=True).click()
             await dialog.locator(".v-card-text").evaluate("element => { element.scrollTop = 0 }")
             await page.wait_for_timeout(300)
             await page.screenshot(path=str(output / f"shared-settings-{width}.png"), full_page=True)
