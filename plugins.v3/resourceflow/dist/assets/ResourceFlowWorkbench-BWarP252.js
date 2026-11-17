@@ -1304,7 +1304,7 @@ const _hoisted_27$1 = ["data-tone"];
 const _hoisted_28$1 = { class: "shared-settings__torrent-title" };
 const _hoisted_29$1 = { class: "shared-settings__meta shared-settings__claim-meta text-caption" };
 const _hoisted_30$1 = { class: "shared-settings__claim-info text-body-2" };
-const _hoisted_31$1 = { class: "shared-settings__info" };
+const _hoisted_31$1 = { class: "shared-settings__claim-owner" };
 const _hoisted_32$1 = { class: "shared-settings__ids" };
 const _hoisted_33$1 = { class: "shared-settings__id text-caption" };
 const _hoisted_34$1 = {
@@ -1315,7 +1315,11 @@ const _hoisted_35$1 = {
   key: 4,
   class: "shared-settings__pagination"
 };
-const _hoisted_36$1 = { class: "shared-settings__total text-caption text-medium-emphasis" };
+const _hoisted_36$1 = {
+  key: 0,
+  class: "shared-settings__pagination-control"
+};
+const _hoisted_37$1 = { class: "shared-settings__total text-caption text-medium-emphasis" };
 
 const {computed: computed$1,onMounted: onMounted$1,onUnmounted: onUnmounted$1,ref: ref$1,watch: watch$1} = await importShared('vue');
 
@@ -1420,6 +1424,9 @@ function requestSummary(row) {
 }
 
 async function load(reset = false) {
+  // Status and records are independent endpoints; start them together so the
+  // first view does not wait for the status request before showing records.
+  const recordsPromise = props.mode === 'records' ? loadRecords() : Promise.resolve();
   const data = unwrapResponse(await props.api.get(`${props.pluginBase}/shared/status`));
   state.value = data;
   ready.value = true;
@@ -1430,7 +1437,7 @@ async function load(reset = false) {
     instance_label: data.instance_label || '我的资源刷流', bot_token: '',
     allowed_users: (data.allowed_users || []).join(', '),
   };
-  await loadRecords();
+  await recordsPromise;
 }
 
 async function perform(action) {
@@ -1475,8 +1482,10 @@ watch$1(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.s
   if (props.mode !== 'records') return
   clearTimeout(searchTimer);
   recordsGeneration += 1;
-  recordsLoading.value = false;
-  recordRows.value = { items: [], total: 0 };
+  // Keep the previous page visible while the next response is in flight.
+  // Clearing it here caused the dialog to collapse and visibly jump on every
+  // search, tab switch, and periodic refresh.
+  recordsLoading.value = true;
   recordPage.value = 1;
   if (!activeFilter.value) return
   const delay = values[0] === previous[0] && values[2] === previous[2] ? 300 : 0;
@@ -1815,18 +1824,19 @@ return (_ctx, _cache) => {
           (activeFilter.value)
             ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_35$1, [
                 (recordRows.value.total > 20)
-                  ? (_openBlock$1(), _createBlock$1(_component_VPagination, {
-                      key: 0,
-                      modelValue: recordPage.value,
-                      "onUpdate:modelValue": [
-                        _cache[9] || (_cache[9] = $event => ((recordPage).value = $event)),
-                        loadRecords
-                      ],
-                      length: Math.ceil(recordRows.value.total / 20),
-                      "total-visible": 3
-                    }, null, 8, ["modelValue", "length"]))
+                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_36$1, [
+                      _createVNode$1(_component_VPagination, {
+                        modelValue: recordPage.value,
+                        "onUpdate:modelValue": [
+                          _cache[9] || (_cache[9] = $event => ((recordPage).value = $event)),
+                          loadRecords
+                        ],
+                        length: Math.ceil(recordRows.value.total / 20),
+                        "total-visible": 3
+                      }, null, 8, ["modelValue", "length"])
+                    ]))
                   : _createCommentVNode$1("", true),
-                _createElementVNode$1("span", _hoisted_36$1, "共 " + _toDisplayString$1(recordRows.value.total) + " 条", 1)
+                _createElementVNode$1("span", _hoisted_37$1, "共 " + _toDisplayString$1(recordRows.value.total) + " 条", 1)
               ]))
             : _createCommentVNode$1("", true)
         ], 64))
@@ -1835,7 +1845,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-bc78c258"]]);
+const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-910c3f54"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle} = await importShared('vue');
 
@@ -2288,8 +2298,10 @@ async function openChannelDedup() {
   approvalTab.value = 'requests';
   sharedRecordsHost.value = false;
   channelDedupDialog.value = true;
-  await loadChannelDedup();
-  await loadResourceRows();
+  await Promise.all([
+    loadChannelDedup(),
+    approvalTab.value === 'pending' ? loadResourceRows() : Promise.resolve(),
+  ]);
 }
 
 async function loadResourceRows() {
@@ -2315,7 +2327,7 @@ watch(() => [activeResourceFilter.value.query, activeResourceFilter.value.media_
     clearTimeout(resourceSearchTimer);
     resourceGeneration += 1;
     resourcePage.value = 1;
-    resourceRows.value = { total: 0, items: [] };
+    // Keep the previous records visible while the filtered result is loading.
     ledgerLoading.value = true;
     const delay = values[1] === previous[1] ? 300 : 0;
     resourceSearchTimer = setTimeout(loadResourceRows, delay);
@@ -2325,9 +2337,11 @@ watch(approvalTab, value => {
 });
 
 async function refreshApprovalRecords() {
-  await sharedRecordsPanel.value?.refresh();
-  await loadChannelDedup({ resetDraft: false });
-  await loadResourceRows();
+  await Promise.all([
+    sharedRecordsPanel.value?.refresh(),
+    loadChannelDedup({ resetDraft: false }),
+    approvalTab.value === 'pending' ? loadResourceRows() : Promise.resolve(),
+  ]);
 }
 
 async function saveChannelDedup(shared) {
@@ -4025,6 +4039,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-43d474a5"]]);
+const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-d4624b87"]]);
 
 export { ResourceFlowWorkbench as R };

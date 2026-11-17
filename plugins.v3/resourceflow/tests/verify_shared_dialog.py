@@ -470,7 +470,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert '占位编号：' in await claim.inner_text()
             claim_identity = await claim.locator('.shared-settings__preview').inner_text()
             assert '玫瑰战争 · S01E05 · TMDB 123 · 分辨率 1080p' in claim_identity
-            assert await claim.locator('.shared-settings__claim-info .shared-settings__info').count() == 1
+            assert await claim.locator('.shared-settings__claim-info .shared-settings__info').count() == 0
+            assert await claim.locator('.shared-settings__claim-owner').inner_text() == '下载方：朋友A'
             assert await claim.locator('.shared-settings__preview.shared-settings__info').count() == 1
             for label in ('已完成', '已入队', '已释放'):
                 assert await records.locator('.shared-settings__record-head .shared-settings__badge').filter(has_text=label).count() == 1

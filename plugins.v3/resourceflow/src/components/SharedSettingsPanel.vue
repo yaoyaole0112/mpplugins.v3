@@ -97,6 +97,9 @@ function requestSummary(row) {
 }
 
 async function load(reset = false) {
+  // Status and records are independent endpoints; start them together so the
+  // first view does not wait for the status request before showing records.
+  const recordsPromise = props.mode === 'records' ? loadRecords() : Promise.resolve()
   const data = unwrapResponse(await props.api.get(`${props.pluginBase}/shared/status`))
   state.value = data
   ready.value = true
@@ -107,7 +110,7 @@ async function load(reset = false) {
     instance_label: data.instance_label || '我的资源刷流', bot_token: '',
     allowed_users: (data.allowed_users || []).join(', '),
   }
-  await loadRecords()
+  await recordsPromise
 }
 
 async function perform(action) {
@@ -152,8 +155,10 @@ watch(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.sta
   if (props.mode !== 'records') return
   clearTimeout(searchTimer)
   recordsGeneration += 1
-  recordsLoading.value = false
-  recordRows.value = { items: [], total: 0 }
+  // Keep the previous page visible while the next response is in flight.
+  // Clearing it here caused the dialog to collapse and visibly jump on every
+  // search, tab switch, and periodic refresh.
+  recordsLoading.value = true
   recordPage.value = 1
   if (!activeFilter.value) return
   const delay = values[0] === previous[0] && values[2] === previous[2] ? 300 : 0
@@ -269,7 +274,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
           <span>占位时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
         </div>
         <div class="shared-settings__claim-info text-body-2">
-          <span class="shared-settings__info">下载方：{{ row.label || '-' }}</span>
+          <span class="shared-settings__claim-owner">下载方：{{ row.label || '-' }}</span>
         </div>
         <div class="shared-settings__ids">
           <span class="shared-settings__id text-caption">占位编号：{{ row.id }}</span>
@@ -278,8 +283,10 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
       </article>
     </div>
     <div v-if="activeFilter" class="shared-settings__pagination">
-      <VPagination v-if="recordRows.total > 20" v-model="recordPage"
-        :length="Math.ceil(recordRows.total / 20)" :total-visible="3" @update:model-value="loadRecords" />
+      <div v-if="recordRows.total > 20" class="shared-settings__pagination-control">
+        <VPagination v-model="recordPage"
+          :length="Math.ceil(recordRows.total / 20)" :total-visible="3" @update:model-value="loadRecords" />
+      </div>
       <span class="shared-settings__total text-caption text-medium-emphasis">共 {{ recordRows.total }} 条</span>
     </div>
   </template>
@@ -305,6 +312,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
   .shared-settings--compact .shared-settings__status { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 .shared-settings__records { min-inline-size: 0; }
+.shared-settings__record > * { margin-inline-start: 0; }
 .shared-settings__record { display: flex; flex-direction: column; gap: 10px; padding-block: 20px; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); overflow-wrap: anywhere; min-inline-size: 0; }
 .shared-settings__record-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; min-inline-size: 0; }
 .shared-settings__record-head strong { flex: 1; min-inline-size: 0; font-size: 14px; line-height: 1.6; }
@@ -323,21 +331,25 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 .shared-settings__preview { display: flex; flex-wrap: wrap; gap: 4px; }
 .shared-settings__preview > span { min-inline-size: 0; }
 .shared-settings__claim-info { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+.shared-settings__claim-owner { color: rgba(var(--v-theme-on-surface), 0.78); }
 .shared-settings__meta, .shared-settings__id { color: rgba(var(--v-theme-on-surface), 0.72); }
 .shared-settings__error { margin: 0; color: rgb(var(--v-theme-error)); }
 .shared-settings__reason { margin: 0; }
 .shared-settings__id { font-family: monospace; }
 .shared-settings__ids { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 18px; min-inline-size: 0; }
 .shared-settings__claim-meta { display: flex; flex-wrap: wrap; }
-.shared-settings__pagination { display: flex; align-items: center; justify-content: flex-end; gap: 18px; min-block-size: 52px; margin-block-start: 8px; }
-.shared-settings__total { flex: 0 0 auto; white-space: nowrap; }
+.shared-settings__pagination { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; min-block-size: 52px; margin-block-start: 8px; }
+.shared-settings__pagination-control { grid-column: 2; min-inline-size: 0; }
+.shared-settings__total { grid-column: 3; justify-self: end; white-space: nowrap; }
 @media (max-width: 599px) {
   .shared-settings__search { grid-template-columns: minmax(0, 1fr); }
   .shared-settings__record-head { gap: 8px; }
   .shared-settings__record-head .shared-settings__badge { max-inline-size: 56%; white-space: normal; }
   .shared-settings__meta { flex-direction: column; align-items: flex-start; gap: 4px; }
   .shared-settings__media-summary { font-size: 15px; }
-  .shared-settings__pagination { justify-content: space-between; gap: 8px; }
+  .shared-settings__pagination { grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; }
+  .shared-settings__pagination-control { grid-column: 1; }
+  .shared-settings__total { grid-column: 2; }
   .shared-settings__status > div { flex-wrap: wrap; }
   .shared-settings__status dd { margin-inline-start: auto; }
 }

@@ -343,8 +343,10 @@ async function openChannelDedup() {
   approvalTab.value = 'requests'
   sharedRecordsHost.value = false
   channelDedupDialog.value = true
-  await loadChannelDedup()
-  await loadResourceRows()
+  await Promise.all([
+    loadChannelDedup(),
+    approvalTab.value === 'pending' ? loadResourceRows() : Promise.resolve(),
+  ])
 }
 
 async function loadResourceRows() {
@@ -370,7 +372,7 @@ watch(() => [activeResourceFilter.value.query, activeResourceFilter.value.media_
     clearTimeout(resourceSearchTimer)
     resourceGeneration += 1
     resourcePage.value = 1
-    resourceRows.value = { total: 0, items: [] }
+    // Keep the previous records visible while the filtered result is loading.
     ledgerLoading.value = true
     const delay = values[1] === previous[1] ? 300 : 0
     resourceSearchTimer = setTimeout(loadResourceRows, delay)
@@ -380,9 +382,11 @@ watch(approvalTab, value => {
 })
 
 async function refreshApprovalRecords() {
-  await sharedRecordsPanel.value?.refresh()
-  await loadChannelDedup({ resetDraft: false })
-  await loadResourceRows()
+  await Promise.all([
+    sharedRecordsPanel.value?.refresh(),
+    loadChannelDedup({ resetDraft: false }),
+    approvalTab.value === 'pending' ? loadResourceRows() : Promise.resolve(),
+  ])
 }
 
 async function saveChannelDedup(shared) {
