@@ -330,6 +330,35 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(selection["shared_tag"], self.plugin._shared_tag(self.entry()))
         self.assertEqual(self.entry()["phase"], "queued")
 
+    def test_same_local_spec_reuses_claim_without_second_reserve(self):
+        self.assertEqual(self.add(), "a" * 40)
+        events = list(self.events)
+        self.plugin._shared_candidates.return_value = ([file_row()], [])
+        self.assertIsNone(self.plugin._add_prechecked_torrent(
+            b"torrent", None, self.task, self.downloader, Mock(), "c" * 40, None, "Same show"
+        ))
+        self.assertEqual(self.events, events)
+        self.assertEqual(
+            sum(call.args[1].get("op") == "reserve"
+                for call in self.plugin._shared_exchange.call_args_list),
+            1,
+        )
+
+    def test_local_duplicate_filter_keeps_unmatched_episode_for_partial_pack(self):
+        first = {**file_row(), "path": "Show.S01E01.mkv"}
+        second = {**file_row(2, 2), "path": "Show.S01E02.mkv"}
+        self.plugin._shared_claims = {
+            "d" * 32: {
+                "request_id": "d" * 32, "phase": "queued", "approved": {first["id"]: "b" * 32},
+                "files": [first, second], "done": [], "rejected": [],
+            }
+        }
+        available, blocked = self.plugin._shared_filter_local_duplicates(
+            [{**first, "id": "e" * 24}, {**second, "id": "f" * 24}], "Show"
+        )
+        self.assertEqual([row["episodes"] for row in available], [[2]])
+        self.assertEqual(len(blocked), 1)
+
     def test_wire_request_contains_only_selected_specs(self):
         self.plugin._shared_candidates.return_value[0][0]["specs"].update(fps=None, effects=None)
         self.assertEqual(self.add(), "a" * 40)

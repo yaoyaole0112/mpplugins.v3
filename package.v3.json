@@ -64,7 +64,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流与Telegram共享下载审批，跨实例同规格下载前占位，无需公网入口。",
     "labels": "刷流,资源去重,Telegram",
-    "version": "1.0.23",
+    "version": "1.0.24",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -72,6 +72,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.24": "优化共享审批请求去重：同一实例内相同身份、季集号和勾选规格的已申请、已批准、排除、排队或完成资源复用已有裁决，不再重复发送 Telegram RFQ；整包按现有 partial/exclude 策略处理，释放或无冲突的传输失败仍可重试。",
       "v1.0.23": "优化共享审批记录体验：记录详情统一左对齐，分页控件居中，总数保留在分页右侧；共享下载记录的下载方改为无背景文本。搜索、切换页签和定时刷新时保留旧列表，避免内容闪烁和页面跳动；共享状态与首屏记录并行加载，缩短首次显示等待。",
       "v1.0.22": "共享审批记录布局统一：本机下载申请与共享下载记录均按媒体摘要、原始标题、时间、下载方和编号顺序展示；媒体摘要加大加粗，时间字段字号增强，申请编号与关联占位同行。移除手动核验未完成申请按钮，将记录总数移至分页控件右侧。",
       "v1.0.21": "修复多站点任务同时刷新时共享审批 Telegram SendMessageRequest 并发限流：同一个人账号与 Bot 会话全局串行，发送后再检查退避，发送间隔提高到 1.5 秒；首个限流错误会阻止排队任务继续发送，保留申请幂等及退避恢复。",

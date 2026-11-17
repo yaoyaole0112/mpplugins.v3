@@ -16,7 +16,7 @@ from app.sdk.services import DownloaderHelper
 from app.modules.themoviedb.tmdbapi import TmdbApi
 
 from .active_dedup import download_files, paths_agree
-from .channel_dedup import parse_candidate_file, parse_torrent_files
+from .channel_dedup import parse_candidate_file, parse_torrent_files, specs_match
 from .models import ChannelDedupSettingsPayload
 from .record_search import matches_record, record_page
 from .shared_coordinator import BotWorker, CoordinatorStore
@@ -661,6 +661,92 @@ class SharedResourceMixin:
             rows.append(candidate)
         return rows, rejected
 
+    @staticmethod
+    def _shared_active_phases():
+        """Local claims that still represent an active or unresolved download."""
+        return {
+            "requesting", "reserved", "adding", "awaiting_start", "queued",
+            "uncertain", "starting",
+        }
+
+    def _shared_local_file_is_blocking(self, entry, file_id):
+        """Reuse only a confirmed local decision; transient failures remain retryable."""
+        phase = entry.get("phase")
+        if phase == "requesting":
+            return file_id in {row.get("id") for row in entry.get("files", [])}
+        if phase in self._shared_active_phases():
+            return file_id in entry.get("approved", {})
+        if phase == "completed":
+            return file_id in set(entry.get("done", [])) or file_id in entry.get("approved", {})
+        if phase != "rejected":
+            return False
+        for row in entry.get("rejected", []) or []:
+            if row.get("id") != file_id:
+                continue
+            # A coordinator conflict has a claim/owner/state. A transport or
+            # validation error without conflict evidence must be retried.
+            if row.get("claim") or row.get("owner") or row.get("state"):
+                return True
+        return False
+
+    def _shared_local_duplicate(self, candidate):
+        """Find an existing same-instance resource with matching selected specs.
+
+        This mirrors the coordinator's identity and episode-overlap semantics.
+        It is only a local optimization; every non-hit still goes through the
+        coordinator for the cross-device atomic decision.
+        """
+        attributes = getattr(self, "_channel_dedup_attributes", []) or []
+        tolerance = getattr(self, "_channel_dedup_size_tolerance_pct", 5)
+        media_type = candidate.get("media_type")
+        tmdb_id = candidate.get("tmdb_id")
+        season = candidate.get("season")
+        episodes = set(candidate.get("episodes") or [])
+        for entry in getattr(self, "_shared_claims", {}).values():
+            for row in entry.get("files", []) or []:
+                if row.get("media_type") != media_type or row.get("tmdb_id") != tmdb_id:
+                    continue
+                if media_type == "tv":
+                    if row.get("season") != season:
+                        continue
+                    if not episodes.intersection(row.get("episodes") or []):
+                        continue
+                elif media_type != "movie":
+                    continue
+                if not specs_match(candidate, row, attributes, tolerance):
+                    continue
+                if self._shared_local_file_is_blocking(entry, row.get("id")):
+                    return entry, row
+        return None
+
+    def _shared_filter_local_duplicates(self, candidates, title):
+        """Remove same-instance duplicates before creating a Telegram RFQ."""
+        available, blocked = [], []
+        for candidate in candidates:
+            hit = self._shared_local_duplicate(candidate)
+            if hit:
+                blocked.append((candidate, hit))
+            else:
+                available.append(candidate)
+        for candidate, (entry, _previous) in blocked:
+            if candidate.get("media_type") == "tv":
+                identity = (
+                    f"TMDB {candidate.get('tmdb_id')} · "
+                    f"S{candidate.get('season'):02d}E"
+                    + ",".join(f"{episode:02d}" for episode in candidate.get("episodes") or [])
+                )
+            else:
+                identity = f"TMDB {candidate.get('tmdb_id')} · 电影"
+            specs = ", ".join(
+                f"{key}={candidate.get('specs', {}).get(key)}"
+                for key in getattr(self, "_channel_dedup_attributes", [])
+            )
+            logger.info(
+                f"共享审批本地缓存命中 {title}：{identity}；规格 {specs}；"
+                f"复用申请 {entry.get('request_id')}，不再发送重复审批"
+            )
+        return available, blocked
+
     def _shared_media_title(self, candidate, cache):
         tmdb_id = candidate.get("tmdb_id")
         if not tmdb_id:
@@ -799,6 +885,15 @@ class SharedResourceMixin:
                        for row in self._shared_claims.values()):
                     raise SharedError("本种子已有共享申请，等待核验，不重复提交")
                 candidates, rejected = self._shared_candidates(content, title, task, selection, spec_hint)
+                candidates, local_blocked = self._shared_filter_local_duplicates(candidates, title)
+                if local_blocked and self._channel_dedup_pack_policy == "exclude":
+                    logger.info(
+                        f"共享审批本地缓存排除整包 {title}：命中 {len(local_blocked)} 个重复文件"
+                    )
+                    return None
+                if local_blocked and not candidates:
+                    logger.info(f"共享审批本地缓存跳过 {title}：候选均已存在本机共享裁决")
+                    return None
                 if not candidates or rejected and self._channel_dedup_pack_policy == "exclude":
                     raise SharedError("共享审批候选身份或规格不完整，本次不添加下载")
                 current_policy = self._local_shared_policy()
