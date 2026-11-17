@@ -604,6 +604,55 @@ class LocalUploadMixin:
             logger.info(f"自动生成ED2K链接：本地ED2K与SHA1计算完成，等待上传校验：{path.name}")
         return record, records
 
+    def _sync_mp_upload_receipt(self, record, receipt, output, cache_path, records):
+        from . import ed2k_link
+
+        item = receipt.get("item") if isinstance(receipt, dict) else None
+        if not isinstance(item, dict):
+            return False
+        previous = record.get("upload_cloud_item") or {}
+        fields = ("storage", "fileid", "path", "name", "size", "type")
+        changed = any(str(previous.get(field) or "") != str(item.get(field) or "") for field in fields)
+        previous_kind = record.get("upload_kind")
+        receipt_kind = receipt.get("upload_kind")
+        kind_changed = receipt_kind in {"instant", "ordinary"} and previous_kind not in {None, receipt_kind}
+        if not changed and not kind_changed:
+            return False
+
+        record.update(
+            upload_cloud_item=dict(item),
+            upload_verified=False,
+            upload_state="verifying",
+            upload_note="MP最新上传回执目标已变化，重新核验网盘副本",
+        )
+        if receipt_kind in {"instant", "ordinary"}:
+            record["upload_kind"] = receipt_kind
+        link = record.get("link")
+        if isinstance(link, str) and "|" in link:
+            parts = link.split("|")
+            if len(parts) > 4 and item.get("name") and record.get("size"):
+                new_link = ed2k_link(item["name"], parts[4], record["size"])
+                if new_link != link:
+                    record.update(
+                        name=item["name"],
+                        link=new_link,
+                        telegram_sent=False,
+                        telegram_target="",
+                        telegram_deliveries={},
+                        ordinary_upload_telegram_sent=False,
+                        ordinary_upload_telegram_target="",
+                        ordinary_upload_telegram_deliveries={},
+                    )
+                else:
+                    record["name"] = item["name"]
+        else:
+            record["name"] = item.get("name") or record.get("name")
+        record.pop("upload_verified_at", None)
+        record.pop("upload_readback_verified", None)
+        self._write_results(output, cache_path, records)
+        logger.info(f"自动生成ED2K链接：MP上传回执目标已更新，重新核验：{item.get('name') or record.get('name')}")
+        return True
+
     def _process_local_upload(self, path, stat, output, cache_path, upload_worker=False):
         from . import ed2k_link
         key = str(path.resolve())
@@ -626,6 +675,7 @@ class LocalUploadMixin:
             record.pop("upload_readback_verified", None)
             record.pop("upload_verified_at", None)
         if self._local_upload_mode == "mp" and receipt:
+            self._sync_mp_upload_receipt(record, receipt, output, cache_path, records)
             self._recover_mp_upload_kind(path, record, receipt)
             record["upload_kind"] = (
                 receipt.get("upload_kind")

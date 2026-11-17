@@ -256,6 +256,41 @@ class LocalUploadTests(unittest.TestCase):
         self.assertIn("|renamed.mkv|", sender.call_args.args[1])
         self.assertTrue(self.records()[str(path)]["telegram_sent"])
 
+    def test_mp_receipt_target_change_replaces_stale_verified_target(self):
+        self.configure(mode="mp", telegram_enabled=True, telegram_chat_id="@target")
+        path = self.sample()
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        with patch.object(self.plugin, "_send_telegram", return_value=True):
+            self.plugin._process_file(path)
+        old_record = self.records()[str(path)]
+        self.assertTrue(old_record["upload_verified"])
+        old_file_id = old_record["upload_cloud_item"]["fileid"]
+
+        self.remote.update(
+            fileid="5678",
+            name="renamed-after-mp.mkv",
+            path="/upload/renamed-after-mp.mkv",
+        )
+        self.plugin._atomic_write(
+            self.root / "data" / "local_upload_receipts.json",
+            json.dumps({str(path): {
+                "identity": self.upload_module.local_identity(path.stat()),
+                "item": self.remote,
+                "upload_kind": "instant",
+            }}),
+        )
+        with patch.object(self.plugin, "_send_telegram", return_value=True) as sender:
+            self.plugin._process_file(path)
+        record = self.records()[str(path)]
+        self.assertNotEqual(record["upload_cloud_item"]["fileid"], old_file_id)
+        self.assertEqual(record["upload_cloud_item"]["fileid"], "5678")
+        self.assertEqual(record["name"], "renamed-after-mp.mkv")
+        self.assertIn("|renamed-after-mp.mkv|", record["link"])
+        self.assertTrue(record["upload_verified"])
+        sender.assert_called_once()
+        self.storage.oper.upload.assert_not_called()
+
     def test_missing_upload_source_is_removed_without_retry_or_cloud_calls(self):
         self.configure()
         path = self.sample()
