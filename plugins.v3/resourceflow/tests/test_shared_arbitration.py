@@ -530,6 +530,8 @@ class AdmissionTests(unittest.TestCase):
 class TransportTests(unittest.TestCase):
     def setUp(self):
         TelegramRPC._last_send.clear()
+        with TelegramRPC._session_locks_guard:
+            TelegramRPC._session_locks.clear()
 
     def account(self, reply_ok=True):
         rid = "a" * 32

@@ -259,6 +259,7 @@ class SharedResourceMixin:
         self._shared_worker = None
         self._shared_store = None
         self._shared_stopping = False
+        self._shared_transport_lock = threading.Lock()
         self._shared_worker_retry_at = 0
         self._shared_error = self.get_data("shared_retry_error") or ""
         self._shared_last_ok = None
@@ -482,36 +483,40 @@ class SharedResourceMixin:
             raise SharedError(f"共享审批退避等待，约 {remaining} 秒后重试；上次原因：{reason}")
 
     def _shared_exchange(self, request_id, value):
-        self._check_shared_available()
-        config = self._shared_settings
-        body = {"v": 1, "group": config.group, "instance": self._shared_instance_id,
-                "label": config.instance_label, **value}
-        try:
-            account = ed2k_account(settings.PROXY)
-            result = TelegramRPC(account, config.bot_username).exchange(request_id, body)
-            if value.get("op") != "policy":
-                self._require_shared_authority(result)
-                previous = (getattr(self, "_shared_probe", None) or {}).get("authority_id")
-                if previous and previous != result["authority_id"]:
-                    self._shared_probe = None
+        # Several site tasks can enter the same refresh cycle together. Recheck
+        # the shared backoff after waiting for the transport lock so queued
+        # tasks do not send more Telegram messages after the first FloodWait.
+        with self._shared_transport_lock:
+            self._check_shared_available()
+            config = self._shared_settings
+            body = {"v": 1, "group": config.group, "instance": self._shared_instance_id,
+                    "label": config.instance_label, **value}
+            try:
+                account = ed2k_account(settings.PROXY)
+                result = TelegramRPC(account, config.bot_username).exchange(request_id, body)
+                if value.get("op") != "policy":
+                    self._require_shared_authority(result)
+                    previous = (getattr(self, "_shared_probe", None) or {}).get("authority_id")
+                    if previous and previous != result["authority_id"]:
+                        self._shared_probe = None
+                        self._shared_policy_checked_at = 0
+                        self._shared_integrity_error = "协调端资源库已变更，等待历史同步及关联核验"
+                        raise SharedError(self._shared_integrity_error)
+                self._shared_last_ok, self._shared_error = time.time(), ""
+                if self._shared_retry_at:
+                    self._shared_retry_at = 0
+                    self.save_data("shared_retry_at", 0)
+                    self.save_data("shared_retry_error", "")
+                return result
+            except SharedError as error:
+                self._shared_error = str(error)
+                if getattr(error, "definitive", False):
                     self._shared_policy_checked_at = 0
-                    self._shared_integrity_error = "协调端资源库已变更，等待历史同步及关联核验"
-                    raise SharedError(self._shared_integrity_error)
-            self._shared_last_ok, self._shared_error = time.time(), ""
-            if self._shared_retry_at:
-                self._shared_retry_at = 0
-                self.save_data("shared_retry_at", 0)
-                self.save_data("shared_retry_error", "")
-            return result
-        except SharedError as error:
-            self._shared_error = str(error)
-            if getattr(error, "definitive", False):
-                self._shared_policy_checked_at = 0
-            else:
-                self._shared_retry_at = time.time() + max(15, getattr(error, "retry_after", 15))
-                self.save_data("shared_retry_at", self._shared_retry_at)
-                self.save_data("shared_retry_error", self._shared_error)
-            raise
+                else:
+                    self._shared_retry_at = time.time() + max(15, getattr(error, "retry_after", 15))
+                    self.save_data("shared_retry_at", self._shared_retry_at)
+                    self.save_data("shared_retry_error", self._shared_error)
+                raise
 
     def _save_shared(self):
         self.save_data("shared_claims", self._shared_claims)

@@ -3,6 +3,7 @@
 import asyncio
 from importlib import import_module
 from pathlib import Path
+import threading
 import time
 
 from .shared_protocol import SharedError, decode, encode, parse_part
@@ -20,16 +21,28 @@ def ed2k_account(proxy=None):
 
 class TelegramRPC:
     _last_send = {}
+    _session_locks = {}
+    _session_locks_guard = threading.Lock()
+    SEND_INTERVAL_SECONDS = 1.5
+
+    @classmethod
+    def _session_lock(cls, session):
+        # asyncio locks cannot be shared by the separate event loops created for
+        # each RPC call, so serialize the whole exchange with a process lock.
+        with cls._session_locks_guard:
+            return cls._session_locks.setdefault(session, threading.Lock())
 
     def __init__(self, account, username, timeout=60):
         self.account, self.username, self.timeout = account, username, timeout
 
     def exchange(self, request_id, body):
+        session = (str(self.account.session_path), self.username.lstrip("@").lower())
         try:
-            with self.account.exclusive(wait_seconds=5):
-                credentials = self.account._credentials()
-                return asyncio.run(asyncio.wait_for(
-                    self._exchange(credentials, request_id, body), timeout=self.timeout))
+            with self._session_lock(session):
+                with self.account.exclusive(wait_seconds=5):
+                    credentials = self.account._credentials()
+                    return asyncio.run(asyncio.wait_for(
+                        self._exchange(credentials, request_id, body), timeout=self.timeout))
         except SharedError:
             raise
         except Exception as error:
@@ -60,7 +73,7 @@ class TelegramRPC:
             first_id = None
             session = (str(self.account.session_path), peer.id)
             for text in encode(body, request_id):
-                delay = self._last_send.get(session, 0) + 1.1 - time.monotonic()
+                delay = self._last_send.get(session, 0) + self.SEND_INTERVAL_SECONDS - time.monotonic()
                 if delay > 0:
                     await asyncio.sleep(delay)
                 self._last_send[session] = time.monotonic()
