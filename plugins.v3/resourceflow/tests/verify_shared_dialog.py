@@ -119,7 +119,7 @@ async def verify_settings_layout(dialog, width):
 
 
 async def verify_record_search(page, dialog, tab, initial_height, output, width, host_css=None):
-    ledger = tab in ('长期账本', '身份待核验')
+    ledger = tab == '身份待核验'
     selector = '.channel-dedup__record' if ledger else '.shared-settings__record'
     await page.evaluate('window.resourceflowExtraRecords = 125')
     await dialog.get_by_role('button', name='刷新资源记录', exact=True).click()
@@ -234,7 +234,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label("参与跨实例共享审批", exact=True).count() == 0
             assert await dialog.get_by_role("button", name="保存设置", exact=True).count() == 0
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机共享申请', '共享占位记录', '长期账本', '身份待核验']
+                '本机共享申请', '共享占位记录', '身份待核验']
             bounds = await dialog.bounding_box()
             assert bounds["width"] >= (1100 if width >= 1000 else width * 0.9 if width >= 600 else width - 2), bounds
             assert bounds["height"] >= height * 0.88, bounds
@@ -302,11 +302,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_text("全局去重字段", exact=True).count() == 0
             assert await dialog.get_by_text("资源去重规则", exact=True).count() == 0
             assert await dialog.get_by_label("剧名别名绑定（可选）", exact=True).count() == 0
-            await dialog.get_by_role("tab", name="长期账本", exact=True).click()
-            await dialog.get_by_text("Film Resource", exact=True).wait_for()
-            assert await dialog.get_by_text('测试电影 · 电影', exact=True).count() == 1
-            await verify_record_search(page, dialog, '长期账本', card_bounds['height'], output, width, host_css)
-            await page.screenshot(path=str(output / f'ledger-{width}.png'), full_page=True)
+            assert await dialog.get_by_role("tab", name="长期账本", exact=True).count() == 0
+            assert await dialog.get_by_role("tab", name="共享已完成", exact=True).count() == 0
             await dialog.get_by_role("tab", name="身份待核验", exact=True).click()
             await dialog.get_by_text("Unknown Resource", exact=True).wait_for()
             assert await dialog.get_by_text('待核验影片 · 电影', exact=True).count() == 1
@@ -440,7 +437,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.get_by_role("button", name="共享下载审批", exact=True).click()
             await dialog.get_by_role("tab", name="共享占位记录", exact=True).wait_for()
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机共享申请', '共享占位记录', '长期账本', '身份待核验']
+                '本机共享申请', '共享占位记录', '身份待核验']
             await dialog.get_by_role("tab", name="共享占位记录", exact=True).click()
             await dialog.get_by_text("朋友A", exact=False).wait_for()
             claim = dialog.locator('.shared-settings__records article').first
@@ -579,7 +576,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             dialog = page.get_by_role("dialog")
             await dialog.get_by_text("协调端共享记录", exact=True).wait_for()
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机共享申请', '共享占位记录', '共享已完成', '身份待核验']
+                '本机共享申请', '共享占位记录', '身份待核验']
             await dialog.get_by_text("共享占位关联异常 1 个，暂缓新增下载", exact=True).wait_for()
             await dialog.get_by_text("历史完成证据待同步：2 条；同步确认前暂缓新增下载。", exact=True).wait_for()
             await dialog.get_by_text("历史证据待核验：3 条，未作为共享完成记录导入。", exact=True).wait_for()
@@ -587,15 +584,23 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert f"命中占位：{'8' * 32}" in await dialog.inner_text()
             await dialog.get_by_role("tab", name="共享占位记录", exact=True).click()
             await dialog.get_by_text(f"关联申请：{'b' * 32}", exact=True).wait_for()
-            await dialog.get_by_role("tab", name="共享已完成", exact=True).click()
-            await dialog.get_by_text("共享已完成 · 下载方：边城旧事", exact=False).wait_for()
+            toolbar = dialog.locator('.shared-settings__search:visible')
+            await toolbar.locator('.v-select').click()
+            await page.get_by_role('option', name='已完成', exact=True).click()
+            await page.wait_for_function("""[...document.querySelectorAll('.shared-settings__record')]
+                .filter(element => element.getBoundingClientRect().width > 0).length === 1""")
+            await dialog.get_by_text("下载方：边城旧事", exact=True).wait_for()
+            assert (await dialog.locator('.shared-settings__badge').inner_text()).strip() == '已完成'
+            assert await dialog.get_by_role("tab", name="共享已完成", exact=True).count() == 0
             assert await dialog.get_by_role("button", name="移除长期证据", exact=True).count() == 0
+            assert not await page.evaluate("""window.resourceflowRequests.some(item =>
+                item.path.includes('/resource-ledger?') && !item.path.includes('state=pending'))""")
             assert await dialog.locator(".v-card-text").evaluate(
                 "element => element.scrollWidth <= element.clientWidth + 1")
             await page.screenshot(path=str(output / f"shared-authority-{width}.png"), full_page=True)
             await page.close()
         await browser.close()
-    print("Verified 1440, 768, 390 and 320: all four record tabs keep dialog height; full-history search, filters, pagination and stale-response guards; duplicate reason text; global settings and task editor regressions")
+    print("Verified 1440, 768, 390 and 320: three record tabs keep dialog height; completed filter replaces separate ledger tab; pending search, filters, pagination and stale-response guards; global settings and task editor regressions")
     if host_css:
         print('MoviePilot host stylesheet verified with glass light/dark overrides')
 

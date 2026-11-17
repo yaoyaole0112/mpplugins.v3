@@ -56,18 +56,13 @@ const sharedHost = ref(false)
 const sharedRecordsHost = ref(false)
 const approvalTab = ref('requests')
 const resourceRows = ref({ total: 0, items: [] })
-const resourceState = ref('ledger')
 const resourcePage = ref(1)
-const resourceFilters = ref({
-  ledger: { query: '', media_type: '' }, pending: { query: '', media_type: '' },
-})
-const activeResourceFilter = computed(() => resourceFilters.value[resourceState.value])
+const activeResourceFilter = ref({ query: '', media_type: '' })
 const resourceTypes = [
   { value: '', title: '全部类型' }, { value: 'tv', title: '剧集' }, { value: 'movie', title: '电影' },
 ]
 let resourceSearchTimer
 let resourceGeneration = 0
-const forgetKey = ref('')
 const ledgerLoading = ref(false)
 const channelDedup = ref({ enabled: false, channels: [], attributes: [], records: [] })
 const channelDedupDraft = ref({
@@ -357,51 +352,37 @@ async function loadResourceRows() {
   const generation = ++resourceGeneration
   ledgerLoading.value = true
   const params = new URLSearchParams({
-    state: resourceState.value, page: String(resourcePage.value), page_size: '20',
+    state: 'pending', page: String(resourcePage.value), page_size: '20',
     query: activeResourceFilter.value.query || '', media_type: activeResourceFilter.value.media_type || '',
   })
   try {
     const data = unwrapResponse(await props.api.get(`${pluginBase.value}/resource-ledger?${params}`))
     if (generation === resourceGeneration) resourceRows.value = data || { total: 0, items: [] }
   } catch (err) {
-    if (generation === resourceGeneration) channelDedupError.value = err?.message || '读取资源账本失败'
+    if (generation === resourceGeneration) channelDedupError.value = err?.message || '读取身份待核验记录失败'
   } finally {
     if (generation === resourceGeneration) ledgerLoading.value = false
   }
 }
 
-watch(() => [resourceState.value, activeResourceFilter.value.query, activeResourceFilter.value.media_type],
+watch(() => [activeResourceFilter.value.query, activeResourceFilter.value.media_type],
   (values, previous) => {
     clearTimeout(resourceSearchTimer)
     resourceGeneration += 1
     resourcePage.value = 1
     resourceRows.value = { total: 0, items: [] }
     ledgerLoading.value = true
-    const delay = values[0] === previous[0] && values[2] === previous[2] ? 300 : 0
+    const delay = values[1] === previous[1] ? 300 : 0
     resourceSearchTimer = setTimeout(loadResourceRows, delay)
   })
 watch(approvalTab, value => {
-  if (['ledger', 'pending'].includes(value)) {
-    if (resourceState.value === value) loadResourceRows()
-    else resourceState.value = value
-  }
+  if (value === 'pending') loadResourceRows()
 })
 
 async function refreshApprovalRecords() {
   await sharedRecordsPanel.value?.refresh()
   await loadChannelDedup({ resetDraft: false })
   await loadResourceRows()
-}
-
-async function forgetResource() {
-  try {
-    unwrapResponse(await props.api.post(`${pluginBase.value}/resource-ledger/forget`, { key: forgetKey.value }))
-    forgetKey.value = ''
-    await loadResourceRows()
-    await loadChannelDedup({ resetDraft: false })
-  } catch (err) {
-    channelDedupError.value = err?.message || '移除长期证据失败'
-  }
 }
 
 async function saveChannelDedup(shared) {
@@ -1148,13 +1129,12 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VTabs v-model="approvalTab" density="compact">
             <VTab value="requests">本机共享申请</VTab>
             <VTab v-if="sharedRecordsHost" value="records">共享占位记录</VTab>
-            <VTab value="ledger">{{ channelDedup.shared_authority ? '共享已完成' : '长期账本' }}</VTab>
             <VTab value="pending">身份待核验</VTab>
           </VTabs>
           <SharedSettingsPanel v-if="channelDedupDialog" v-show="['requests', 'records'].includes(approvalTab)"
             ref="sharedRecordsPanel" :api="api" :plugin-base="pluginBase" :record-tab="approvalTab"
             @host-change="sharedRecordsHost = $event" />
-          <div v-if="['ledger', 'pending'].includes(approvalTab)" class="channel-dedup__section">
+          <div v-if="approvalTab === 'pending'" class="channel-dedup__section">
             <div class="channel-dedup__search">
               <VTextField v-model="activeResourceFilter.query" label="搜索记录" prepend-inner-icon="mdi-magnify"
                 clearable maxlength="200" density="comfortable" hide-details />
@@ -1174,14 +1154,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                   <small>{{ row.tmdb_id ? `TMDB ${row.tmdb_id}` : '身份待确认' }} · {{ channelRecordSpecs(row) }}</small>
                 </div>
                 <div class="channel-dedup__record-meta">
-                  <span>{{ row.evidence_source === 'shared' ? `共享已完成 · 下载方：${row.label || '-'} · 占位编号：${row.id}` :
-                    row.reason || (row.evidence_source === 'channel' ? '频道已发布' : '下载已完成') }}</span>
-                  <VTooltip v-if="resourceState === 'ledger' && !resourceRows.shared_authority" text="移除长期证据">
-                    <template #activator="{ props: tooltipProps }">
-                      <VBtn v-bind="tooltipProps" icon="mdi-delete-outline" size="small" variant="text"
-                        aria-label="移除长期证据" @click="forgetKey = row.key" />
-                    </template>
-                  </VTooltip>
+                  <span>{{ row.reason || '身份或规格待核验' }}</span>
                 </div>
               </div>
             </div>
@@ -1192,17 +1165,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
         <VCardActions>
           <VSpacer />
           <VBtn variant="text" @click="channelDedupDialog = false">关闭</VBtn>
-        </VCardActions>
-      </VCard>
-    </VDialog>
-
-    <VDialog :model-value="Boolean(forgetKey)" max-width="28rem" @update:model-value="value => { if (!value) forgetKey = '' }">
-      <VCard title="移除长期证据">
-        <VCardText>移除后，本地这条长期证据不再参与匹配。共享占位及在队任务不受影响。</VCardText>
-        <VCardActions>
-          <VSpacer />
-          <VBtn @click="forgetKey = ''">取消</VBtn>
-          <VBtn color="error" @click="forgetResource">确认移除</VBtn>
         </VCardActions>
       </VCard>
     </VDialog>
