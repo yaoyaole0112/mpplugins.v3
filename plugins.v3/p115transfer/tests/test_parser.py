@@ -435,12 +435,23 @@ class TransferPluginTest(unittest.TestCase):
         switch = next(node for node in content if node.get("component") == "VSwitch"
                       and node.get("props", {}).get("model") == "split_target_dirs")
         self.assertIn("关闭时", switch["props"]["hint"])
-        conditional_groups = [node for node in content if node.get("component") == "div"
+        conditional_groups = [node for node in content if node.get("component") == "VRow"
                               and node.get("props", {}).get("v-if")]
         self.assertEqual(
             [node["props"]["v-if"] for node in conditional_groups],
             ["!split_target_dirs", "split_target_dirs"],
         )
+        grouped_models = []
+        for conditional_group in conditional_groups:
+            grouped_models.append([
+                field["content"][2]["props"]["model"]
+                for column in conditional_group["content"]
+                for field in column["content"]
+            ])
+        self.assertEqual(grouped_models, [
+            ["target_path", "target_cid"],
+            ["offline_target_path", "offline_target_cid", "share_target_path", "share_target_cid"],
+        ])
         self.assertNotIn("cookie", defaults)
         self.assertFalse(defaults["split_target_dirs"])
 

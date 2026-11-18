@@ -194,7 +194,7 @@ class P115Transfer(_PluginBase):
     plugin_name = "115转存/离线"
     plugin_desc = "通过Telegram Bot接收115分享及离线链接，支持Telegraph资源页面和消息URL按钮，可分别设置离线与分享保存目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.3.2"
+    plugin_version = "1.3.3"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "p115transfer_"
@@ -295,15 +295,27 @@ class P115Transfer(_PluginBase):
                 "hint": "关闭时两种链接共用下方目录；开启后分别使用离线目录和分享目录。",
                 "persistent-hint": True, "class": "mb-4",
             }},
-            {"component": "div", "props": {"v-if": "!split_target_dirs"}, "content": [
-                field("target_path", "共用网盘保存目录", "关闭分目录开关时，115分享转存和离线任务都保存到此目录。填写从网盘根目录开始的路径，目录不存在时自动创建；填写CID后以CID为准。", "115目录路径", placeholder="/115离线"),
-                field("target_cid", "共用目录CID", "仅关闭分目录开关时使用。可填写已有115文件夹的数字CID，填写后优先于共用目录路径；0表示网盘根目录。不清楚CID时留空。", "目录CID（可选）", placeholder="例如：123456789"),
+            {"component": "VRow", "props": {"v-if": "!split_target_dirs"}, "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    field("target_path", "共用网盘保存目录", "关闭分目录开关时，115分享转存和离线任务都保存到此目录。填写从网盘根目录开始的路径，目录不存在时自动创建；填写CID后以CID为准。", "115目录路径", placeholder="/115离线"),
+                ]},
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    field("target_cid", "共用目录CID", "仅关闭分目录开关时使用。可填写已有115文件夹的数字CID，填写后优先于共用目录路径；0表示网盘根目录。不清楚CID时留空。", "目录CID（可选）", placeholder="例如：123456789"),
+                ]},
             ]},
-            {"component": "div", "props": {"v-if": "split_target_dirs"}, "content": [
-                field("offline_target_path", "离线任务保存目录", "开启分目录开关后，识别到 ed2k、magnet 或 .torrent 离线链接时使用此目录。目录不存在时自动创建；填写对应CID后以CID为准。", "离线目录路径", placeholder="/115离线"),
-                field("offline_target_cid", "离线任务目录CID", "可填写已有115文件夹的数字CID，优先于离线目录路径；0表示网盘根目录。留空时使用离线目录路径。", "离线目录CID（可选）", placeholder="例如：123456789"),
-                field("share_target_path", "115分享转存目录", "开启分目录开关后，识别到115分享链接时使用此目录。目录不存在时自动创建；填写对应CID后以CID为准。", "分享目录路径", placeholder="/影视资源/资源池"),
-                field("share_target_cid", "分享转存目录CID", "可填写已有115文件夹的数字CID，优先于分享目录路径；0表示网盘根目录。留空时使用分享目录路径。", "分享目录CID（可选）", placeholder="例如：123456789"),
+            {"component": "VRow", "props": {"v-if": "split_target_dirs"}, "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    field("offline_target_path", "离线任务保存目录", "开启分目录开关后，识别到 ed2k、magnet 或 .torrent 离线链接时使用此目录。目录不存在时自动创建；填写对应CID后以CID为准。", "离线目录路径", placeholder="/115离线"),
+                ]},
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    field("offline_target_cid", "离线任务目录CID", "可填写已有115文件夹的数字CID，优先于离线目录路径；0表示网盘根目录。留空时使用离线目录路径。", "离线目录CID（可选）", placeholder="例如：123456789"),
+                ]},
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    field("share_target_path", "115分享转存目录", "开启分目录开关后，识别到115分享链接时使用此目录。目录不存在时自动创建；填写对应CID后以CID为准。", "分享目录路径", placeholder="/影视资源/资源池"),
+                ]},
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    field("share_target_cid", "分享转存目录CID", "可填写已有115文件夹的数字CID，优先于分享目录路径；0表示网盘根目录。留空时使用分享目录路径。", "分享目录CID（可选）", placeholder="例如：123456789"),
+                ]},
             ]},
         ]}], {"enabled": self._enabled, "target_path": self._target_path, "target_cid": self._target_cid,
                "split_target_dirs": self._split_target_dirs,
