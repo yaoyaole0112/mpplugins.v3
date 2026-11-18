@@ -4,6 +4,7 @@ import copy
 import hashlib
 from pathlib import Path
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -16,9 +17,10 @@ from app.sdk.services import DownloaderHelper
 from app.modules.themoviedb.tmdbapi import TmdbApi
 
 from .active_dedup import download_files, paths_agree
-from .channel_dedup import parse_candidate_file, parse_torrent_files, specs_match
+from .channel_dedup import parse_candidate_file, parse_torrent_files
 from .models import ChannelDedupSettingsPayload
 from .record_search import matches_record, record_page
+from .shared_cache import SYNC_VERSION, SharedRecordCache, same_resource
 from .shared_coordinator import BotWorker, CoordinatorStore
 from .shared_history import AUTHORITY_VERSION, completion_rows
 from .shared_models import SharedSettingsPayload
@@ -27,6 +29,11 @@ from .telegram_rpc import TelegramRPC, ed2k_account
 
 
 class SharedResourceMixin:
+    _shared_cache = None
+    _shared_cache_activity = 0
+    _shared_cache_next_sync = 0
+    _shared_cache_sync_failed = False
+
     def _shared_rules(self):
         return {key: getattr(self, f"_channel_dedup_{key}", default) for key, default in RULE_DEFAULTS.items()}
 
@@ -81,6 +88,71 @@ class SharedResourceMixin:
         if (response.get("authority_version", 0) < AUTHORITY_VERSION
                 or not re.fullmatch(r"[a-f0-9]{32}", str(response.get("authority_id", "")))):
             raise SharedError("请先将协调端更新至 1.0.17 或以上，再启用统一共享资源记录")
+
+    def _shared_cache_scope(self, response):
+        return digest([self._shared_settings.bot_username.lower(), self._shared_settings.group,
+                       self._shared_instance_id, response["authority_id"], response["policy"]["revision"], SYNC_VERSION])
+
+    def _shared_cache_probe(self):
+        probe = getattr(self, "_shared_probe", None) or {}
+        if self._shared_cache and probe.get("record_sync_version") == SYNC_VERSION:
+            return probe
+        return None
+
+    def _sync_shared_record_cache(self):
+        probe = self._shared_cache_probe()
+        if not probe or self._shared_settings.host_coordinator:
+            return
+        now = time.time()
+        if now < self._shared_cache_next_sync or now < getattr(self, "_shared_retry_at", 0):
+            return
+        self._shared_cache_next_sync = now + 60
+        try:
+            progress = self._shared_cache.progress(self._shared_cache_scope(probe))
+            active = now - self._shared_cache_activity < 180
+            if not active and not self._shared_cache_sync_failed and not progress["more"] and now - progress["checked_at"] < 540:
+                return
+            result = self._shared_exchange(uuid.uuid4().hex, {
+                "op": "sync_records", "authority_id": probe["authority_id"],
+                "revision": probe["policy"]["revision"], "cursor": progress["cursor"],
+            })
+            self._require_shared_authority(result)
+            if result.get("record_sync_version") != SYNC_VERSION:
+                raise SharedError("协调端共享记录同步协议不匹配")
+            self._apply_shared_policy(result.get("policy"))
+            self._shared_probe = {**probe, "policy": result["policy"], "authority_id": result["authority_id"]}
+            self._shared_policy_checked_at = now
+            self._shared_cache.apply(self._shared_cache_scope(self._shared_probe), progress["cursor"], result, now)
+            self._shared_cache_sync_failed = False
+        except (SharedError, sqlite3.Error, KeyError, TypeError, ValueError) as error:
+            self._shared_cache_sync_failed = True
+            self._shared_cache_next_sync = now + 120
+            logger.warning(f"共享下载记录同步暂缓：{error}；未确认资源仍须协调端审批")
+
+    def _filter_shared_record_cache(self, candidates, title):
+        if not candidates:
+            return candidates, []
+        self._shared_cache_activity = time.time()
+        store = getattr(self, "_shared_store", None)
+        probe = self._shared_cache_probe()
+        try:
+            if self._shared_settings.host_coordinator and store:
+                available, blocked = store.filter_duplicates(candidates)
+            elif (probe and not self._shared_cache_sync_failed
+                  and probe["policy"]["revision"] == self._local_shared_policy()["revision"]):
+                available, blocked = self._shared_cache.filter(
+                    self._shared_cache_scope(probe), candidates, probe["policy"], self._shared_cache_activity)
+            else:
+                return candidates, []
+        except (sqlite3.Error, KeyError, TypeError, ValueError) as error:
+            logger.warning(f"共享下载记录本地对比不可用：{error}；转协调端审批")
+            return candidates, []
+        for candidate, row in blocked:
+            episodes = ",".join(f"{episode:02d}" for episode in candidate["episodes"])
+            scope = f"S{candidate['season']:02d}E{episodes}" if candidate["media_type"] == "tv" else "电影"
+            logger.info(f"共享下载记录本地命中 {title}：TMDB {candidate['tmdb_id']} · {scope}；"
+                        f"下载方：{row['label']}；状态 {row['state']}；占位 {row['id']}，不发送占位申请")
+        return available, blocked
 
     def _shared_history_rows(self):
         records = [*getattr(self, "_resource_ledger", {}).values(),
@@ -274,6 +346,14 @@ class SharedResourceMixin:
         self._shared_audit_at = 0
         self._shared_retry_at = float(self.get_data("shared_retry_at") or 0)
         self._shared_probe = None
+        self._shared_cache = None
+        self._shared_cache_next_sync = 0
+        self._shared_cache_activity = time.time()
+        self._shared_cache_sync_failed = False
+        try:
+            self._shared_cache = SharedRecordCache(Path(self.get_data_path()) / "shared-record-cache.sqlite3")
+        except (OSError, sqlite3.Error) as error:
+            logger.warning(f"无法打开共享下载记录本地缓存：{error}；继续使用协调端审批")
         self._start_shared_worker()
 
     def _shared_config(self):
@@ -406,6 +486,16 @@ class SharedResourceMixin:
             if store:
                 data = store.search_records(query, status, page, page_size, media_type)
             elif getattr(self, "_shared_settings", None) and self._shared_settings.enabled:
+                self._shared_cache_activity = time.time()
+                probe = self._shared_cache_probe()
+                if probe:
+                    try:
+                        data = self._shared_cache.search(self._shared_cache_scope(probe), query, status, page,
+                                                         page_size, media_type)
+                    except (sqlite3.Error, KeyError, TypeError, ValueError):
+                        data = None
+                    if data is not None:
+                        return schemas.Response(success=True, data=data)
                 try:
                     with self._shared_rpc_lock:
                         response = self._shared_exchange(uuid.uuid4().hex, {
@@ -451,6 +541,12 @@ class SharedResourceMixin:
                         self._start_shared_worker()
                         raise SharedError("协调端仍有其他实例未完成的占位，不能更换连接或关闭协调端")
                 self._shared_settings = payload
+                if route_changed or payload.host_coordinator != previous.host_coordinator:
+                    self._shared_probe = None
+                    self._shared_policy_checked_at = 0
+                    self._shared_cache_next_sync = 0
+                    self._shared_cache_activity = time.time()
+                    self._shared_cache_sync_failed = False
                 self._shared_stopping = False
                 self._shared_error = ""
                 self._shared_worker_retry_at = 0
@@ -493,7 +589,9 @@ class SharedResourceMixin:
                     "label": config.instance_label, **value}
             try:
                 account = ed2k_account(settings.PROXY)
-                result = TelegramRPC(account, config.bot_username).exchange(request_id, body)
+                rpc = (TelegramRPC(account, config.bot_username, timeout=20) if value.get("op") == "sync_records"
+                       else TelegramRPC(account, config.bot_username))
+                result = rpc.exchange(request_id, body)
                 if value.get("op") != "policy":
                     self._require_shared_authority(result)
                     previous = (getattr(self, "_shared_probe", None) or {}).get("authority_id")
@@ -512,7 +610,7 @@ class SharedResourceMixin:
                 self._shared_error = str(error)
                 if getattr(error, "definitive", False):
                     self._shared_policy_checked_at = 0
-                else:
+                elif value.get("op") != "sync_records" or getattr(error, "retry_after", 0):
                     self._shared_retry_at = time.time() + max(15, getattr(error, "retry_after", 15))
                     self.save_data("shared_retry_at", self._shared_retry_at)
                     self.save_data("shared_retry_error", self._shared_error)
@@ -670,23 +768,12 @@ class SharedResourceMixin:
         }
 
     def _shared_local_file_is_blocking(self, entry, file_id):
-        """Reuse only a confirmed local decision; transient failures remain retryable."""
+        """Keep unresolved same-instance work from being sent twice."""
         phase = entry.get("phase")
         if phase == "requesting":
             return file_id in {row.get("id") for row in entry.get("files", [])}
         if phase in self._shared_active_phases():
             return file_id in entry.get("approved", {})
-        if phase == "completed":
-            return file_id in set(entry.get("done", [])) or file_id in entry.get("approved", {})
-        if phase != "rejected":
-            return False
-        for row in entry.get("rejected", []) or []:
-            if row.get("id") != file_id:
-                continue
-            # A coordinator conflict has a claim/owner/state. A transport or
-            # validation error without conflict evidence must be retried.
-            if row.get("claim") or row.get("owner") or row.get("state"):
-                return True
         return False
 
     def _shared_local_duplicate(self, candidate):
@@ -698,24 +785,12 @@ class SharedResourceMixin:
         """
         attributes = getattr(self, "_channel_dedup_attributes", []) or []
         tolerance = getattr(self, "_channel_dedup_size_tolerance_pct", 5)
-        media_type = candidate.get("media_type")
-        tmdb_id = candidate.get("tmdb_id")
-        season = candidate.get("season")
-        episodes = set(candidate.get("episodes") or [])
         for entry in getattr(self, "_shared_claims", {}).values():
+            if entry.get("phase") not in self._shared_active_phases():
+                continue
             for row in entry.get("files", []) or []:
-                if row.get("media_type") != media_type or row.get("tmdb_id") != tmdb_id:
-                    continue
-                if media_type == "tv":
-                    if row.get("season") != season:
-                        continue
-                    if not episodes.intersection(row.get("episodes") or []):
-                        continue
-                elif media_type != "movie":
-                    continue
-                if not specs_match(candidate, row, attributes, tolerance):
-                    continue
-                if self._shared_local_file_is_blocking(entry, row.get("id")):
+                if (self._shared_local_file_is_blocking(entry, row.get("id"))
+                        and same_resource(candidate, row, attributes, tolerance)):
                     return entry, row
         return None
 
@@ -886,13 +961,15 @@ class SharedResourceMixin:
                     raise SharedError("本种子已有共享申请，等待核验，不重复提交")
                 candidates, rejected = self._shared_candidates(content, title, task, selection, spec_hint)
                 candidates, local_blocked = self._shared_filter_local_duplicates(candidates, title)
-                if local_blocked and self._channel_dedup_pack_policy == "exclude":
+                candidates, shared_blocked = self._filter_shared_record_cache(candidates, title)
+                blocked_count = len(local_blocked) + len(shared_blocked)
+                if blocked_count and self._channel_dedup_pack_policy == "exclude":
                     logger.info(
-                        f"共享审批本地缓存排除整包 {title}：命中 {len(local_blocked)} 个重复文件"
+                        f"共享审批本地缓存排除整包 {title}：命中 {blocked_count} 个重复文件"
                     )
                     return None
-                if local_blocked and not candidates:
-                    logger.info(f"共享审批本地缓存跳过 {title}：候选均已存在本机共享裁决")
+                if blocked_count and not candidates:
+                    logger.info(f"共享审批本地缓存跳过 {title}：候选均已命中共享下载记录或本机在途申请")
                     return None
                 if not candidates or rejected and self._channel_dedup_pack_policy == "exclude":
                     raise SharedError("共享审批候选身份或规格不完整，本次不添加下载")
@@ -1070,6 +1147,8 @@ class SharedResourceMixin:
                         self._shared_phase(entry, entry["phase"], error=str(error))
                     except Exception:
                         self._shared_phase(entry, entry["phase"], error="下载器或共享状态待核验")
+                if self._shared_settings.enabled:
+                    self._sync_shared_record_cache()
         finally:
             self._shared_rpc_lock.release()
 

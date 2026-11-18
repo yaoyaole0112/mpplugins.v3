@@ -11,8 +11,11 @@ import threading
 import time
 import uuid
 
-from .channel_dedup import normalize_effects, specs_match
+from .channel_dedup import normalize_effects
 from .record_search import matches_record, record_page
+from .shared_cache import (
+    RECORD_COLUMNS, SYNC_BATCH, SYNC_MAX_PARTS, SYNC_VERSION, display_record, filter_records, same_resource,
+)
 from .shared_history import AUTHORITY_VERSION
 from .shared_protocol import (
     MAX_PARTS, SharedError, canonical, decode, digest, encode, parse_part, policy,
@@ -56,6 +59,30 @@ class CoordinatorStore:
             if "media_title" not in columns:
                 db.execute("ALTER TABLE claims ADD COLUMN media_title TEXT NOT NULL DEFAULT ''")
             db.execute("INSERT OR IGNORE INTO meta VALUES ('authority_id', ?)", (canonical(uuid.uuid4().hex),))
+            db.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE IF NOT EXISTS claim_changes (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, claim_id TEXT NOT NULL,
+                    UNIQUE(group_id, claim_id));
+                CREATE INDEX IF NOT EXISTS claim_changes_cursor ON claim_changes(group_id, seq);
+                CREATE TRIGGER IF NOT EXISTS claim_changes_insert AFTER INSERT ON claims BEGIN
+                    INSERT OR REPLACE INTO claim_changes(group_id,claim_id) VALUES (NEW.group_id,NEW.id);
+                END;
+                CREATE TRIGGER IF NOT EXISTS claim_changes_update AFTER UPDATE OF
+                    id,group_id,label,title,media_title,media_type,tmdb_id,season,episodes,specs,
+                    state,created,updated,request_id,file_id ON claims BEGIN
+                    INSERT OR REPLACE INTO claim_changes(group_id,claim_id)
+                        SELECT OLD.group_id,OLD.id WHERE OLD.group_id!=NEW.group_id OR OLD.id!=NEW.id;
+                    INSERT OR REPLACE INTO claim_changes(group_id,claim_id) VALUES (NEW.group_id,NEW.id);
+                END;
+                CREATE TRIGGER IF NOT EXISTS claim_changes_delete AFTER DELETE ON claims BEGIN
+                    INSERT OR REPLACE INTO claim_changes(group_id,claim_id) VALUES (OLD.group_id,OLD.id);
+                END;
+                INSERT INTO claim_changes(group_id,claim_id)
+                    SELECT claims.group_id,claims.id FROM claims WHERE NOT EXISTS (
+                        SELECT 1 FROM claim_changes WHERE group_id=claims.group_id AND claim_id=claims.id);
+                COMMIT;
+            """)
         self.path.chmod(0o600)
 
     @contextmanager
@@ -138,6 +165,8 @@ class CoordinatorStore:
         op = body.get("op")
         if op == "policy":
             return {"ok": True, "policy": self.policy, "user_id": sender, **self.authority()}
+        if op == "sync_records":
+            return self._sync_records(db, request_id, body)
         if op == "records":
             return {"ok": True, **self.authority(), "records": self.search_records(
                 str(body.get("query", ""))[:200], str(body.get("status", "")),
@@ -172,13 +201,7 @@ class CoordinatorStore:
             ).fetchall()
             conflict = None
             for row in [dict(row) for row in rows] + pending:
-                if (row["media_type"], row["tmdb_id"], row["season"]) != (
-                        item["media_type"], item["tmdb_id"], item["season"]):
-                    continue
-                episodes = json.loads(row["episodes"])
-                overlap = item["media_type"] == "movie" or bool(set(item["episodes"]) & set(episodes))
-                if overlap and specs_match(item, {"specs": json.loads(row["specs"])},
-                                           self.policy["attributes"], self.policy["size_tolerance_pct"]):
+                if self._same_identity_file(item, row, overlap=True):
                     conflict = row
                     break
             if conflict:
@@ -212,7 +235,47 @@ class CoordinatorStore:
                 "pack_rejected": False, "policy": self.policy, **self.authority()}
 
     def authority(self):
-        return {"authority_version": AUTHORITY_VERSION, "authority_id": self.meta("authority_id")}
+        return {"authority_version": AUTHORITY_VERSION, "authority_id": self.meta("authority_id"),
+                "record_sync_version": SYNC_VERSION}
+
+    def _sync_records(self, db, request_id, body):
+        cursor = body.get("cursor")
+        if type(cursor) is not int or not 0 <= cursor < 2**63:
+            raise SharedError("共享记录同步游标无效")
+        authority = self.authority()
+        head = db.execute("SELECT COALESCE(MAX(seq),0) FROM claim_changes WHERE group_id=?",
+                          (self.group,)).fetchone()[0]
+        reset = (body.get("authority_id") != authority["authority_id"]
+                 or body.get("revision") != self.policy["revision"] or cursor > head)
+        if reset:
+            cursor = 0
+        columns = ",".join(f"claims.{name}" for name in RECORD_COLUMNS)
+        rows = db.execute(
+            f"SELECT claim_changes.seq,claim_changes.claim_id,{columns} FROM claim_changes "
+            "LEFT JOIN claims ON claims.id=claim_changes.claim_id AND claims.group_id=claim_changes.group_id "
+            "WHERE claim_changes.group_id=? AND claim_changes.seq>? ORDER BY claim_changes.seq LIMIT ?",
+            (self.group, cursor, SYNC_BATCH + 1),
+        ).fetchall()
+        changes = [{"seq": row["seq"], "id": row["claim_id"],
+                    "record": display_record({key: row[key] for key in RECORD_COLUMNS}) if row["id"] else None}
+                   for row in rows[:SYNC_BATCH]]
+        while True:
+            response = {**authority, "ok": True, "policy": self.policy, "changes": changes, "reset": reset,
+                        "cursor": changes[-1]["seq"] if changes else cursor, "more": len(rows) > len(changes)}
+            try:
+                if len(encode(response, request_id, response=True)) <= SYNC_MAX_PARTS:
+                    return response
+            except SharedError:
+                if len(changes) <= 1:
+                    raise
+            if len(changes) <= 1:
+                raise SharedError("单条共享记录超过同步大小限制")
+            changes = changes[:len(changes) // 2]
+
+    def filter_duplicates(self, candidates):
+        with self.connect() as db:
+            db.execute("BEGIN")
+            return filter_records(db, candidates, self.policy, group=self.group)
 
     def seed_completed(self, instance, label, files):
         """Import the coordinator's own verified legacy evidence before accepting requests."""
@@ -284,13 +347,9 @@ class CoordinatorStore:
         return {"ok": True, "imported": imported, **self.authority()}
 
     def _same_identity_file(self, item, row, overlap=False):
-        return ((item["media_type"], item["tmdb_id"], item["season"]) ==
-                (row["media_type"], row["tmdb_id"], row["season"])
-                and (item["media_type"] == "movie" or
-                     (bool(set(item["episodes"]) & set(json.loads(row["episodes"]))) if overlap
-                      else set(item["episodes"]).issubset(json.loads(row["episodes"]))))
-                and specs_match(item, {"specs": json.loads(row["specs"])},
-                                self.policy["attributes"], self.policy["size_tolerance_pct"]))
+        return same_resource(item, {**dict(row), "episodes": json.loads(row["episodes"]),
+                                   "specs": json.loads(row["specs"])}, self.policy["attributes"],
+                             self.policy["size_tolerance_pct"], overlap=overlap)
 
     def _inspect(self, db, sender, instance, body):
         requested = body.get("claims")
@@ -403,15 +462,9 @@ class CoordinatorStore:
                 (self.group, status, status))
             items = []
             for row in rows:
-                item = dict(row)
-                for field, length in (("request_id", 32), ("file_id", 24)):
-                    if not re.fullmatch(rf"[a-f0-9]{{{length}}}", str(item[field])):
-                        item.pop(field)
-                if media_type and item["media_type"] != media_type:
+                if media_type and row["media_type"] != media_type:
                     continue
-                item["episodes"], item["specs"] = json.loads(row["episodes"]), json.loads(row["specs"])
-                if item["specs"].get("effects"):
-                    item["specs"]["effects"] = normalize_effects(item["specs"]["effects"])
+                item = display_record(row)
                 if matches_record(item, query):
                     items.append(item)
         return record_page(items, page, page_size)
