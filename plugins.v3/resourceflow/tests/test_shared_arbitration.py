@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
 import time
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -26,6 +27,40 @@ from test_channel_integration import make_torrent
 def file_row(number=1, episode=1, **specs):
     return {"id": f"{number:024x}", "title": "Show", "media_type": "tv", "tmdb_id": 123,
             "season": 1, "episodes": [episode], "specs": {"resolution": "1080p", **specs}}
+
+
+class FakeRequestsExceptions:
+    class RequestException(Exception):
+        pass
+
+    class ProxyError(RequestException):
+        pass
+
+    class SSLError(RequestException):
+        pass
+
+    class Timeout(RequestException):
+        pass
+
+    class ConnectTimeout(Timeout):
+        pass
+
+    class ReadTimeout(Timeout):
+        pass
+
+    class ConnectionError(RequestException):
+        pass
+
+
+class FakeRequests:
+    exceptions = FakeRequestsExceptions
+
+    def __init__(self):
+        self.post = Mock()
+
+
+def fake_requests_context(requests_module):
+    return patch.dict(sys.modules, {"requests": requests_module})
 
 
 class ProtocolTests(unittest.TestCase):
@@ -248,6 +283,64 @@ class StoreTests(unittest.TestCase):
         worker.poll_once()
         self.assertEqual(self.store.recent()[0]["id"], saved)
         self.assertEqual(self.store.meta("offset"), 2)
+
+    def test_bot_http_transport_errors_are_specific_and_do_not_expose_token(self):
+        worker = BotWorker(self.store, "12345:private-token", "testbot", [11])
+        cases = (
+            (FakeRequestsExceptions.ProxyError("proxy url could contain token"), "代理连接失败"),
+            (FakeRequestsExceptions.ConnectTimeout("connect timed out"), "连接超时"),
+            (FakeRequestsExceptions.ReadTimeout("read timed out"), "响应超时"),
+            (FakeRequestsExceptions.SSLError("bad certificate"), "TLS 握手失败"),
+        )
+        for failure, expected in cases:
+            requests_module = FakeRequests()
+            requests_module.post.side_effect = failure
+            with self.subTest(error=type(failure).__name__), fake_requests_context(requests_module):
+                with self.assertRaises(SharedError) as caught:
+                    worker.call("getUpdates", {})
+                self.assertIn(expected, str(caught.exception))
+                self.assertNotIn(worker.token, str(caught.exception))
+                self.assertNotIn("proxy url", str(caught.exception))
+
+    def test_bot_http_invalid_json_identifies_gateway_response(self):
+        worker = BotWorker(self.store, "fake", "testbot", [11])
+        response = Mock(status_code=502)
+        response.json.side_effect = ValueError("html body")
+        requests_module = FakeRequests()
+        requests_module.post.return_value = response
+        with fake_requests_context(requests_module):
+            with self.assertRaisesRegex(SharedError, "HTTP 502.*非 JSON 页面"):
+                worker.call("getUpdates", {})
+
+    def test_bot_api_rate_limit_reports_wait_and_persists_retry(self):
+        worker = BotWorker(self.store, "fake", "testbot", [11])
+        response = Mock(status_code=429)
+        response.json.return_value = {"ok": False, "error_code": 429,
+                                      "parameters": {"retry_after": 37}}
+        requests_module = FakeRequests()
+        requests_module.post.return_value = response
+        with fake_requests_context(requests_module):
+            with self.assertRaisesRegex(SharedError, "限流.*37 秒"):
+                worker.call("getUpdates", {})
+        self.assertGreater(self.store.meta("retry_at"), time.time() + 30)
+
+    def test_bot_worker_uses_exponential_backoff_and_suppresses_duplicate_warnings(self):
+        worker = BotWorker(self.store, "fake", "testbot", [11])
+        with patch("resourceflow.shared_coordinator.logger") as log:
+            delays = [worker._record_failure(SharedError("Telegram Bot getUpdates 响应超时"))
+                      for _ in range(8)]
+            self.assertEqual(delays, [5, 10, 20, 40, 80, 160, 300, 300])
+            self.assertEqual(log.warning.call_count, 1)
+            self.assertIn("连续失败 8 次，300 秒后重试", worker.last_error)
+
+            worker._record_success()
+            self.assertEqual(worker.last_error, "")
+            self.assertEqual(worker._consecutive_failures, 0)
+            log.info.assert_called_once()
+
+            limited = SharedError("Telegram Bot getUpdates 限流")
+            limited.retry_after = 37
+            self.assertEqual(worker._record_failure(limited), 37)
 
 
 class AdmissionTests(unittest.TestCase):

@@ -11,6 +11,8 @@ import threading
 import time
 import uuid
 
+from app.sdk.logging import logger
+
 from .channel_dedup import normalize_specs
 from .record_search import localized_record_titles, matches_record, record_display_title, record_page
 from .shared_cache import (
@@ -483,6 +485,10 @@ class CoordinatorStore:
 
 
 class BotWorker:
+    RETRY_BASE_SECONDS = 5
+    RETRY_MAX_SECONDS = 300
+    ERROR_LOG_INTERVAL_SECONDS = 300
+
     def __init__(self, store, token, username, allowed_users, proxies=None, call=None):
         self.store, self.token, self.username = store, token, username.lstrip("@").lower()
         self.allowed_users = set(allowed_users)
@@ -493,22 +499,115 @@ class BotWorker:
         self.last_ok = None
         self.ready_event = threading.Event()
         self._sent_at = {}
+        self._consecutive_failures = 0
+        self._last_logged_error = ""
+        self._last_error_logged_at = 0
+
+    @staticmethod
+    def _network_error(method, error, requests):
+        prefix = f"Telegram Bot {method}"
+        exceptions = requests.exceptions
+        if isinstance(error, exceptions.ProxyError):
+            return f"{prefix} 代理连接失败（ProxyError），请检查 MoviePilot 代理配置和代理连通性"
+        if isinstance(error, exceptions.SSLError):
+            return f"{prefix} TLS 握手失败（SSLError），请检查代理证书及 NAS 系统时间"
+        if isinstance(error, exceptions.ConnectTimeout):
+            return f"{prefix} 连接超时（ConnectTimeout），请检查 NAS 出站网络、DNS 和代理"
+        if isinstance(error, exceptions.ReadTimeout):
+            return f"{prefix} 响应超时（ReadTimeout），请检查代理是否支持 Telegram 长轮询"
+        if isinstance(error, exceptions.Timeout):
+            return f"{prefix} 请求超时（{type(error).__name__}），请检查 NAS 网络和代理"
+        if isinstance(error, exceptions.ConnectionError):
+            return f"{prefix} DNS/网络连接失败（{type(error).__name__}），请检查 api.telegram.org 解析及代理"
+        if isinstance(error, exceptions.RequestException):
+            return f"{prefix} 请求失败（{type(error).__name__}），请检查 NAS 网络和代理"
+        return f"{prefix} 网络请求失败（{type(error).__name__}）"
+
+    def _record_failure(self, error):
+        self._consecutive_failures = min(self._consecutive_failures + 1, 16)
+        retry_after = getattr(error, "retry_after", 0)
+        delay = (min(max(int(retry_after), 1), 86400) if retry_after else
+                 min(self.RETRY_BASE_SECONDS * 2 ** (self._consecutive_failures - 1), self.RETRY_MAX_SECONDS))
+        summary = (str(error) if isinstance(error, SharedError)
+                   else f"协调处理异常（{type(error).__name__}），暂缓请求")
+        self.last_error = f"{summary}；连续失败 {self._consecutive_failures} 次，{delay} 秒后重试"
+
+        now = time.monotonic()
+        if (summary != self._last_logged_error
+                or now - self._last_error_logged_at >= self.ERROR_LOG_INTERVAL_SECONDS):
+            logger.warning(f"资源刷流协调 Bot 请求失败：{summary}；连续失败 {self._consecutive_failures} 次，"
+                           f"{delay} 秒后重试")
+            self._last_logged_error = summary
+            self._last_error_logged_at = now
+        return delay
+
+    def _record_success(self):
+        if self._consecutive_failures:
+            logger.info(f"资源刷流协调 Bot 连接恢复；此前连续失败 {self._consecutive_failures} 次")
+        self._consecutive_failures = 0
+        self._last_logged_error = ""
+        self._last_error_logged_at = 0
+        self.last_error = ""
+
+    def _wait_retry(self, seconds):
+        deadline = time.monotonic() + max(0, seconds)
+        while not self.stop_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            self.stop_event.wait(min(remaining, 30))
 
     def call(self, method, payload):
         if self.custom_call:
             return self.custom_call(method, payload)
-        import requests
+        try:
+            import requests
+        except ImportError:
+            raise SharedError("Telegram Bot 请求依赖缺失（requests），请重新安装资源刷流插件依赖") from None
         try:
             response = requests.post(f"https://api.telegram.org/bot{self.token}/{method}",
                                      json=payload, proxies=self.proxies, timeout=(10, 35))
+        except requests.exceptions.RequestException as error:
+            raise SharedError(self._network_error(method, error, requests)) from None
+        except Exception as error:
+            raise SharedError(f"Telegram Bot {method} 请求准备失败（{type(error).__name__}）") from None
+        try:
             data = response.json()
-        except Exception:
-            raise SharedError("Telegram Bot 网络请求失败") from None
+        except ValueError:
+            status = getattr(response, "status_code", 0)
+            raise SharedError(f"Telegram Bot {method} 返回无法解析的响应（HTTP {status}），"
+                              "可能是代理或网关返回了非 JSON 页面") from None
+        except Exception as error:
+            status = getattr(response, "status_code", 0)
+            raise SharedError(f"Telegram Bot {method} 响应解析失败（HTTP {status}，{type(error).__name__}）") from None
+        if not isinstance(data, dict):
+            status = getattr(response, "status_code", 0)
+            raise SharedError(f"Telegram Bot {method} 响应格式无效（HTTP {status}）")
         if not data.get("ok"):
-            retry = (data.get("parameters") or {}).get("retry_after")
-            if retry:
-                self.store.set_meta("retry_at", time.time() + min(max(int(retry), 1), 86400))
-            raise SharedError(f"Telegram Bot 请求未确认（{int(data.get('error_code') or 0)}）")
+            parameters = data.get("parameters")
+            retry = parameters.get("retry_after") if isinstance(parameters, dict) else None
+            try:
+                retry_seconds = min(max(int(retry), 1), 86400) if retry else 0
+            except (TypeError, ValueError):
+                retry_seconds = 0
+            if retry_seconds:
+                self.store.set_meta("retry_at", time.time() + retry_seconds)
+            try:
+                error_code = int(data.get("error_code") or getattr(response, "status_code", 0) or 0)
+            except (TypeError, ValueError):
+                error_code = 0
+            if error_code == 401:
+                reason = "Bot Token 无效或已撤销"
+            elif error_code == 409:
+                reason = "同一 Bot 可能已有其他 getUpdates 接收器，或 Webhook 尚未关闭"
+            elif error_code == 429:
+                reason = f"Telegram 限流{f'，约 {retry_seconds} 秒后重试' if retry_seconds else ''}"
+            else:
+                reason = "Telegram API 拒绝请求"
+            failure = SharedError(f"Telegram Bot {method} 请求未确认（{error_code}）：{reason}")
+            if retry_seconds:
+                failure.retry_after = retry_seconds
+            raise failure
         return data.get("result")
 
     def start(self):
@@ -537,7 +636,7 @@ class BotWorker:
                 try:
                     retry_at = self.store.meta("retry_at", 0)
                     if retry_at > time.time():
-                        self.stop_event.wait(min(retry_at - time.time(), 30))
+                        self._wait_retry(min(retry_at - time.time(), 30))
                         continue
                     if not verified:
                         me = self.call("getMe", {})
@@ -548,10 +647,10 @@ class BotWorker:
                         verified = True
                         self.ready_event.set()
                     self.poll_once()
-                    self.last_ok, self.last_error = time.time(), ""
+                    self.last_ok = time.time()
+                    self._record_success()
                 except Exception as error:
-                    self.last_error = str(error) if isinstance(error, SharedError) else "协调处理失败，保留占位"
-                    self.stop_event.wait(5)
+                    self._wait_retry(self._record_failure(error))
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
