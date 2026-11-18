@@ -24,6 +24,10 @@ test('queue cancellation only exposes waiting task IDs and does not delete files
 test('queue rows display file sizes and No. badges without eligibility timestamps', async () => {
   const source = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
   const queue = source.split('<ol v-else class="progress-list">')[1].split('</ol>')[0]
+  const heading = queue.match(/<div class="progress-heading">([^\n]*)<\/div>/)?.[1]
+  assert.ok(heading)
+  assert.doesNotMatch(heading, /source-tag/)
+  assert.match(queue, /<p class="progress-detail">\s*<span class="source-tag">\{\{ task\.source \}\}<\/span>\s*<span v-if="task\.status === 'active'/)
   assert.match(queue, /class="queue-position">\{\{ task\.source === '本地上传' \? '上传 No\.' : 'No\.' \}\}\{\{ task\.queue_position \}\}/)
   assert.match(queue, /v-else-if="task\.status === 'queued'">文件大小：/)
   assert.match(queue, /formatBytes\(task\.size\)/)
