@@ -88,6 +88,110 @@ class TransferPluginTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             plugin._path_id(client)
 
+    def test_split_target_directories_route_share_and_offline_independently(self):
+        plugin = self.module.P115Transfer()
+        plugin._split_target_dirs = True
+        plugin._target_path = "/shared"
+        plugin._target_cid = "999"
+        plugin._offline_target_path = "/offline"
+        plugin._offline_target_cid = "111"
+        plugin._share_target_path = "/shares"
+        plugin._share_target_cid = "222"
+        client = Mock()
+        client.clouddownload_task_add_url.return_value = {"state": True}
+        client.share_receive.return_value = {"state": True}
+        link = "ed2k://|file|demo.mkv|4|0123456789abcdef0123456789abcdef|/"
+
+        self.assertIn("111", plugin._offline(client, [link]))
+        client.clouddownload_task_add_url.assert_called_once_with(
+            {"url": link, "wp_path_id": 111}, type="web",
+        )
+
+        tool_package = types.ModuleType("p115client.tool")
+        tool_package.__path__ = []
+        iterdir_module = types.ModuleType("p115client.tool.iterdir")
+        iterdir_module.share_iterdir = Mock(return_value=[{"id": 321}])
+        with patch.dict(sys.modules, {
+            "p115client.tool": tool_package,
+            "p115client.tool.iterdir": iterdir_module,
+        }):
+            self.assertIn("222", plugin._receive_share(client, "share-code", "1234"))
+
+        self.assertEqual(client.share_receive.call_args.args[0]["cid"], 222)
+        self.assertEqual(plugin._path_id(client, "offline"), 111)
+        self.assertEqual(plugin._path_id(client, "share"), 222)
+
+    def test_split_target_directories_default_from_legacy_config(self):
+        plugin = self.module.P115Transfer()
+        plugin.init_plugin({
+            "enabled": False,
+            "target_path": "/existing/destination",
+            "target_cid": "456",
+        })
+        self.assertFalse(plugin._split_target_dirs)
+        self.assertEqual(plugin._target_settings("offline"), ("/existing/destination", "456"))
+        self.assertEqual(plugin._target_settings("share"), ("/existing/destination", "456"))
+        form, defaults = plugin.get_form()
+        self.assertEqual(defaults["target_path"], "/existing/destination")
+        self.assertEqual(defaults["offline_target_path"], "/existing/destination")
+        self.assertEqual(defaults["share_target_path"], "/existing/destination")
+        self.assertEqual(defaults["offline_target_cid"], "456")
+        self.assertEqual(defaults["share_target_cid"], "456")
+
+    def test_split_target_paths_resolve_to_their_own_directories(self):
+        plugin = self.module.P115Transfer()
+        plugin._split_target_dirs = True
+        plugin._target_path = "/shared"
+        plugin._offline_target_path = "/offline"
+        plugin._share_target_path = "/shares"
+        tool_package = types.ModuleType("p115client.tool")
+        tool_package.__path__ = []
+        iterdir_module = types.ModuleType("p115client.tool.iterdir")
+        iterdir_module.iterdir = Mock(return_value=[
+            {"name": "offline", "id": 111, "is_dir": True},
+            {"name": "shares", "id": 222, "is_dir": True},
+            {"name": "shared", "id": 999, "is_dir": True},
+        ])
+        with patch.dict(sys.modules, {
+            "p115client.tool": tool_package,
+            "p115client.tool.iterdir": iterdir_module,
+        }):
+            self.assertEqual(plugin._path_id(Mock(), "offline"), 111)
+            self.assertEqual(plugin._path_id(Mock(), "share"), 222)
+
+    def test_shared_mode_ignores_but_preserves_split_targets(self):
+        plugin = self.module.P115Transfer()
+        plugin.init_plugin({
+            "enabled": False,
+            "target_path": "/shared",
+            "target_cid": "999",
+            "split_target_dirs": False,
+            "offline_target_path": "/offline",
+            "offline_target_cid": "111",
+            "share_target_path": "/shares",
+            "share_target_cid": "222",
+        })
+        self.assertEqual(plugin._target_settings("offline"), ("/shared", "999"))
+        self.assertEqual(plugin._target_settings("share"), ("/shared", "999"))
+        _, defaults = plugin.get_form()
+        self.assertEqual(defaults["offline_target_path"], "/offline")
+        self.assertEqual(defaults["share_target_path"], "/shares")
+
+    def test_split_target_config_preserves_root_cid(self):
+        plugin = self.module.P115Transfer()
+        plugin.init_plugin({
+            "enabled": False,
+            "target_path": "/shared",
+            "split_target_dirs": True,
+            "offline_target_path": "/offline",
+            "offline_target_cid": "0",
+            "share_target_path": "/shares",
+            "share_target_cid": "",
+        })
+        self.assertEqual(plugin._target_settings("offline"), ("/offline", "0"))
+        self.assertEqual(plugin._path_id(Mock(), "offline"), 0)
+        self.assertEqual(plugin._target_settings("share"), ("/shares", ""))
+
     def test_custom_bot_authorization(self):
         plugin = self.module.P115Transfer()
         plugin._allowed_users = {"123"}
@@ -302,8 +406,17 @@ class TransferPluginTest(unittest.TestCase):
         self.assertEqual(plugin.plugin_name, "115转存/离线")
         self.assertEqual(plugin.plugin_config_prefix, "p115transfer_")
         self.assertEqual(form[0]["props"]["class"], "pa-4")
-        groups = form[0]["content"][2:]
-        self.assertEqual(len(groups), 5)
+        content = form[0]["content"]
+        groups = []
+
+        def collect_fields(nodes):
+            for node in nodes:
+                if node.get("component") == "div" and node.get("props", {}).get("class") == "mb-6":
+                    groups.append(node)
+                collect_fields(node.get("content") or [])
+
+        collect_fields(content)
+        self.assertEqual(len(groups), 9)
         models = []
         for group in groups:
             self.assertEqual(group["props"]["class"], "mb-6")
@@ -315,8 +428,21 @@ class TransferPluginTest(unittest.TestCase):
             self.assertEqual(control["props"]["variant"], "outlined")
             self.assertEqual(control["props"]["density"], "comfortable")
             models.append(control["props"]["model"])
-        self.assertEqual(models, ["bot_token", "allowed_users", "bot_proxy", "target_path", "target_cid"])
+        self.assertEqual(models, [
+            "bot_token", "allowed_users", "bot_proxy", "target_path", "target_cid",
+            "offline_target_path", "offline_target_cid", "share_target_path", "share_target_cid",
+        ])
+        switch = next(node for node in content if node.get("component") == "VSwitch"
+                      and node.get("props", {}).get("model") == "split_target_dirs")
+        self.assertIn("关闭时", switch["props"]["hint"])
+        conditional_groups = [node for node in content if node.get("component") == "div"
+                              and node.get("props", {}).get("v-if")]
+        self.assertEqual(
+            [node["props"]["v-if"] for node in conditional_groups],
+            ["!split_target_dirs", "split_target_dirs"],
+        )
         self.assertNotIn("cookie", defaults)
+        self.assertFalse(defaults["split_target_dirs"])
 
     def test_bot_proxy_prefers_explicit_then_mp(self):
         plugin = self.module.P115Transfer()

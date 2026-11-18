@@ -192,9 +192,9 @@ def validate_offline_links(links):
 
 class P115Transfer(_PluginBase):
     plugin_name = "115转存/离线"
-    plugin_desc = "通过Telegram Bot接收115分享及离线链接，支持Telegraph资源页面和消息URL按钮，保存到指定115目录。"
+    plugin_desc = "通过Telegram Bot接收115分享及离线链接，支持Telegraph资源页面和消息URL按钮，可分别设置离线与分享保存目录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/docs/images/moviepilot.png"
-    plugin_version = "1.3.1"
+    plugin_version = "1.3.2"
     plugin_author = "helios"
     author_url = "https://github.com/yaoyaole0112/mpplugins.v3"
     plugin_config_prefix = "p115transfer_"
@@ -215,6 +215,11 @@ class P115Transfer(_PluginBase):
         self._bot_token = ""
         self._allowed_users = set()
         self._target_cid = ""
+        self._split_target_dirs = False
+        self._offline_target_path = self._target_path
+        self._offline_target_cid = ""
+        self._share_target_path = self._target_path
+        self._share_target_cid = ""
         self._bot_proxy = ""
         self._bot_error = ""
         self._bot_proxy_source = "未连接"
@@ -232,6 +237,13 @@ class P115Transfer(_PluginBase):
         self._enabled = bool(config.get("enabled", False))
         self._target_path = str(config.get("target_path") or "/115离线").strip() or "/115离线"
         self._target_cid = str(config.get("target_cid") or "").strip()
+        self._split_target_dirs = bool(config.get("split_target_dirs", False))
+        self._offline_target_path = str(config.get("offline_target_path") or self._target_path).strip() or self._target_path
+        offline_cid = config.get("offline_target_cid")
+        self._offline_target_cid = str(self._target_cid if offline_cid is None else offline_cid).strip()
+        self._share_target_path = str(config.get("share_target_path") or self._target_path).strip() or self._target_path
+        share_cid = config.get("share_target_cid")
+        self._share_target_cid = str(self._target_cid if share_cid is None else share_cid).strip()
         self._bot_token = str(config.get("bot_token") or "").strip()
         self._bot_proxy = str(config.get("bot_proxy") or "").strip()
         self._bot_error = ""
@@ -278,9 +290,25 @@ class P115Transfer(_PluginBase):
             field("bot_token", "接收链接的 Bot", "填写你自己的 Bot Token，让该 Bot 独立接收链接；留空则继续使用 MoviePilot 已配置的 Bot。", "Bot Token（可选）", type="password"),
             field("allowed_users", "允许使用 Bot 的用户", "使用独立 Bot 时必填。只接受这些 Telegram 用户的私聊消息；填写数字用户ID，多个ID用逗号分隔，不是 @用户名。", "Telegram 用户ID", placeholder="123456789,987654321"),
             field("bot_proxy", "Bot 网络代理", "仅用于独立 Bot 访问 Telegram API。填写后优先使用此代理；留空自动使用 MoviePilot 的网络代理，MP未配置时使用运行环境网络。地址必须能从MP容器访问，127.0.0.1指容器自身。", "代理地址（可选）", placeholder="http://代理服务器地址:7890"),
-            field("target_path", "网盘保存目录", "115分享转存和离线任务都保存到此目录。填写从网盘根目录开始的路径，目录不存在时自动创建；填写下方CID后以CID为准。", "115目录路径", placeholder="/115离线"),
-            field("target_cid", "精确指定保存目录", "可填写已有115文件夹的数字CID，填写后优先于上方目录路径；0表示网盘根目录。不清楚CID时留空，使用目录路径即可。", "目录CID（可选）", placeholder="例如：123456789"),
+            {"component": "VSwitch", "props": {
+                "model": "split_target_dirs", "label": "离线任务与115分享使用不同目录",
+                "hint": "关闭时两种链接共用下方目录；开启后分别使用离线目录和分享目录。",
+                "persistent-hint": True, "class": "mb-4",
+            }},
+            {"component": "div", "props": {"v-if": "!split_target_dirs"}, "content": [
+                field("target_path", "共用网盘保存目录", "关闭分目录开关时，115分享转存和离线任务都保存到此目录。填写从网盘根目录开始的路径，目录不存在时自动创建；填写CID后以CID为准。", "115目录路径", placeholder="/115离线"),
+                field("target_cid", "共用目录CID", "仅关闭分目录开关时使用。可填写已有115文件夹的数字CID，填写后优先于共用目录路径；0表示网盘根目录。不清楚CID时留空。", "目录CID（可选）", placeholder="例如：123456789"),
+            ]},
+            {"component": "div", "props": {"v-if": "split_target_dirs"}, "content": [
+                field("offline_target_path", "离线任务保存目录", "开启分目录开关后，识别到 ed2k、magnet 或 .torrent 离线链接时使用此目录。目录不存在时自动创建；填写对应CID后以CID为准。", "离线目录路径", placeholder="/115离线"),
+                field("offline_target_cid", "离线任务目录CID", "可填写已有115文件夹的数字CID，优先于离线目录路径；0表示网盘根目录。留空时使用离线目录路径。", "离线目录CID（可选）", placeholder="例如：123456789"),
+                field("share_target_path", "115分享转存目录", "开启分目录开关后，识别到115分享链接时使用此目录。目录不存在时自动创建；填写对应CID后以CID为准。", "分享目录路径", placeholder="/影视资源/资源池"),
+                field("share_target_cid", "分享转存目录CID", "可填写已有115文件夹的数字CID，优先于分享目录路径；0表示网盘根目录。留空时使用分享目录路径。", "分享目录CID（可选）", placeholder="例如：123456789"),
+            ]},
         ]}], {"enabled": self._enabled, "target_path": self._target_path, "target_cid": self._target_cid,
+               "split_target_dirs": self._split_target_dirs,
+               "offline_target_path": self._offline_target_path, "offline_target_cid": self._offline_target_cid,
+               "share_target_path": self._share_target_path, "share_target_cid": self._share_target_cid,
                "bot_token": self._bot_token, "allowed_users": ",".join(sorted(self._allowed_users)), "bot_proxy": self._bot_proxy}
 
     def get_page(self) -> Optional[List[dict]]:
@@ -303,15 +331,27 @@ class P115Transfer(_PluginBase):
             pass
         logger.info("115转存/离线：回复渠道不可用，未广播消息")
 
-    def _path_id(self, client: P115Client) -> int:
-        if self._target_cid:
-            if not self._target_cid.isdecimal():
+    def _target_settings(self, target_kind: str = "shared") -> Tuple[str, str]:
+        if self._split_target_dirs and target_kind == "offline":
+            return self._offline_target_path, self._offline_target_cid
+        if self._split_target_dirs and target_kind == "share":
+            return self._share_target_path, self._share_target_cid
+        return self._target_path, self._target_cid
+
+    def _target_label(self, target_kind: str = "shared") -> str:
+        target_path, target_cid = self._target_settings(target_kind)
+        return target_cid or target_path
+
+    def _path_id(self, client: P115Client, target_kind: str = "shared") -> int:
+        target_path, target_cid = self._target_settings(target_kind)
+        if target_cid:
+            if not target_cid.isdecimal():
                 raise ValueError("目标目录CID必须为非负整数")
-            return int(self._target_cid)
+            return int(target_cid)
         from p115client.tool.iterdir import iterdir
 
         parent_id = 0
-        for name in (part for part in self._target_path.split("/") if part):
+        for name in (part for part in target_path.split("/") if part):
             matched = None
             for item in iterdir(client, cid=parent_id, ensure_file=False, app="web"):
                 item_name = str(item.get("name") or item.get("file_name") or item.get("n") or "")
@@ -335,16 +375,16 @@ class P115Transfer(_PluginBase):
         share_files = list(share_iterdir(client, receive_code=password, share_code=code, cid=0, app="web", order="user_ptime"))
         if not share_files:
             raise ValueError("分享链接为空或提取码错误")
-        payload = {"share_code": code, "receive_code": password, "file_id": ",".join(str(item["id"]) for item in share_files), "cid": self._path_id(client), "is_check": 0}
+        payload = {"share_code": code, "receive_code": password, "file_id": ",".join(str(item["id"]) for item in share_files), "cid": self._path_id(client, "share"), "is_check": 0}
         response = client.share_receive(payload)
         if not response.get("state"):
             raise response_error("分享转存", response)
-        return f"115分享已转存到 {self._target_cid or self._target_path}"
+        return f"115分享已转存到 {self._target_label('share')}"
 
     def _offline(self, client: P115Client, links: List[str]) -> str:
         validate_offline_links(links)
         try:
-            destination = self._path_id(client)
+            destination = self._path_id(client, "offline")
         except P115OperationError:
             raise
         except Exception as exc:
@@ -389,7 +429,7 @@ class P115Transfer(_PluginBase):
                 raise P115OperationError("提交离线任务：115返回空结果，未确认成功，请核实任务列表")
         else:
             count = len(links)
-        return f"已提交 {count} 条离线任务，目标目录：{self._target_cid or self._target_path}（尚未确认下载完成）"
+        return f"已提交 {count} 条离线任务，目标目录：{self._target_label('offline')}（尚未确认下载完成）"
 
     def _fetch_telegraph(self, path: str) -> str:
         import httpx
