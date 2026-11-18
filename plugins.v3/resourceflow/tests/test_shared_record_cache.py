@@ -9,7 +9,7 @@ import uuid
 
 from resourceflow.shared_cache import ACTIVE_MAX_AGE, COMPLETED_MAX_AGE, SYNC_MAX_PARTS, SharedRecordCache
 from resourceflow.shared_coordinator import CoordinatorStore
-from resourceflow.shared_protocol import RULE_DEFAULTS, SharedError, encode
+from resourceflow.shared_protocol import RULE_DEFAULTS, SharedError, canonical, encode
 import test_shared_arbitration as arbitration
 from test_shared_arbitration import file_row
 
@@ -46,6 +46,26 @@ class SharedRecordCacheTests(unittest.TestCase):
 
     def match(self, *files, age=0):
         return self.cache.filter(self.scope, list(files), self.store.policy, self.now + age)
+
+    def test_existing_cache_and_authority_records_match_canonical_specs(self):
+        self.store = CoordinatorStore(self.store.path, "resources", ["resolution", "effects"], 5, RULE_DEFAULTS)
+        claim = self.reserve(file_row(resolution="2160p", effects="HDR"))["approved"][0]["claim"]
+        legacy_specs = {"resolution": "4K", "effects": "HDR10+"}
+        with self.store.connect() as db:
+            db.execute("UPDATE claims SET specs=? WHERE id=?", (canonical(legacy_specs), claim))
+        snapshot = self.send("sync_records", cursor=0, authority_id=self.store.authority()["authority_id"])
+        self.assertEqual(snapshot["changes"][0]["record"]["specs"], {"resolution": "2160p", "effects": "HDR"})
+        snapshot["changes"][0]["record"]["specs"] = legacy_specs
+        self.cache.apply(self.scope, 0, snapshot, self.now)
+
+        candidate = file_row(resolution="2160p", effects="HDR Vivid")
+        self.assertTrue(self.match(candidate)[1])
+        self.assertEqual(self.cache.search(self.scope, "2160p", "", 1, 20, "")["total"], 1)
+        self.assertFalse(self.reserve(candidate, instance="b" * 32, sender=22)["approved"])
+        distinct = file_row(resolution="4k", effects="Dolby Vision Profile 8")
+        self.assertFalse(self.match(distinct)[1])
+        self.assertTrue(self.reserve(distinct, instance="b" * 32, sender=22)["approved"])
+        self.assertIn({"resolution": "2160p", "effects": "DV"}, [row["specs"] for row in self.store.recent()])
 
     def test_snapshot_resume_and_filter_identical_to_authority(self):
         for start in range(1, 202, 50):

@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from .channel_dedup import normalize_effects, specs_match
+from .channel_dedup import normalize_specs, specs_match
 from .record_search import matches_record, record_page
 from .shared_protocol import ID_PATTERN, SharedError, canonical
 
@@ -25,9 +25,7 @@ def display_record(row):
     for field, length in (("request_id", 32), ("file_id", 24)):
         if not re.fullmatch(rf"[a-f0-9]{{{length}}}", str(item.get(field, ""))):
             item.pop(field, None)
-    item["episodes"], item["specs"] = json.loads(item["episodes"]), json.loads(item["specs"])
-    if item["specs"].get("effects"):
-        item["specs"]["effects"] = normalize_effects(item["specs"]["effects"])
+    item["episodes"], item["specs"] = json.loads(item["episodes"]), normalize_specs(json.loads(item["specs"]))
     return item
 
 
@@ -130,8 +128,13 @@ class SharedRecordCache:
                 return None
             rows = db.execute("SELECT data FROM mirror WHERE (?='' OR state=?) AND (?='' OR media_type=?) "
                               "ORDER BY updated DESC, id", (status, status, media_type, media_type))
-            items = (json.loads(row["data"]) for row in rows)
-            return record_page([item for item in items if matches_record(item, query)], page, page_size)
+            items = []
+            for row in rows:
+                item = json.loads(row["data"])
+                item["specs"] = normalize_specs(item["specs"])
+                if matches_record(item, query):
+                    items.append(item)
+            return record_page(items, page, page_size)
 
 
 def filter_records(db, candidates, rules, *, mirror=False, group=None, completed_only=False):

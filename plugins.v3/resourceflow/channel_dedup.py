@@ -10,6 +10,15 @@ from urllib.parse import unquote
 
 ATTRIBUTES = ("resolution", "effects", "codec", "source", "fps", "size")
 VIDEO_EXTENSIONS = {"mkv", "mp4", "avi", "mov", "wmv", "m4v", "ts", "m2ts", "webm"}
+EFFECT_PATTERNS = {
+    "HDR": re.compile(r"(?<![A-Z0-9])(?:HDR[A-Z0-9]*|MAXPLUS(?![A-Z0-9]))"),
+    "SDR": re.compile(r"(?<![A-Z0-9])SDR[A-Z0-9]*"),
+    "DV": re.compile(r"(?<![A-Z0-9])(?:DOLBY[ ._-]*VISION|DOVI|DV(?!D|B))[A-Z0-9]*"),
+    "HLG": re.compile(r"(?<![A-Z0-9])HLG(?![A-Z0-9])"),
+}
+RESOLUTION_PATTERN = re.compile(
+    r"(?<!\d)(2160|1440|1080|720|576|540|480)\s*([PI])|(?<![A-Z0-9])(4K|UHD|FHD)(?![A-Z0-9])"
+)
 
 
 def normalize_title(value: Any) -> str:
@@ -121,44 +130,36 @@ def parse_size(value: Any) -> Optional[int]:
     return int(float(match.group(1)) * (1024 ** units[match.group(2).upper()]))
 
 
+def _effect_families(value: str) -> Optional[str]:
+    return "+".join(sorted(label for label, pattern in EFFECT_PATTERNS.items() if pattern.search(value))) or None
+
+
 def normalize_effects(value: Any) -> Optional[str]:
-    """Treat HDR Vivid as the same comparison class as ordinary HDR."""
-    if value is None:
+    text = normalize("NFKC", str(value or "")).strip()
+    return _effect_families(text.upper()) or text or None
+
+
+def _parse_resolution(value: str) -> Optional[str]:
+    match = RESOLUTION_PATTERN.search(value)
+    if not match:
         return None
-    value = re.sub(r"(?i)HDR10\s*\+", "HDR10PLUS", str(value))
-    effects = []
-    for item in value.split("+"):
-        item = item.strip()
-        if not item:
-            continue
-        if re.fullmatch(r"(?i)HDR[ ._-]*VIVID|MAXPLUS", item):
-            item = "HDR"
-        elif item.upper() == "HDR10PLUS":
-            item = "HDR10+"
-        effects.append(item)
-    return "+".join(sorted(set(effects))) or None
+    if match.group(3):
+        return "1080p" if match.group(3) == "FHD" else "2160p"
+    return f"{match.group(1)}{match.group(2).lower()}"
+
+
+def normalize_resolution(value: Any) -> Optional[str]:
+    text = normalize("NFKC", str(value or "")).strip()
+    return _parse_resolution(text.upper()) or text or None
+
+
+def normalize_specs(specs: dict) -> dict:
+    return {key: normalize_effects(value) if key == "effects" else
+            normalize_resolution(value) if key == "resolution" else value for key, value in specs.items()}
 
 
 def parse_specs(text: Any, size: Any = None) -> dict:
     value = normalize("NFKC", str(text or "")).upper()
-    value = re.sub(r"(?<![A-Z0-9])(?:4K|UHD)(?![A-Z0-9])", "2160P", value)
-    value = re.sub(r"(?<![A-Z0-9])FHD(?![A-Z0-9])", "1080P", value)
-    resolution_match = re.search(r"(?<!\d)(2160|1440|1080|720|576|540|480)\s*([PI])", value)
-    effects = []
-    for pattern, label in (
-        (r"HDR[ ._-]*VIVID|MAXPLUS", "HDR Vivid"),
-        (r"HDR10\s*\+", "HDR10+"),
-        (r"DOLBY[ ._-]*VISION|DOVI|(?:^|[^A-Z0-9])DV(?:[^A-Z0-9]|$)", "DV"),
-        (r"HDR10(?!\s*\+)", "HDR10"),
-        (r"(?<![A-Z0-9])HDR(?![A-Z0-9])", "HDR"),
-        (r"(?<![A-Z0-9])HLG(?![A-Z0-9])", "HLG"),
-        (r"(?<![A-Z0-9])SDR(?![A-Z0-9])", "SDR"),
-    ):
-        if re.search(pattern, value):
-            effects.append(label)
-    if "HDR Vivid" in effects and "HDR" in effects:
-        effects.remove("HDR")
-    normalized_effects = normalize_effects("+".join(effects))
     codec = None
     for pattern, label in (
         (r"(?:H\.?\s*265|HEVC|X265|H265)", "H.265"),
@@ -199,8 +200,8 @@ def parse_specs(text: Any, size: Any = None) -> dict:
         except ValueError:
             pass
     return {
-        "resolution": f"{resolution_match.group(1)}{resolution_match.group(2).lower()}" if resolution_match else None,
-        "effects": normalized_effects,
+        "resolution": _parse_resolution(value),
+        "effects": _effect_families(value),
         "codec": codec,
         "source": source,
         "fps": fps,
@@ -407,7 +408,12 @@ def specs_match(candidate: dict, record: dict, attributes: Iterable[str], size_t
             if not _same_size(left, right, size_tolerance_pct):
                 return False
         elif attribute == "effects":
-            if not left or not right or normalize_effects(left) != normalize_effects(right):
+            left, right = normalize_effects(left), normalize_effects(right)
+            if not left or left != right:
+                return False
+        elif attribute == "resolution":
+            left, right = normalize_resolution(left), normalize_resolution(right)
+            if not left or left != right:
                 return False
         elif left is None or right is None or left != right:
             return False

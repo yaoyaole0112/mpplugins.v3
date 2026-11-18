@@ -17,7 +17,7 @@ from app.sdk.services import DownloaderHelper
 from app.modules.themoviedb.tmdbapi import TmdbApi
 
 from .active_dedup import download_files, paths_agree
-from .channel_dedup import parse_candidate_file, parse_torrent_files
+from .channel_dedup import normalize_specs, parse_candidate_file, parse_torrent_files
 from .models import ChannelDedupSettingsPayload
 from .record_search import matches_record, record_page
 from .shared_cache import SYNC_VERSION, SharedRecordCache, same_resource
@@ -443,7 +443,8 @@ class SharedResourceMixin:
             "integrity_error": row.get("integrity_error", ""),
             "file_count": len(files), "completed": len(row.get("done") or []),
             "files": [{**{key: item.get(key) for key in
-                         ("id", "path", "media_type", "tmdb_id", "media_title", "season", "episodes", "specs")},
+                         ("id", "path", "media_type", "tmdb_id", "media_title", "season", "episodes")},
+                       "specs": normalize_specs(item.get("specs") or {}),
                        "decision": "approved" if item.get("id") in approved else
                        "rejected" if item.get("id") in decisions else
                        "not_approved" if row["phase"] == "rejected" else "pending",

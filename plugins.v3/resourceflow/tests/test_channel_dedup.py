@@ -9,6 +9,7 @@ from resourceflow.channel_dedup import (
     parse_torrent_files,
     repair_record_frame_rates,
     same_release,
+    specs_match,
 )
 
 
@@ -63,17 +64,27 @@ ed2k://|file|PSYREN -决战游戏-(2026)(tmdbid=297903).S01E05.WEB-DL.1080p.SDR.
         candidate["specs"]["codec"] = "H.265"
         self.assertFalse(same_release(candidate, record, ["resolution", "codec"]))
 
-    def test_hdr_vivid_and_hdr_share_the_same_effect_comparison_value(self):
-        vivid = parse_specs("Show.S01E19.2160p.HDR Vivid.WEB-DL.mkv")
-        hdr = parse_specs("Show.S01E19.2160p.HDR.WEB-DL.mkv")
-        self.assertEqual(vivid["effects"], "HDR")
-        self.assertEqual(hdr["effects"], "HDR")
-        self.assertEqual(parse_specs("Show.HDR10+.mkv")["effects"], "HDR10+")
-        self.assertTrue(same_release(
-            {"tmdb_id": 297903, "season": 1, "episodes": [19], "specs": vivid},
-            {"tmdb_id": 297903, "season": 1, "episodes": [19], "specs": hdr},
-            ["resolution", "effects"],
-        ))
+    def test_spec_aliases_match_legacy_records_within_their_own_family(self):
+        for family, aliases in {
+            "HDR": ("HDR Vivid", "HDR10", "HDR10+", "HDR.Dynamic", "HDRCustom", "MAXPLUS"),
+            "SDR": ("SDR BT.709", "SDR10", "ＳＤＲ"),
+            "DV": ("DV P8", "DV8", "Dolby Vision Profile 5", "DoVi8"),
+        }.items():
+            for alias in aliases:
+                with self.subTest(alias=alias):
+                    candidate = parse_specs(f"Show.S01E19.4K.{alias}.WEB-DL.mkv")
+                    self.assertEqual((candidate["resolution"], candidate["effects"]), ("2160p", family))
+                    self.assertTrue(specs_match({"specs": candidate}, {
+                        "specs": {"resolution": "４Ｋ", "effects": alias},
+                    }, ["effects", "resolution"]))
+                    other = "SDR" if family == "HDR" else "HDR"
+                    self.assertFalse(specs_match({"specs": candidate}, {"specs": {"effects": other}}, ["effects"]))
+
+    def test_explicit_hybrid_and_unknown_effects_are_preserved(self):
+        self.assertEqual(parse_specs("Show.S01E19.DV.P8.HDR10+.mkv")["effects"], "DV+HDR")
+        for quality in ("DVD", "DVDRip", "DVB-S2", "XHDR"):
+            with self.subTest(quality=quality):
+                self.assertIsNone(parse_specs(f"Show.{quality}.mkv")["effects"])
 
     def test_unknown_selected_attribute_fails_open(self):
         record = parse_channel_message("@channel", 1, 1794339396, self.message)
@@ -181,7 +192,7 @@ ed2k://|file|PSYREN -决战游戏-(2026)(tmdbid=297903).S01E05.WEB-DL.1080p.SDR.
                     f"Show.S01E01.1080p.H264.{effect}.WEB-DL.mkv", 1,
                     spec_hint="SDR",
                 )
-                self.assertEqual(candidate["specs"]["effects"], effect)
+                self.assertEqual(candidate["specs"]["effects"], "HDR" if effect.startswith("HDR") else effect)
                 self.assertEqual(candidate["inferred_attributes"], [])
 
     def test_sdr_inference_requires_conventional_avc_web_specs(self):

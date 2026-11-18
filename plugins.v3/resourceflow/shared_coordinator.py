@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 
-from .channel_dedup import normalize_effects
+from .channel_dedup import normalize_specs
 from .record_search import matches_record, record_page
 from .shared_cache import (
     RECORD_COLUMNS, SYNC_BATCH, SYNC_MAX_PARTS, SYNC_VERSION, display_record, filter_records, same_resource,
@@ -396,8 +396,9 @@ class CoordinatorStore:
                     raise SharedError("规格数值无效")
             elif not isinstance(value, str) or not 0 < len(value) <= 80:
                 raise SharedError("规格文本无效")
-        if "effects" in specs:
-            specs["effects"] = normalize_effects(specs["effects"])
+        specs = normalize_specs(specs)
+        if any(value is None for value in specs.values()):
+            raise SharedError("缺少共享规则勾选的规格")
         media_title = row.get("media_title", "")
         if not isinstance(media_title, str):
             raise SharedError("媒体显示名称无效")
@@ -443,9 +444,7 @@ class CoordinatorStore:
         result = []
         for row in rows:
             item = dict(row)
-            item["episodes"], item["specs"] = json.loads(row["episodes"]), json.loads(row["specs"])
-            if item["specs"].get("effects"):
-                item["specs"]["effects"] = normalize_effects(item["specs"]["effects"])
+            item["episodes"], item["specs"] = json.loads(row["episodes"]), normalize_specs(json.loads(row["specs"]))
             result.append(item)
         return result
 
