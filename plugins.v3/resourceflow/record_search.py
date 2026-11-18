@@ -12,7 +12,7 @@ STATE_LABELS = {
 }
 TEXT_FIELDS = (
     "key", "id", "request_id", "title", "media_title", "path", "file_key", "title_key",
-    "task_id", "task_name", "downloader", "label", "owner", "reason", "error",
+    "task_id", "task_name", "downloader", "label", "owner", "download_owners", "reason", "error",
     "channel", "evidence_source",
 )
 SPEC_FIELDS = ("resolution", "effects", "codec", "source", "fps", "size")
@@ -87,6 +87,50 @@ def matches_record(row, query=""):
         return True
     text = _normalize(" ".join(_terms(row)))
     return all(token in text for token in tokens)
+
+
+def record_owners(row):
+    """Return downloader labels visible on a record and its file decisions."""
+    owners = set()
+    for value in row.get("download_owners") or []:
+        if isinstance(value, str) and value.strip():
+            owners.add(value.strip())
+    for key in ("label", "owner"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            owners.add(value.strip())
+    for key in ("files", "rejected"):
+        for item in row.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            for owner_key in ("label", "owner"):
+                value = item.get(owner_key)
+                if isinstance(value, str) and value.strip():
+                    owners.add(value.strip())
+            for decision in item.get("rejected") or []:
+                if isinstance(decision, dict) and isinstance(decision.get("owner"), str):
+                    value = decision["owner"].strip()
+                    if value:
+                        owners.add(value)
+    return owners
+
+
+def matches_owner(row, owner=""):
+    selected = str(owner or "").strip()
+    if not selected:
+        return True
+    target = _normalize(selected)
+    return any(_normalize(value) == target for value in record_owners(row))
+
+
+def matches_media_type(row, media_type=""):
+    selected = str(media_type or "").strip()
+    if not selected:
+        return True
+    if row.get("media_type") == selected:
+        return True
+    return any(isinstance(item, dict) and item.get("media_type") == selected
+               for item in row.get("files") or [])
 
 
 def record_page(items, page=1, page_size=20):

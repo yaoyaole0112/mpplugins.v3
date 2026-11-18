@@ -268,7 +268,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.31"
+    plugin_version = "1.0.32"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -3303,14 +3303,14 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         if downloader_helper.is_downloader("qbittorrent", service=service):
             up_limit = up_speed * 1024 if up_speed else None
             down_limit = down_speed * 1024 if down_speed else None
+            shared_add = bool(recent_selection and recent_selection.get("shared_request_id"))
             random_tag = StringUtils.generate_random_str(10)
             add_result = downloader.add_torrent(
                 content=torrent_content,
                 download_dir=task.save_path,
                 cookie=cookies,
                 category=task.qb_category,
-                tag=[task.brush_tag, random_tag] + ([recent_selection["shared_tag"]]
-                    if recent_selection and recent_selection.get("shared_tag") else []),
+                tag=[task.brush_tag, random_tag],
                 upload_limit=up_limit,
                 download_limit=down_limit,
                 is_paused=bool(recent_selection),
@@ -3329,33 +3329,29 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             if str(torrent_hash).lower() != expected_hash:
                 logger.error(f"刷流任务 [{task.name}] 添加结果 Hash 与种子不一致，停止处理：{title}")
                 return None
+            try:
+                downloader.remove_torrents_tag(ids=torrent_hash, tag=random_tag)
+            except Exception as err:
+                logger.warning(f"刷流任务 [{task.name}] 移除临时标签失败：{str(err)}")
             if recent_selection and not self._select_recent_episode_files(
                 downloader, torrent_hash, recent_selection, "qbittorrent", task.name
             ):
-                if recent_selection.get("shared_tag"):
+                if shared_add:
                     recent_selection["selection_pending"] = True
-                    try:
-                        downloader.remove_torrents_tag(ids=torrent_hash, tag=random_tag)
-                    except Exception as err:
-                        logger.warning(f"刷流任务 [{task.name}] 移除随机标签失败：{str(err)}")
                     return torrent_hash
                 try:
                     downloader.delete_torrents(ids=torrent_hash, delete_file=False)
                 except Exception as err:
                     logger.error(f"移除选集失败的暂停任务失败：{err}")
                 return None
-            try:
-                downloader.remove_torrents_tag(ids=torrent_hash, tag=random_tag)
-            except Exception as err:
-                logger.warning(f"刷流任务 [{task.name}] 移除随机标签失败：{str(err)}")
             return torrent_hash
         if downloader_helper.is_downloader("transmission", service=service):
+            shared_add = bool(recent_selection and recent_selection.get("shared_request_id"))
             added_torrent = downloader.add_torrent(
                 content=torrent_content,
                 download_dir=task.save_path,
                 cookie=cookies,
-                labels=[task.brush_tag] + ([recent_selection["shared_tag"]]
-                    if recent_selection and recent_selection.get("shared_tag") else []),
+                labels=[task.brush_tag],
                 is_paused=bool(recent_selection),
             )
             if not added_torrent:
@@ -3366,7 +3362,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             if recent_selection and not self._select_recent_episode_files(
                 downloader, added_torrent.hashString, recent_selection, "transmission", task.name
             ):
-                if recent_selection.get("shared_tag"):
+                if shared_add:
                     recent_selection["selection_pending"] = True
                     return added_torrent.hashString
                 try:

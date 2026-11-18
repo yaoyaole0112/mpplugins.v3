@@ -132,7 +132,7 @@ class DownloadDedupTest(unittest.TestCase):
 
     def test_shared_selection_failure_keeps_paused_torrent_for_reconciliation(self):
         self.task.recent_episodes_only = True
-        selection = {"accepted": {"test.mkv"}, "shared_tag": "resourceflow-claim-test"}
+        selection = {"accepted": {"test.mkv"}, "shared_request_id": "request-test"}
         self.plugin._recent_episode_file_selection.return_value = selection
         self.plugin._select_recent_episode_files.return_value = False
 

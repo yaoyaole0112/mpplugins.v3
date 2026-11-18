@@ -123,12 +123,16 @@
     const params = new URLSearchParams(path.split('?')[1])
     const query = (params.get('query') || '').toLowerCase().split(/\s+/).filter(Boolean)
     const status = params.get('status')
+    const owner = params.get('owner')
     const media = params.get('media_type')
+    const ownersFor = row => [row.label, ...(row.download_owners || []), ...(row.rejected || []).map(item => item.owner)].filter(Boolean)
+    const owners = [...new Set(items.flatMap(ownersFor))]
     items = items.filter(row => (!status || (row.phase || row.state) === status)
-      && (!media || row.media_type === media)
+      && (!media || row.media_type === media || (row.files || []).some(item => item.media_type === media))
+      && (!owner || ownersFor(row).some(value => value.toLowerCase() === owner.toLowerCase()))
       && query.every(word => JSON.stringify(row).toLowerCase().includes(word)))
     const page = Math.max(1, Number(params.get('page') || 1))
-    return { total: items.length, page, items: items.slice((page - 1) * 20, page * 20) }
+    return { total: items.length, page, owners, items: items.slice((page - 1) * 20, page * 20) }
   }
   window.resourceflowExtraRecords = 0
   const api = {

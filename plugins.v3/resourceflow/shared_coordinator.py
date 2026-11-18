@@ -14,7 +14,9 @@ import uuid
 from app.sdk.logging import logger
 
 from .channel_dedup import normalize_specs
-from .record_search import localized_record_titles, matches_record, record_display_title, record_page
+from .record_search import (
+    localized_record_titles, matches_owner, matches_record, record_display_title, record_page,
+)
 from .shared_cache import (
     RECORD_COLUMNS, SYNC_BATCH, SYNC_MAX_PARTS, SYNC_VERSION, display_record, filter_records, same_resource,
 )
@@ -173,7 +175,7 @@ class CoordinatorStore:
             return {"ok": True, **self.authority(), "records": self.search_records(
                 str(body.get("query", ""))[:200], str(body.get("status", "")),
                 body.get("page", 1), min(int(body.get("page_size", 20)), 20),
-                str(body.get("media_type", "")))}
+                str(body.get("media_type", "")), str(body.get("owner", ""))[:80])}
         if op == "inspect":
             return self._inspect(db, sender, instance, body)
         if op == "update":
@@ -455,10 +457,12 @@ class CoordinatorStore:
             return bool(db.execute("SELECT 1 FROM claims WHERE group_id=? AND state IN ('reserved','queued') LIMIT 1",
                                    (self.group,)).fetchone())
 
-    def search_records(self, query="", status="", page=1, page_size=20, media_type=""):
+    def search_records(self, query="", status="", page=1, page_size=20, media_type="", owner=""):
         with self.connect() as db:
             db.execute("BEGIN")
             titles = self._media_titles(db)
+            owners = {row[0] for row in db.execute(
+                "SELECT DISTINCT label FROM claims WHERE group_id=? AND label<>''", (self.group,))}
             rows = db.execute(
                 f"SELECT {','.join(RECORD_COLUMNS)} FROM claims "
                 "WHERE group_id=? AND (?='' OR state=?) ORDER BY created DESC, id",
@@ -469,9 +473,9 @@ class CoordinatorStore:
                     continue
                 item = display_record(row)
                 item["media_title"] = record_display_title(item, titles)
-                if matches_record(item, query):
+                if matches_owner(item, owner) and matches_record(item, query):
                     items.append(item)
-        return record_page(items, page, page_size)
+        return {**record_page(items, page, page_size), "owners": sorted(owners, key=str.casefold)}
 
     def media_titles(self):
         with self.connect() as db:

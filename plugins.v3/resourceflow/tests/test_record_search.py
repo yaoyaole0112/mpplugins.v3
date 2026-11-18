@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock
 
 from resourceflow import ResourceFlow
-from resourceflow.record_search import matches_record, record_page
+from resourceflow.record_search import matches_owner, matches_record, matches_media_type, record_page
 from resourceflow.shared_coordinator import CoordinatorStore
 
 
@@ -25,6 +25,14 @@ class RecordSearchTests(unittest.TestCase):
                 self.assertTrue(matches_record(self.row, query))
         for query in ("S01E07", "2160p", "玫瑰 HDR"):
             self.assertFalse(matches_record(self.row, query))
+
+    def test_directed_owner_and_media_type_filters(self):
+        request = {"download_owners": ["设备A"], "files": [self.row]}
+        self.assertTrue(matches_owner(request, "设备A"))
+        self.assertTrue(matches_owner(request, "设备a"))
+        self.assertFalse(matches_owner(request, "设备B"))
+        self.assertTrue(matches_media_type(request, "tv"))
+        self.assertFalse(matches_media_type(request, "movie"))
 
     def test_nested_files_and_rejections(self):
         row = {"files": [self.row], "rejected": [{"owner": "朋友", "reason": "已存在"}],
@@ -95,6 +103,22 @@ class ApprovalSearchTests(unittest.TestCase):
         self.assertEqual(len(result["items"]), 20)
         self.assertEqual(self.plugin.get_shared_records(status="rejected").data["total"], 1)
         self.assertEqual(self.plugin.get_shared_records(query="private-passkey").data["total"], 0)
+
+    def test_download_owner_and_media_type_filters_apply_before_paging(self):
+        for index in range(125):
+            row = self.plugin._shared_claims[str(index)]
+            row["approved"] = {"approved": "claim"} if index % 2 else {}
+            row["rejected"] = ([{"id": "duplicate", "owner": "设备B", "reason": "同规格已占位或已完成",
+                                 "state": "queued"}] if index % 2 == 0 else [])
+            row["files"][0]["media_type"] = "movie" if index == 1 else "tv"
+        self.plugin._shared_settings = SimpleNamespace(instance_label="设备A", enabled=False)
+        result = self.plugin.get_shared_records(owner="设备B", media_type="tv", page=1, page_size=10).data
+        self.assertEqual(result["total"], 63)
+        self.assertTrue(all(row["files"][0]["media_type"] == "tv" for row in result["items"]))
+        own = self.plugin.get_shared_records(owner="设备A", media_type="movie").data
+        self.assertEqual(own["total"], 1)
+        self.assertEqual(own["items"][0]["request_id"], "1")
+        self.assertIn("设备A", own["owners"])
 
     def test_filtered_label_and_reasons_searchable_with_legacy_alias(self):
         self.plugin._shared_claims["0"].update(phase="rejected", error="规格数值无效", rejected=[{"id": "legacy"}])
@@ -228,6 +252,15 @@ class StoreSearchTests(unittest.TestCase):
         self.assertEqual(page["items"][0]["id"], "104")
         self.assertEqual(self.store.search_records(query="' OR 1=1 --")["total"], 0)
         self.assertEqual(self.store.search_records(query="边城旧事 1080P")["total"], 125)
+
+    def test_store_owner_filter_is_applied_before_pagination_and_returns_all_owners(self):
+        with self.store.connect() as db:
+            db.execute("UPDATE claims SET label='设备A' WHERE id='0'")
+            db.execute("UPDATE claims SET label='设备B' WHERE id='1'")
+        result = self.store.search_records(owner="设备B", page=1, page_size=1)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["id"], "1")
+        self.assertEqual(result["owners"], ["设备A", "设备B", "边城旧事"])
 
     def test_media_titles_are_group_scoped_and_latest_wins(self):
         with self.store.connect() as db:

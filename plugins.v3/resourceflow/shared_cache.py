@@ -7,7 +7,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .channel_dedup import normalize_specs, specs_match
-from .record_search import localized_record_titles, matches_record, record_display_title, record_page
+from .record_search import (
+    localized_record_titles, matches_owner, matches_record, record_display_title, record_page,
+)
 from .shared_protocol import ID_PATTERN, SharedError, canonical
 
 
@@ -121,12 +123,15 @@ class SharedRecordCache:
                 return candidates, []
             return filter_records(db, candidates, rules, mirror=True, completed_only=age >= ACTIVE_MAX_AGE)
 
-    def search(self, scope, query, status, page, page_size, media_type):
+    def search(self, scope, query, status, page, page_size, media_type, owner=""):
         with self.connect() as db:
             db.execute("BEGIN")
             if self.progress(scope, db)["more"]:
                 return None
             titles = self._media_titles(db)
+            owners = {row[0] for row in db.execute(
+                "SELECT DISTINCT json_extract(data, '$.label') FROM mirror "
+                "WHERE COALESCE(json_extract(data, '$.label'), '') <> ''")}
             rows = db.execute("SELECT data FROM mirror WHERE (?='' OR state=?) AND (?='' OR media_type=?) "
                               "ORDER BY json_extract(data, '$.created') DESC, id", (status, status, media_type, media_type))
             items = []
@@ -134,9 +139,9 @@ class SharedRecordCache:
                 item = json.loads(row["data"])
                 item["specs"] = normalize_specs(item["specs"])
                 item["media_title"] = record_display_title(item, titles)
-                if matches_record(item, query):
+                if matches_owner(item, owner) and matches_record(item, query):
                     items.append(item)
-            return record_page(items, page, page_size)
+            return {**record_page(items, page, page_size), "owners": sorted(owners, key=str.casefold)}
 
     def media_titles(self, scope):
         with self.connect() as db:

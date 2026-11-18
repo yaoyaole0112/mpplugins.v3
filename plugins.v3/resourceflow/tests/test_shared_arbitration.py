@@ -374,7 +374,8 @@ class AdmissionTests(unittest.TestCase):
         patcher = patch("resourceflow.shared_plugin.DownloaderHelper", return_value=helper)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.task = SimpleNamespace(id="t", downloader="QB", enabled=True, spec_dedup_enabled=True, name="test")
+        self.task = SimpleNamespace(id="t", downloader="QB", enabled=True, spec_dedup_enabled=True,
+                                    name="test", brush_tag="resourceflow-test")
         p._task_configs = {"t": self.task}
         self.events = []
 
@@ -420,7 +421,8 @@ class AdmissionTests(unittest.TestCase):
         selection = self.plugin._add_local_prechecked_torrent.call_args.args[6]
         self.assertEqual(selection["accepted"], {"Show.S01E01.mkv"})
         self.assertTrue(selection["hold_paused"])
-        self.assertEqual(selection["shared_tag"], self.plugin._shared_tag(self.entry()))
+        self.assertEqual(selection["shared_request_id"], self.entry()["request_id"])
+        self.assertNotIn("shared_tag", selection)
         self.assertEqual(self.entry()["phase"], "queued")
 
     def test_same_local_spec_reuses_claim_without_second_reserve(self):
@@ -566,6 +568,31 @@ class AdmissionTests(unittest.TestCase):
                     {"index": 1, "name": "unapproved.mkv", "size": 10, "progress": 0, "priority": 1}]
         with self.assertRaises(SharedError):
             self.reconcile(torrents=[{"tags": self.plugin._shared_tag(self.entry())}], files=snapshot)
+
+    def test_new_claim_recovers_with_only_the_existing_task_tag(self):
+        self.add()
+        original_tag = self.task.brush_tag
+        self.task.brush_tag = "renamed-task"
+        snapshot = [{"index": 0, "name": "Show.S01E01.mkv", "size": 10, "progress": 0.5, "priority": 1}]
+        self.reconcile(torrents=[{"tags": original_tag}], files=snapshot)
+        self.assertEqual(self.entry()["phase"], "queued")
+        self.downloader.get_files.assert_called()
+
+    def test_active_legacy_marker_is_kept_when_no_normal_tag_confirms_ownership(self):
+        self.add()
+        self.entry().pop("task_tag")
+        torrent = {"tags": self.plugin._shared_tag(self.entry())}
+        self.plugin._remove_legacy_shared_tag(self.entry(), self.task, self.downloader, "qbittorrent", torrent)
+        self.downloader.remove_torrents_tag.assert_not_called()
+
+    def test_old_claim_marker_is_removed_without_removing_task_tag(self):
+        self.add()
+        self.entry()["download_started_at"] = time.time()
+        torrent = {"tags": f"{self.task.brush_tag},{self.plugin._shared_tag(self.entry())}"}
+        self.downloader.remove_torrents_tag.return_value = True
+        self.plugin._remove_legacy_shared_tag(self.entry(), self.task, self.downloader, "qbittorrent", torrent)
+        self.downloader.remove_torrents_tag.assert_called_once_with(
+            ids="a" * 40, tag=self.plugin._shared_tag(self.entry()))
 
     def test_completion_report_and_no_release_of_completed_claim(self):
         self.add()

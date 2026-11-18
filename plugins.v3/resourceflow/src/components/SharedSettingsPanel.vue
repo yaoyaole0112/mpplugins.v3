@@ -27,9 +27,24 @@ const requestRows = computed(() => uniqueRequestRows(recordRows.value.items).map
 const recordPage = ref(1)
 const recordsLoading = ref(false)
 const recordFilters = ref({
-  requests: { query: '', status: '' }, records: { query: '', status: '' },
+  requests: { query: '', owner: '', media_type: '', status: '' },
+  records: { query: '', owner: '', media_type: '', status: '' },
 })
 const activeFilter = computed(() => recordFilters.value[props.recordTab])
+const ownerOptions = computed(() => {
+  const owners = new Set(recordRows.value.owners || [])
+  if (activeFilter.value?.owner) owners.add(activeFilter.value.owner)
+  return [
+    { value: '', title: '全部下载方' },
+    ...[...owners].filter(Boolean).sort((a, b) => a.localeCompare(b, 'zh-CN'))
+      .map(value => ({ value, title: value })),
+  ]
+})
+const mediaTypeOptions = [
+  { value: '', title: '全部类型' },
+  { value: 'tv', title: '剧集' },
+  { value: 'movie', title: '电影' },
+]
 let searchTimer
 let recordsGeneration = 0
 const phaseNames = {
@@ -49,9 +64,10 @@ const phaseIcons = {
 }
 const statusOptions = computed(() => [
   { value: '', title: '全部状态' },
-  ...Object.entries(phaseNames).filter(([key]) =>
-    props.recordTab === 'requests' || ['reserved', 'queued', 'completed', 'released'].includes(key),
-  ).map(([value, title]) => ({ value, title })),
+  ...(props.recordTab === 'requests'
+    ? ['completed', 'queued', 'released', 'rejected']
+    : ['reserved', 'queued', 'completed', 'released'])
+    .map(value => ({ value, title: phaseNames[value] })),
 ])
 
 async function loadRecords() {
@@ -61,7 +77,8 @@ async function loadRecords() {
   recordsLoading.value = true
   error.value = ''
   const params = new URLSearchParams({
-    kind: props.recordTab, query: activeFilter.value.query || '', status: activeFilter.value.status || '',
+    kind: props.recordTab, query: activeFilter.value.query || '', owner: activeFilter.value.owner || '',
+    media_type: activeFilter.value.media_type || '', status: activeFilter.value.status || '',
     page: String(recordPage.value), page_size: '20',
   })
   try {
@@ -153,7 +170,8 @@ watch(() => draft.value.host_coordinator, value => {
   if (props.mode === 'settings') emit('host-change', value)
 }, { immediate: true })
 watch(recordsLoading, value => emit('loading-change', value), { immediate: true })
-watch(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.status], (values, previous) => {
+watch(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.owner,
+  activeFilter.value?.media_type, activeFilter.value?.status], (values, previous) => {
   if (props.mode !== 'records') return
   clearTimeout(searchTimer)
   recordsGeneration += 1
@@ -163,7 +181,8 @@ watch(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.sta
   recordsLoading.value = true
   recordPage.value = 1
   if (!activeFilter.value) return
-  const delay = values[0] === previous[0] && values[2] === previous[2] ? 300 : 0
+  const delay = values[0] === previous[0] && values[2] === previous[2]
+    && values[3] === previous[3] && values[4] === previous[4] ? 300 : 0
   recordsLoading.value = true
   searchTimer = setTimeout(loadRecords, delay)
 })
@@ -213,12 +232,16 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
     <div v-if="activeFilter" class="shared-settings__search">
       <VTextField v-model="activeFilter.query" label="搜索记录" prepend-inner-icon="mdi-magnify"
         clearable maxlength="200" density="comfortable" hide-details />
+      <VSelect v-model="activeFilter.owner" label="下载方筛选" :items="ownerOptions"
+        item-title="title" item-value="value" clearable density="comfortable" hide-details />
+      <VSelect v-model="activeFilter.media_type" label="类型筛选" :items="mediaTypeOptions"
+        item-title="title" item-value="value" density="comfortable" hide-details />
       <VSelect v-model="activeFilter.status" label="状态筛选" :items="statusOptions"
         density="comfortable" hide-details />
     </div>
     <div v-if="recordTab === 'requests'" class="shared-settings__records">
       <div v-if="!recordsLoading && !recordRows.items.length" class="text-body-2 text-medium-emphasis">
-        {{ activeFilter.query || activeFilter.status ? '无匹配记录' : '暂无共享申请' }}
+        {{ activeFilter.query || activeFilter.owner || activeFilter.media_type || activeFilter.status ? '无匹配记录' : '暂无共享申请' }}
       </div>
       <article v-for="row in requestRows" :key="row.request_id" class="shared-settings__record">
         <div class="shared-settings__record-head">
@@ -256,7 +279,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
     </div>
     <div v-else-if="recordTab === 'records' && (state.host_coordinator || state.enabled)" class="shared-settings__records">
       <div v-if="!recordsLoading && !recordRows.items.length" class="text-body-2 text-medium-emphasis">
-        {{ activeFilter.query || activeFilter.status ? '无匹配记录' : '暂无共享占位' }}
+        {{ activeFilter.query || activeFilter.owner || activeFilter.media_type || activeFilter.status ? '无匹配记录' : '暂无共享占位' }}
       </div>
       <article v-for="row in recordRows.items" :key="row.id" class="shared-settings__record">
         <div class="shared-settings__record-head">
@@ -295,7 +318,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 <style scoped>
 .shared-settings { display: flex; flex-direction: column; gap: 16px; min-inline-size: 0; }
 .shared-settings--compact { gap: 12px; }
-.shared-settings__search { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 12px; }
+.shared-settings__search { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 210px) minmax(130px, 160px) minmax(150px, 170px); gap: 12px; }
 .shared-settings__search > * { min-inline-size: 0; }
 .shared-settings__grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 12px 20px; min-inline-size: 0; }
 .shared-settings__grid > * { min-inline-size: 0; }
@@ -340,8 +363,12 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 .shared-settings__pagination { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; min-block-size: 52px; margin-block-start: 8px; }
 .shared-settings__pagination-control { grid-column: 2; min-inline-size: 0; }
 .shared-settings__total { grid-column: 3; justify-self: end; white-space: nowrap; }
+@media (min-width: 600px) and (max-width: 800px) {
+  .shared-settings__search { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 599px) {
-  .shared-settings__search { grid-template-columns: minmax(0, 1fr); }
+  .shared-settings__search { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .shared-settings__search > :nth-child(-n+2) { grid-column: 1 / -1; }
   .shared-settings__record-head { gap: 8px; }
   .shared-settings__record-head .shared-settings__badge { max-inline-size: 56%; white-space: normal; }
   .shared-settings__meta { flex-direction: column; align-items: flex-start; gap: 4px; }

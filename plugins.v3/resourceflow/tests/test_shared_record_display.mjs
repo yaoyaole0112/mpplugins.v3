@@ -117,7 +117,7 @@ test('same owner and duplicate reason collapse into one line without claim IDs',
   const rows = rejectionSummaries({ rejected: Array.from({ length: 6 }, (_, index) => ({
     reason: '同规格已占位或已完成', owner: '设备B', state: 'completed', claim: `claim-${index}`,
   })) })
-  assert.deepEqual(rows, ['资源已下载 · 下载方：设备B'])
+  assert.deepEqual(rows, ['命中其他下载：已完成 · 下载方：设备B'])
 })
 
 test('multiple owners are preserved in a single reason line', () => {
@@ -125,7 +125,7 @@ test('multiple owners are preserved in a single reason line', () => {
     { reason: '同规格已占位或已完成', owner: '设备B' },
     { reason: '同规格已占位或已完成', owner: '设备A' },
     { reason: '同规格已占位或已完成', owner: '设备B' },
-  ] }), ['资源已下载 · 下载方：设备B、设备A'])
+  ] }), ['命中其他下载：已完成 · 下载方：设备B、设备A'])
 })
 
 test('in-progress conflicts are distinguished from completed downloads', () => {
@@ -133,7 +133,13 @@ test('in-progress conflicts are distinguished from completed downloads', () => {
     { reason: '同规格已占位或已完成', owner: '设备A', state: 'queued' },
     { reason: '同规格已占位或已完成', owner: '设备B', state: 'reserved' },
     { reason: '同规格已占位或已完成', owner: '设备C', state: 'completed' },
-  ] }), ['资源下载中 · 下载方：设备A、设备B', '资源已下载 · 下载方：设备C'])
+  ] }), ['命中其他下载：正在下载 · 下载方：设备A、设备B', '命中其他下载：已完成 · 下载方：设备C'])
+})
+
+test('filtered request distinguishes its own rejection from another downloader match', () => {
+  assert.deepEqual(rejectionSummaries({ phase: 'rejected', rejected: [
+    { reason: '同规格已占位或已完成', owner: '边城旧事', state: 'queued' },
+  ] }), ['命中其他下载：正在下载 · 下载方：边城旧事'])
 })
 
 test('distinct non-duplicate rejection reasons remain visible', () => {

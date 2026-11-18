@@ -19,7 +19,10 @@ from app.modules.themoviedb.tmdbapi import TmdbApi
 from .active_dedup import download_files, paths_agree
 from .channel_dedup import normalize_specs, parse_candidate_file, parse_torrent_files
 from .models import ChannelDedupSettingsPayload
-from .record_search import matches_record, record_display_title, record_page, record_title_key
+from .record_search import (
+    matches_media_type, matches_owner, matches_record, record_display_title, record_owners, record_page,
+    record_title_key,
+)
 from .shared_cache import SYNC_VERSION, SharedRecordCache, same_resource
 from .shared_coordinator import BotWorker, CoordinatorStore
 from .shared_history import AUTHORITY_VERSION, completion_rows
@@ -435,6 +438,11 @@ class SharedResourceMixin:
         return {
             "request_id": row["request_id"], "title": row["title"], "phase": row["phase"],
             "task_id": row["task_id"], "task_name": getattr(task, "name", None),
+            "download_owners": sorted({
+                *([getattr(getattr(self, "_shared_settings", None), "instance_label", "")]
+                  if approved else []),
+                *(item.get("owner", "") for item in rejected if isinstance(item, dict) and item.get("owner")),
+            }),
             "downloader": row.get("downloader"), "created": row.get("created"), "updated": row.get("updated"),
             "download_started_at": row.get("download_started_at"),
             "timeout_at": row.get("timeout_at"), "timeout_reason": row.get("timeout_reason", ""),
@@ -481,20 +489,21 @@ class SharedResourceMixin:
         })
 
     def get_shared_records(self, kind: str = "requests", query: str = "", status: str = "",
-                           page: int = 1, page_size: int = 20, media_type: str = "") -> schemas.Response:
+                           page: int = 1, page_size: int = 20, media_type: str = "",
+                           owner: str = "") -> schemas.Response:
         if kind not in {"requests", "records"}:
             return schemas.Response(success=False, message="无效的记录类别")
         if kind == "records":
             store = getattr(self, "_shared_store", None)
             if store:
-                data = store.search_records(query, status, page, page_size, media_type)
+                data = store.search_records(query, status, page, page_size, media_type, owner)
             elif getattr(self, "_shared_settings", None) and self._shared_settings.enabled:
                 self._shared_cache_activity = time.time()
                 probe = self._shared_cache_probe()
                 if probe:
                     try:
                         data = self._shared_cache.search(self._shared_cache_scope(probe), query, status, page,
-                                                         page_size, media_type)
+                                                         page_size, media_type, owner)
                     except (sqlite3.Error, KeyError, TypeError, ValueError):
                         data = None
                     if data is not None:
@@ -503,9 +512,12 @@ class SharedResourceMixin:
                     with self._shared_rpc_lock:
                         response = self._shared_exchange(uuid.uuid4().hex, {
                             "op": "records", "query": query[:200], "status": status,
-                            "page": page, "page_size": min(page_size, 20), "media_type": media_type})
+                            "page": page, "page_size": min(page_size, 20), "media_type": media_type,
+                            "owner": owner[:80]})
                     self._require_shared_authority(response)
                     data = response["records"]
+                    if owner and "owners" not in data:
+                        raise SharedError("协调端版本较旧，暂不支持下载方筛选；请先更新协调端")
                 except SharedError as error:
                     return schemas.Response(success=False, message=str(error))
             else:
@@ -513,11 +525,20 @@ class SharedResourceMixin:
         else:
             titles = self._resource_display_titles()
             with self._shared_lock:
-                rows = [self._shared_request_status(row, titles) for row in self._shared_claims.values()
-                        if not status or row.get("phase") == status]
-            rows = [row for row in rows if matches_record(row, query)]
+                rows = [self._shared_request_status(row, titles) for row in self._shared_claims.values()]
+            owners = set()
+            filtered = []
+            for row in rows:
+                owners.update(record_owners(row))
+                phase = row.get("phase")
+                matches_status = (not status or phase == status
+                                  or status == "queued" and phase == "awaiting_start")
+                if (matches_status and matches_media_type(row, media_type)
+                        and matches_owner(row, owner) and matches_record(row, query)):
+                    filtered.append(row)
+            rows = filtered
             rows.sort(key=lambda row: (-(row.get("created") or 0), row["request_id"]))
-            data = record_page(rows, page, page_size)
+            data = {**record_page(rows, page, page_size), "owners": sorted(owners, key=str.casefold)}
         return schemas.Response(success=True, data=self._shared_record_display_page(data, kind))
 
     @staticmethod
@@ -670,10 +691,9 @@ class SharedResourceMixin:
             return False
         if selection.get("hold_paused") is not True:
             return False
-        tag = selection.get("shared_tag")
-        if not isinstance(tag, str) or not tag.startswith("resourceflow-claim-"):
+        request_id = selection.get("shared_request_id")
+        if not isinstance(request_id, str) or not request_id:
             return False
-        request_id = tag.removeprefix("resourceflow-claim-")
         entry = getattr(self, "_shared_claims", {}).get(request_id)
         if (not entry or entry.get("phase") != "adding" or not entry.get("approved")
                 or entry.get("task_id") != task.id or entry.get("downloader") != task.downloader
@@ -730,21 +750,28 @@ class SharedResourceMixin:
         with self._shared_lock:
             for torrent in torrents:
                 torrent_hash = self._ResourceFlow__get_hash(torrent)
-                entries = [entry for entry in self._shared_claims.values()
-                           if entry["hash"] == torrent_hash and entry["downloader"] == task.downloader
-                           and entry["phase"] not in {"completed", "released", "rejected"}]
-                if not entries:
+                matching_entries = [entry for entry in self._shared_claims.values()
+                                    if entry["hash"] == torrent_hash
+                                    and entry["downloader"] == task.downloader
+                                    and entry.get("task_id") == task.id]
+                if not matching_entries:
                     continue
                 kind = "qbittorrent" if isinstance(torrent, dict) else "transmission"
-                tags = (str(torrent.get("tags") or "").split(",") if kind == "qbittorrent"
-                        else list(getattr(torrent, "labels", None) or []))
                 try:
                     service = DownloaderHelper().get_service(name=task.downloader)
+                    if not service or not service.instance:
+                        continue
+                    for entry in matching_entries:
+                        self._remove_legacy_shared_tag(entry, task, service.instance, kind, torrent)
+                    entries = [entry for entry in matching_entries
+                               if entry["phase"] not in {"completed", "released", "rejected"}]
+                    if not entries:
+                        continue
                     files = download_files(service.instance.get_files(torrent_hash), kind) if service else None
                     if not files:
                         continue
                     for entry in entries:
-                        if self._shared_tag(entry) not in {str(tag).strip() for tag in tags}:
+                        if not self._shared_torrent_owned(entry, task, torrent, kind):
                             continue
                         observed = set(entry.get("observed_completed", []))
                         for row in entry["files"]:
@@ -1020,6 +1047,7 @@ class SharedResourceMixin:
                 if not self._shared_task_ready(task):
                     raise SharedError("任务或共享设置已变更，暂不添加下载")
                 entry["attempted_add"] = True
+                entry["task_tag"] = task.brush_tag
                 self._shared_phase(entry, "adding")
                 paths = {row["path"] for row in entry["files"] if row["id"] in entry["approved"]}
                 with self._inflight_lock:
@@ -1030,7 +1058,7 @@ class SharedResourceMixin:
                 result = self._add_local_prechecked_torrent(
                     content, cookies, task, downloader, service, expected_hash,
                     selection := {"accepted": paths, "hold_paused": True,
-                                  "shared_tag": self._shared_tag(entry)}, title)
+                                  "shared_request_id": request_id}, title)
                 if not result:
                     self._shared_phase(entry, "uncertain", error="添加或选集未确认，保留占位等待核验")
                     return None
@@ -1096,7 +1124,53 @@ class SharedResourceMixin:
 
     @staticmethod
     def _shared_tag(entry):
+        """Legacy visible marker used only to clean up tasks from older versions."""
         return f"resourceflow-claim-{entry['request_id']}"
+
+    @staticmethod
+    def _torrent_tags(torrent, kind):
+        if kind == "qbittorrent":
+            raw = torrent.get("tags") or ""
+            return {str(tag).strip() for tag in raw.split(",") if str(tag).strip()}
+        return {str(tag).strip() for tag in (getattr(torrent, "labels", None) or []) if str(tag).strip()}
+
+    def _shared_torrent_owned(self, entry, task, torrent, kind):
+        tags = self._torrent_tags(torrent, kind)
+        if self._shared_tag(entry) in tags:
+            return True
+        return self._shared_task_tag_matches(entry, task, tags)
+
+    @staticmethod
+    def _shared_task_tag_matches(entry, task, tags):
+        return bool(entry.get("attempted_add") and (
+            entry.get("task_tag") in tags or (
+                task and task.id == entry.get("task_id") and task.downloader == entry.get("downloader")
+                and task.brush_tag in tags)))
+
+    def _remove_legacy_shared_tag(self, entry, task, downloader, kind, torrent):
+        """Remove the old visible marker after the normal task label confirms ownership."""
+        legacy_tag = self._shared_tag(entry)
+        current_tags = self._torrent_tags(torrent, kind)
+        if legacy_tag not in current_tags or not task:
+            return
+        if (entry["phase"] not in {"completed", "released", "rejected"}
+                and not self._shared_task_tag_matches(entry, task, current_tags)):
+            # An in-flight legacy task may still rely on this marker when its task tag has changed.
+            return
+        try:
+            if kind == "qbittorrent":
+                removed = downloader.remove_torrents_tag(ids=entry["hash"], tag=legacy_tag)
+            else:
+                current = list(downloader.get_torrent_tags(ids=entry["hash"]) or [])
+                remaining = [tag for tag in current if tag != legacy_tag]
+                if remaining and legacy_tag in current:
+                    removed = downloader.set_torrent_tag(ids=entry["hash"], tags=remaining, org_tags=[])
+                else:
+                    removed = legacy_tag not in current
+            if removed is True:
+                logger.info(f"清理旧共享归属标签 {entry.get('title', '')}：{legacy_tag}")
+        except Exception as error:
+            logger.warning(f"清理旧共享归属标签失败 {entry.get('title', '')}：{error}")
 
     def _start_shared_download(self, entry, task, downloader):
         if not entry.get("approved") or entry.get("phase") not in {"awaiting_start", "queued"}:
@@ -1216,16 +1290,15 @@ class SharedResourceMixin:
         kind = "qbittorrent" if DownloaderHelper().is_downloader("qbittorrent", service=service) else "transmission"
         if len(torrents) != 1:
             raise SharedError("下载器任务不唯一，保留占位等待核验")
-        tags = (str(torrents[0].get("tags") or "").split(",") if kind == "qbittorrent"
-                else list(getattr(torrents[0], "labels", None) or []))
-        if self._shared_tag(entry) not in {str(tag).strip() for tag in tags}:
-            raise SharedError("任务缺少本申请归属标签，不自动操作或释放占位")
+        task = self._task_configs.get(entry["task_id"])
+        if not self._shared_torrent_owned(entry, task, torrents[0], kind):
+            raise SharedError("下载器任务缺少本任务标签，无法确认共享申请归属；保留占位等待核验")
+        self._remove_legacy_shared_tag(entry, task, downloader, kind, torrents[0])
         approved = [row for row in entry["files"] if row["id"] in entry["approved"]]
         if entry.get("timeout_cancel_pending"):
             self._cancel_timed_out_download(entry, downloader)
             return
         if entry["phase"] in {"adding", "uncertain", "reserved", "requesting"} or entry.get("selection_pending"):
-            task = self._task_configs.get(entry["task_id"])
             if not task or not self._shared_task_ready(task, entry["hash"]):
                 raise SharedError("原任务不可运行，保留暂停任务等待核验")
             if not self._select_recent_episode_files(downloader, entry["hash"],

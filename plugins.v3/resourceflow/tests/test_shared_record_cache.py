@@ -113,6 +113,17 @@ class SharedRecordCacheTests(unittest.TestCase):
         self.assertEqual(first["media_title"], "剧集中文名")
         self.assertEqual(self.cache.media_titles("other-scope"), {})
 
+    def test_mirror_owner_filter_happens_before_paging_and_returns_all_owners(self):
+        self.reserve(file_row())
+        second = self.reserve(file_row(2, 2), instance="b" * 32, sender=22)
+        with self.store.connect() as db:
+            db.execute("UPDATE claims SET label='NAS-B' WHERE id=?", (second["approved"][0]["claim"],))
+        self.sync()
+        result = self.cache.search(self.scope, "", "", 1, 20, "", owner="NAS-B")
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["label"], "NAS-B")
+        self.assertEqual(result["owners"], ["NAS-A", "NAS-B"])
+
     def test_expiry_and_scope_fail_open_only_to_reserve(self):
         completed, active = [row["claim"] for row in self.reserve(file_row(), file_row(2, 2))["approved"]]
         self.send("update", updates=[{"claim": completed, "state": "completed"}, {"claim": active, "state": "queued"}])

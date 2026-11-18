@@ -70,7 +70,7 @@ class SharedDownloadGateTests(unittest.TestCase):
         variants = [
             None,
             {**selection, "hold_paused": False},
-            {**selection, "shared_tag": "resourceflow-claim-" + "f" * 32},
+            {**selection, "shared_request_id": "other-request"},
             {**selection, "accepted": {"Show.S01E02.mkv"}},
             {**selection, "accepted": set()},
         ]
@@ -113,7 +113,8 @@ class SharedDownloadGateTests(unittest.TestCase):
         self.assertEqual(result, "a" * 40)
         self.assertTrue(downloader.add_torrent.call_args.kwargs["is_paused"])
         entry = next(iter(plugin._shared_claims.values()))
-        self.assertIn(plugin._shared_tag(entry), downloader.add_torrent.call_args.kwargs["tag"])
+        self.assertFalse(any(tag.startswith("resourceflow-claim-")
+                             for tag in downloader.add_torrent.call_args.kwargs["tag"]))
         downloader.start_torrents.assert_called_once_with("a" * 40)
 
     def test_rejected_or_released_entry_cannot_be_started(self):

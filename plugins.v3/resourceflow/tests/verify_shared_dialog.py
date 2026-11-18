@@ -184,6 +184,25 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
     await dialog.get_by_text(f'{prefix}124', exact=True).wait_for()
     assert await dialog.locator(f'{selector}:visible').count() == 1
     assert await dialog.locator('.v-pagination:visible').count() == 0
+    if not ledger:
+        toolbar = dialog.locator('.shared-settings__search:visible')
+        owner_select, type_select = toolbar.locator('.v-select').nth(0), toolbar.locator('.v-select').nth(1)
+        await owner_select.click()
+        await page.get_by_role('option', name='朋友A', exact=True).click()
+        await dialog.get_by_text('无匹配记录', exact=True).wait_for()
+        await owner_select.click()
+        await page.get_by_role('option', name='搜索下载方', exact=True).click()
+        await dialog.get_by_text(f'{prefix}124', exact=True).wait_for()
+        await type_select.click()
+        await page.get_by_role('option', name='电影', exact=True).click()
+        await dialog.get_by_text('无匹配记录', exact=True).wait_for()
+        await type_select.click()
+        await page.get_by_role('option', name='剧集', exact=True).click()
+        await dialog.get_by_text(f'{prefix}124', exact=True).wait_for()
+        await type_select.click()
+        await page.get_by_role('option', name='全部类型', exact=True).click()
+        await owner_select.click()
+        await page.get_by_role('option', name='全部下载方', exact=True).click()
     await search.fill('not-a-record-[]_%')
     await dialog.get_by_text('无匹配记录', exact=True).wait_for()
     bounds = await dialog.locator('.channel-dedup__card').bounding_box()
@@ -199,15 +218,19 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
     await page.evaluate('window.resourceflowSlowSearch = false; window.resourceflowExtraRecords = 0')
     await search.fill('')
     toolbar = dialog.locator('.channel-dedup__search:visible, .shared-settings__search:visible')
+    status_select = toolbar.locator('.v-select').last
     value = '电影' if ledger else '已过滤' if tab == '本机下载申请' else '已完成'
-    await toolbar.locator('.v-select').click()
+    await status_select.click()
+    if tab == '本机下载申请':
+        assert set(await page.get_by_role('option').all_text_contents()) == {
+            '全部状态', '已完成', '已入队', '已释放', '已过滤'}
     await page.get_by_role('option', name=value, exact=True).click()
     await page.wait_for_function("""selector =>
         [...document.querySelectorAll(selector)].filter(item => item.getBoundingClientRect().width > 0).length === 1
     """, arg=selector)
     await search.fill('not-a-record')
     await dialog.get_by_text('无匹配记录', exact=True).wait_for()
-    await toolbar.locator('.v-select').click()
+    await status_select.click()
     await page.get_by_role('option', name='全部类型' if ledger else '全部状态', exact=True).click()
     await search.fill('')
     await page.wait_for_timeout(600)
@@ -287,7 +310,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await first.locator('.shared-settings__id').count() == 1
             assert '申请编号：' in await first.inner_text()
             assert await first.locator('.shared-settings__reason').all_text_contents() == [
-                '资源已下载 · 下载方：朋友A']
+                '命中其他下载：已完成 · 下载方：朋友A']
             assert '过滤原因' not in await first.inner_text()
             assert '命中占位' not in await first.inner_text()
             assert '占位方' not in await first.inner_text()
@@ -653,7 +676,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert text.startswith('凤起微月 · S01E01-06 · TMDB 342129'), text
             assert text.endswith('大小 6.0 GB'), text
             assert await first.locator('.shared-settings__reason').all_text_contents() == [
-                '资源已下载 · 下载方：设备B']
+                '命中其他下载：已完成 · 下载方：设备B']
             await first.get_by_text('已过滤（6）', exact=True).wait_for()
             assert '首文件' not in await first.inner_text()
             assert '命中占位' not in await first.inner_text()

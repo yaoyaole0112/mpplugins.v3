@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { R as ResourceFlowWorkbench } from './ResourceFlowWorkbench-DZr0-2_D.js';
+import { R as ResourceFlowWorkbench } from './ResourceFlowWorkbench-BoI6hSsD.js';
 
 const {openBlock:_openBlock,createBlock:_createBlock} = await importShared('vue');
 

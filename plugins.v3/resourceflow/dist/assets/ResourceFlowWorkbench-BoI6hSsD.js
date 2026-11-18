@@ -1247,7 +1247,7 @@ function rejectionSummaries(row) {
   for (const item of row.rejected || []) {
     const reason = item.reason || '';
     const status = reason === '同规格已占位或已完成'
-      ? ['reserved', 'queued'].includes(item.state) ? '资源下载中' : '资源已下载'
+      ? ['reserved', 'queued'].includes(item.state) ? '命中其他下载：正在下载' : '命中其他下载：已完成'
       : '';
     if (!reason && !item.owner) continue
     const key = JSON.stringify([status, reason]);
@@ -1378,9 +1378,24 @@ const requestRows = computed$1(() => uniqueRequestRows(recordRows.value.items).m
 const recordPage = ref$1(1);
 const recordsLoading = ref$1(false);
 const recordFilters = ref$1({
-  requests: { query: '', status: '' }, records: { query: '', status: '' },
+  requests: { query: '', owner: '', media_type: '', status: '' },
+  records: { query: '', owner: '', media_type: '', status: '' },
 });
 const activeFilter = computed$1(() => recordFilters.value[props.recordTab]);
+const ownerOptions = computed$1(() => {
+  const owners = new Set(recordRows.value.owners || []);
+  if (activeFilter.value?.owner) owners.add(activeFilter.value.owner);
+  return [
+    { value: '', title: '全部下载方' },
+    ...[...owners].filter(Boolean).sort((a, b) => a.localeCompare(b, 'zh-CN'))
+      .map(value => ({ value, title: value })),
+  ]
+});
+const mediaTypeOptions = [
+  { value: '', title: '全部类型' },
+  { value: 'tv', title: '剧集' },
+  { value: 'movie', title: '电影' },
+];
 let searchTimer;
 let recordsGeneration = 0;
 const phaseNames = {
@@ -1400,9 +1415,10 @@ const phaseIcons = {
 };
 const statusOptions = computed$1(() => [
   { value: '', title: '全部状态' },
-  ...Object.entries(phaseNames).filter(([key]) =>
-    props.recordTab === 'requests' || ['reserved', 'queued', 'completed', 'released'].includes(key),
-  ).map(([value, title]) => ({ value, title })),
+  ...(props.recordTab === 'requests'
+    ? ['completed', 'queued', 'released', 'rejected']
+    : ['reserved', 'queued', 'completed', 'released'])
+    .map(value => ({ value, title: phaseNames[value] })),
 ]);
 
 async function loadRecords() {
@@ -1412,7 +1428,8 @@ async function loadRecords() {
   recordsLoading.value = true;
   error.value = '';
   const params = new URLSearchParams({
-    kind: props.recordTab, query: activeFilter.value.query || '', status: activeFilter.value.status || '',
+    kind: props.recordTab, query: activeFilter.value.query || '', owner: activeFilter.value.owner || '',
+    media_type: activeFilter.value.media_type || '', status: activeFilter.value.status || '',
     page: String(recordPage.value), page_size: '20',
   });
   try {
@@ -1504,7 +1521,8 @@ watch$1(() => draft.value.host_coordinator, value => {
   if (props.mode === 'settings') emit('host-change', value);
 }, { immediate: true });
 watch$1(recordsLoading, value => emit('loading-change', value), { immediate: true });
-watch$1(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.status], (values, previous) => {
+watch$1(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.owner,
+  activeFilter.value?.media_type, activeFilter.value?.status], (values, previous) => {
   if (props.mode !== 'records') return
   clearTimeout(searchTimer);
   recordsGeneration += 1;
@@ -1514,7 +1532,8 @@ watch$1(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.s
   recordsLoading.value = true;
   recordPage.value = 1;
   if (!activeFilter.value) return
-  const delay = values[0] === previous[0] && values[2] === previous[2] ? 300 : 0;
+  const delay = values[0] === previous[0] && values[2] === previous[2]
+    && values[3] === previous[3] && values[4] === previous[4] ? 300 : 0;
   recordsLoading.value = true;
   searchTimer = setTimeout(loadRecords, delay);
 });
@@ -1600,7 +1619,7 @@ return (_ctx, _cache) => {
       : _createCommentVNode$1("", true),
     (__props.mode === 'settings')
       ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 5 }, [
-          _cache[15] || (_cache[15] = _createElementVNode$1("div", { class: "text-subtitle-2" }, "Telegram 共享审批", -1)),
+          _cache[17] || (_cache[17] = _createElementVNode$1("div", { class: "text-subtitle-2" }, "Telegram 共享审批", -1)),
           _createElementVNode$1("div", _hoisted_1$1, [
             _createVNode$1(_component_VSwitch, {
               modelValue: draft.value.enabled,
@@ -1676,27 +1695,27 @@ return (_ctx, _cache) => {
               ]))
             : _createCommentVNode$1("", true),
           _createElementVNode$1("dl", _hoisted_3$1, [
-            _cache[14] || (_cache[14] = _createElementVNode$1("div", null, [
+            _cache[16] || (_cache[16] = _createElementVNode$1("div", null, [
               _createElementVNode$1("dt", null, "账号来源"),
               _createElementVNode$1("dd", null, "自动生成ED2K链接 · 个人账号")
             ], -1)),
             _createElementVNode$1("div", null, [
-              _cache[10] || (_cache[10] = _createElementVNode$1("dt", null, "协调端", -1)),
+              _cache[12] || (_cache[12] = _createElementVNode$1("dt", null, "协调端", -1)),
               _createElementVNode$1("dd", null, _toDisplayString$1(state.value.host_coordinator ? state.value.coordinator_running ? '本机运行中' : '本机未运行' : '远端'), 1)
             ]),
             _createElementVNode$1("div", null, [
-              _cache[11] || (_cache[11] = _createElementVNode$1("dt", null, "最近审批确认", -1)),
+              _cache[13] || (_cache[13] = _createElementVNode$1("dt", null, "最近审批确认", -1)),
               _createElementVNode$1("dd", null, _toDisplayString$1(timestamp(state.value.last_ok)), 1)
             ]),
             (state.value.probe?.user_id)
               ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_4$1, [
-                  _cache[12] || (_cache[12] = _createElementVNode$1("dt", null, "本机 Telegram ID", -1)),
+                  _cache[14] || (_cache[14] = _createElementVNode$1("dt", null, "本机 Telegram ID", -1)),
                   _createElementVNode$1("dd", null, _toDisplayString$1(state.value.probe.user_id), 1)
                 ]))
               : _createCommentVNode$1("", true),
             (state.value.probe?.policy)
               ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_5$1, [
-                  _cache[13] || (_cache[13] = _createElementVNode$1("dt", null, "协调端规则版本", -1)),
+                  _cache[15] || (_cache[15] = _createElementVNode$1("dt", null, "协调端规则版本", -1)),
                   _createElementVNode$1("dd", null, _toDisplayString$1(state.value.probe.policy.revision.slice(0, 12)), 1)
                 ]))
               : _createCommentVNode$1("", true)
@@ -1716,8 +1735,29 @@ return (_ctx, _cache) => {
                   "hide-details": ""
                 }, null, 8, ["modelValue"]),
                 _createVNode$1(_component_VSelect, {
+                  modelValue: activeFilter.value.owner,
+                  "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((activeFilter.value.owner) = $event)),
+                  label: "下载方筛选",
+                  items: ownerOptions.value,
+                  "item-title": "title",
+                  "item-value": "value",
+                  clearable: "",
+                  density: "comfortable",
+                  "hide-details": ""
+                }, null, 8, ["modelValue", "items"]),
+                _createVNode$1(_component_VSelect, {
+                  modelValue: activeFilter.value.media_type,
+                  "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((activeFilter.value.media_type) = $event)),
+                  label: "类型筛选",
+                  items: mediaTypeOptions,
+                  "item-title": "title",
+                  "item-value": "value",
+                  density: "comfortable",
+                  "hide-details": ""
+                }, null, 8, ["modelValue"]),
+                _createVNode$1(_component_VSelect, {
                   modelValue: activeFilter.value.status,
-                  "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((activeFilter.value.status) = $event)),
+                  "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((activeFilter.value.status) = $event)),
                   label: "状态筛选",
                   items: statusOptions.value,
                   density: "comfortable",
@@ -1728,7 +1768,7 @@ return (_ctx, _cache) => {
           (__props.recordTab === 'requests')
             ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_7$1, [
                 (!recordsLoading.value && !recordRows.value.items.length)
-                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_8$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.status ? '无匹配记录' : '暂无共享申请'), 1))
+                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_8$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.owner || activeFilter.value.media_type || activeFilter.value.status ? '无匹配记录' : '暂无共享申请'), 1))
                   : _createCommentVNode$1("", true),
                 (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(requestRows.value, (row) => {
                   return (_openBlock$1(), _createElementBlock$1("article", {
@@ -1798,7 +1838,7 @@ return (_ctx, _cache) => {
             : (__props.recordTab === 'records' && (state.value.host_coordinator || state.value.enabled))
               ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_22$1, [
                   (!recordsLoading.value && !recordRows.value.items.length)
-                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_23$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.status ? '无匹配记录' : '暂无共享占位'), 1))
+                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_23$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.owner || activeFilter.value.media_type || activeFilter.value.status ? '无匹配记录' : '暂无共享占位'), 1))
                     : _createCommentVNode$1("", true),
                   (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(recordRows.value.items, (row) => {
                     return (_openBlock$1(), _createElementBlock$1("article", {
@@ -1845,7 +1885,7 @@ return (_ctx, _cache) => {
                       _createVNode$1(_component_VPagination, {
                         modelValue: recordPage.value,
                         "onUpdate:modelValue": [
-                          _cache[9] || (_cache[9] = $event => ((recordPage).value = $event)),
+                          _cache[11] || (_cache[11] = $event => ((recordPage).value = $event)),
                           loadRecords
                         ],
                         length: Math.ceil(recordRows.value.total / 20),
@@ -1862,7 +1902,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-33a71f2f"]]);
+const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-16aec415"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle} = await importShared('vue');
 
