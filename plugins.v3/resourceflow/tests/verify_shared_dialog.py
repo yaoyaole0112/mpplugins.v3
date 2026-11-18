@@ -222,8 +222,10 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
     value = '电影' if ledger else '已过滤' if tab == '本机下载申请' else '已完成'
     await status_select.click()
     if tab == '本机下载申请':
-        assert set(await page.get_by_role('option').all_text_contents()) == {
-            '全部状态', '已完成', '已入队', '已释放', '已过滤'}
+        await page.get_by_role('option', name='已过滤', exact=True).wait_for()
+        options = await page.get_by_role('option').all_text_contents()
+        assert {option.strip() for option in options} == {
+            '全部状态', '已完成', '已入队', '已释放', '已过滤'}, options
     await page.get_by_role('option', name=value, exact=True).click()
     await page.wait_for_function("""selector =>
         [...document.querySelectorAll(selector)].filter(item => item.getBoundingClientRect().width > 0).length === 1
@@ -648,7 +650,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_role("tab", name="共享下载记录", exact=True).click()
             await dialog.get_by_text(f"关联申请：{'b' * 32}", exact=True).wait_for()
             toolbar = dialog.locator('.shared-settings__search:visible')
-            await toolbar.locator('.v-select').click()
+            await toolbar.locator('.v-select').filter(has=page.locator('label', has_text='状态筛选')).click()
             await page.get_by_role('option', name='已完成', exact=True).click()
             await page.wait_for_function("""[...document.querySelectorAll('.shared-settings__record')]
                 .filter(element => element.getBoundingClientRect().width > 0).length === 1""")
