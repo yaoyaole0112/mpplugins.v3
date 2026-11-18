@@ -199,7 +199,7 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
     await page.evaluate('window.resourceflowSlowSearch = false; window.resourceflowExtraRecords = 0')
     await search.fill('')
     toolbar = dialog.locator('.channel-dedup__search:visible, .shared-settings__search:visible')
-    value = '电影' if ledger else '已排除' if tab == '本机下载申请' else '已完成'
+    value = '电影' if ledger else '已过滤' if tab == '本机下载申请' else '已完成'
     await toolbar.locator('.v-select').click()
     await page.get_by_role('option', name=value, exact=True).click()
     await page.wait_for_function("""selector =>
@@ -286,7 +286,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await first.locator('details').count() == 0
             assert await first.locator('.shared-settings__id').count() == 1
             assert '申请编号：' in await first.inner_text()
-            assert await first.locator('.shared-settings__reason').all_text_contents() == ['资源已下载 · 下载方：朋友A']
+            assert await first.locator('.shared-settings__reason').all_text_contents() == [
+                '资源已下载 · 下载方：朋友A · 过滤原因：同规格已占位或已完成']
             assert '命中占位' not in await first.inner_text()
             assert '占位方' not in await first.inner_text()
             assert await dialog.get_by_role("button", name="核验未完成申请", exact=True).count() == 0
@@ -464,7 +465,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_role("tab", name="共享下载记录", exact=True).click()
             await dialog.get_by_text("朋友A", exact=False).wait_for()
             claim = dialog.locator('.shared-settings__records article').first
-            assert '占位时间' in await claim.inner_text()
+            assert '下载时间：' in await claim.inner_text()
             assert '最近更新' in await claim.inner_text()
             assert '下载方：朋友A' in await claim.inner_text()
             assert '占位编号：' in await claim.inner_text()
@@ -641,9 +642,17 @@ async def verify(base_url, output, executable_path, host_css=None):
             text = await summary.inner_text()
             assert text.startswith('凤起微月 · S01E01-06 · TMDB 342129'), text
             assert text.endswith('大小 6.0 GB'), text
-            assert await first.locator('.shared-settings__reason').all_text_contents() == ['资源已下载 · 下载方：设备B']
+            assert await first.locator('.shared-settings__reason').all_text_contents() == [
+                '资源已下载 · 下载方：设备B · 过滤原因：同规格已占位或已完成']
+            await first.get_by_text('已过滤（6）', exact=True).wait_for()
             assert '首文件' not in await first.inner_text()
             assert '命中占位' not in await first.inner_text()
+            completed = dialog.locator('.shared-settings__record').filter(has_text='Lets Go S01 2026 2160p WEB-DL')
+            assert await completed.count() == 1
+            assert await completed.locator('.shared-settings__preview').all_text_contents() == [
+                '走马上任 · S01E36-40 · TMDB 275297 · 分辨率 2160p · 特效 HDR · 编码 H.265 · 来源 WEB-DL · 大小 16.5 GB']
+            await completed.get_by_text(f"关联占位：{'1' * 32} 等5个", exact=True).wait_for()
+            assert '2' * 32 not in await completed.inner_text()
             await verify_record_layout(dialog)
             await page.screenshot(path=str(output / f'pack-summary-{width}.png'), full_page=True)
             await page.close()

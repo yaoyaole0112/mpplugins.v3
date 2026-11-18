@@ -96,6 +96,17 @@ class ApprovalSearchTests(unittest.TestCase):
         self.assertEqual(self.plugin.get_shared_records(status="rejected").data["total"], 1)
         self.assertEqual(self.plugin.get_shared_records(query="private-passkey").data["total"], 0)
 
+    def test_filtered_label_and_reasons_searchable_with_legacy_alias(self):
+        self.plugin._shared_claims["0"].update(phase="rejected", error="规格数值无效", rejected=[{"id": "legacy"}])
+        self.plugin._shared_claims["1"].update(phase="rejected", rejected=[
+            {"id": "file", "reason": "同规格已占位或已完成", "state": "completed", "owner": "边城旧事"}])
+        for query, request_id in (("已过滤 过滤原因 规格数值无效", "0"), ("已排除 资源已下载 边城旧事", "1")):
+            result = self.plugin.get_shared_records(query=query).data
+            self.assertEqual(result["total"], 1)
+            self.assertEqual(result["items"][0]["request_id"], request_id)
+        status = self.plugin.get_shared_records(query="规格数值无效").data["items"][0]
+        self.assertEqual(status["error"], "规格数值无效")
+
     def test_requests_identity_task_and_specs_combined(self):
         result = self.plugin.get_shared_records(query="站点 玫瑰 S01E05 1080p").data
         self.assertEqual(result["total"], 1)

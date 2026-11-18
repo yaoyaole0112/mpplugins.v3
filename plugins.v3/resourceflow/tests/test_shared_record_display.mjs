@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { episodeLabel, releaseDetails, requestMediaSummaries, rejectionSummaries } from '../src/sharedRecordDisplay.js'
+import { claimLinkSummary, episodeLabel, releaseDetails, requestMediaSummaries, rejectionSummaries, uniqueRequestRows } from '../src/sharedRecordDisplay.js'
 
 function file(episode = 1, extra = {}) {
   return {
@@ -23,6 +23,34 @@ test('six physical files show real range and total size', () => {
   assert.match(rows[0], /^凤起微月 · S01E01-06 · TMDB 342129/)
   assert.match(rows[0], /大小 6.0 GB$/)
   assert(!rows[0].includes('首文件'))
+})
+
+test('five-file request shows the range and total once even with repeated file rows', () => {
+  const files = Array.from({ length: 5 }, (_, index) => file(36 + index, {
+    media_title: '走马上任', tmdb_id: 275297,
+    specs: { ...file().specs, fps: index % 2 ? '' : null, size: 3543348019 },
+  }))
+  assert.deepEqual(requestMediaSummaries({ files: [...files, ...files] }), [
+    '走马上任 · S01E36-40 · TMDB 275297 · 分辨率 2160p · 特效 HDR · 编码 H.265 · 来源 WEB-DL · 大小 16.5 GB',
+  ])
+})
+
+test('identical visible summaries do not repeat within a card', () => {
+  const files = [file(1, { tmdb_id: null }), file(1, { tmdb_id: null, path: 'other.mkv' })]
+  assert.equal(requestMediaSummaries({ files }).length, 1)
+})
+
+test('duplicate request IDs show the latest snapshot without hiding distinct requests', () => {
+  const row = { request_id: 'same', title: '走马上任', updated: 1, phase: 'queued', task_id: 'a' }
+  const latest = { ...row, updated: 2, phase: 'completed' }
+  const other = { ...row, request_id: 'other', phase: 'rejected', task_id: 'b' }
+  assert.deepEqual(uniqueRequestRows([row, other, latest, row]), [latest, other])
+})
+
+test('linked claims show first distinct ID and total only when multiple', () => {
+  assert.equal(claimLinkSummary({ claim_links: ['first', 'b', 'c', 'd', 'e', 'b'] }), 'first 等5个')
+  assert.equal(claimLinkSummary({ claim_links: ['first', 'first'] }), 'first')
+  assert.equal(claimLinkSummary({}), '')
 })
 
 test('episode ranges are sorted, unique, and do not invent missing episodes', () => {
@@ -89,7 +117,7 @@ test('same owner and duplicate reason collapse into one line without claim IDs',
   const rows = rejectionSummaries({ rejected: Array.from({ length: 6 }, (_, index) => ({
     reason: '同规格已占位或已完成', owner: '设备B', state: 'completed', claim: `claim-${index}`,
   })) })
-  assert.deepEqual(rows, ['资源已下载 · 下载方：设备B'])
+  assert.deepEqual(rows, ['资源已下载 · 下载方：设备B · 过滤原因：同规格已占位或已完成'])
 })
 
 test('multiple owners are preserved in a single reason line', () => {
@@ -97,7 +125,7 @@ test('multiple owners are preserved in a single reason line', () => {
     { reason: '同规格已占位或已完成', owner: '设备B' },
     { reason: '同规格已占位或已完成', owner: '设备A' },
     { reason: '同规格已占位或已完成', owner: '设备B' },
-  ] }), ['资源已下载 · 下载方：设备B、设备A'])
+  ] }), ['资源已下载 · 下载方：设备B、设备A · 过滤原因：同规格已占位或已完成'])
 })
 
 test('in-progress conflicts are distinguished from completed downloads', () => {
@@ -105,13 +133,22 @@ test('in-progress conflicts are distinguished from completed downloads', () => {
     { reason: '同规格已占位或已完成', owner: '设备A', state: 'queued' },
     { reason: '同规格已占位或已完成', owner: '设备B', state: 'reserved' },
     { reason: '同规格已占位或已完成', owner: '设备C', state: 'completed' },
-  ] }), ['资源下载中 · 下载方：设备A、设备B', '资源已下载 · 下载方：设备C'])
+  ] }), ['资源下载中 · 下载方：设备A、设备B · 过滤原因：同规格已占位或已完成',
+    '资源已下载 · 下载方：设备C · 过滤原因：同规格已占位或已完成'])
 })
 
 test('distinct non-duplicate rejection reasons remain visible', () => {
   assert.deepEqual(rejectionSummaries({ rejected: [
     { reason: '缺少分辨率' }, { reason: '身份不明' }, { reason: '缺少分辨率' },
-  ] }), ['缺少分辨率', '身份不明'])
+  ] }), ['过滤原因：缺少分辨率', '过滤原因：身份不明'])
+})
+
+test('legacy filtered requests use their recorded error only when no file reason exists', () => {
+  assert.deepEqual(rejectionSummaries({ phase: 'rejected', error: '规格数值无效', rejected: [{}] }),
+    ['过滤原因：规格数值无效'])
+  assert.deepEqual(rejectionSummaries({ phase: 'rejected', error: '规格数值无效', rejected: [{ reason: '身份不明' }] }),
+    ['过滤原因：身份不明'])
+  assert.deepEqual(rejectionSummaries({ phase: 'uncertain', error: '暂不可用' }), [])
 })
 
 test('empty legacy records remain displayable', () => {

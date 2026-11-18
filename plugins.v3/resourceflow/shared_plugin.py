@@ -438,7 +438,8 @@ class SharedResourceMixin:
             "downloader": row.get("downloader"), "created": row.get("created"), "updated": row.get("updated"),
             "download_started_at": row.get("download_started_at"),
             "timeout_at": row.get("timeout_at"), "timeout_reason": row.get("timeout_reason", ""),
-            "error": "" if row["phase"] == "rejected" and rejected else row.get("error", ""),
+            "error": "" if row["phase"] == "rejected" and any(item.get("reason") for item in decisions.values())
+            else row.get("error", ""),
             "approved": len(approved), "rejected": rejected,
             "integrity_error": row.get("integrity_error", ""),
             "file_count": len(files), "completed": len(row.get("done") or []),

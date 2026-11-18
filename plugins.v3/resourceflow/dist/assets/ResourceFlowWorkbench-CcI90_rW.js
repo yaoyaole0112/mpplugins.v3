@@ -1200,7 +1200,7 @@ function requestMediaSummaries(row) {
   for (const [index, file] of (row.files || []).entries()) {
     const key = JSON.stringify([
       file.media_type, file.tmdb_id || `unknown-${index}`, file.season,
-      ...qualityKeys.map(field => file.specs?.[field] ?? null),
+      ...qualityKeys.map(field => file.specs?.[field] === '' ? null : file.specs?.[field] ?? null),
     ]);
     if (!groups.has(key)) groups.set(key, { file, episodes: new Set(), sizes: new Map() });
     const group = groups.get(key);
@@ -1214,28 +1214,53 @@ function requestMediaSummaries(row) {
     if (!group.sizes.has(physicalFile)) group.sizes.set(physicalFile, validSize ? size : null);
     else if (previous !== size) group.sizes.set(physicalFile, null);
   }
-  return [...groups.values()].map(group => {
+  const summaries = [...groups.values()].map(group => {
     const sizes = [...group.sizes.values()];
     const total = sizes.every(value => value !== null) ? sizes.reduce((sum, value) => sum + value, 0) : null;
     const size = Number.isFinite(total) && total > 0 ? total : null;
     return releaseDetails({
       ...group.file, episodes: [...group.episodes], specs: { ...group.file.specs, size },
     })
-  })
+  });
+  return [...new Set(summaries)]
+}
+
+function uniqueRequestRows(items) {
+  const requests = new Map();
+  for (const row of items) {
+    if (!row.request_id) continue
+    const previous = requests.get(row.request_id);
+    if (!previous || Number(row.updated || 0) > Number(previous.updated || 0)) {
+      requests.set(row.request_id, row);
+    }
+  }
+  return [...requests.values()]
+}
+
+function claimLinkSummary(row) {
+  const [first, ...rest] = new Set((row.claim_links || []).filter(Boolean));
+  return first ? `${first}${rest.length ? ` 等${rest.length + 1}个` : ''}` : ''
 }
 
 function rejectionSummaries(row) {
   const reasons = new Map();
   for (const item of row.rejected || []) {
-    const reason = item.reason === '同规格已占位或已完成'
+    const reason = item.reason || '';
+    const status = reason === '同规格已占位或已完成'
       ? ['reserved', 'queued'].includes(item.state) ? '资源下载中' : '资源已下载'
-      : item.reason || '';
+      : '';
     if (!reason && !item.owner) continue
-    if (!reasons.has(reason)) reasons.set(reason, new Set());
-    if (item.owner) reasons.get(reason).add(item.owner);
+    const key = JSON.stringify([status, reason]);
+    if (!reasons.has(key)) reasons.set(key, { status, reason, owners: new Set() });
+    if (item.owner) reasons.get(key).owners.add(item.owner);
   }
-  return [...reasons].map(([reason, owners]) =>
-    [reason, owners.size ? `下载方：${[...owners].join('、')}` : ''].filter(Boolean).join(' · '))
+  const summaries = [...reasons.values()].map(({ status, reason, owners }) =>
+    [status, owners.size ? `下载方：${[...owners].join('、')}` : '', reason ? `过滤原因：${reason}` : '']
+      .filter(Boolean).join(' · '));
+  if (row.phase === 'rejected' && row.error && ![...reasons.values()].some(item => item.reason)) {
+    summaries.push(`过滤原因：${row.error}`);
+  }
+  return summaries
 }
 
 const {toDisplayString:_toDisplayString$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,createElementVNode:_createElementVNode$1,createVNode:_createVNode$1,createElementBlock:_createElementBlock$1,Fragment:_Fragment$1,renderList:_renderList$1,unref:_unref$1,normalizeClass:_normalizeClass$1} = await importShared('vue');
@@ -1346,8 +1371,9 @@ const ready = ref$1(false);
 const canTest = computed$1(() => Boolean(state.value.bot_username));
 const error = ref$1('');
 const recordRows = ref$1({ items: [], total: 0 });
-const requestRows = computed$1(() => recordRows.value.items.map(row => ({
+const requestRows = computed$1(() => uniqueRequestRows(recordRows.value.items).map(row => ({
   ...row, mediaSummaries: requestMediaSummaries(row), rejectionSummaries: rejectionSummaries(row),
+  claimSummary: claimLinkSummary(row),
 })));
 const recordPage = ref$1(1);
 const recordsLoading = ref$1(false);
@@ -1360,7 +1386,7 @@ let recordsGeneration = 0;
 const phaseNames = {
   requesting: '等待审批', reserved: '已获准', adding: '暂停添加中', awaiting_start: '等待入队确认',
   timeout_cancel_pending: '超时取消中',
-  queued: '已入队', completed: '已完成', released: '已释放', rejected: '已排除', uncertain: '待核验',
+  queued: '已入队', completed: '已完成', released: '已释放', rejected: '已过滤', uncertain: '待核验',
 };
 const phaseColors = {
   requesting: 'info', reserved: 'success', adding: 'info', awaiting_start: 'warning',
@@ -1415,7 +1441,7 @@ function requestSummary(row) {
   const approved = Number(row.approved || 0);
   const rejected = row.rejected?.length || 0;
   const completed = Number(row.completed || 0);
-  if (row.phase === 'rejected') return `已排除（${rejected || row.file_count || 0}）`
+  if (row.phase === 'rejected') return `${phaseNames.rejected}（${rejected || row.file_count || 0}）`
   if (row.phase === 'queued' || row.phase === 'awaiting_start') return `已入队（${approved}）`
   if (row.phase === 'completed') return `已完成（${completed || approved}）`
   if (['reserved', 'adding'].includes(row.phase)) return `已批准（${approved}）`
@@ -1748,7 +1774,7 @@ return (_ctx, _cache) => {
                       _createElementVNode$1("span", null, "任务：" + _toDisplayString$1(row.task_name || row.task_id || '-'), 1),
                       _createElementVNode$1("span", null, "下载器：" + _toDisplayString$1(row.downloader || '-'), 1)
                     ]),
-                    (row.error)
+                    (row.error && row.phase !== 'rejected')
                       ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_17$1, _toDisplayString$1(row.error), 1))
                       : _createCommentVNode$1("", true),
                     (row.integrity_error)
@@ -1762,8 +1788,8 @@ return (_ctx, _cache) => {
                     }), 128)),
                     _createElementVNode$1("div", _hoisted_19$1, [
                       _createElementVNode$1("span", _hoisted_20$1, "申请编号：" + _toDisplayString$1(row.request_id), 1),
-                      (row.claim_links?.length)
-                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_21$1, " 关联占位：" + _toDisplayString$1(row.claim_links.join(' · ')), 1))
+                      (row.claimSummary)
+                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_21$1, " 关联占位：" + _toDisplayString$1(row.claimSummary), 1))
                         : _createCommentVNode$1("", true)
                     ])
                   ]))
@@ -1836,7 +1862,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-45c69812"]]);
+const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-33a71f2f"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle} = await importShared('vue');
 

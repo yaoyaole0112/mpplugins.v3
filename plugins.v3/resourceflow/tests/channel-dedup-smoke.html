@@ -108,6 +108,16 @@
         id: `file-${index}`, reason: '同规格已占位或已完成', owner: '设备B', state: 'completed', claim: String(index).repeat(32),
       })),
     }]
+    const completed = {
+      ...shared.requests[0], request_id: '5'.repeat(32), title: 'Lets Go S01 2026 2160p WEB-DL',
+      phase: 'completed', approved: 5, completed: 5, file_count: 5, rejected: [],
+      claim_links: ['1', '2', '3', '4', '5'].map(id => id.repeat(32)),
+      files: shared.requests[0].files.slice(0, 5).map((file, index) => ({
+        ...file, media_title: '走马上任', tmdb_id: 275297, episodes: [36 + index],
+        specs: { ...file.specs, fps: null, size: 3543348019 },
+      })),
+    }
+    shared.requests.push(completed, { ...completed, updated: completed.updated - 1 })
   }
   function recordPage(items, path) {
     const params = new URLSearchParams(path.split('?')[1])

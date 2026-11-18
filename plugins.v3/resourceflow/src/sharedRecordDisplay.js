@@ -33,7 +33,7 @@ export function requestMediaSummaries(row) {
   for (const [index, file] of (row.files || []).entries()) {
     const key = JSON.stringify([
       file.media_type, file.tmdb_id || `unknown-${index}`, file.season,
-      ...qualityKeys.map(field => file.specs?.[field] ?? null),
+      ...qualityKeys.map(field => file.specs?.[field] === '' ? null : file.specs?.[field] ?? null),
     ])
     if (!groups.has(key)) groups.set(key, { file, episodes: new Set(), sizes: new Map() })
     const group = groups.get(key)
@@ -47,7 +47,7 @@ export function requestMediaSummaries(row) {
     if (!group.sizes.has(physicalFile)) group.sizes.set(physicalFile, validSize ? size : null)
     else if (previous !== size) group.sizes.set(physicalFile, null)
   }
-  return [...groups.values()].map(group => {
+  const summaries = [...groups.values()].map(group => {
     const sizes = [...group.sizes.values()]
     const total = sizes.every(value => value !== null) ? sizes.reduce((sum, value) => sum + value, 0) : null
     const size = Number.isFinite(total) && total > 0 ? total : null
@@ -55,18 +55,43 @@ export function requestMediaSummaries(row) {
       ...group.file, episodes: [...group.episodes], specs: { ...group.file.specs, size },
     })
   })
+  return [...new Set(summaries)]
+}
+
+export function uniqueRequestRows(items) {
+  const requests = new Map()
+  for (const row of items) {
+    if (!row.request_id) continue
+    const previous = requests.get(row.request_id)
+    if (!previous || Number(row.updated || 0) > Number(previous.updated || 0)) {
+      requests.set(row.request_id, row)
+    }
+  }
+  return [...requests.values()]
+}
+
+export function claimLinkSummary(row) {
+  const [first, ...rest] = new Set((row.claim_links || []).filter(Boolean))
+  return first ? `${first}${rest.length ? ` 等${rest.length + 1}个` : ''}` : ''
 }
 
 export function rejectionSummaries(row) {
   const reasons = new Map()
   for (const item of row.rejected || []) {
-    const reason = item.reason === '同规格已占位或已完成'
+    const reason = item.reason || ''
+    const status = reason === '同规格已占位或已完成'
       ? ['reserved', 'queued'].includes(item.state) ? '资源下载中' : '资源已下载'
-      : item.reason || ''
+      : ''
     if (!reason && !item.owner) continue
-    if (!reasons.has(reason)) reasons.set(reason, new Set())
-    if (item.owner) reasons.get(reason).add(item.owner)
+    const key = JSON.stringify([status, reason])
+    if (!reasons.has(key)) reasons.set(key, { status, reason, owners: new Set() })
+    if (item.owner) reasons.get(key).owners.add(item.owner)
   }
-  return [...reasons].map(([reason, owners]) =>
-    [reason, owners.size ? `下载方：${[...owners].join('、')}` : ''].filter(Boolean).join(' · '))
+  const summaries = [...reasons.values()].map(({ status, reason, owners }) =>
+    [status, owners.size ? `下载方：${[...owners].join('、')}` : '', reason ? `过滤原因：${reason}` : '']
+      .filter(Boolean).join(' · '))
+  if (row.phase === 'rejected' && row.error && ![...reasons.values()].some(item => item.reason)) {
+    summaries.push(`过滤原因：${row.error}`)
+  }
+  return summaries
 }

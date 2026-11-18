@@ -7,7 +7,7 @@ STATE_LABELS = {
     "requesting": "等待审批", "reserved": "已获准 已批准", "adding": "暂停添加中",
     "awaiting_start": "等待入队确认", "timeout_cancel_pending": "超时取消中",
     "queued": "已入队", "completed": "已完成 已下载", "released": "已释放",
-    "rejected": "已排除", "uncertain": "待核验",
+    "rejected": "已过滤 已排除", "uncertain": "待核验",
 }
 TEXT_FIELDS = (
     "key", "id", "request_id", "title", "media_title", "path", "file_key", "title_key",
@@ -28,7 +28,10 @@ def _terms(row):
     if row.get("media_type") in {"movie", "tv"}:
         values.append("电影 movie" if row["media_type"] == "movie" else "剧集 tv")
     if row.get("reason") == "同规格已占位或已完成":
+        values.append("资源下载中" if row.get("state") in {"queued", "reserved"} else "资源已下载")
         values.append("资源已完成/已下载")
+    if row.get("reason") or (phase == "rejected" and row.get("error")):
+        values.append("过滤原因")
     if row.get("tmdb_id"):
         values.append(f"TMDB {row['tmdb_id']}")
     season = row.get("season")

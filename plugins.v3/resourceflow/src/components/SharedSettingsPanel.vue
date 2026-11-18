@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { unwrapResponse } from '../utils'
-import { releaseDetails, requestMediaSummaries, rejectionSummaries } from '../sharedRecordDisplay'
+import { claimLinkSummary, releaseDetails, requestMediaSummaries, rejectionSummaries, uniqueRequestRows } from '../sharedRecordDisplay'
 
 const props = defineProps({
   api: { type: Object, required: true },
@@ -20,8 +20,9 @@ const ready = ref(false)
 const canTest = computed(() => Boolean(state.value.bot_username))
 const error = ref('')
 const recordRows = ref({ items: [], total: 0 })
-const requestRows = computed(() => recordRows.value.items.map(row => ({
+const requestRows = computed(() => uniqueRequestRows(recordRows.value.items).map(row => ({
   ...row, mediaSummaries: requestMediaSummaries(row), rejectionSummaries: rejectionSummaries(row),
+  claimSummary: claimLinkSummary(row),
 })))
 const recordPage = ref(1)
 const recordsLoading = ref(false)
@@ -34,7 +35,7 @@ let recordsGeneration = 0
 const phaseNames = {
   requesting: '等待审批', reserved: '已获准', adding: '暂停添加中', awaiting_start: '等待入队确认',
   timeout_cancel_pending: '超时取消中',
-  queued: '已入队', completed: '已完成', released: '已释放', rejected: '已排除', uncertain: '待核验',
+  queued: '已入队', completed: '已完成', released: '已释放', rejected: '已过滤', uncertain: '待核验',
 }
 const phaseColors = {
   requesting: 'info', reserved: 'success', adding: 'info', awaiting_start: 'warning',
@@ -89,7 +90,7 @@ function requestSummary(row) {
   const approved = Number(row.approved || 0)
   const rejected = row.rejected?.length || 0
   const completed = Number(row.completed || 0)
-  if (row.phase === 'rejected') return `已排除（${rejected || row.file_count || 0}）`
+  if (row.phase === 'rejected') return `${phaseNames.rejected}（${rejected || row.file_count || 0}）`
   if (row.phase === 'queued' || row.phase === 'awaiting_start') return `已入队（${approved}）`
   if (row.phase === 'completed') return `已完成（${completed || approved}）`
   if (['reserved', 'adding'].includes(row.phase)) return `已批准（${approved}）`
@@ -240,15 +241,15 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
           <span v-if="row.timeout_at">超时处理：{{ timestamp(row.timeout_at) }}</span>
           <span>任务：{{ row.task_name || row.task_id || '-' }}</span><span>下载器：{{ row.downloader || '-' }}</span>
         </div>
-        <p v-if="row.error" class="shared-settings__error text-body-2">{{ row.error }}</p>
+        <p v-if="row.error && row.phase !== 'rejected'" class="shared-settings__error text-body-2">{{ row.error }}</p>
         <p v-if="row.integrity_error" class="shared-settings__error text-body-2">{{ row.integrity_error }}</p>
         <p v-for="(reason, index) in row.rejectionSummaries" :key="index" class="shared-settings__reason text-body-2">
           {{ reason }}
         </p>
         <div class="shared-settings__ids">
           <span class="shared-settings__id text-caption">申请编号：{{ row.request_id }}</span>
-          <span v-if="row.claim_links?.length" class="shared-settings__id text-caption">
-            关联占位：{{ row.claim_links.join(' · ') }}
+          <span v-if="row.claimSummary" class="shared-settings__id text-caption">
+            关联占位：{{ row.claimSummary }}
           </span>
         </div>
       </article>
