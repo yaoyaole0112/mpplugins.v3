@@ -628,7 +628,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 <strong>{{ task.name }}</strong>
                 <span class="resourceflow-status-dot" :class="`resourceflow-status-dot--${taskStateMeta(task.state).color}`" />
               </span>
-              <span>{{ task.spec_dedup_enabled ? '开启去重' : '关闭去重' }} · {{ task.site_name }} · {{ task.downloader }}</span>
+              <span>{{ task.spec_dedup_enabled ? '下载审批 · ' : '' }}{{ task.site_name }} · {{ task.downloader }}</span>
               <span class="resourceflow-task-item__meta">
                 <span>{{ task.statistic.active || 0 }} 个种子</span>
                 <span>{{ task.next_run_at ? formatDateTime(task.next_run_at) : '暂无计划' }}</span>
@@ -649,7 +649,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               <div>
                 <div class="resourceflow-task-head__title">
                   <h2>{{ selectedTask.name }}</h2>
-                  <VChip size="small" variant="outlined">{{ selectedTask.spec_dedup_enabled ? '开启去重' : '关闭去重' }}</VChip>
+                  <VChip v-if="selectedTask.spec_dedup_enabled" size="small" variant="outlined">下载审批</VChip>
                   <VChip :color="selectedState.color" size="small" variant="tonal" :prepend-icon="selectedState.icon">
                     {{ selectedState.text }}
                   </VChip>

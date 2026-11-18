@@ -551,6 +551,12 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert not await page.evaluate("window.resourceflowRequests.some(item => item.path.endsWith('/poll'))")
             await page.goto(f"{base_url}/tests/channel-dedup-smoke.html?task=traffic")
             await page.wait_for_function("window.resourceflowReady === true")
+            approval_badge = page.locator('.resourceflow-task-head__title').get_by_text('下载审批', exact=True)
+            task_item = page.locator('.resourceflow-task-item').filter(has_text='Saved Traffic')
+            await page.locator('.resourceflow-task-head__title').get_by_role('heading', name='【分享】Saved Traffic').wait_for()
+            assert await approval_badge.count() == 0
+            assert await task_item.get_by_text('Test Site · QB', exact=True).count() == 1
+            assert await page.get_by_text('关闭去重', exact=False).count() == 0
             await page.locator('button:has(.mdi-pencil-outline)').click()
             editor = page.get_by_role('dialog')
             await editor.get_by_text('编辑刷流任务', exact=True).wait_for()
@@ -586,6 +592,9 @@ async def verify(base_url, output, executable_path, host_css=None):
                 item.method === 'PUT' && item.body.spec_dedup_enabled === true
                 && item.body.recent_episodes_days === 7)''')
             await editor.wait_for(state='hidden')
+            await approval_badge.wait_for()
+            assert await task_item.get_by_text('下载审批 · Test Site · QB', exact=True).count() == 1
+            assert await page.get_by_text('开启去重', exact=False).count() == 0
             await page.locator('button:has(.mdi-pencil-outline)').click()
             assert await editor.get_by_label('共享下载审批', exact=True).is_checked()
             await editor.get_by_role('button', name='设置全局去重规则', exact=True).click()
