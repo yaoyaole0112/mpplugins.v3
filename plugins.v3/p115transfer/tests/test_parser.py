@@ -435,25 +435,33 @@ class TransferPluginTest(unittest.TestCase):
         switch = next(node for node in content if node.get("component") == "VSwitch"
                       and node.get("props", {}).get("model") == "split_target_dirs")
         self.assertIn("关闭时", switch["props"]["hint"])
-        conditional_groups = [node for node in content if node.get("component") == "VRow"
-                              and node.get("props", {}).get("v-if")]
-        self.assertEqual(
-            [node["props"]["v-if"] for node in conditional_groups],
-            ["!split_target_dirs", "split_target_dirs"],
-        )
-        grouped_models = []
-        for conditional_group in conditional_groups:
-            grouped_models.append([
-                field["content"][2]["props"]["model"]
-                for column in conditional_group["content"]
-                for field in column["content"]
-            ])
-        self.assertEqual(grouped_models, [
-            ["target_path", "target_cid"],
-            ["offline_target_path", "offline_target_cid", "share_target_path", "share_target_cid"],
-        ])
         self.assertNotIn("cookie", defaults)
-        self.assertFalse(defaults["split_target_dirs"])
+
+    def test_settings_directory_visibility_uses_host_show_binding(self):
+        plugin = self.module.P115Transfer()
+        directories = {
+            "target_path": "/shared", "target_cid": "999",
+            "offline_target_path": "/offline", "offline_target_cid": "111",
+            "share_target_path": "/shares", "share_target_cid": "222",
+        }
+        for split in (False, True):
+            with self.subTest(split=split):
+                plugin.init_plugin({**directories, "split_target_dirs": split})
+                form, model = plugin.get_form()
+                rows = [node for node in form[0]["content"] if node["component"] == "VRow"]
+                self.assertEqual([row["props"] for row in rows], [
+                    {"v-show": "!split_target_dirs"},
+                    {"v-show": "split_target_dirs"},
+                ])
+                self.assertEqual([
+                    [column["content"][0]["content"][2]["props"]["model"] for column in row["content"]]
+                    for row in rows
+                ], [
+                    ["target_path", "target_cid"],
+                    ["offline_target_path", "offline_target_cid", "share_target_path", "share_target_cid"],
+                ])
+                self.assertIs(model["split_target_dirs"], split)
+                self.assertEqual({key: model[key] for key in directories}, directories)
 
     def test_bot_proxy_prefers_explicit_then_mp(self):
         plugin = self.module.P115Transfer()
