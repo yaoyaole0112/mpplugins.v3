@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .channel_dedup import normalize_specs, specs_match
-from .record_search import matches_record, record_page
+from .record_search import localized_record_titles, matches_record, record_display_title, record_page
 from .shared_protocol import ID_PATTERN, SharedError, canonical
 
 
@@ -126,15 +126,28 @@ class SharedRecordCache:
             db.execute("BEGIN")
             if self.progress(scope, db)["more"]:
                 return None
+            titles = self._media_titles(db)
             rows = db.execute("SELECT data FROM mirror WHERE (?='' OR state=?) AND (?='' OR media_type=?) "
-                              "ORDER BY updated DESC, id", (status, status, media_type, media_type))
+                              "ORDER BY json_extract(data, '$.created') DESC, id", (status, status, media_type, media_type))
             items = []
             for row in rows:
                 item = json.loads(row["data"])
                 item["specs"] = normalize_specs(item["specs"])
+                item["media_title"] = record_display_title(item, titles)
                 if matches_record(item, query):
                     items.append(item)
             return record_page(items, page, page_size)
+
+    def media_titles(self, scope):
+        with self.connect() as db:
+            db.execute("BEGIN")
+            return {} if self.progress(scope, db)["more"] else self._media_titles(db)
+
+    @staticmethod
+    def _media_titles(db):
+        rows = db.execute("SELECT media_type, tmdb_id, json_extract(data, '$.media_title') AS media_title "
+                          "FROM mirror WHERE media_title <> '' ORDER BY updated, id")
+        return localized_record_titles(map(dict, rows))
 
 
 def filter_records(db, candidates, rules, *, mirror=False, group=None, completed_only=False):

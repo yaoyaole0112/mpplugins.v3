@@ -287,7 +287,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await first.locator('.shared-settings__id').count() == 1
             assert '申请编号：' in await first.inner_text()
             assert await first.locator('.shared-settings__reason').all_text_contents() == [
-                '资源已下载 · 下载方：朋友A · 过滤原因：同规格已占位或已完成']
+                '资源已下载 · 下载方：朋友A']
+            assert '过滤原因' not in await first.inner_text()
             assert '命中占位' not in await first.inner_text()
             assert '占位方' not in await first.inner_text()
             assert await dialog.get_by_role("button", name="核验未完成申请", exact=True).count() == 0
@@ -643,7 +644,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert text.startswith('凤起微月 · S01E01-06 · TMDB 342129'), text
             assert text.endswith('大小 6.0 GB'), text
             assert await first.locator('.shared-settings__reason').all_text_contents() == [
-                '资源已下载 · 下载方：设备B · 过滤原因：同规格已占位或已完成']
+                '资源已下载 · 下载方：设备B']
             await first.get_by_text('已过滤（6）', exact=True).wait_for()
             assert '首文件' not in await first.inner_text()
             assert '命中占位' not in await first.inner_text()

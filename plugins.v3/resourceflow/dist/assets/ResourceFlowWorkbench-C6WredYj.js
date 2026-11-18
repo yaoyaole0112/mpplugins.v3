@@ -1255,10 +1255,10 @@ function rejectionSummaries(row) {
     if (item.owner) reasons.get(key).owners.add(item.owner);
   }
   const summaries = [...reasons.values()].map(({ status, reason, owners }) =>
-    [status, owners.size ? `下载方：${[...owners].join('、')}` : '', reason ? `过滤原因：${reason}` : '']
+    [status, owners.size ? `下载方：${[...owners].join('、')}` : '', reason && !status ? reason : '']
       .filter(Boolean).join(' · '));
   if (row.phase === 'rejected' && row.error && ![...reasons.values()].some(item => item.reason)) {
-    summaries.push(`过滤原因：${row.error}`);
+    summaries.push(row.error);
   }
   return summaries
 }

@@ -100,12 +100,34 @@ class ApprovalSearchTests(unittest.TestCase):
         self.plugin._shared_claims["0"].update(phase="rejected", error="规格数值无效", rejected=[{"id": "legacy"}])
         self.plugin._shared_claims["1"].update(phase="rejected", rejected=[
             {"id": "file", "reason": "同规格已占位或已完成", "state": "completed", "owner": "边城旧事"}])
-        for query, request_id in (("已过滤 过滤原因 规格数值无效", "0"), ("已排除 资源已下载 边城旧事", "1")):
+        for query, request_id in (("已过滤 规格数值无效", "0"), ("已排除 资源已下载 边城旧事", "1")):
             result = self.plugin.get_shared_records(query=query).data
             self.assertEqual(result["total"], 1)
             self.assertEqual(result["items"][0]["request_id"], request_id)
         status = self.plugin.get_shared_records(query="规格数值无效").data["items"][0]
         self.assertEqual(status["error"], "规格数值无效")
+
+    def test_requests_created_sort_across_pages_even_after_old_updates(self):
+        for index, created, updated in ((0, 10, 80), (1, 20, 30), (2, 20, 40)):
+            self.plugin._shared_claims[str(index)].update(created=created, updated=updated)
+        pages = [self.plugin.get_shared_records(page=page, page_size=1).data for page in (1, 2, 3)]
+        self.assertEqual([page["items"][0]["request_id"] for page in pages], ["1", "2", "0"])
+
+    def test_request_names_reused_by_tmdb_and_untranslated_titles_fall_back(self):
+        unlocalized = self.plugin._shared_claims["0"]["files"][0]
+        unlocalized.pop("media_title")
+        self.assertEqual(self.plugin.get_shared_records(query="S01E01 玫瑰").data["items"][0]["files"][0]["media_title"],
+                         "玫瑰战争")
+        unlocalized.update(tmdb_id=340280, path="Gordon.S01E07.1080p.mkv")
+        self.assertEqual(self.plugin.get_shared_records(query="Gordon").data["items"][0]["files"][0]["media_title"],
+                         "Gordon")
+        self.assertNotIn("media_title", unlocalized)
+
+    def test_shared_display_page_uses_gordon_fallback_without_mutating_records(self):
+        page = {"items": [{"title": "Gordon S01 1080p NF WEB-DL DDP 5.1 Atmos H.264-CHDWEB", "media_title": ""}]}
+        display = self.plugin._shared_record_display_page(page, "records")
+        self.assertEqual(display["items"][0]["media_title"], "Gordon")
+        self.assertEqual(page["items"][0]["media_title"], "")
 
     def test_requests_identity_task_and_specs_combined(self):
         result = self.plugin.get_shared_records(query="站点 玫瑰 S01E05 1080p").data
@@ -212,6 +234,15 @@ class StoreSearchTests(unittest.TestCase):
             db.execute("UPDATE claims SET media_title='其他共享组' WHERE group_id='other'")
             db.execute("UPDATE claims SET media_title='最新中文名称' WHERE id='124'")
         self.assertEqual(self.store.media_titles(), {("tv", 123): "最新中文名称"})
+
+    def test_sort_on_download_time_and_search_reused_chinese_title(self):
+        with self.store.connect() as db:
+            db.execute("UPDATE claims SET updated=10000,media_title='' WHERE id='123'")
+            db.execute("UPDATE claims SET media_title='' WHERE id='124'")
+        first = self.store.search_records(query="玫瑰 1080p", page=1, page_size=1)["items"][0]
+        second = self.store.search_records(query="玫瑰 1080p", page=2, page_size=1)["items"][0]
+        self.assertEqual((first["id"], second["id"]), ("124", "123"))
+        self.assertEqual(first["media_title"], "玫瑰战争")
 
 
 if __name__ == "__main__":

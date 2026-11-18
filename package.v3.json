@@ -64,7 +64,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流与Telegram共享下载审批，跨实例同规格下载前占位，无需公网入口。",
     "labels": "刷流,资源去重,Telegram",
-    "version": "1.0.28",
+    "version": "1.0.29",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -72,6 +72,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.29": "共享审批记录不再重复显示同规格过滤原因；按媒体类型和 TMDB ID 补齐历史中文名，缺失时显示可读原名；本机下载申请和共享下载记录分别按申请时间、下载时间倒序分页。",
       "v1.0.28": "优化本机下载申请：同一申请及相同的媒体摘要仅展示一次，多文件关联占位仅显示首条与总数；状态改为已过滤，并显示原始过滤原因。",
       "v1.0.27": "统一资源规格：HDR Vivid、HDR10、HDR10+ 等归为 HDR，SDR 和 DV 的变体分别归为 SDR、DV，4K 与 2160p 统一为 2160p；已有共享记录和本地缓存也按新归类对比。",
       "v1.0.26": "共享下载记录分批增量同步到本机，先按协调端规则本地预筛；缓存命中不发送 Telegram 占位申请，整包仅提交剩余文件。未命中、缓存过期或同步失败仍由协调端原子审批，占位释放同步后不再拦截。",

@@ -19,7 +19,7 @@ from app.modules.themoviedb.tmdbapi import TmdbApi
 from .active_dedup import download_files, paths_agree
 from .channel_dedup import normalize_specs, parse_candidate_file, parse_torrent_files
 from .models import ChannelDedupSettingsPayload
-from .record_search import matches_record, record_page
+from .record_search import matches_record, record_display_title, record_page, record_title_key
 from .shared_cache import SYNC_VERSION, SharedRecordCache, same_resource
 from .shared_coordinator import BotWorker, CoordinatorStore
 from .shared_history import AUTHORITY_VERSION, completion_rows
@@ -426,7 +426,7 @@ class SharedResourceMixin:
             self._shared_worker = None
         self._shared_store = None
 
-    def _shared_request_status(self, row):
+    def _shared_request_status(self, row, titles=None):
         files = row.get("files") or []
         approved = row.get("approved") or {}
         rejected = row.get("rejected") or []
@@ -444,7 +444,8 @@ class SharedResourceMixin:
             "integrity_error": row.get("integrity_error", ""),
             "file_count": len(files), "completed": len(row.get("done") or []),
             "files": [{**{key: item.get(key) for key in
-                         ("id", "path", "media_type", "tmdb_id", "media_title", "season", "episodes")},
+                         ("id", "path", "media_type", "tmdb_id", "season", "episodes")},
+                       "media_title": record_display_title(item, titles or {}),
                        "specs": normalize_specs(item.get("specs") or {}),
                        "decision": "approved" if item.get("id") in approved else
                        "rejected" if item.get("id") in decisions else
@@ -497,7 +498,7 @@ class SharedResourceMixin:
                     except (sqlite3.Error, KeyError, TypeError, ValueError):
                         data = None
                     if data is not None:
-                        return schemas.Response(success=True, data=data)
+                        return schemas.Response(success=True, data=self._shared_record_display_page(data, kind))
                 try:
                     with self._shared_rpc_lock:
                         response = self._shared_exchange(uuid.uuid4().hex, {
@@ -510,13 +511,31 @@ class SharedResourceMixin:
             else:
                 data = record_page([], page, page_size)
         else:
+            titles = self._resource_display_titles()
             with self._shared_lock:
-                rows = [self._shared_request_status(row) for row in self._shared_claims.values()
+                rows = [self._shared_request_status(row, titles) for row in self._shared_claims.values()
                         if not status or row.get("phase") == status]
             rows = [row for row in rows if matches_record(row, query)]
-            rows.sort(key=lambda row: row.get("updated") or 0, reverse=True)
+            rows.sort(key=lambda row: (-(row.get("created") or 0), row["request_id"]))
             data = record_page(rows, page, page_size)
-        return schemas.Response(success=True, data=data)
+        return schemas.Response(success=True, data=self._shared_record_display_page(data, kind))
+
+    @staticmethod
+    def _shared_record_display_page(data, kind):
+        def display_title(row, torrent_title):
+            if row.get("media_title"):
+                return row
+            # Parse only the visible page, without performing TMDB lookups while listing history.
+            for value in (row.get("path"), torrent_title):
+                if (isinstance(value, str) and value and (name := MetaInfo(value.rsplit("/", 1)[-1]).name)
+                        and any(char.isalpha() for char in name)):
+                    return {**row, "media_title": name[:120]}
+            return row
+
+        if kind == "requests":
+            return {**data, "items": [{**row, "files": [display_title(item, row["title"]) for item in row["files"]]}
+                                      for row in data["items"]]}
+        return {**data, "items": [display_title(row, row.get("title")) for row in data["items"]]}
 
     def update_shared_settings(self, payload: SharedSettingsPayload) -> schemas.Response:
         try:
@@ -894,6 +913,12 @@ class SharedResourceMixin:
                 titles.update(store_titles())
             except Exception:
                 pass
+        elif (getattr(self, "_shared_settings", None) and self._shared_settings.enabled
+              and (probe := self._shared_cache_probe())):
+            try:
+                titles.update(self._shared_cache.media_titles(self._shared_cache_scope(probe)))
+            except (sqlite3.Error, KeyError, TypeError, ValueError):
+                pass
         titles.update(getattr(self, "_shared_media_title_cache", {}) or {})
         lock = getattr(self, "_shared_lock", None)
         if lock:
@@ -913,12 +938,7 @@ class SharedResourceMixin:
 
     @staticmethod
     def _resource_title_key(row):
-        if row.get("media_type") not in {"tv", "movie"}:
-            return None
-        try:
-            return row["media_type"], int(row["tmdb_id"])
-        except (KeyError, TypeError, ValueError):
-            return None
+        return record_title_key(row)
 
     def _resource_record_title(self, row, titles):
         title = row.get("media_title")

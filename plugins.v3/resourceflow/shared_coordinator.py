@@ -12,7 +12,7 @@ import time
 import uuid
 
 from .channel_dedup import normalize_specs
-from .record_search import matches_record, record_page
+from .record_search import localized_record_titles, matches_record, record_display_title, record_page
 from .shared_cache import (
     RECORD_COLUMNS, SYNC_BATCH, SYNC_MAX_PARTS, SYNC_VERSION, display_record, filter_records, same_resource,
 )
@@ -455,25 +455,31 @@ class CoordinatorStore:
 
     def search_records(self, query="", status="", page=1, page_size=20, media_type=""):
         with self.connect() as db:
+            db.execute("BEGIN")
+            titles = self._media_titles(db)
             rows = db.execute(
-                "SELECT id,label,title,media_title,media_type,tmdb_id,season,episodes,specs,state,created,updated,request_id,file_id "
-                "FROM claims WHERE group_id=? AND (?='' OR state=?) ORDER BY updated DESC, id",
+                f"SELECT {','.join(RECORD_COLUMNS)} FROM claims "
+                "WHERE group_id=? AND (?='' OR state=?) ORDER BY created DESC, id",
                 (self.group, status, status))
             items = []
             for row in rows:
                 if media_type and row["media_type"] != media_type:
                     continue
                 item = display_record(row)
+                item["media_title"] = record_display_title(item, titles)
                 if matches_record(item, query):
                     items.append(item)
         return record_page(items, page, page_size)
 
     def media_titles(self):
         with self.connect() as db:
-            rows = db.execute(
-                "SELECT media_type,tmdb_id,media_title FROM claims "
-                "WHERE group_id=? AND media_title<>'' ORDER BY updated", (self.group,))
-            return {(row["media_type"], row["tmdb_id"]): row["media_title"] for row in rows}
+            return self._media_titles(db)
+
+    def _media_titles(self, db):
+        rows = db.execute(
+            "SELECT media_type,tmdb_id,media_title FROM claims "
+            "WHERE group_id=? AND media_title<>'' ORDER BY updated, id", (self.group,))
+        return localized_record_titles(map(dict, rows))
 
 
 class BotWorker:

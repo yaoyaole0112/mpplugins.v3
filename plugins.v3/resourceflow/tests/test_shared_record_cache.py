@@ -100,6 +100,19 @@ class SharedRecordCacheTests(unittest.TestCase):
         self.assertEqual(self.cache.search(self.scope, "", "released", 1, 20, "")["total"], 0)
         self.assertEqual(len(self.reserve(file_row())["approved"]), 1)
 
+    def test_mirror_display_time_order_and_search_by_reused_localized_name(self):
+        old, new = [row["claim"] for row in self.reserve(dict(file_row(), media_title="剧集中文名"),
+                                                          dict(file_row(2, 2), media_title=""))["approved"]]
+        with self.store.connect() as db:
+            db.execute("UPDATE claims SET created=10,updated=90 WHERE id=?", (old,))
+            db.execute("UPDATE claims SET created=20,updated=30 WHERE id=?", (new,))
+        self.sync()
+        first = self.cache.search(self.scope, "剧集中文名", "", 1, 1, "tv")["items"][0]
+        second = self.cache.search(self.scope, "剧集中文名", "", 2, 1, "tv")["items"][0]
+        self.assertEqual((first["id"], second["id"]), (new, old))
+        self.assertEqual(first["media_title"], "剧集中文名")
+        self.assertEqual(self.cache.media_titles("other-scope"), {})
+
     def test_expiry_and_scope_fail_open_only_to_reserve(self):
         completed, active = [row["claim"] for row in self.reserve(file_row(), file_row(2, 2))["approved"]]
         self.send("update", updates=[{"claim": completed, "state": "completed"}, {"claim": active, "state": "queued"}])

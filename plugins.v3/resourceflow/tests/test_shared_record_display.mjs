@@ -117,7 +117,7 @@ test('same owner and duplicate reason collapse into one line without claim IDs',
   const rows = rejectionSummaries({ rejected: Array.from({ length: 6 }, (_, index) => ({
     reason: '同规格已占位或已完成', owner: '设备B', state: 'completed', claim: `claim-${index}`,
   })) })
-  assert.deepEqual(rows, ['资源已下载 · 下载方：设备B · 过滤原因：同规格已占位或已完成'])
+  assert.deepEqual(rows, ['资源已下载 · 下载方：设备B'])
 })
 
 test('multiple owners are preserved in a single reason line', () => {
@@ -125,7 +125,7 @@ test('multiple owners are preserved in a single reason line', () => {
     { reason: '同规格已占位或已完成', owner: '设备B' },
     { reason: '同规格已占位或已完成', owner: '设备A' },
     { reason: '同规格已占位或已完成', owner: '设备B' },
-  ] }), ['资源已下载 · 下载方：设备B、设备A · 过滤原因：同规格已占位或已完成'])
+  ] }), ['资源已下载 · 下载方：设备B、设备A'])
 })
 
 test('in-progress conflicts are distinguished from completed downloads', () => {
@@ -133,21 +133,20 @@ test('in-progress conflicts are distinguished from completed downloads', () => {
     { reason: '同规格已占位或已完成', owner: '设备A', state: 'queued' },
     { reason: '同规格已占位或已完成', owner: '设备B', state: 'reserved' },
     { reason: '同规格已占位或已完成', owner: '设备C', state: 'completed' },
-  ] }), ['资源下载中 · 下载方：设备A、设备B · 过滤原因：同规格已占位或已完成',
-    '资源已下载 · 下载方：设备C · 过滤原因：同规格已占位或已完成'])
+  ] }), ['资源下载中 · 下载方：设备A、设备B', '资源已下载 · 下载方：设备C'])
 })
 
 test('distinct non-duplicate rejection reasons remain visible', () => {
   assert.deepEqual(rejectionSummaries({ rejected: [
     { reason: '缺少分辨率' }, { reason: '身份不明' }, { reason: '缺少分辨率' },
-  ] }), ['过滤原因：缺少分辨率', '过滤原因：身份不明'])
+  ] }), ['缺少分辨率', '身份不明'])
 })
 
 test('legacy filtered requests use their recorded error only when no file reason exists', () => {
   assert.deepEqual(rejectionSummaries({ phase: 'rejected', error: '规格数值无效', rejected: [{}] }),
-    ['过滤原因：规格数值无效'])
+    ['规格数值无效'])
   assert.deepEqual(rejectionSummaries({ phase: 'rejected', error: '规格数值无效', rejected: [{ reason: '身份不明' }] }),
-    ['过滤原因：身份不明'])
+    ['身份不明'])
   assert.deepEqual(rejectionSummaries({ phase: 'uncertain', error: '暂不可用' }), [])
 })
 

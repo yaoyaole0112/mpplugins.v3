@@ -1,5 +1,6 @@
 """Search displayable approval records without inspecting private download payloads."""
 
+import re
 import unicodedata
 
 
@@ -15,6 +16,35 @@ TEXT_FIELDS = (
     "channel", "evidence_source",
 )
 SPEC_FIELDS = ("resolution", "effects", "codec", "source", "fps", "size")
+CHINESE_TITLE = re.compile(r"[\u3400-\u9fff]")
+
+
+def record_title_key(row):
+    if row.get("media_type") not in {"tv", "movie"}:
+        return None
+    try:
+        tmdb_id = int(row.get("tmdb_id"))
+    except (TypeError, ValueError):
+        return None
+    return (row["media_type"], tmdb_id) if tmdb_id > 0 else None
+
+
+def localized_record_titles(rows):
+    titles = {}
+    for row in rows:
+        title = row.get("media_title")
+        key = record_title_key(row)
+        if key and isinstance(title, str) and CHINESE_TITLE.search(title):
+            titles[key] = title.strip()[:120]
+    return titles
+
+
+def record_display_title(row, titles):
+    value = row.get("media_title")
+    title = value.strip() if isinstance(value, str) else ""
+    if CHINESE_TITLE.search(title):
+        return title
+    return titles.get(record_title_key(row)) or title
 
 
 def _normalize(value):
@@ -30,8 +60,6 @@ def _terms(row):
     if row.get("reason") == "同规格已占位或已完成":
         values.append("资源下载中" if row.get("state") in {"queued", "reserved"} else "资源已下载")
         values.append("资源已完成/已下载")
-    if row.get("reason") or (phase == "rejected" and row.get("error")):
-        values.append("过滤原因")
     if row.get("tmdb_id"):
         values.append(f"TMDB {row['tmdb_id']}")
     season = row.get("season")
