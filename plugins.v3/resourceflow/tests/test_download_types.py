@@ -12,9 +12,10 @@ class DownloadTypeTest(unittest.TestCase):
         self.plugin = ResourceFlow.__new__(ResourceFlow)
         self.plugin.chain = SimpleNamespace(recognize_media=Mock())
 
-    def classify(self, media=None, category=None, labels=None, cache=None):
+    def classify(self, media=None, category=None, labels=None, description="", cache=None):
         self.plugin.chain.recognize_media.return_value = media
-        torrent = SimpleNamespace(title="Example.S01E01.2026", description="", category=category, labels=labels or [])
+        torrent = SimpleNamespace(title="Example.S01E01.2026", description=description,
+                                  category=category, labels=labels or [])
         return self.plugin._download_type(torrent, cache if cache is not None else {})
 
     def test_special_site_category_does_not_need_network(self):
@@ -26,6 +27,12 @@ class DownloadTypeTest(unittest.TestCase):
         self.assertEqual(self.classify(SimpleNamespace(type="电视剧"), category="短剧")[0], "short_drama")
         self.assertEqual(self.classify(labels=["微短剧"])[0], "short_drama")
         self.assertEqual(self.classify(category="short drama")[0], "short_drama")
+
+    def test_short_drama_string_labels_and_description_category(self):
+        self.assertEqual(self.classify(labels="短剧")[0], "short_drama")
+        self.assertEqual(self.classify(labels="电视剧/短剧")[0], "short_drama")
+        self.assertEqual(self.classify(description="类型：剧情/短剧")[0], "short_drama")
+        self.assertIsNone(self.classify(description="剧情简介：讲述短剧演员的故事")[0])
 
     def test_genres_override_basic_site_category(self):
         for genre, expected in [(16, "anime"), (99, "documentary"), (10764, "variety"), (10767, "variety")]:
