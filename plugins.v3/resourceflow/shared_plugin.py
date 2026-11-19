@@ -799,13 +799,24 @@ class SharedResourceMixin:
                 candidate, item["path"], item.get("size"), candidate_overrides
             )
             episode_group = getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None)
-            if (not candidate or episode_group and not candidate.get("manual_identity")
-                    or not self._verify_resource_identity(candidate, title, task)
-                    or any(not candidate["specs"].get(field) for field in self._channel_dedup_attributes)):
+            reason = ""
+            if not candidate:
+                reason = "无法解析媒体或季集身份"
+            elif episode_group and not candidate.get("manual_identity"):
+                reason = "剧集组需核验标准季集号"
+            elif not self._verify_resource_identity(candidate, title, task):
+                reason = "媒体身份未确认（TMDB ID 或名称别名未匹配）"
+            else:
+                missing_specs = [
+                    field for field in self._channel_dedup_attributes if not candidate["specs"].get(field)
+                ]
+                if missing_specs:
+                    reason = f"缺少勾选规格：{', '.join(missing_specs)}"
+            if reason:
                 rejected.append(item["path"])
                 if candidate:
-                    self._pending_identity(candidate, title, task, "共享审批缺少核验身份或勾选规格",
-                                           pending_source)
+                    self._pending_identity(candidate, title, task, reason, pending_source)
+                logger.info(f"资源刷流共享审批候选暂缓 {item['path']}：{reason}")
                 continue
             candidate["id"] = hashlib.sha256(item["path"].encode()).hexdigest()[:24]
             candidate["title"] = title[:160]

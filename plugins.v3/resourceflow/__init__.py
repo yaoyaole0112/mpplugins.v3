@@ -274,7 +274,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.39"
+    plugin_version = "1.0.40"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -3737,6 +3737,19 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         bindings = getattr(self, "_channel_dedup_movie_identity_aliases" if movie
                            else "_channel_dedup_identity_aliases", {})
         names = set(candidate.get("title_keys") or [])
+        if movie:
+            names.update(normalize_title(name) for name in filename_title_aliases(candidate.get("path", "")))
+            names.update(normalize_title(name) for name in filename_title_aliases(title))
+            for filename in (candidate.get("path", ""), title):
+                if not filename:
+                    continue
+                meta_names = MetaInfo(filename)
+                names.update(
+                    normalize_title(getattr(meta_names, field, ""))
+                    for field in ("cn_name", "en_name", "name")
+                    if getattr(meta_names, field, None)
+                )
+        names.discard("")
         ids = {int(value) for name, value in bindings.items() if normalize_title(name) in names}
         identity = next(iter(ids)) if len(ids) == 1 else None
         if not ids and not movie:
@@ -3755,10 +3768,17 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     aliases.update(normalize_title(name) for name in getattr(media, "names", []) or [])
                     cn = {name for name in names if re.search(r"[\u3400-\u9fff]", name)}
                     cn_aliases = {name for name in aliases if re.search(r"[\u3400-\u9fff]", name)}
+                    cn_match = cn.intersection(cn_aliases)
+                    cn_conflict = bool(
+                        cn and (
+                            (cn_aliases and not cn_match)
+                            or (not cn_match and any(len(name) <= 2 for name in cn))
+                        )
+                    )
                     if (self._is_movie(media) and names.intersection(aliases)
                             and candidate.get("year") == self._movie_year(media, None)
                             and candidate.get("year") is not None
-                            and not (cn and cn_aliases and not cn.intersection(cn_aliases))):
+                            and not cn_conflict):
                         identity = getattr(media, "tmdb_id", None)
                 except Exception as err:
                     logger.info(f"资源身份核验失败 {candidate['path']}：{type(err).__name__}")

@@ -1073,6 +1073,44 @@ class PluginSetupTests(unittest.TestCase):
         self.assertFalse(files)
         self.assertEqual(rejected, [path])
 
+    def test_movie_candidate_splits_bilingual_names_before_tmdb_identity_check(self):
+        p = self.plugin
+        p._channel_dedup_attributes = ["resolution", "effects"]
+        p.chain.recognize_media.return_value = SimpleNamespace(
+            type="电影", tmdb_id=1633056, title="八仙！",
+            en_title="All Wishes Come True", year="2026", release_date="2026-01-01",
+            names=["八仙！"],
+        )
+        path = "八仙！.All.Wishes.Come.True.2026.1080p.WEB-DL.AAC.H264-HDSWEB.mkv"
+        task = SimpleNamespace(id="task", spec_dedup_enabled=True, name="test")
+        files, rejected = p._shared_candidates(
+            make_torrent([(path, 123456)]),
+            "All Wishes Come True 2026 1080p WEB-DL AAC H264-HDSWEB", task, None,
+        )
+        self.assertFalse(rejected)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]["tmdb_id"], 1633056)
+        self.assertEqual(files[0]["specs"]["effects"], "SDR")
+
+    def test_movie_candidate_reports_the_exact_missing_selected_spec(self):
+        p = self.plugin
+        p._channel_dedup_attributes = ["resolution", "fps"]
+        p.chain.recognize_media.return_value = SimpleNamespace(
+            type="电影", tmdb_id=1633056, title="八仙！",
+            en_title="All Wishes Come True", year="2026", release_date="2026-01-01",
+            names=["八仙！"],
+        )
+        path = "八仙！.All.Wishes.Come.True.2026.1080p.WEB-DL.AAC.H264-HDSWEB.mkv"
+        task = SimpleNamespace(id="task", spec_dedup_enabled=True, name="test")
+        with patch("resourceflow.shared_plugin.logger") as log:
+            files, rejected = p._shared_candidates(
+                make_torrent([(path, 123456)]),
+                "All Wishes Come True 2026 1080p WEB-DL AAC H264-HDSWEB", task, None,
+            )
+        self.assertFalse(files)
+        self.assertEqual(rejected, [path])
+        self.assertTrue(any("缺少勾选规格：fps" in call.args[0] for call in log.info.call_args_list))
+
     def test_host_cannot_abandon_remote_claims_or_change_their_policy(self):
         from resourceflow.models import ChannelDedupSettingsPayload
 
