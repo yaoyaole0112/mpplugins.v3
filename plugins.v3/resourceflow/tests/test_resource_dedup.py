@@ -777,12 +777,16 @@ class ResourceMigrationTests(unittest.TestCase):
         task = BrushTaskPayload(name='Test', site_id=1, downloader='QB', identity_policy='allow')
         self.assertNotIn('identity_policy', task.model_dump())
 
-    def test_global_settings_roundtrip_preserves_tasks_and_ledger(self):
+    def test_global_settings_roundtrip_keeps_fixed_rules_and_preserves_ledger(self):
         plugin = ResourceFlow.__new__(ResourceFlow)
         plugin.get_data = Mock(return_value=None)
         plugin.save_data = Mock()
         plugin.update_config = Mock()
-        plugin.init_plugin({'enabled': False, 'tasks': [], 'channel_dedup_identity_policy': 'allow'})
+        plugin.init_plugin({
+            'enabled': False, 'tasks': [], 'channel_dedup_inflight_enabled': False,
+            'channel_dedup_pack_dedup_enabled': False, 'channel_dedup_prefer_2160p': False,
+            'channel_dedup_pack_policy': 'exclude', 'channel_dedup_identity_policy': 'allow',
+        })
         from resourceflow.shared_models import SharedSettingsPayload
         plugin._shared_settings = SharedSettingsPayload(
             host_coordinator=True, bot_username="@testbot", allowed_users=[11])
@@ -790,23 +794,30 @@ class ResourceMigrationTests(unittest.TestCase):
         plugin._save_config = Mock()
         plugin._refresh_scheduler = Mock()
         before = copy.deepcopy(plugin._resource_ledger)
-        for enabled in (False, True):
-            payload = ChannelDedupSettingsPayload(
-                inflight_enabled=enabled, pack_dedup_enabled=enabled, pack_policy='exclude',
-                prefer_2160p=enabled, identity_policy='defer', attributes=['resolution'],
-            )
-            result = plugin.update_channel_dedup_settings(payload)
-            self.assertTrue(result.success)
-            config = plugin._current_config()
-            self.assertEqual(config['channel_dedup_inflight_enabled'], enabled)
-            self.assertEqual(config['channel_dedup_prefer_2160p'], enabled)
-            self.assertEqual(result.data['prefer_2160p'], enabled)
-            self.assertEqual(result.data['pack_dedup_enabled'], enabled)
-            self.assertEqual(result.data['pack_policy'], 'exclude')
-            self.assertEqual(config['channel_dedup_identity_policy'], 'defer')
-            self.assertEqual(plugin._resource_ledger, before)
+        legacy = plugin._current_config()
+        self.assertTrue(legacy['channel_dedup_inflight_enabled'])
+        self.assertTrue(legacy['channel_dedup_pack_dedup_enabled'])
+        self.assertTrue(legacy['channel_dedup_prefer_2160p'])
+        self.assertEqual(legacy['channel_dedup_pack_policy'], 'partial')
+        self.assertEqual(legacy['channel_dedup_identity_policy'], 'defer')
+        payload = ChannelDedupSettingsPayload(
+            inflight_enabled=False, pack_dedup_enabled=False, pack_policy='exclude',
+            prefer_2160p=False, identity_policy='allow', attributes=['resolution'],
+        )
+        result = plugin.update_channel_dedup_settings(payload)
+        self.assertTrue(result.success)
+        config = plugin._current_config()
+        self.assertTrue(config['channel_dedup_inflight_enabled'])
+        self.assertTrue(config['channel_dedup_pack_dedup_enabled'])
+        self.assertTrue(config['channel_dedup_prefer_2160p'])
+        self.assertEqual(config['channel_dedup_pack_policy'], 'partial')
+        self.assertTrue(result.data['prefer_2160p'])
+        self.assertTrue(result.data['pack_dedup_enabled'])
+        self.assertEqual(result.data['pack_policy'], 'partial')
+        self.assertEqual(config['channel_dedup_identity_policy'], 'defer')
+        self.assertEqual(plugin._resource_ledger, before)
         plugin.update_channel_dedup_settings(ChannelDedupSettingsPayload(attributes=['resolution']))
-        self.assertEqual(plugin._channel_dedup_pack_policy, 'exclude')
+        self.assertEqual(plugin._channel_dedup_pack_policy, 'partial')
         self.assertEqual(plugin._channel_dedup_identity_policy, 'defer')
 
     def test_upgrade_creates_switch_and_keeps_old_limits(self):

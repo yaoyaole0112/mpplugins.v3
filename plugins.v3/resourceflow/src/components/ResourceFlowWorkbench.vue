@@ -80,8 +80,6 @@ const channelDedupDraft = ref({
   enabled: false, channels: '', attributes: [], size_tolerance_pct: 5,
   unknown_policy: 'exclude', identity_aliases: '', cancel_downloading: false,
   movie_identity_aliases: '',
-  inflight_enabled: true, pack_dedup_enabled: true, prefer_2160p: true,
-  pack_policy: 'partial', identity_policy: 'defer',
 })
 const channelUnknownPolicies = [
   { value: 'exclude', title: '排除不下载' },
@@ -330,11 +328,6 @@ async function loadChannelDedup({ resetDraft = true } = {}) {
       channelDedupDraft.value = {
         enabled: Boolean(data?.enabled),
         cancel_downloading: Boolean(data?.cancel_downloading),
-        inflight_enabled: data?.inflight_enabled ?? true,
-        pack_dedup_enabled: data?.pack_dedup_enabled ?? true,
-        prefer_2160p: data?.prefer_2160p ?? true,
-        pack_policy: data?.pack_policy || 'partial',
-        identity_policy: data?.identity_policy || 'defer',
         channels: (data?.channels || []).join('\n'),
         attributes: [...(data?.attributes || [])],
         size_tolerance_pct: Number(data?.size_tolerance_pct ?? 5),
@@ -407,11 +400,6 @@ async function saveChannelDedup(shared) {
     enabled: false,
     cancel_downloading: false,
     ...(shared.host_coordinator ? {
-      inflight_enabled: channelDedupDraft.value.inflight_enabled,
-      pack_dedup_enabled: channelDedupDraft.value.pack_dedup_enabled,
-      prefer_2160p: channelDedupDraft.value.prefer_2160p,
-      pack_policy: channelDedupDraft.value.pack_policy,
-      identity_policy: channelDedupDraft.value.identity_policy,
       attributes: channelDedupDraft.value.attributes,
       size_tolerance_pct: channelDedupDraft.value.size_tolerance_pct,
       unknown_policy: channelDedupDraft.value.unknown_policy,
@@ -607,7 +595,7 @@ watch(
 onMounted(async () => {
   await loadStatus({ preserveSelection: false })
   refreshTimer = window.setInterval(() => {
-    if (!editorOpen.value && document.visibilityState === 'visible') loadStatus()
+    if (!editorOpen.value && !settingsDialog.value && document.visibilityState === 'visible') loadStatus()
     if (channelDedupDialog.value && document.visibilityState === 'visible') refreshApprovalRecords()
   }, 30000)
 })
@@ -1083,7 +1071,10 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VAlert v-if="settingsError || channelDedupError" type="error" variant="tonal" density="compact">
             {{ settingsError || channelDedupError }}
           </VAlert>
-          <VProgressLinear v-if="loading || channelDedupLoading" indeterminate />
+          <div class="global-settings__progress">
+            <VProgressLinear :class="{ 'global-settings__progress--idle': !loading && !channelDedupLoading }"
+              indeterminate />
+          </div>
           <div class="channel-dedup__section">
             <div class="global-settings__toggles">
               <VSwitch v-model="settingsDraft.enabled" label="启用插件"
@@ -1135,25 +1126,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 hint="按种子内单个视频文件大小比较，不使用整包总大小" persistent-hint />
             </div>
             <VDivider />
-            <div class="global-settings__grid global-settings__rules">
-              <VSwitch v-model="channelDedupDraft.inflight_enabled" label="排除已入队的同规格资源"
-                color="primary" density="compact" hide-details inset />
-              <VSwitch v-model="channelDedupDraft.pack_dedup_enabled" label="排除同一种子包内的同规格重复文件"
-                color="primary" density="compact" hide-details inset />
-              <VSelect v-model="channelDedupDraft.pack_policy" label="整包处理方式"
-                :items="[
-                  { title: '逐文件排除，仅下载剩余文件', value: 'partial' },
-                  { title: '存在不合格文件则排除整包', value: 'exclude' },
-                ]" density="comfortable" hide-details />
-              <VSelect v-model="channelDedupDraft.identity_policy" label="资源身份未确认时"
-                :items="[
-                  { title: '等待核验，不下载', value: 'defer' },
-                  { title: '按未命中放行', value: 'allow' },
-                ]" density="comfortable" hide-details />
-            </div>
-            <VSwitch v-model="channelDedupDraft.prefer_2160p"
-              label="已有 2160p/4K 完成记录时排除低分辨率版本"
-              color="primary" density="compact" hide-details inset />
           </template>
           <VDivider />
           <div class="text-subtitle-2">别名绑定</div>
@@ -1471,6 +1443,14 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
 .global-settings__body {
   gap: 18px;
+}
+
+.global-settings__progress {
+  block-size: 4px;
+}
+
+.global-settings__progress--idle {
+  visibility: hidden;
 }
 
 .global-settings__grid {

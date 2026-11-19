@@ -69,12 +69,8 @@ async def verify_settings_layout(dialog, width):
                 stacked: second.top >= first.bottom, fits: element.scrollWidth <= element.clientWidth + 1}
         }''')
         assert layout['inline' if width >= 600 else 'stacked'] and layout['fits'], (width, selector, layout)
-    rules = await dialog.locator('.global-settings__rules').evaluate('''element => {
-        const [first, second] = [...element.children].slice(2).map(child => child.getBoundingClientRect())
-        return {inline: second.left >= first.right && Math.abs(first.top - second.top) < 2,
-            stacked: second.top >= first.bottom, fits: element.scrollWidth <= element.clientWidth + 1}
-    }''')
-    assert rules['inline' if width >= 600 else 'stacked'] and rules['fits'], (width, rules)
+    assert await dialog.locator('.global-settings__rules').count() == 0
+    assert await dialog.locator('.global-settings__progress').count() == 1
     limits = await dialog.locator('.global-settings__limits').evaluate('''element =>
         [...element.children].map(child => {
             const box = child.getBoundingClientRect()

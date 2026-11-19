@@ -38,7 +38,9 @@ class SharedResourceMixin:
     _shared_cache_sync_failed = False
 
     def _shared_rules(self):
-        return {key: getattr(self, f"_channel_dedup_{key}", default) for key, default in RULE_DEFAULTS.items()}
+        rules = dict(RULE_DEFAULTS)
+        rules["unknown_policy"] = getattr(self, "_channel_dedup_unknown_policy", "exclude")
+        return rules
 
     def _local_shared_policy(self):
         return policy(self._channel_dedup_attributes, self._channel_dedup_size_tolerance_pct, self._shared_rules())
@@ -49,6 +51,9 @@ class SharedResourceMixin:
         expected = policy(value.get("attributes", []), value.get("size_tolerance_pct", 5), value["rules"])
         if expected != value:
             raise SharedError("协调端规则版本或内容无效")
+        if any(expected["rules"].get(key) != value for key, value in RULE_DEFAULTS.items()
+               if key != "unknown_policy"):
+            raise SharedError("协调端仍使用可配置资源规则，请先更新协调端")
         current = self._local_shared_policy() if self._channel_dedup_attributes else None
         if self._shared_settings.host_coordinator:
             if expected != current:
@@ -281,6 +286,10 @@ class SharedResourceMixin:
     def update_channel_dedup_settings(self, payload: ChannelDedupSettingsPayload) -> schemas.Response:
         with getattr(self, "_shared_rpc_lock", threading.RLock()):
             store = getattr(self, "_shared_store", None)
+            payload = payload.model_copy(update={
+                "inflight_enabled": True, "pack_dedup_enabled": True, "prefer_2160p": True,
+                "pack_policy": "partial", "identity_policy": "defer",
+            })
             fields = {"attributes": list(self._channel_dedup_attributes),
                       "size_tolerance_pct": self._channel_dedup_size_tolerance_pct, **self._shared_rules()}
             changed = any(getattr(payload, key) != value for key, value in fields.items()

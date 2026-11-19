@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { claimLinkSummary, episodeLabel, releaseDetails, requestMediaSummaries, rejectionSummaries, uniqueRequestRows } from '../src/sharedRecordDisplay.js'
 
@@ -51,6 +52,19 @@ test('linked claims show first distinct ID and total only when multiple', () => 
   assert.equal(claimLinkSummary({ claim_links: ['first', 'b', 'c', 'd', 'e', 'b'] }), 'first 等5个')
   assert.equal(claimLinkSummary({ claim_links: ['first', 'first'] }), 'first')
   assert.equal(claimLinkSummary({}), '')
+})
+
+test('global settings hide fixed dedup policy controls and pause status polling while open', async () => {
+  const source = await readFile(new URL('../src/components/ResourceFlowWorkbench.vue', import.meta.url), 'utf8')
+  for (const label of [
+    '排除已入队的同规格资源',
+    '排除同一种子包内的同规格重复文件',
+    '整包处理方式',
+    '资源身份未确认时',
+    '已有 2160p/4K 完成记录时排除低分辨率版本',
+  ]) assert(!source.includes(label), `unexpected visible setting: ${label}`)
+  assert.match(source, /!editorOpen\.value && !settingsDialog\.value/)
+  assert.match(source, /global-settings__progress--idle/)
 })
 
 test('episode ranges are sorted, unique, and do not invent missing episodes', () => {

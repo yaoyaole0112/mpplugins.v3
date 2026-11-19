@@ -913,12 +913,19 @@ class PluginSetupTests(unittest.TestCase):
         self.assertIsNone(response["task_name"])
         self.assertEqual(response["files"], [])
 
-    def test_client_cannot_edit_global_rules_but_can_save_local_aliases(self):
+    def test_shared_dedup_rules_are_fixed_but_client_can_save_local_aliases(self):
         from resourceflow.models import ChannelDedupSettingsPayload
         p = self.plugin
         p._refresh_scheduler = Mock()
         before = p._local_shared_policy()
-        for changes in ({"attributes": ["size"]}, {"pack_policy": "exclude"}, {"inflight_enabled": False}):
+        response = p.update_channel_dedup_settings(ChannelDedupSettingsPayload(
+            inflight_enabled=False, pack_dedup_enabled=False, prefer_2160p=False,
+            pack_policy="exclude", identity_policy="allow",
+        ))
+        self.assertTrue(response.success)
+        self.assertEqual(p._shared_rules(), RULE_DEFAULTS)
+        self.assertEqual(p._local_shared_policy(), before)
+        for changes in ({"attributes": ["size"]},):
             response = p.update_channel_dedup_settings(ChannelDedupSettingsPayload(**changes))
             self.assertFalse(response.success)
             self.assertEqual(p._local_shared_policy(), before)
@@ -927,21 +934,26 @@ class PluginSetupTests(unittest.TestCase):
         self.assertEqual(p._channel_dedup_identity_aliases, {"Show": 123})
         self.assertEqual(p._local_shared_policy(), before)
 
-    def test_client_syncs_all_coordinator_rules_before_local_filters_and_persists(self):
+    def test_client_syncs_fixed_coordinator_rules_before_local_filters_and_persists(self):
         p = self.plugin
-        rules = {**RULE_DEFAULTS, "pack_policy": "exclude", "inflight_enabled": False,
-                 "unknown_policy": "allow", "identity_policy": "allow", "pack_dedup_enabled": False}
-        expected = policy(["resolution"], 3, rules)
+        expected = policy(["resolution"], 3, RULE_DEFAULTS)
         p._shared_exchange = Mock(return_value={"ok": True, "policy": expected, "user_id": 11,
                                               "authority_version": 2, "authority_id": "f" * 32})
         p._sync_shared_policy()
         self.assertEqual(p._local_shared_policy(), expected)
-        self.assertEqual(p.update_config.call_args.args[0]["channel_dedup_pack_policy"], "exclude")
+        self.assertEqual(p.update_config.call_args.args[0]["channel_dedup_pack_policy"], "partial")
         p._shared_exchange.return_value = {"ok": True, "policy": policy(["resolution"], 3)}
         p._shared_policy_checked_at = 0
         with self.assertRaisesRegex(SharedError, "更新"):
             p._sync_shared_policy()
         self.assertEqual(p._local_shared_policy(), expected)
+
+    def test_client_rejects_valid_but_legacy_custom_rule_policy(self):
+        p = self.plugin
+        legacy = policy(["resolution"], 3, {**RULE_DEFAULTS, "pack_policy": "exclude"})
+        with self.assertRaisesRegex(SharedError, "更新协调端"):
+            p._apply_shared_policy(legacy)
+        self.assertEqual(p._local_shared_policy()["rules"], RULE_DEFAULTS)
 
     def test_policy_cache_does_not_slide_and_never_skips_history_or_audit(self):
         p = self.plugin
