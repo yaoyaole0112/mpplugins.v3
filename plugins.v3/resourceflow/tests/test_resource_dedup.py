@@ -769,6 +769,7 @@ class ResourceMigrationTests(unittest.TestCase):
         )
         self.assertFalse(settings.inflight_enabled)
         self.assertFalse(settings.pack_dedup_enabled)
+        self.assertTrue(settings.prefer_2160p)
         self.assertEqual(settings.pack_policy, 'exclude')
         for field in ('pack_policy', 'identity_policy'):
             with self.assertRaises(ValueError):
@@ -792,12 +793,14 @@ class ResourceMigrationTests(unittest.TestCase):
         for enabled in (False, True):
             payload = ChannelDedupSettingsPayload(
                 inflight_enabled=enabled, pack_dedup_enabled=enabled, pack_policy='exclude',
-                identity_policy='defer', attributes=['resolution'],
+                prefer_2160p=enabled, identity_policy='defer', attributes=['resolution'],
             )
             result = plugin.update_channel_dedup_settings(payload)
             self.assertTrue(result.success)
             config = plugin._current_config()
             self.assertEqual(config['channel_dedup_inflight_enabled'], enabled)
+            self.assertEqual(config['channel_dedup_prefer_2160p'], enabled)
+            self.assertEqual(result.data['prefer_2160p'], enabled)
             self.assertEqual(result.data['pack_dedup_enabled'], enabled)
             self.assertEqual(result.data['pack_policy'], 'exclude')
             self.assertEqual(config['channel_dedup_identity_policy'], 'defer')

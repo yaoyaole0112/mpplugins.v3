@@ -116,6 +116,36 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(restored.recent()), 1)
         self.assertTrue(restored.has_unfinished())
 
+    def test_completed_2160p_blocks_lower_resolution_even_when_resolution_is_not_selected(self):
+        self.store = CoordinatorStore(self.path, "resources", ["effects"], 5, RULE_DEFAULTS)
+        high = file_row(resolution="4K", effects="SDR")
+        approved = self.send(self.request([high]))["approved"][0]
+        self.assertTrue(self.send({"v": 1, "group": "resources", "instance": "a" * 32, "op": "update",
+                                   "updates": [{"claim": approved["claim"], "state": "queued"}]})["ok"])
+        self.assertTrue(self.send({"v": 1, "group": "resources", "instance": "a" * 32, "op": "update",
+                                   "updates": [{"claim": approved["claim"], "state": "completed"}]})["ok"])
+
+        lower = file_row(resolution="1080p", effects="HDR")
+        reply = self.send(self.request([lower], instance="b" * 32), sender=22)
+        self.assertEqual(reply["approved"], [])
+        self.assertEqual(reply["rejected"][0]["reason"], "已有2160p/4K高分辨率资源")
+
+    def test_2160p_rule_is_episode_scoped_and_keeps_2160p_candidate(self):
+        self.store = CoordinatorStore(self.path, "resources", ["effects"], 5, RULE_DEFAULTS)
+        high = file_row(resolution="2160p", effects="SDR")
+        approved = self.send(self.request([high]))["approved"][0]
+        for state in ("queued", "completed"):
+            self.send({"v": 1, "group": "resources", "instance": "a" * 32, "op": "update",
+                       "updates": [{"claim": approved["claim"], "state": state}]})
+        other_episode = self.send(self.request(
+            [dict(file_row(2, 2, resolution="1080p", effects="HDR"))], instance="b" * 32), sender=22)
+        same_quality = self.send(self.request(
+            [dict(file_row(3, 1, resolution="2160p", effects="HDR"))], instance="c" * 32), sender=33)
+        self.assertTrue(other_episode["ok"], other_episode)
+        self.assertTrue(same_quality["ok"], same_quality)
+        self.assertEqual(len(other_episode["approved"]), 1)
+        self.assertEqual(len(same_quality["approved"]), 1)
+
     def test_recent_claim_includes_creation_and_update_times_without_private_rpc(self):
         before = time.time()
         self.send(self.request())

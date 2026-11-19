@@ -100,6 +100,19 @@ class SharedRecordCacheTests(unittest.TestCase):
         self.assertEqual(self.cache.search(self.scope, "", "released", 1, 20, "")["total"], 0)
         self.assertEqual(len(self.reserve(file_row())["approved"]), 1)
 
+    def test_completed_2160p_mirror_blocks_lower_resolution_per_episode(self):
+        self.store = CoordinatorStore(self.store.path, "resources", ["effects"], 5, RULE_DEFAULTS)
+        high = file_row(resolution="4K", effects="SDR")
+        claim = self.reserve(high)["approved"][0]["claim"]
+        self.send("update", updates=[{"claim": claim, "state": "queued"}])
+        self.send("update", updates=[{"claim": claim, "state": "completed"}])
+        self.sync()
+
+        blocked = self.match(file_row(2, 1, resolution="720p", effects="HDR"))[1]
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0][1]["_match_reason"], "已有2160p/4K高分辨率资源")
+        self.assertFalse(self.match(file_row(3, 2, resolution="720p", effects="HDR"))[1])
+
     def test_mirror_display_time_order_and_search_by_reused_localized_name(self):
         old, new = [row["claim"] for row in self.reserve(dict(file_row(), media_title="剧集中文名"),
                                                           dict(file_row(2, 2), media_title=""))["approved"]]

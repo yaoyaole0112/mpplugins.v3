@@ -70,6 +70,26 @@ class SharedAuthorityTests(unittest.TestCase):
         self.assertEqual([row["episodes"] for row in rows], [[21], [22]])
         self.assertEqual(rows[0]["specs"], {"resolution": "2160p"})
 
+    def test_unselected_resolution_is_preserved_for_2160p_preference(self):
+        rows, skipped = completion_rows([
+            evidence(specs={"resolution": "4K", "effects": "HDR", "fps": 24, "size": 1000}),
+        ], ["effects"])
+        self.assertEqual(skipped, 0)
+        self.assertEqual(rows[0]["specs"], {"effects": "HDR", "resolution": "2160p"})
+
+    def test_imported_2160p_history_blocks_lower_quality_peer_when_resolution_is_unselected(self):
+        self.store = CoordinatorStore(self.path, "resources", ["effects"], 5, RULE_DEFAULTS)
+        rows, _ = completion_rows([
+            evidence(specs={"resolution": "4K", "effects": "HDR", "fps": 24, "size": 1000}),
+        ], ["effects"])
+        imported = self.send("import_completed", files=rows)
+        self.assertTrue(imported["ok"], imported)
+        lower = {"id": "b" * 24, "title": "Show", "media_type": "tv", "tmdb_id": 279155,
+                 "season": 1, "episodes": [21], "specs": {"resolution": "720p", "effects": "SDR"}}
+        result = self.send("reserve", 22, "b" * 32, files=[lower])
+        self.assertEqual(result["approved"], [])
+        self.assertEqual(result["rejected"][0]["reason"], "已有2160p/4K高分辨率资源")
+
     def test_invalid_import_batch_rolls_back_all_evidence(self):
         _, rows = self.import_rows()
         bad = {**rows[0], "id": "f" * 24, "completed_at": time.time() + 600}

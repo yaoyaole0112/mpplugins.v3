@@ -300,6 +300,7 @@ class ChannelDedupSettingsPayload(BaseModel):
     cancel_downloading: bool = False
     inflight_enabled: bool = True
     pack_dedup_enabled: bool = True
+    prefer_2160p: bool = True
     pack_policy: Literal["partial", "exclude"] = "partial"
     identity_policy: Literal["defer", "allow"] = "defer"
     attributes: list[str] = Field(default_factory=lambda: ["resolution", "effects", "codec", "source", "fps"])

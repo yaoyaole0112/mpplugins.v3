@@ -274,7 +274,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.40"
+    plugin_version = "1.0.41"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -342,6 +342,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 "cancel_downloading": raw_config.get("channel_dedup_cancel_downloading", False),
                 "inflight_enabled": raw_config.get("channel_dedup_inflight_enabled", True),
                 "pack_dedup_enabled": raw_config.get("channel_dedup_pack_dedup_enabled", True),
+                "prefer_2160p": raw_config.get("channel_dedup_prefer_2160p", True),
                 "pack_policy": raw_config.get("channel_dedup_pack_policy", "partial"),
                 "identity_policy": migrated_identity_policy(raw_config),
                 "channels": raw_config.get("channel_dedup_channels", []),
@@ -360,6 +361,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         self._channel_dedup_cancel_downloading = False
         self._channel_dedup_inflight_enabled = channel_config.inflight_enabled
         self._channel_dedup_pack_dedup_enabled = channel_config.pack_dedup_enabled
+        self._channel_dedup_prefer_2160p = channel_config.prefer_2160p
         self._channel_dedup_pack_policy = channel_config.pack_policy
         self._channel_dedup_identity_policy = channel_config.identity_policy
         self._channel_dedup_channels = []
@@ -759,7 +761,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             )
             self._channel_dedup_enabled = payload.enabled
             self._channel_dedup_cancel_downloading = payload.cancel_downloading
-            for field in ("inflight_enabled", "pack_dedup_enabled", "pack_policy", "identity_policy"):
+            for field in ("inflight_enabled", "pack_dedup_enabled", "prefer_2160p", "pack_policy", "identity_policy"):
                 if field in payload.model_fields_set:
                     setattr(self, f"_channel_dedup_{field}", getattr(payload, field))
             self._channel_dedup_channels = payload.channels
@@ -1099,6 +1101,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             "channel_dedup_cancel_downloading": bool(getattr(self, "_channel_dedup_cancel_downloading", False)),
             "channel_dedup_inflight_enabled": bool(getattr(self, "_channel_dedup_inflight_enabled", True)),
             "channel_dedup_pack_dedup_enabled": bool(getattr(self, "_channel_dedup_pack_dedup_enabled", True)),
+            "channel_dedup_prefer_2160p": bool(getattr(self, "_channel_dedup_prefer_2160p", True)),
             "channel_dedup_pack_policy": getattr(self, "_channel_dedup_pack_policy", "partial"),
             "channel_dedup_identity_policy": getattr(self, "_channel_dedup_identity_policy", "defer"),
             "channel_dedup_channels": list(getattr(self, "_channel_dedup_channels", [])),
@@ -1151,6 +1154,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 "cancel_downloading": bool(getattr(self, "_channel_dedup_cancel_downloading", False)),
                 "inflight_enabled": bool(getattr(self, "_channel_dedup_inflight_enabled", True)),
                 "pack_dedup_enabled": bool(getattr(self, "_channel_dedup_pack_dedup_enabled", True)),
+                "prefer_2160p": bool(getattr(self, "_channel_dedup_prefer_2160p", True)),
                 "pack_policy": getattr(self, "_channel_dedup_pack_policy", "partial"),
                 "identity_policy": getattr(self, "_channel_dedup_identity_policy", "defer"),
                 "channels": list(self._channel_dedup_channels),

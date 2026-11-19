@@ -80,7 +80,8 @@ const channelDedupDraft = ref({
   enabled: false, channels: '', attributes: [], size_tolerance_pct: 5,
   unknown_policy: 'exclude', identity_aliases: '', cancel_downloading: false,
   movie_identity_aliases: '',
-  inflight_enabled: true, pack_dedup_enabled: true, pack_policy: 'partial', identity_policy: 'defer',
+  inflight_enabled: true, pack_dedup_enabled: true, prefer_2160p: true,
+  pack_policy: 'partial', identity_policy: 'defer',
 })
 const channelUnknownPolicies = [
   { value: 'exclude', title: '排除不下载' },
@@ -331,6 +332,7 @@ async function loadChannelDedup({ resetDraft = true } = {}) {
         cancel_downloading: Boolean(data?.cancel_downloading),
         inflight_enabled: data?.inflight_enabled ?? true,
         pack_dedup_enabled: data?.pack_dedup_enabled ?? true,
+        prefer_2160p: data?.prefer_2160p ?? true,
         pack_policy: data?.pack_policy || 'partial',
         identity_policy: data?.identity_policy || 'defer',
         channels: (data?.channels || []).join('\n'),
@@ -407,6 +409,7 @@ async function saveChannelDedup(shared) {
     ...(shared.host_coordinator ? {
       inflight_enabled: channelDedupDraft.value.inflight_enabled,
       pack_dedup_enabled: channelDedupDraft.value.pack_dedup_enabled,
+      prefer_2160p: channelDedupDraft.value.prefer_2160p,
       pack_policy: channelDedupDraft.value.pack_policy,
       identity_policy: channelDedupDraft.value.identity_policy,
       attributes: channelDedupDraft.value.attributes,
@@ -1132,7 +1135,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 hint="按种子内单个视频文件大小比较，不使用整包总大小" persistent-hint />
             </div>
             <VDivider />
-            <div class="text-subtitle-2">资源去重规则</div>
             <div class="global-settings__grid global-settings__rules">
               <VSwitch v-model="channelDedupDraft.inflight_enabled" label="排除已入队的同规格资源"
                 color="primary" density="compact" hide-details inset />
@@ -1149,6 +1151,9 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                   { title: '按未命中放行', value: 'allow' },
                 ]" density="comfortable" hide-details />
             </div>
+            <VSwitch v-model="channelDedupDraft.prefer_2160p"
+              label="已有 2160p/4K 完成记录时排除低分辨率版本"
+              color="primary" density="compact" hide-details inset />
           </template>
           <VDivider />
           <div class="text-subtitle-2">别名绑定</div>
@@ -1465,14 +1470,14 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 .channel-dedup__search > * { min-inline-size: 0; }
 
 .global-settings__body {
-  gap: 12px;
+  gap: 18px;
 }
 
 .global-settings__grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: 12px 20px;
+  gap: 16px 24px;
   min-inline-size: 0;
 }
 
@@ -1493,7 +1498,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 16px;
+  gap: 8px 22px;
   min-inline-size: 0;
 }
 
@@ -1568,7 +1573,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
 .channel-dedup__section {
   display: grid;
-  gap: 8px;
+  gap: 12px;
   min-inline-size: 0;
 }
 

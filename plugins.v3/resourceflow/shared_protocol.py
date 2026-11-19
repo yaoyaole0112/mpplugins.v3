@@ -17,7 +17,7 @@ RESPONSE_PREFIX = "RFA1"
 ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 RULE_DEFAULTS = {
     "unknown_policy": "exclude", "inflight_enabled": True, "pack_dedup_enabled": True,
-    "pack_policy": "partial", "identity_policy": "defer",
+    "pack_policy": "partial", "identity_policy": "defer", "prefer_2160p": True,
 }
 
 
@@ -105,7 +105,7 @@ def policy(attributes, tolerance, rules=None):
     if rules is not None:
         if not isinstance(rules, dict) or set(rules) != set(RULE_DEFAULTS):
             raise SharedError("协调端资源规则字段不完整，请更新双方插件")
-        for field in ("inflight_enabled", "pack_dedup_enabled"):
+        for field in ("inflight_enabled", "pack_dedup_enabled", "prefer_2160p"):
             if type(rules[field]) is not bool:
                 raise SharedError("协调端资源规则无效")
         for field, choices in {

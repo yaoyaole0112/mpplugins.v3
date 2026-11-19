@@ -3,6 +3,7 @@
 import math
 import re
 
+from .channel_dedup import normalize_specs
 from .shared_protocol import digest
 
 
@@ -45,10 +46,14 @@ def completion_rows(records, attributes):
         episode_groups = ([sorted(set(episodes))] if links else
                           [[episode] for episode in sorted(set(episodes))]) if kind == "tv" else [[]]
         for group in episode_groups:
+            stored_specs = {key: specs[key] for key in attributes}
+            resolution = specs.get("resolution")
+            if isinstance(resolution, str) and 0 < len(resolution) <= 80:
+                stored_specs["resolution"] = normalize_specs({"resolution": resolution})["resolution"]
             row = {
                 "media_type": kind, "tmdb_id": identity, "season": season if kind == "tv" else None,
                 "episodes": group,
-                "specs": {key: specs[key] for key in attributes},
+                "specs": stored_specs,
                 "title": str(record.get("title") or record.get("path") or record.get("file_key") or "")[-160:],
                 "media_title": str(record.get("media_title") or "")[:120],
                 "completed_at": timestamp,

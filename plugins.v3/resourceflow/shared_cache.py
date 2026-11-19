@@ -43,6 +43,19 @@ def same_resource(candidate, record, attributes, tolerance, *, overlap=True):
     return specs_match(candidate, record, attributes, tolerance)
 
 
+def has_2160p_conflict(candidate, record):
+    if (candidate.get("media_type") != "tv" or record.get("media_type") != "tv"
+            or candidate.get("tmdb_id") != record.get("tmdb_id")
+            or candidate.get("season") != record.get("season")
+            or record.get("state") != "completed"):
+        return False
+    if not set(candidate.get("episodes") or []).intersection(record.get("episodes") or []):
+        return False
+    candidate_resolution = normalize_specs(candidate.get("specs") or {}).get("resolution")
+    record_resolution = normalize_specs(record.get("specs") or {}).get("resolution")
+    return bool(candidate_resolution and candidate_resolution != "2160p" and record_resolution == "2160p")
+
+
 class SharedRecordCache:
     def __init__(self, path):
         self.path = Path(path)
@@ -171,6 +184,10 @@ def filter_records(db, candidates, rules, *, mirror=False, group=None, completed
                 identities[identity] = [display_record(row) for row in rows]
         hit = next((row for row in identities[identity]
                     if same_resource(candidate, row, rules["attributes"], rules["size_tolerance_pct"])), None)
+        if not hit and rules.get("rules", {}).get("prefer_2160p", True):
+            hit = next((row for row in identities[identity] if has_2160p_conflict(candidate, row)), None)
+            if hit:
+                hit = {**hit, "_match_reason": "已有2160p/4K高分辨率资源"}
         if hit:
             blocked.append((candidate, hit))
         else:

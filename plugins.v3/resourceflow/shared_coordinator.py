@@ -18,7 +18,8 @@ from .record_search import (
     localized_record_titles, matches_owner, matches_record, record_display_title, record_page,
 )
 from .shared_cache import (
-    RECORD_COLUMNS, SYNC_BATCH, SYNC_MAX_PARTS, SYNC_VERSION, display_record, filter_records, same_resource,
+    RECORD_COLUMNS, SYNC_BATCH, SYNC_MAX_PARTS, SYNC_VERSION, display_record, filter_records,
+    has_2160p_conflict, same_resource,
 )
 from .shared_history import AUTHORITY_VERSION
 from .shared_protocol import (
@@ -204,12 +205,21 @@ class CoordinatorStore:
                 (self.group, item["media_type"], item["tmdb_id"], item["season"]),
             ).fetchall()
             conflict = None
-            for row in [dict(row) for row in rows] + pending:
+            existing_rows = [dict(row) for row in rows]
+            for row in existing_rows + pending:
+                high_resolution_row = row
+                if isinstance(row.get("episodes"), str) and isinstance(row.get("specs"), str):
+                    high_resolution_row = {**row, "episodes": json.loads(row["episodes"]),
+                                           "specs": json.loads(row["specs"])}
+                if (self.policy.get("rules", {}).get("prefer_2160p", True)
+                        and has_2160p_conflict(item, high_resolution_row)):
+                    conflict = {**row, "_match_reason": "已有2160p/4K高分辨率资源"}
+                    break
                 if self._same_identity_file(item, row, overlap=True):
                     conflict = row
                     break
             if conflict:
-                rejected.append({"id": item["id"], "reason": "同规格已占位或已完成",
+                rejected.append({"id": item["id"], "reason": conflict.get("_match_reason", "同规格已占位或已完成"),
                                  "owner": conflict["label"], "state": conflict["state"],
                                  "claim": conflict["id"], "created": conflict["created"],
                                  "updated": conflict["updated"]})
@@ -310,16 +320,22 @@ class CoordinatorStore:
                 (self.group, instance, item["id"], self.policy["revision"])).fetchone()
             original = source.get("original_claim")
             linked = db.execute("SELECT * FROM claims WHERE id=?", (original,)).fetchone() if original else None
+            linked_resolution = (normalize_specs(json.loads(linked["specs"])).get("resolution")
+                                 if linked and isinstance(linked["specs"], str) else None)
+            item_resolution = item["specs"].get("resolution")
             if linked and (linked["group_id"] != self.group or linked["instance"] != instance
                            or linked["request_id"] != source.get("original_request")
                            or linked["file_id"] != source.get("original_file")
                            or linked["state"] == "released"
                            or not self._same_identity_file(item, linked)
+                           or self.policy.get("rules", {}).get("prefer_2160p", True)
+                           and linked_resolution and item_resolution and linked_resolution != item_resolution
                            or set(item["episodes"]) != set(json.loads(linked["episodes"]))):
                 raise SharedError("历史完成证据与原占位身份或归属不一致")
             if linked:
                 claim = linked["id"]
-                db.execute("UPDATE claims SET state='completed',updated=? WHERE id=?", (time.time(), claim))
+                db.execute("UPDATE claims SET state='completed',specs=?,updated=? WHERE id=?",
+                           (canonical(item["specs"]), time.time(), claim))
             elif old and db.execute("SELECT 1 FROM claims WHERE id=? AND state='completed'",
                                     (old["claim_id"],)).fetchone():
                 claim = old["claim_id"]
@@ -328,7 +344,7 @@ class CoordinatorStore:
                     "SELECT * FROM claims WHERE group_id=? AND media_type=? AND tmdb_id=? "
                     "AND season IS ? AND state='completed'",
                     (self.group, item["media_type"], item["tmdb_id"], item["season"])).fetchall()
-                match = next((row for row in matches if self._same_identity_file(item, row)), None)
+                match = next((row for row in matches if self._same_completed_evidence(item, row)), None)
                 # An original request must retain its original claim link, even after DB recovery.
                 claim = original or (match["id"] if match else uuid.uuid4().hex)
                 if original or not match:
@@ -354,6 +370,15 @@ class CoordinatorStore:
         return same_resource(item, {**dict(row), "episodes": json.loads(row["episodes"]),
                                    "specs": json.loads(row["specs"])}, self.policy["attributes"],
                              self.policy["size_tolerance_pct"], overlap=overlap)
+
+    def _same_completed_evidence(self, item, row):
+        if not self._same_identity_file(item, row):
+            return False
+        if not self.policy.get("rules", {}).get("prefer_2160p", True):
+            return True
+        stored = normalize_specs(json.loads(row["specs"])).get("resolution")
+        incoming = item["specs"].get("resolution")
+        return stored == incoming
 
     def _inspect(self, db, sender, instance, body):
         requested = body.get("claims")
@@ -401,6 +426,11 @@ class CoordinatorStore:
             elif not isinstance(value, str) or not 0 < len(value) <= 80:
                 raise SharedError("规格文本无效")
         specs = normalize_specs(specs)
+        resolution = row.get("specs", {}).get("resolution")
+        if resolution is not None:
+            if not isinstance(resolution, str) or not 0 < len(resolution) <= 80:
+                raise SharedError("分辨率规格无效")
+            specs["resolution"] = normalize_specs({"resolution": resolution})["resolution"]
         if any(value is None for value in specs.values()):
             raise SharedError("缺少共享规则勾选的规格")
         media_title = row.get("media_title", "")

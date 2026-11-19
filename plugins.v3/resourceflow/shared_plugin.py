@@ -153,8 +153,10 @@ class SharedResourceMixin:
         for candidate, row in blocked:
             episodes = ",".join(f"{episode:02d}" for episode in candidate["episodes"])
             scope = f"S{candidate['season']:02d}E{episodes}" if candidate["media_type"] == "tv" else "电影"
+            reason = row.get("_match_reason", "同规格已占位或已完成")
             logger.info(f"共享下载记录本地命中 {title}：TMDB {candidate['tmdb_id']} · {scope}；"
-                        f"下载方：{row['label']}；状态 {row['state']}；占位 {row['id']}，不发送占位申请")
+                        f"原因：{reason}；下载方：{row['label']}；状态 {row['state']}；"
+                        f"占位 {row['id']}，不发送占位申请")
         return available, blocked
 
     def _shared_history_rows(self):
@@ -1048,7 +1050,10 @@ class SharedResourceMixin:
                         "files": [{**{key: row.get(key) for key in
                                    ("id", "title", "media_type", "tmdb_id", "media_title",
                                     "season", "episodes")},
-                                   "specs": {key: row["specs"].get(key) for key in current_policy["attributes"]}}
+                                   "specs": {
+                                       **{key: row["specs"].get(key) for key in current_policy["attributes"]},
+                                       "resolution": row["specs"].get("resolution"),
+                                   }}
                                   for row in candidates]}
                 entry = {"request_id": request_id, "body": body, "title": title[:160],
                          "task_id": task.id, "downloader": task.downloader, "hash": expected_hash,

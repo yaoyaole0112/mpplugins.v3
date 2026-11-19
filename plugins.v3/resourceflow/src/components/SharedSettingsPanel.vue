@@ -198,7 +198,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
     <VAlert v-if="state.history_sync?.pending" type="warning" variant="tonal" density="compact">
       历史完成证据待同步：{{ state.history_sync.pending }} 条；同步确认前暂缓新增下载。
     </VAlert>
-    <VAlert v-if="state.history_sync?.unverified && (mode === 'settings' || recordTab === 'pending')"
+    <VAlert v-if="state.history_sync?.unverified && recordTab === 'pending' && mode !== 'settings'"
       type="info" variant="tonal" density="compact">
       历史完成证据不完整：{{ state.history_sync.unverified }} 条，未导入共享记录。
       缺少身份、已勾规格或有效时间的旧证据会保留，补齐后才可重新校验；这不是正在等待同步的任务。
@@ -221,11 +221,10 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
         placeholder="123456789, 987654321; 112233445" auto-grow hide-details />
     </div>
     <dl class="shared-settings__status">
-      <div><dt>账号来源</dt><dd>自动生成ED2K链接 · 个人账号</dd></div>
-      <div><dt>协调端</dt><dd>{{ state.host_coordinator ? state.coordinator_running ? '本机运行中' : '本机未运行' : '远端' }}</dd></div>
-      <div><dt>最近审批确认</dt><dd>{{ timestamp(state.last_ok) }}</dd></div>
-      <div v-if="state.probe?.user_id"><dt>本机 Telegram ID</dt><dd>{{ state.probe.user_id }}</dd></div>
-      <div v-if="state.probe?.policy"><dt>协调端规则版本</dt><dd>{{ state.probe.policy.revision.slice(0, 12) }}</dd></div>
+      <div><dt>账号来源：</dt><dd>插件（自动生成ED2K链接）</dd></div>
+      <div><dt>协调端：</dt><dd>{{ state.host_coordinator ? state.coordinator_running ? '本机运行中' : '本机未运行' : '远端' }}</dd></div>
+      <div><dt>最近审批确认：</dt><dd>{{ timestamp(state.last_ok || state.coordinator_last_ok) }}</dd></div>
+      <div><dt>协调端规则版本：</dt><dd>{{ state.probe?.policy?.revision?.slice(0, 12) || '-' }}</dd></div>
     </dl>
     </template>
     <template v-else>
@@ -316,22 +315,44 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 </template>
 
 <style scoped>
-.shared-settings { display: flex; flex-direction: column; gap: 16px; min-inline-size: 0; }
-.shared-settings--compact { gap: 12px; }
+.shared-settings { display: flex; flex-direction: column; gap: 20px; min-inline-size: 0; }
+.shared-settings--compact { gap: 18px; }
 .shared-settings__search { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 210px) minmax(130px, 160px) minmax(150px, 170px); gap: 12px; }
 .shared-settings__search > * { min-inline-size: 0; }
-.shared-settings__grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 12px 20px; min-inline-size: 0; }
+.shared-settings__grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 16px 24px; min-inline-size: 0; }
 .shared-settings__grid > * { min-inline-size: 0; }
 .shared-settings__instance :deep(input) { font-family: monospace; font-size: 11px; }
 .shared-settings__status { margin: 0; display: grid; gap: 10px; }
 .shared-settings__status > div { display: flex; justify-content: space-between; gap: 12px; }
 .shared-settings__status dd { margin: 0; overflow-wrap: anywhere; text-align: end; }
-.shared-settings--compact .shared-settings__status { gap: 8px 20px; font-size: 13px; }
-.shared-settings--compact .shared-settings__status > div { min-inline-size: 0; justify-content: flex-start; gap: 8px; flex-wrap: wrap; }
+.shared-settings--compact .shared-settings__status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  border-radius: 6px;
+  background: rgba(var(--v-theme-surface-variant), 0.14);
+  font-size: 13px;
+}
+.shared-settings--compact .shared-settings__status > div {
+  min-inline-size: 0;
+  justify-content: flex-start;
+  gap: 4px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+.shared-settings--compact .shared-settings__status > div:not(:last-child)::after {
+  content: "·";
+  margin-inline: 12px;
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
+}
 .shared-settings--compact .shared-settings__status dt { flex-shrink: 0; }
+.shared-settings--compact .shared-settings__status dd { text-align: start; }
 @media (min-width: 600px) {
   .shared-settings__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .shared-settings--compact .shared-settings__status { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .shared-settings--compact .shared-settings__status { grid-template-columns: none; }
 }
 .shared-settings__records { min-inline-size: 0; }
 .shared-settings__record > * { margin-inline-start: 0; }
@@ -376,7 +397,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
   .shared-settings__pagination { grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; }
   .shared-settings__pagination-control { grid-column: 1; }
   .shared-settings__total { grid-column: 2; }
-  .shared-settings__status > div { flex-wrap: wrap; }
+  .shared-settings--compact .shared-settings__status > div { flex-wrap: wrap; white-space: normal; }
   .shared-settings__status dd { margin-inline-start: auto; }
 }
 </style>

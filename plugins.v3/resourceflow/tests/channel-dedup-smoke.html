@@ -33,7 +33,8 @@
     enabled: true, channels: ['@example_channel'], attributes: ['resolution', 'effects', 'codec', 'source'],
     size_tolerance_pct: 5, record_count: 2, last_poll_at: Date.now() / 1000, last_error: '',
     unknown_policy: 'exclude', identity_aliases: {}, movie_identity_aliases: {}, cancel_downloading: false,
-    inflight_enabled: true, pack_dedup_enabled: true, pack_policy: 'partial', identity_policy: 'defer',
+    inflight_enabled: true, pack_dedup_enabled: true, prefer_2160p: true,
+    pack_policy: 'partial', identity_policy: 'defer',
     ledger_count: 1, pending_count: 1,
     poll_interval_seconds: 300, next_poll_at: Date.now() / 1000 + 300,
     records: [1, 2].map(number => ({
