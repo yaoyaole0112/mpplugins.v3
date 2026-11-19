@@ -4916,8 +4916,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 self._resolve_pending_identity(candidate, task)
             if "effects" in attributes and "effects" in candidate["inferred_attributes"]:
                 logger.info(
-                    f"{match_source}规格推断 {item['path']}：未标动态范围的常规 "
-                    f"{candidate['specs']['resolution']} H.264 WEB 资源按 SDR 命名约定比较，非媒体实测"
+                    f"{match_source}规格推断 {item['path']}：文件名和种子描述未标明动态范围，"
+                    "按 SDR 命名约定比较，非媒体实测"
                 )
             matched_records = self._match_channel_candidate(candidate, episode_records, attributes, tolerance, title,
                                                             mode=mode, task=task)
@@ -5058,10 +5058,16 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             aliases = {normalize_title(name) for name in raw_aliases} - {""}
             chinese_names = {normalize_title(name) for name in evidence_names if re.search(r"[\u3400-\u9fff]", name)}
             chinese_aliases = {normalize_title(name) for name in raw_aliases if re.search(r"[\u3400-\u9fff]", name)}
+            chinese_alias_match = chinese_names.intersection(chinese_aliases)
             year, media_year = str(meta.year or ""), str(getattr(media, "year", "") or "")
             first_season = getattr(meta, "begin_season", None) in (None, 1)
             year_conflict = first_season and year and media_year and year != media_year
-            chinese_conflict = chinese_names and chinese_aliases and not chinese_names.intersection(chinese_aliases)
+            chinese_conflict = bool(
+                chinese_names and (
+                    (chinese_aliases and not chinese_alias_match)
+                    or (not chinese_alias_match and any(len(name) <= 2 for name in chinese_names))
+                )
+            )
             exact = bool(evidence_keys.intersection(aliases))
             truncated = bool(
                 not exact and year and year == media_year

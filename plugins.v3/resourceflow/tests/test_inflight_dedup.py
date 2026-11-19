@@ -63,10 +63,10 @@ class InflightDedupTests(unittest.TestCase):
         self.assertFalse(self.enqueue(path=cr)["blocked"])
         self.assertTrue(self.enqueue("b" * 40, baha)["blocked"])
 
-    def test_unknown_selected_effects_are_not_silently_treated_as_sdr(self):
+    def test_unmarked_selected_effect_defaults_to_sdr_and_matches_queued_release(self):
         self.enqueue()
         path = self.path.replace("SDR.", "").replace("H264", "H265")
-        self.assertFalse(self.enqueue("b" * 40, path)["blocked"])
+        self.assertTrue(self.enqueue("b" * 40, path)["blocked"])
 
     def test_failed_add_releases_reservation_only_after_confirmed_absence(self):
         self.downloader.add_torrent.return_value = (False, [])

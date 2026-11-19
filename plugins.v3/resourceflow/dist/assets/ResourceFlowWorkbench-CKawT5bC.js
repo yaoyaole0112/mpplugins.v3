@@ -2015,25 +2015,24 @@ const _hoisted_68 = { class: "channel-dedup__record-head" };
 const _hoisted_69 = { class: "channel-dedup__record-main" };
 const _hoisted_70 = { class: "channel-dedup__record-identity channel-dedup__record-info" };
 const _hoisted_71 = { class: "channel-dedup__record-actions" };
-const _hoisted_72 = { class: "channel-dedup__badge" };
-const _hoisted_73 = { class: "channel-dedup__record-title" };
-const _hoisted_74 = { class: "channel-dedup__record-meta" };
-const _hoisted_75 = { key: 0 };
-const _hoisted_76 = { class: "channel-dedup__record-reason" };
-const _hoisted_77 = {
+const _hoisted_72 = { class: "channel-dedup__record-title" };
+const _hoisted_73 = { class: "channel-dedup__record-meta" };
+const _hoisted_74 = { key: 0 };
+const _hoisted_75 = { class: "channel-dedup__record-reason" };
+const _hoisted_76 = {
   key: 0,
   class: "channel-dedup__record-progress"
 };
-const _hoisted_78 = {
+const _hoisted_77 = {
   key: 1,
   class: "channel-dedup__record-error"
 };
-const _hoisted_79 = {
+const _hoisted_78 = {
   key: 2,
   class: "channel-dedup__record-error"
 };
-const _hoisted_80 = { class: "pending-approval__grid" };
-const _hoisted_81 = {
+const _hoisted_79 = { class: "pending-approval__grid" };
+const _hoisted_80 = {
   key: 1,
   class: "text-caption text-medium-emphasis"
 };
@@ -2405,7 +2404,7 @@ async function loadResourceRows() {
     const data = unwrapResponse(await props.api.get(`${pluginBase.value}/resource-ledger?${params}`));
     if (generation === resourceGeneration) resourceRows.value = data || { total: 0, items: [] };
   } catch (err) {
-    if (generation === resourceGeneration) channelDedupError.value = err?.message || '读取身份待核验记录失败';
+    if (generation === resourceGeneration) channelDedupError.value = err?.message || '读取下载待核验记录失败';
   } finally {
     if (generation === resourceGeneration) ledgerLoading.value = false;
   }
@@ -4043,7 +4042,7 @@ return (_ctx, _cache) => {
                       : _createCommentVNode("", true),
                     _createVNode(_component_VTab, { value: "pending" }, {
                       default: _withCtx(() => [...(_cache[120] || (_cache[120] = [
-                        _createTextVNode("身份待核验", -1)
+                        _createTextVNode("下载待核验", -1)
                       ]))]),
                       _: 1
                     })
@@ -4112,6 +4111,7 @@ return (_ctx, _cache) => {
                                       size: "small",
                                       density: "compact",
                                       variant: "tonal",
+                                      class: "channel-dedup__pending-action",
                                       "prepend-icon": "mdi-check-circle-outline",
                                       disabled: row.manual_state === 'queued' || row.manual_state === 'processing',
                                       onClick: $event => (openPendingApproval(row))
@@ -4121,40 +4121,33 @@ return (_ctx, _cache) => {
                                       ]))]),
                                       _: 1
                                     }, 8, ["disabled", "onClick"]))
-                                  : _createCommentVNode("", true),
-                                _createElementVNode("span", _hoisted_72, [
-                                  _createVNode(_component_VIcon, {
-                                    icon: "mdi-help-circle-outline",
-                                    size: "16"
-                                  }),
-                                  _cache[122] || (_cache[122] = _createTextVNode(" 待核验 ", -1))
-                                ])
+                                  : _createCommentVNode("", true)
                               ])
                             ]),
-                            _createElementVNode("strong", _hoisted_73, _toDisplayString(row.title || row.path || row.file_key || row.title_key), 1),
-                            _createElementVNode("div", _hoisted_74, [
+                            _createElementVNode("strong", _hoisted_72, _toDisplayString(row.title || row.path || row.file_key || row.title_key), 1),
+                            _createElementVNode("div", _hoisted_73, [
                               _createElementVNode("span", null, "最近更新：" + _toDisplayString(formatChannelTimestamp(row.last_seen)), 1),
                               _createElementVNode("span", null, "任务：" + _toDisplayString(row.task_name || '-'), 1),
                               (row.path)
-                                ? (_openBlock(), _createElementBlock("span", _hoisted_75, "文件：" + _toDisplayString(row.path), 1))
+                                ? (_openBlock(), _createElementBlock("span", _hoisted_74, "文件：" + _toDisplayString(row.path), 1))
                                 : _createCommentVNode("", true)
                             ]),
-                            _createElementVNode("p", _hoisted_76, _toDisplayString(row.reason || '身份或规格待核验'), 1),
+                            _createElementVNode("p", _hoisted_75, _toDisplayString(row.reason || '身份或规格待核验'), 1),
                             (row.manual_state === 'queued' || row.manual_state === 'processing')
-                              ? (_openBlock(), _createElementBlock("p", _hoisted_77, [
+                              ? (_openBlock(), _createElementBlock("p", _hoisted_76, [
                                   _createVNode(_component_VProgressCircular, {
                                     indeterminate: "",
                                     size: "14",
                                     width: "2",
                                     class: "mr-2"
                                   }),
-                                  _cache[123] || (_cache[123] = _createTextVNode(" 正在重新核验并执行下载审批 ", -1))
+                                  _cache[122] || (_cache[122] = _createTextVNode(" 正在重新核验并执行下载审批 ", -1))
                                 ]))
                               : (row.manual_error)
-                                ? (_openBlock(), _createElementBlock("p", _hoisted_78, " 上次处理未完成：" + _toDisplayString(row.manual_error), 1))
+                                ? (_openBlock(), _createElementBlock("p", _hoisted_77, " 上次处理未完成：" + _toDisplayString(row.manual_error), 1))
                                 : _createCommentVNode("", true),
                             (row.source_consumed)
-                              ? (_openBlock(), _createElementBlock("p", _hoisted_79, " 同一种子中的其他待核验文件不可再次单独添加 "))
+                              ? (_openBlock(), _createElementBlock("p", _hoisted_78, " 同一种子中的其他待核验文件不可再次单独添加 "))
                               : _createCommentVNode("", true)
                           ]))
                         }), 128))
@@ -4197,12 +4190,12 @@ return (_ctx, _cache) => {
                   variant: "tonal",
                   density: "compact"
                 }, {
-                  default: _withCtx(() => [...(_cache[124] || (_cache[124] = [
+                  default: _withCtx(() => [...(_cache[123] || (_cache[123] = [
                     _createTextVNode(" 你确认的身份和规格将重新进入原选种规则与共享下载审批；重复命中、规则排除或协调端拒绝时不会下载。 ", -1)
                   ]))]),
                   _: 1
                 }),
-                _createElementVNode("div", _hoisted_80, [
+                _createElementVNode("div", _hoisted_79, [
                   _createVNode(_component_VSelect, {
                     modelValue: pendingApprovalForm.value.media_type,
                     "onUpdate:modelValue": _cache[41] || (_cache[41] = $event => ((pendingApprovalForm.value.media_type) = $event)),
@@ -4271,7 +4264,7 @@ return (_ctx, _cache) => {
                     }))
                   : _createCommentVNode("", true),
                 (pendingApprovalRow.value)
-                  ? (_openBlock(), _createElementBlock("div", _hoisted_81, " 文件：" + _toDisplayString(pendingApprovalRow.value.path), 1))
+                  ? (_openBlock(), _createElementBlock("div", _hoisted_80, " 文件：" + _toDisplayString(pendingApprovalRow.value.path), 1))
                   : _createCommentVNode("", true)
               ]),
               _: 1
@@ -4284,7 +4277,7 @@ return (_ctx, _cache) => {
                   disabled: pendingApprovalSaving.value,
                   onClick: _cache[47] || (_cache[47] = $event => (pendingApprovalDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[125] || (_cache[125] = [
+                  default: _withCtx(() => [...(_cache[124] || (_cache[124] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -4296,7 +4289,7 @@ return (_ctx, _cache) => {
                   disabled: !pendingApprovalForm.value.confirmed,
                   onClick: submitPendingApproval
                 }, {
-                  default: _withCtx(() => [...(_cache[126] || (_cache[126] = [
+                  default: _withCtx(() => [...(_cache[125] || (_cache[125] = [
                     _createTextVNode(" 重新核验并提交 ", -1)
                   ]))]),
                   _: 1
@@ -4331,7 +4324,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[49] || (_cache[49] = $event => (deleteDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[127] || (_cache[127] = [
+                  default: _withCtx(() => [...(_cache[126] || (_cache[126] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -4342,7 +4335,7 @@ return (_ctx, _cache) => {
                   loading: saving.value,
                   onClick: confirmDeleteTask
                 }, {
-                  default: _withCtx(() => [...(_cache[128] || (_cache[128] = [
+                  default: _withCtx(() => [...(_cache[127] || (_cache[127] = [
                     _createTextVNode("删除", -1)
                   ]))]),
                   _: 1
@@ -4365,7 +4358,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_VCard, { title: "清除任务数据" }, {
           default: _withCtx(() => [
             _createVNode(_component_VCardText, null, {
-              default: _withCtx(() => [...(_cache[129] || (_cache[129] = [
+              default: _withCtx(() => [...(_cache[128] || (_cache[128] = [
                 _createTextVNode("将清除当前任务的统计、运行诊断、托管和归档记录，下载器内的种子与文件不会删除。", -1)
               ]))]),
               _: 1
@@ -4377,7 +4370,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[51] || (_cache[51] = $event => (clearDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[130] || (_cache[130] = [
+                  default: _withCtx(() => [...(_cache[129] || (_cache[129] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -4388,7 +4381,7 @@ return (_ctx, _cache) => {
                   loading: saving.value,
                   onClick: confirmClearTask
                 }, {
-                  default: _withCtx(() => [...(_cache[131] || (_cache[131] = [
+                  default: _withCtx(() => [...(_cache[130] || (_cache[130] = [
                     _createTextVNode("清除", -1)
                   ]))]),
                   _: 1
@@ -4407,6 +4400,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0f4e8ebd"]]);
+const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-25808235"]]);
 
 export { ResourceFlowWorkbench as R };

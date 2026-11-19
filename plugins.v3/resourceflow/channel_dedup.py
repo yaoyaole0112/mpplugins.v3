@@ -356,20 +356,9 @@ def parse_candidate_file(
     year_match = re.search(r"\b(?:19|20)\d{2}\b", filename) or re.search(r"\b(?:19|20)\d{2}\b", title_hint)
     specs = merge_specs(parse_specs(filename, size), merge_specs(parse_specs(title_hint), parse_specs(spec_hint)))
     inferred_attributes = []
-    # Naming convention only, not a probe: limit implicit SDR to ordinary AVC WEB releases.
-    if (
-        specs["effects"] is None
-        and specs["resolution"] in {"1080p", "1080i", "720p", "720i", "576p", "576i", "540p", "540i", "480p", "480i"}
-        and specs["codec"] == "H.264"
-        and specs["source"] in {"WEB-DL", "WEBRip", "WEB"}
-        and not re.search(
-            r"HDR|HLG|DOVI|DOLBY[ ._-]*VISION|EDR|MAXPLUS|"
-            r"(?:^|[^A-Z0-9])(?:DV|PQ)(?:[^A-Z0-9]|$)|"
-            r"(?:10|12)[ ._-]*BIT|HI10P|HIGH[ ._-]*10|YUV\d+P(?:10|12)|"
-            r"(?:BT|REC)[ ._-]*2020|(?:SMPTE[ ._-]*)?(?:ST[ ._-]*)?2084",
-            f"{path} {title_hint} {spec_hint}", re.IGNORECASE,
-        )
-    ):
+    # This is a filename convention, not a media probe. Explicit effect labels
+    # win; absent labels are treated as SDR for the user's selected-field match.
+    if specs["effects"] is None:
         specs["effects"] = "SDR"
         inferred_attributes.append("effects")
     return {

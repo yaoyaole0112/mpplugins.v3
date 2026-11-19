@@ -372,7 +372,7 @@ async function loadResourceRows() {
     const data = unwrapResponse(await props.api.get(`${pluginBase.value}/resource-ledger?${params}`))
     if (generation === resourceGeneration) resourceRows.value = data || { total: 0, items: [] }
   } catch (err) {
-    if (generation === resourceGeneration) channelDedupError.value = err?.message || '读取身份待核验记录失败'
+    if (generation === resourceGeneration) channelDedupError.value = err?.message || '读取下载待核验记录失败'
   } finally {
     if (generation === resourceGeneration) ledgerLoading.value = false
   }
@@ -1227,7 +1227,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VTabs v-model="approvalTab" density="compact">
             <VTab value="requests">本机下载申请</VTab>
             <VTab v-if="sharedRecordsHost" value="records">共享下载记录</VTab>
-            <VTab value="pending">身份待核验</VTab>
+            <VTab value="pending">下载待核验</VTab>
           </VTabs>
           <SharedSettingsPanel v-if="channelDedupDialog"
             ref="sharedRecordsPanel" :api="api" :plugin-base="pluginBase" :record-tab="approvalTab"
@@ -1255,15 +1255,12 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                   </div>
                   <div class="channel-dedup__record-actions">
                     <VBtn v-if="row.actionable" size="small" density="compact" variant="tonal"
+                      class="channel-dedup__pending-action"
                       prepend-icon="mdi-check-circle-outline"
                       :disabled="row.manual_state === 'queued' || row.manual_state === 'processing'"
                       @click="openPendingApproval(row)">
                       核验并继续下载
                     </VBtn>
-                    <span class="channel-dedup__badge">
-                      <VIcon icon="mdi-help-circle-outline" size="16" />
-                      待核验
-                    </span>
                   </div>
                 </div>
                 <strong class="channel-dedup__record-title">
@@ -1668,12 +1665,14 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
 .channel-dedup__record-actions {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: flex-end;
   flex: 0 0 auto;
   gap: 8px;
   min-inline-size: 0;
 }
+
+.channel-dedup__pending-action { min-block-size: 32px; }
 
 .channel-dedup__record-main,
 .channel-dedup__record-meta {

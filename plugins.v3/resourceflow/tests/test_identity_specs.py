@@ -78,30 +78,28 @@ class SelectedSpecsTests(unittest.TestCase):
         )
         self.assertIsNotNone(self.select())
 
-    def test_selected_missing_effect_excludes_even_when_no_channel_records_exist(self):
+    def test_unmarked_effect_defaults_to_sdr_and_does_not_count_as_missing(self):
         self.plugin._channel_dedup_attributes = ["resolution", "effects"]
         self.plugin._channel_dedup_state["records"] = []
         path = "Show.S01E01.2160p.H265.mkv"
-        with patch("resourceflow.logger") as log:
-            result = self.select(path)
-        self.assertEqual(result["excluded"], {path})
-        self.assertEqual(result["missing_spec_count"], 1)
-        self.assertEqual(result["matched_video_count"], 0)
-        self.assertTrue(any("不是已发布重复" in call.args[0] for call in log.info.call_args_list))
+        self.assertIsNone(self.select(path))
+        self.assertEqual(parse_candidate_file(path, 1000)["specs"]["effects"], "SDR")
         self.plugin.chain.recognize_media.assert_not_called()
 
-    def test_default_without_policy_attribute_is_strict_not_legacy_allow(self):
+    def test_default_without_policy_attribute_still_infers_unmarked_effect_as_sdr(self):
         del self.plugin._channel_dedup_unknown_policy
-        self.assertEqual(self.select("Show.S01E01.H265.mkv")["missing_spec_count"], 1)
+        self.assertEqual(self.select("Show.S01E01.1080p.H265.mkv")["missing_spec_count"], 0)
 
     def test_unknown_unselected_effect_allows_when_no_record_exists(self):
         self.plugin._channel_dedup_state["records"] = []
         self.assertIsNone(self.select("Show.S01E01.2160p.H265.mkv"))
 
-    def test_compatibility_allow_policy_keeps_unknown_selected_specs_unmatched(self):
+    def test_compatibility_allow_policy_does_not_override_sdr_inference(self):
         self.plugin._channel_dedup_attributes = ["resolution", "effects"]
         self.plugin._channel_dedup_unknown_policy = "allow"
-        self.assertIsNone(self.select("Show.S01E01.1080p.H265.mkv"))
+        self.assertEqual(
+            self.select("Show.S01E01.1080p.H265.mkv")["matched_video_count"], 1,
+        )
 
     def test_record_missing_selected_spec_is_not_proof_of_a_duplicate(self):
         self.plugin._channel_dedup_attributes = ["resolution", "effects"]
@@ -112,26 +110,23 @@ class SelectedSpecsTests(unittest.TestCase):
         self.plugin._channel_dedup_attributes = []
         self.assertIsNone(self.select("Show.S01E01.mkv"))
 
-    def test_pack_excludes_missing_selected_specs_but_keeps_known_new_episode(self):
+    def test_unmarked_effect_in_pack_is_not_excluded_as_missing_spec(self):
         self.plugin._channel_dedup_attributes = ["resolution", "effects"]
         unknown = "Show.S01E02.2160p.H265.mkv"
         known = "Show.S01E03.2160p.SDR.H265.mkv"
         result = self.plugin._channel_dedup_file_selection(
             integration.make_torrent([(unknown, 1000), (known, 2000)]), "Show S01"
         )
-        self.assertEqual(result["excluded"], {unknown})
-        self.assertEqual(result["remaining_paths"], {known})
-        self.assertEqual(result["missing_spec_count"], 1)
+        self.assertIsNone(result)
 
-    def test_strict_unknown_is_filtered_before_downloader_add_and_not_logged_as_published(self):
+    def test_unmarked_effect_is_sdr_and_does_not_prevent_downloader_add(self):
         self.plugin._channel_dedup_attributes = ["resolution", "effects"]
         self.content = integration.make_torrent([("Show.S01E01.2160p.H265.mkv", 1000)])
         downloader, _ = integration.ChannelIntegrationTests.prepare_download(self)
         with patch("resourceflow.logger") as log:
-            self.assertIsNone(self.plugin._ResourceFlow__download(self.torrent))
-        downloader.add_torrent.assert_not_called()
-        self.assertTrue(any("同规格重复 0 个，缺少勾选规格 1 个" in call.args[0] for call in log.info.call_args_list))
-        self.assertFalse(any("均已在监听频道发布" in call.args[0] for call in log.info.call_args_list))
+            self.assertEqual(self.plugin._ResourceFlow__download(self.torrent), "a" * 40)
+        downloader.add_torrent.assert_called_once()
+        self.assertTrue(any("按 SDR 命名约定比较" in call.args[0] for call in log.info.call_args_list))
 
     def test_only_recently_selected_files_are_subject_to_missing_specs_policy(self):
         unknown = "Show.S01E02.2160p.H265.mkv"
@@ -194,6 +189,12 @@ class IdentityEvidenceTests(unittest.TestCase):
     def test_conflicting_chinese_title_cannot_be_overridden_by_an_english_match(self):
         self.assertIsNone(self.identity("[华灯起].Light.the.Night.2026.S01E01.1080p.mkv", {
             "tmdb_id": 130330, "title": "华灯初上", "en_title": "Light the Night", "year": "2026",
+        }))
+
+    def test_short_chinese_title_does_not_match_a_longer_animation_title(self):
+        self.assertIsNone(self.identity("[诛仙].Jade.Dynasty.S01E01.2026.1080p.mkv", {
+            "tmdb_id": 123456, "en_title": "Jade Dynasty",
+            "year": "2026",
         }))
 
     def test_subtitle_language_and_release_tags_are_not_treated_as_chinese_titles(self):
@@ -359,10 +360,10 @@ class QueueSelectedSpecsTests(unittest.TestCase):
         self.assertFalse(self.enqueue(path="Show.S01E01.1080p.mkv")["blocked"])
         self.assertTrue(self.enqueue("b" * 40, "Show.S01E01.1080p.HDR10.H265.BluRay.60FPS.mkv")["blocked"])
 
-    def test_strict_unknown_is_not_reserved_or_added_even_with_empty_queue(self):
+    def test_unmarked_effect_is_sdr_and_empty_queue_reserves_candidate(self):
         result = self.enqueue(path="Show.S01E01.2160p.H265.mkv")
-        self.assertTrue(result["blocked"])
-        self.assertEqual(self.plugin._inflight_entries, {})
+        self.assertFalse(result["blocked"])
+        self.assertEqual(len(self.plugin._inflight_entries), 1)
 
     def test_verified_manual_aliases_match_across_different_queued_title_spellings(self):
         self.plugin._channel_dedup_attributes = ["resolution"]

@@ -119,7 +119,7 @@ async def verify_settings_layout(dialog, width):
 
 
 async def verify_record_search(page, dialog, tab, initial_height, output, width, host_css=None):
-    ledger = tab == '身份待核验'
+    ledger = tab == '下载待核验'
     selector = '.channel-dedup__record' if ledger else '.shared-settings__record'
     await page.evaluate('window.resourceflowExtraRecords = 125')
     await dialog.get_by_role('button', name='刷新资源记录', exact=True).click()
@@ -262,7 +262,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label("参与跨实例共享审批", exact=True).count() == 0
             assert await dialog.get_by_role("button", name="保存设置", exact=True).count() == 0
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机下载申请', '共享下载记录', '身份待核验']
+                '本机下载申请', '共享下载记录', '下载待核验']
             bounds = await dialog.bounding_box()
             assert bounds["width"] >= (1100 if width >= 1000 else width * 0.9 if width >= 600 else width - 2), bounds
             assert bounds["height"] >= height * 0.88, bounds
@@ -353,15 +353,14 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label("剧名别名绑定（可选）", exact=True).count() == 0
             assert await dialog.get_by_role("tab", name="长期账本", exact=True).count() == 0
             assert await dialog.get_by_role("tab", name="共享已完成", exact=True).count() == 0
-            await dialog.get_by_role("tab", name="身份待核验", exact=True).click()
+            await dialog.get_by_role("tab", name="下载待核验", exact=True).click()
             await dialog.get_by_text("Unknown Resource", exact=True).wait_for()
             assert await dialog.get_by_text('待核验影片 · 电影 · 身份待确认 · 分辨率 2160p', exact=True).count() == 1
-            assert await dialog.get_by_text('待核验', exact=True).count() == 1
+            assert await dialog.locator('.channel-dedup__badge').count() == 0
             action_layout = await dialog.locator('.channel-dedup__record-actions').first.evaluate("""element => {
                 const button = element.querySelector('button').getBoundingClientRect()
-                const badge = element.querySelector('.channel-dedup__badge').getBoundingClientRect()
                 const record = element.closest('article').getBoundingClientRect()
-                return {buttonLeftOfBadge: button.right <= badge.left + 1,
+                return {buttonHeight: Math.abs(button.height - 32) < 1,
                     contained: element.getBoundingClientRect().right <= record.right + 1,
                     fits: element.scrollWidth <= element.clientWidth + 1}
             }""")
@@ -374,7 +373,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.wait_for_function("""() => window.resourceflowRequests.some(item =>
                 item.method === 'POST' && item.path.endsWith('/resource-ledger/pending/approve')
                 && item.body.tmdb_id === 123 && item.body.confirmed === true)""")
-            await verify_record_search(page, dialog, '身份待核验', card_bounds['height'], output, width, host_css)
+            await verify_record_search(page, dialog, '下载待核验', card_bounds['height'], output, width, host_css)
             await page.screenshot(path=str(output / f'pending-{width}.png'), full_page=True)
             assert await close_button.is_visible()
             await close_button.click()
@@ -507,7 +506,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.get_by_role("button", name="共享下载审批", exact=True).click()
             await dialog.get_by_role("tab", name="共享下载记录", exact=True).wait_for()
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机下载申请', '共享下载记录', '身份待核验']
+                '本机下载申请', '共享下载记录', '下载待核验']
             await dialog.get_by_role("tab", name="共享下载记录", exact=True).click()
             await dialog.get_by_text("朋友A", exact=False).wait_for()
             claim = dialog.locator('.shared-settings__records article').first
@@ -657,13 +656,13 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_text("Show S01E05", exact=True).wait_for()
             assert await dialog.get_by_text("全部参与设备的共享下载记录", exact=True).count() == 0
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机下载申请', '共享下载记录', '身份待核验']
+                '本机下载申请', '共享下载记录', '下载待核验']
             await dialog.get_by_text("共享占位关联异常 1 个，暂缓新增下载", exact=True).wait_for()
             await dialog.get_by_text("历史完成证据待同步：2 条；同步确认前暂缓新增下载。", exact=True).wait_for()
             assert await dialog.get_by_text("历史完成证据不完整", exact=False).count() == 0
             await dialog.get_by_text(f"关联占位：{'9' * 32}", exact=True).wait_for()
             assert "命中占位" not in await dialog.inner_text()
-            await dialog.get_by_role("tab", name="身份待核验", exact=True).click()
+            await dialog.get_by_role("tab", name="下载待核验", exact=True).click()
             await dialog.get_by_text("历史完成证据不完整：3 条，未导入共享记录。", exact=False).wait_for()
             assert await dialog.get_by_text("历史完成证据不完整", exact=False).evaluate(
                 "element => element.classList.contains('v-alert--variant-tonal') || !!element.closest('.v-alert')")

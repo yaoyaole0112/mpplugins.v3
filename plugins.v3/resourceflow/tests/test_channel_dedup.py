@@ -195,7 +195,7 @@ ed2k://|file|PSYREN -决战游戏-(2026)(tmdbid=297903).S01E05.WEB-DL.1080p.SDR.
                 self.assertEqual(candidate["specs"]["effects"], "HDR" if effect.startswith("HDR") else effect)
                 self.assertEqual(candidate["inferred_attributes"], [])
 
-    def test_sdr_inference_requires_conventional_avc_web_specs(self):
+    def test_unmarked_effect_defaults_to_inferred_sdr_for_all_quality_combinations(self):
         for quality in (
             "2160p.H264.WEB-DL", "1440p.H264.WEB-DL", "1080p.H265.WEB-DL",
             "1080p.AV1.WEB-DL", "1080p.H264.BluRay", "1080p.WEB-DL",
@@ -203,19 +203,13 @@ ed2k://|file|PSYREN -决战游戏-(2026)(tmdbid=297903).S01E05.WEB-DL.1080p.SDR.
         ):
             with self.subTest(quality=quality):
                 candidate = parse_candidate_file(f"Show.S01E01.{quality}.mkv", 1)
-                self.assertIsNone(candidate["specs"]["effects"])
-                self.assertEqual(candidate["inferred_attributes"], [])
-        for quality in ("1080p.H264.WEB-DL", "720p.x264.WEBRip", "480p.AVC.WEB"):
-            with self.subTest(quality=quality):
-                self.assertEqual(
-                    parse_candidate_file(f"Show.S01E01.{quality}.mkv", 1)["specs"]["effects"], "SDR",
-                )
+                self.assertEqual(candidate["specs"]["effects"], "SDR")
+                self.assertEqual(candidate["inferred_attributes"], ["effects"])
 
-    def test_hdr_or_high_bit_depth_hints_block_sdr_inference(self):
-        for marker in (
-            "10bit", "10-bit", "10 bit", "Hi10P", "High10", "High 10",
-            "12bit", "12-bit", "HDRVivid", "HDR.Vivid", "HLG10", "DoVi8",
-            "BT.2020", "Rec2020", "PQ", "EDR", "MAXPLUS", "SMPTE.ST.2084",
+    def test_explicit_hdr_and_dv_markers_remain_explicit_while_other_unmarked_tags_default_sdr(self):
+        for marker, expected in (
+            ("HDRVivid", "HDR"), ("HDR.Vivid", "HDR"), ("DoVi8", "DV"),
+            ("MAXPLUS", "HDR"),
         ):
             for location in ("filename", "title", "description"):
                 with self.subTest(marker=marker, location=location):
@@ -224,8 +218,16 @@ ed2k://|file|PSYREN -决战游戏-(2026)(tmdbid=297903).S01E05.WEB-DL.1080p.SDR.
                         1, marker if location == "title" else "",
                         spec_hint=marker if location == "description" else "",
                     )
-                    self.assertNotEqual(candidate["specs"]["effects"], "SDR")
+                    self.assertEqual(candidate["specs"]["effects"], expected)
                     self.assertEqual(candidate["inferred_attributes"], [])
+        for marker in ("10bit", "10-bit", "10 bit", "Hi10P", "High10", "12bit", "12-bit",
+                       "HLG10", "BT.2020", "Rec2020", "PQ", "EDR", "SMPTE.ST.2084", "HQ"):
+            with self.subTest(marker=marker):
+                candidate = parse_candidate_file(
+                    f"Show.S01E01.1080p.H264.WEB-DL.{marker}.mkv", 1,
+                )
+                self.assertEqual(candidate["specs"]["effects"], "SDR")
+                self.assertEqual(candidate["inferred_attributes"], ["effects"])
 
     def test_plain_tmdb_id_is_only_used_on_tv_template(self):
         message = "影视：Show\n季集：S01E01\n质量：1080p H264\n类型：剧集\n评分：7.2 ｜ ID：297903"
