@@ -59,6 +59,14 @@ class DownloadDedupTest(unittest.TestCase):
         magnet = f"magnet:?xt=urn:btih:{self.expected_hash.upper()}"
         self.assertEqual(TorrentHelper.get_torrent_hash(magnet), self.expected_hash)
 
+    def test_cached_torrent_bytes_are_passed_separately_from_string_enclosure(self):
+        self.torrent.enclosure = None
+        result = self.plugin._ResourceFlow__download(
+            self.torrent, torrent_content_override=TORRENT_CONTENT,
+        )
+        self.assertEqual(result, self.expected_hash)
+        self.assertEqual(self.downloader.add_torrent.call_args.kwargs["content"], TORRENT_CONTENT)
+
     def test_existing_hash_is_skipped_before_episode_lookup_for_both_downloaders(self):
         self.task.recent_episodes_only = True
         self.downloader.get_torrents.return_value = ([{"name": "Different.Root.Title.S01"}], False)

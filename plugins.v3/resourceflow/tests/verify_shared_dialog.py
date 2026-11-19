@@ -357,6 +357,15 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_text("Unknown Resource", exact=True).wait_for()
             assert await dialog.get_by_text('待核验影片 · 电影 · 身份待确认 · 分辨率 2160p', exact=True).count() == 1
             assert await dialog.get_by_text('待核验', exact=True).count() == 1
+            action_layout = await dialog.locator('.channel-dedup__record-actions').first.evaluate("""element => {
+                const button = element.querySelector('button').getBoundingClientRect()
+                const badge = element.querySelector('.channel-dedup__badge').getBoundingClientRect()
+                const record = element.closest('article').getBoundingClientRect()
+                return {buttonLeftOfBadge: button.right <= badge.left + 1,
+                    contained: element.getBoundingClientRect().right <= record.right + 1,
+                    fits: element.scrollWidth <= element.clientWidth + 1}
+            }""")
+            assert all(action_layout.values()), action_layout
             await dialog.get_by_role("button", name="核验并继续下载", exact=True).click()
             manual_dialog = page.get_by_role("dialog").filter(has=page.get_by_text("人工核验并继续下载", exact=True))
             await manual_dialog.get_by_label("TMDB ID").fill("123")

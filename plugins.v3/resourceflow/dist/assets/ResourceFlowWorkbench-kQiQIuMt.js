@@ -2014,25 +2014,26 @@ const _hoisted_67 = { class: "channel-dedup__records" };
 const _hoisted_68 = { class: "channel-dedup__record-head" };
 const _hoisted_69 = { class: "channel-dedup__record-main" };
 const _hoisted_70 = { class: "channel-dedup__record-identity channel-dedup__record-info" };
-const _hoisted_71 = { class: "channel-dedup__badge" };
-const _hoisted_72 = { class: "channel-dedup__record-title" };
-const _hoisted_73 = { class: "channel-dedup__record-meta" };
-const _hoisted_74 = { key: 0 };
-const _hoisted_75 = { class: "channel-dedup__record-reason" };
-const _hoisted_76 = {
+const _hoisted_71 = { class: "channel-dedup__record-actions" };
+const _hoisted_72 = { class: "channel-dedup__badge" };
+const _hoisted_73 = { class: "channel-dedup__record-title" };
+const _hoisted_74 = { class: "channel-dedup__record-meta" };
+const _hoisted_75 = { key: 0 };
+const _hoisted_76 = { class: "channel-dedup__record-reason" };
+const _hoisted_77 = {
   key: 0,
   class: "channel-dedup__record-progress"
 };
-const _hoisted_77 = {
+const _hoisted_78 = {
   key: 1,
   class: "channel-dedup__record-error"
 };
-const _hoisted_78 = {
+const _hoisted_79 = {
   key: 2,
   class: "channel-dedup__record-error"
 };
-const _hoisted_79 = { class: "pending-approval__grid" };
-const _hoisted_80 = {
+const _hoisted_80 = { class: "pending-approval__grid" };
+const _hoisted_81 = {
   key: 1,
   class: "text-caption text-medium-emphasis"
 };
@@ -4104,53 +4105,56 @@ return (_ctx, _cache) => {
                                     : _createCommentVNode("", true)
                                 ])
                               ]),
-                              _createElementVNode("span", _hoisted_71, [
-                                _createVNode(_component_VIcon, {
-                                  icon: "mdi-help-circle-outline",
-                                  size: "16"
-                                }),
-                                _cache[121] || (_cache[121] = _createTextVNode(" 待核验 ", -1))
+                              _createElementVNode("div", _hoisted_71, [
+                                (row.actionable)
+                                  ? (_openBlock(), _createBlock(_component_VBtn, {
+                                      key: 0,
+                                      size: "small",
+                                      density: "compact",
+                                      variant: "tonal",
+                                      "prepend-icon": "mdi-check-circle-outline",
+                                      disabled: row.manual_state === 'queued' || row.manual_state === 'processing',
+                                      onClick: $event => (openPendingApproval(row))
+                                    }, {
+                                      default: _withCtx(() => [...(_cache[121] || (_cache[121] = [
+                                        _createTextVNode(" 核验并继续下载 ", -1)
+                                      ]))]),
+                                      _: 1
+                                    }, 8, ["disabled", "onClick"]))
+                                  : _createCommentVNode("", true),
+                                _createElementVNode("span", _hoisted_72, [
+                                  _createVNode(_component_VIcon, {
+                                    icon: "mdi-help-circle-outline",
+                                    size: "16"
+                                  }),
+                                  _cache[122] || (_cache[122] = _createTextVNode(" 待核验 ", -1))
+                                ])
                               ])
                             ]),
-                            _createElementVNode("strong", _hoisted_72, _toDisplayString(row.title || row.path || row.file_key || row.title_key), 1),
-                            _createElementVNode("div", _hoisted_73, [
+                            _createElementVNode("strong", _hoisted_73, _toDisplayString(row.title || row.path || row.file_key || row.title_key), 1),
+                            _createElementVNode("div", _hoisted_74, [
                               _createElementVNode("span", null, "最近更新：" + _toDisplayString(formatChannelTimestamp(row.last_seen)), 1),
                               _createElementVNode("span", null, "任务：" + _toDisplayString(row.task_name || '-'), 1),
                               (row.path)
-                                ? (_openBlock(), _createElementBlock("span", _hoisted_74, "文件：" + _toDisplayString(row.path), 1))
+                                ? (_openBlock(), _createElementBlock("span", _hoisted_75, "文件：" + _toDisplayString(row.path), 1))
                                 : _createCommentVNode("", true)
                             ]),
-                            _createElementVNode("p", _hoisted_75, _toDisplayString(row.reason || '身份或规格待核验'), 1),
+                            _createElementVNode("p", _hoisted_76, _toDisplayString(row.reason || '身份或规格待核验'), 1),
                             (row.manual_state === 'queued' || row.manual_state === 'processing')
-                              ? (_openBlock(), _createElementBlock("p", _hoisted_76, [
+                              ? (_openBlock(), _createElementBlock("p", _hoisted_77, [
                                   _createVNode(_component_VProgressCircular, {
                                     indeterminate: "",
                                     size: "14",
                                     width: "2",
                                     class: "mr-2"
                                   }),
-                                  _cache[122] || (_cache[122] = _createTextVNode(" 正在重新核验并执行下载审批 ", -1))
+                                  _cache[123] || (_cache[123] = _createTextVNode(" 正在重新核验并执行下载审批 ", -1))
                                 ]))
                               : (row.manual_error)
-                                ? (_openBlock(), _createElementBlock("p", _hoisted_77, " 上次处理未完成：" + _toDisplayString(row.manual_error), 1))
+                                ? (_openBlock(), _createElementBlock("p", _hoisted_78, " 上次处理未完成：" + _toDisplayString(row.manual_error), 1))
                                 : _createCommentVNode("", true),
                             (row.source_consumed)
-                              ? (_openBlock(), _createElementBlock("p", _hoisted_78, " 同一种子中的其他待核验文件不可再次单独添加 "))
-                              : _createCommentVNode("", true),
-                            (row.actionable)
-                              ? (_openBlock(), _createBlock(_component_VBtn, {
-                                  key: 3,
-                                  size: "small",
-                                  variant: "tonal",
-                                  "prepend-icon": "mdi-check-circle-outline",
-                                  disabled: row.manual_state === 'queued' || row.manual_state === 'processing',
-                                  onClick: $event => (openPendingApproval(row))
-                                }, {
-                                  default: _withCtx(() => [...(_cache[123] || (_cache[123] = [
-                                    _createTextVNode(" 核验并继续下载 ", -1)
-                                  ]))]),
-                                  _: 1
-                                }, 8, ["disabled", "onClick"]))
+                              ? (_openBlock(), _createElementBlock("p", _hoisted_79, " 同一种子中的其他待核验文件不可再次单独添加 "))
                               : _createCommentVNode("", true)
                           ]))
                         }), 128))
@@ -4198,7 +4202,7 @@ return (_ctx, _cache) => {
                   ]))]),
                   _: 1
                 }),
-                _createElementVNode("div", _hoisted_79, [
+                _createElementVNode("div", _hoisted_80, [
                   _createVNode(_component_VSelect, {
                     modelValue: pendingApprovalForm.value.media_type,
                     "onUpdate:modelValue": _cache[41] || (_cache[41] = $event => ((pendingApprovalForm.value.media_type) = $event)),
@@ -4267,7 +4271,7 @@ return (_ctx, _cache) => {
                     }))
                   : _createCommentVNode("", true),
                 (pendingApprovalRow.value)
-                  ? (_openBlock(), _createElementBlock("div", _hoisted_80, " 文件：" + _toDisplayString(pendingApprovalRow.value.path), 1))
+                  ? (_openBlock(), _createElementBlock("div", _hoisted_81, " 文件：" + _toDisplayString(pendingApprovalRow.value.path), 1))
                   : _createCommentVNode("", true)
               ]),
               _: 1
@@ -4403,6 +4407,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-ff532956"]]);
+const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0f4e8ebd"]]);
 
 export { ResourceFlowWorkbench as R };

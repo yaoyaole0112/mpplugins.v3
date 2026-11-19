@@ -1253,10 +1253,18 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                       <template v-if="channelRecordSpecs(row)"> · {{ channelRecordSpecs(row) }}</template>
                     </div>
                   </div>
-                  <span class="channel-dedup__badge">
-                    <VIcon icon="mdi-help-circle-outline" size="16" />
-                    待核验
-                  </span>
+                  <div class="channel-dedup__record-actions">
+                    <VBtn v-if="row.actionable" size="small" density="compact" variant="tonal"
+                      prepend-icon="mdi-check-circle-outline"
+                      :disabled="row.manual_state === 'queued' || row.manual_state === 'processing'"
+                      @click="openPendingApproval(row)">
+                      核验并继续下载
+                    </VBtn>
+                    <span class="channel-dedup__badge">
+                      <VIcon icon="mdi-help-circle-outline" size="16" />
+                      待核验
+                    </span>
+                  </div>
                 </div>
                 <strong class="channel-dedup__record-title">
                   {{ row.title || row.path || row.file_key || row.title_key }}
@@ -1278,11 +1286,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 <p v-if="row.source_consumed" class="channel-dedup__record-error">
                   同一种子中的其他待核验文件不可再次单独添加
                 </p>
-                <VBtn v-if="row.actionable" size="small" variant="tonal" prepend-icon="mdi-check-circle-outline"
-                  :disabled="row.manual_state === 'queued' || row.manual_state === 'processing'"
-                  @click="openPendingApproval(row)">
-                  核验并继续下载
-                </VBtn>
               </article>
             </div>
             <VPagination v-if="resourceRows.total > 20" v-model="resourcePage"
@@ -1661,6 +1664,15 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   background: rgba(220, 150, 60, 0.13);
   font-size: 13px;
   line-height: 20px;
+}
+
+.channel-dedup__record-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  gap: 8px;
+  min-inline-size: 0;
 }
 
 .channel-dedup__record-main,

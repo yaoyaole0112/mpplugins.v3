@@ -274,7 +274,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.37"
+    plugin_version = "1.0.38"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -3209,15 +3209,21 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         self, torrent: TorrentInfo, candidate_overrides: Optional[dict] = None,
         prevalidated_recent_paths: Optional[List[str]] = None,
         manual_path: Optional[str] = None,
+        torrent_content_override: Optional[Union[str, bytes]] = None,
     ) -> Optional[str]:
         """按当前任务配置向 qBittorrent 或 Transmission 添加种子"""
         task = self._get_task_config()
-        if not task or not torrent.enclosure:
+        if not task or (torrent_content_override is None and not torrent.enclosure):
             logger.error(f"获取种子下载链接失败：{torrent.title}")
             return None
         if not self._shared_download_gate(task):
             return None
-        torrent_content: Union[str, bytes] = torrent.enclosure
+        torrent_content: Union[str, bytes] = (
+            torrent.enclosure if torrent_content_override is None else torrent_content_override
+        )
+        if not torrent_content:
+            logger.error(f"获取种子下载链接失败：{torrent.title}")
+            return None
         proxies = settings.PROXY if torrent.site_proxy else None
         cookies = torrent.site_cookie
         indirect_download = isinstance(torrent_content, str) and torrent_content.startswith("[")
@@ -3626,7 +3632,6 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             if not any(item.get("path", "").replace("\\", "/") == file_path for item in files):
                 raise ValueError("文件不属于暂存种子")
             metadata = dict(source.get("torrent") or {})
-            metadata["enclosure"] = content
             fields = getattr(TorrentInfo, "model_fields", None) or getattr(TorrentInfo, "__fields__", {})
             torrent = TorrentInfo(**{name: value for name, value in metadata.items() if name in fields})
             site = SiteOper().get(task.site_id)
@@ -3673,6 +3678,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                         raise ValueError(f"下载类型复核未通过：{reason}")
                 result = self.__download(
                     torrent, candidate_overrides={file_path: override}, manual_path=file_path,
+                    torrent_content_override=content,
                 )
                 if not result:
                     raise ValueError("原筛选或协调端审批未通过，或下载器未确认添加；请查看插件日志")
