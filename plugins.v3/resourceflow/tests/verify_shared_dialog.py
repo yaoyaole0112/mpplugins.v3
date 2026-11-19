@@ -357,11 +357,21 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_text("Unknown Resource", exact=True).wait_for()
             assert await dialog.get_by_text('待核验影片 · 电影 · 身份待确认 · 分辨率 2160p', exact=True).count() == 1
             assert await dialog.get_by_text('待核验', exact=True).count() == 1
+            await dialog.get_by_role("button", name="核验并继续下载", exact=True).click()
+            manual_dialog = page.get_by_role("dialog").filter(has=page.get_by_text("人工核验并继续下载", exact=True))
+            await manual_dialog.get_by_label("TMDB ID").fill("123")
+            await manual_dialog.get_by_label("我已核对以上媒体身份、季集号及规格").check()
+            await manual_dialog.get_by_role("button", name="重新核验并提交", exact=True).click()
+            await page.wait_for_function("""() => window.resourceflowRequests.some(item =>
+                item.method === 'POST' && item.path.endsWith('/resource-ledger/pending/approve')
+                && item.body.tmdb_id === 123 && item.body.confirmed === true)""")
             await verify_record_search(page, dialog, '身份待核验', card_bounds['height'], output, width, host_css)
             await page.screenshot(path=str(output / f'pending-{width}.png'), full_page=True)
             assert await close_button.is_visible()
             await close_button.click()
-            assert not await page.evaluate("window.resourceflowRequests.some(item => item.method === 'POST')")
+            assert await page.evaluate("""window.resourceflowRequests.filter(item =>
+                item.method === 'POST').map(item => item.path)""") == [
+                'plugin/ResourceFlow/resource-ledger/pending/approve']
             await page.get_by_role("button", name="全局设置", exact=True).click()
             await dialog.get_by_label("本机名称", exact=True).wait_for()
             await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")

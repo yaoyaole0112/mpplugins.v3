@@ -59,6 +59,13 @@ const approvalTab = ref('requests')
 const resourceRows = ref({ total: 0, items: [] })
 const resourcePage = ref(1)
 const activeResourceFilter = ref({ query: '', media_type: '' })
+const pendingApprovalDialog = ref(false)
+const pendingApprovalSaving = ref(false)
+const pendingApprovalRow = ref(null)
+const pendingApprovalError = ref('')
+const pendingApprovalForm = ref({
+  tmdb_id: '', media_title: '', media_type: 'tv', season: 1, episodes: '', specs: {}, confirmed: false,
+})
 const resourceTypes = [
   { value: '', title: '全部类型' }, { value: 'tv', title: '剧集' }, { value: 'movie', title: '电影' },
 ]
@@ -416,6 +423,80 @@ async function saveChannelDedup(shared) {
 function formatChannelTimestamp(value) {
   if (!value) return '尚未同步'
   return new Date(Number(value) * 1000).toLocaleString()
+}
+
+function openPendingApproval(row) {
+  pendingApprovalRow.value = row
+  pendingApprovalError.value = ''
+  pendingApprovalForm.value = {
+    tmdb_id: row.tmdb_id || '',
+    media_title: row.media_title || '',
+    media_type: row.media_type === 'movie' ? 'movie' : 'tv',
+    season: row.season ?? 1,
+    episodes: (row.episodes || []).join(','),
+    specs: Object.fromEntries(channelDedup.value.attributes.map(key => [key, row.specs?.[key] ?? ''])),
+    confirmed: false,
+  }
+  pendingApprovalDialog.value = true
+}
+
+function parseManualEpisodes(value) {
+  const episodes = new Set()
+  for (const part of String(value || '').split(/[，,\s]+/).filter(Boolean)) {
+    const range = part.match(/^(\d+)\s*[-~至]\s*(\d+)$/)
+    if (range) {
+      const first = Number(range[1])
+      const last = Number(range[2])
+      if (last < first || last - first > 500) return null
+      for (let number = first; number <= last; number += 1) episodes.add(number)
+      continue
+    }
+    if (!/^\d+$/.test(part)) return null
+    episodes.add(Number(part))
+  }
+  return [...episodes].sort((a, b) => a - b)
+}
+
+async function submitPendingApproval() {
+  const row = pendingApprovalRow.value
+  if (!row || pendingApprovalSaving.value) return
+  const form = pendingApprovalForm.value
+  const episodes = parseManualEpisodes(form.episodes)
+  if (!form.tmdb_id || !form.media_title.trim() || !form.confirmed
+    || (form.media_type === 'tv' && !episodes?.length)) {
+    pendingApprovalError.value = '请填写 TMDB ID、媒体名称及有效的季集号。'
+    return
+  }
+  pendingApprovalSaving.value = true
+  pendingApprovalError.value = ''
+  try {
+    unwrapResponse(await props.api.post(`${pluginBase.value}/resource-ledger/pending/approve`, {
+      key: row.key,
+      tmdb_id: Number(form.tmdb_id),
+      media_title: form.media_title.trim(),
+      media_type: form.media_type,
+      season: form.media_type === 'tv' ? Number(form.season) : null,
+      episodes: form.media_type === 'tv' ? episodes : [],
+      specs: form.specs,
+      confirmed: form.confirmed,
+    }))
+    pendingApprovalDialog.value = false
+    await loadResourceRows()
+    const poll = async remaining => {
+      if (remaining <= 0 || approvalTab.value !== 'pending') return
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      await loadResourceRows()
+      const current = resourceRows.value.items.find(item => item.key === row.key)
+      if (current?.manual_state === 'queued' || current?.manual_state === 'processing') {
+        poll(remaining - 1)
+      }
+    }
+    poll(30)
+  } catch (err) {
+    pendingApprovalError.value = err?.message || '提交人工核验失败'
+  } finally {
+    pendingApprovalSaving.value = false
+  }
 }
 
 function channelRecordEpisodes(record) {
@@ -1186,12 +1267,71 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                   <span v-if="row.path">文件：{{ row.path }}</span>
                 </div>
                 <p class="channel-dedup__record-reason">{{ row.reason || '身份或规格待核验' }}</p>
+                <p v-if="row.manual_state === 'queued' || row.manual_state === 'processing'"
+                  class="channel-dedup__record-progress">
+                  <VProgressCircular indeterminate size="14" width="2" class="mr-2" />
+                  正在重新核验并执行下载审批
+                </p>
+                <p v-else-if="row.manual_error" class="channel-dedup__record-error">
+                  上次处理未完成：{{ row.manual_error }}
+                </p>
+                <p v-if="row.source_consumed" class="channel-dedup__record-error">
+                  同一种子中的其他待核验文件不可再次单独添加
+                </p>
+                <VBtn v-if="row.actionable" size="small" variant="tonal" prepend-icon="mdi-check-circle-outline"
+                  :disabled="row.manual_state === 'queued' || row.manual_state === 'processing'"
+                  @click="openPendingApproval(row)">
+                  核验并继续下载
+                </VBtn>
               </article>
             </div>
             <VPagination v-if="resourceRows.total > 20" v-model="resourcePage"
               :length="Math.ceil(resourceRows.total / 20)" :total-visible="3" @update:model-value="loadResourceRows" />
           </div>
         </VCardText>
+      </VCard>
+    </VDialog>
+
+    <VDialog v-model="pendingApprovalDialog" max-width="42rem">
+      <VCard title="人工核验并继续下载">
+        <VCardText class="pending-approval__body">
+          <VAlert type="warning" variant="tonal" density="compact">
+            你确认的身份和规格将重新进入原选种规则与共享下载审批；重复命中、规则排除或协调端拒绝时不会下载。
+          </VAlert>
+          <div class="pending-approval__grid">
+            <VSelect v-model="pendingApprovalForm.media_type" label="媒体类型"
+              :items="[{ title: '剧集', value: 'tv' }, { title: '电影', value: 'movie' }]" />
+            <VTextField v-model="pendingApprovalForm.tmdb_id" label="TMDB ID" type="number" min="1" />
+            <VTextField v-model="pendingApprovalForm.media_title" label="中文媒体名" />
+            <template v-if="pendingApprovalForm.media_type === 'tv'">
+              <VTextField v-model="pendingApprovalForm.season" label="季号" type="number" min="0" />
+              <VTextField v-model="pendingApprovalForm.episodes" label="集号" placeholder="1, 2-4" />
+            </template>
+            <template v-for="field in channelDedupAttributes.filter(item =>
+              channelDedup.attributes.includes(item.value))" :key="field.value">
+              <VTextField v-model="pendingApprovalForm.specs[field.value]"
+                :label="field.value === 'size' ? '大小（字节）' : field.title"
+                :type="['size', 'fps'].includes(field.value) ? 'number' : 'text'"
+                :min="['size', 'fps'].includes(field.value) ? 0.001 : undefined" />
+            </template>
+          </div>
+          <VCheckbox v-model="pendingApprovalForm.confirmed" density="compact" hide-details
+            label="我已核对以上媒体身份、季集号及规格" />
+          <VAlert v-if="pendingApprovalError" type="error" variant="tonal" density="compact">
+            {{ pendingApprovalError }}
+          </VAlert>
+          <div v-if="pendingApprovalRow" class="text-caption text-medium-emphasis">
+            文件：{{ pendingApprovalRow.path }}
+          </div>
+        </VCardText>
+        <VCardActions>
+          <VSpacer />
+          <VBtn variant="text" :disabled="pendingApprovalSaving" @click="pendingApprovalDialog = false">取消</VBtn>
+          <VBtn color="primary" variant="flat" :loading="pendingApprovalSaving"
+            :disabled="!pendingApprovalForm.confirmed" @click="submitPendingApproval">
+            重新核验并提交
+          </VBtn>
+        </VCardActions>
       </VCard>
     </VDialog>
 
@@ -1487,6 +1627,26 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   line-height: 1.5;
 }
 
+.channel-dedup__record-progress,
+.channel-dedup__record-error {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.channel-dedup__record-progress { color: rgb(var(--v-theme-primary)); }
+.channel-dedup__record-error { color: rgb(var(--v-theme-error)); }
+
+.pending-approval__body { display: grid; gap: 14px; }
+.pending-approval__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+}
+.pending-approval__grid > * { min-inline-size: 0; }
+
 .channel-dedup__badge {
   display: inline-flex;
   align-items: center;
@@ -1529,6 +1689,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 }
 
 @media (max-width: 600px) {
+  .pending-approval__grid { grid-template-columns: minmax(0, 1fr); }
   .channel-dedup__record-head {
     gap: 8px;
   }

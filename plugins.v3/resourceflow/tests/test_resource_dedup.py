@@ -1,4 +1,6 @@
 import copy
+import os
+import tempfile
 import threading
 import time
 import unittest
@@ -459,6 +461,91 @@ class ResourceDedupTests(unittest.TestCase):
         self.assertIsNone(self.plugin._ResourceFlow__download(self.torrent))
         downloader.add_torrent.assert_not_called()
         self.assertEqual(len(self.plugin._identity_pending), 1)
+
+    def test_manual_pending_override_supplies_identity_episode_and_selected_specs(self):
+        override = {
+            "Film.2026.mkv": {
+                "media_type": "tv", "tmdb_id": 123, "media_title": "手动确认剧名",
+                "season": 2, "episodes": [5, 6],
+                "specs": {"resolution": "4K", "effects": "HDR10"},
+            }
+        }
+        candidate = ResourceFlow._apply_pending_candidate_override(
+            None, "Film.2026.mkv", 1024, override,
+        )
+        self.assertEqual(candidate["tmdb_id"], 123)
+        self.assertEqual(candidate["title_key"], "手动确认剧名")
+        self.assertEqual(candidate["season"], 2)
+        self.assertEqual(candidate["episodes"], [5, 6])
+        self.assertEqual(candidate["specs"]["resolution"], "2160p")
+        self.assertEqual(candidate["specs"]["effects"], "HDR")
+        self.assertTrue(candidate["manual_identity"])
+
+    def test_pending_source_cache_is_private_and_prunable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.plugin.get_data_path = Mock(return_value=directory)
+            self.plugin._identity_pending_source_lock = threading.RLock()
+            self.plugin._identity_pending_sources = {}
+            self.plugin._identity_pending = {"pending": {"source_id": "pending-source"}}
+            self.plugin.save_data = Mock()
+            source = {
+                "content": b"private torrent bytes", "task_id": "task",
+                "hash": "a" * 40, "title": "Private Torrent",
+                "torrent": {"title": "Private Torrent"},
+            }
+            source_id = self.plugin._persist_pending_source(source)
+            row = self.plugin._identity_pending_sources[source_id]
+            self.assertEqual(os.stat(row["file"]).st_mode & 0o777, 0o600)
+            self.assertNotIn("cookie", row)
+            self.assertNotIn("url", row)
+            self.plugin._identity_pending = {}
+            self.plugin._prune_pending_sources()
+            self.assertFalse(os.path.exists(row["file"]))
+            self.assertNotIn(source_id, self.plugin._identity_pending_sources)
+
+    def test_pending_source_paths_ignore_persisted_external_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            external = os.path.join(directory, "outside.torrent")
+            with open(external, "wb") as handle:
+                handle.write(b"must not be deleted")
+            self.plugin.get_data_path = Mock(return_value=directory)
+            source_id = "a" * 32
+            self.plugin._identity_pending = {
+                "pending": {"source_id": source_id, "last_seen": time.time()},
+            }
+            self.plugin._identity_pending_sources = {
+                source_id: {
+                    "file": external, "expires_at": time.time() - 1, "created_at": time.time(),
+                },
+            }
+            self.plugin._prune_pending_sources()
+            self.assertTrue(os.path.exists(external))
+            self.assertNotIn(source_id, self.plugin._identity_pending_sources)
+
+    def test_consumed_pending_source_is_not_actionable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.plugin.get_data_path = Mock(return_value=directory)
+            source_id = "b" * 32
+            cache = os.path.join(directory, "resourceflow-pending")
+            os.mkdir(cache, 0o700)
+            source_file = os.path.join(cache, f"{source_id}.torrent")
+            with open(source_file, "wb") as handle:
+                handle.write(b"cached torrent")
+            self.plugin._identity_pending = {
+                "pending": {
+                    "source_id": source_id, "last_seen": time.time(),
+                    "task_id": self.task.id, "task_name": self.task.name,
+                },
+            }
+            self.plugin._identity_pending_sources = {
+                source_id: {
+                    "file": source_file, "expires_at": time.time() + 600,
+                    "consumed_hash": "a" * 40,
+                },
+            }
+            row = self.plugin.get_resource_ledger(state="pending").data["items"][0]
+            self.assertFalse(row["actionable"])
+            self.assertTrue(row["source_consumed"])
 
     def test_legacy_allow_does_not_defer(self):
         self.plugin._channel_dedup_identity_policy = 'allow'

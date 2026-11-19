@@ -67,7 +67,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流与Telegram共享下载审批，跨实例同规格下载前占位，无需公网入口。",
     "labels": "刷流,资源去重,Telegram",
-    "version": "1.0.36",
+    "version": "1.0.37",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -75,6 +75,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.37": "身份待核验支持人工确认并按原任务规则及共享占位流程重新审批下载；种子元数据短期私有暂存，严格限制缓存路径，避免同包重复添加。",
       "v1.0.36": "身份待核验记录改为与本机下载申请、共享下载记录一致的摘要、状态标签、标题、时间、任务和原因布局。",
       "v1.0.35": "修复短剧类型漏识别：兼容字符串及组合站点标签，并识别种子描述中明确的类型/分类字段；不依据标题或剧情简介猜测短剧。",
       "v1.0.34": "选种规则下载类型增加短剧；支持按站点分类或标签中的短剧、微短剧等明确标记识别，并优先于通用剧集识别。",

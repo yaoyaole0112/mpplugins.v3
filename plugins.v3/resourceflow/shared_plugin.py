@@ -784,7 +784,8 @@ class SharedResourceMixin:
                 except Exception:
                     logger.warning("共享完成证据读取未确认，保留原占位")
 
-    def _shared_candidates(self, content, title, task, selection, spec_hint=""):
+    def _shared_candidates(self, content, title, task, selection, spec_hint="",
+                           pending_source=None, candidate_overrides=None):
         paths = selection.get("accepted") if selection else None
         rows, rejected = [], []
         display_titles = getattr(self, "_shared_media_title_cache", None)
@@ -794,12 +795,17 @@ class SharedResourceMixin:
             if not self._video_file(item["path"]) or paths is not None and item["path"] not in paths:
                 continue
             candidate = parse_candidate_file(item["path"], item.get("size"), title, spec_hint, allow_movie=True)
+            candidate = self._apply_pending_candidate_override(
+                candidate, item["path"], item.get("size"), candidate_overrides
+            )
             episode_group = getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None)
-            if (not candidate or episode_group or not self._verify_resource_identity(candidate, title, task)
+            if (not candidate or episode_group and not candidate.get("manual_identity")
+                    or not self._verify_resource_identity(candidate, title, task)
                     or any(not candidate["specs"].get(field) for field in self._channel_dedup_attributes)):
                 rejected.append(item["path"])
                 if candidate:
-                    self._pending_identity(candidate, title, task, "共享审批缺少核验身份或勾选规格")
+                    self._pending_identity(candidate, title, task, "共享审批缺少核验身份或勾选规格",
+                                           pending_source)
                 continue
             candidate["id"] = hashlib.sha256(item["path"].encode()).hexdigest()[:24]
             candidate["title"] = title[:160]
@@ -984,7 +990,7 @@ class SharedResourceMixin:
         return ""
 
     def _add_prechecked_torrent(self, content, cookies, task, downloader, service, expected_hash, selection, title,
-                               spec_hint=""):
+                               spec_hint="", pending_source=None, candidate_overrides=None):
         if not task.spec_dedup_enabled:
             logger.info(
                 f"共享审批旁路 [{task.name}] {title}：任务开关关闭，仅执行本地规则，"
@@ -1008,7 +1014,9 @@ class SharedResourceMixin:
                        and row["phase"] not in {"released", "rejected"}
                        for row in self._shared_claims.values()):
                     raise SharedError("本种子已有共享申请，等待核验，不重复提交")
-                candidates, rejected = self._shared_candidates(content, title, task, selection, spec_hint)
+                candidates, rejected = self._shared_candidates(
+                    content, title, task, selection, spec_hint, pending_source, candidate_overrides
+                )
                 candidates, local_blocked = self._shared_filter_local_duplicates(candidates, title)
                 candidates, shared_blocked = self._filter_shared_record_cache(candidates, title)
                 blocked_count = len(local_blocked) + len(shared_blocked)

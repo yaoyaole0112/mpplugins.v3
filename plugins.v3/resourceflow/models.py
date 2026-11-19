@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -383,3 +383,31 @@ class ChannelDedupSettingsPayload(BaseModel):
 
 class ResourceLedgerDeletePayload(BaseModel):
     key: str = Field(..., min_length=64, max_length=64, pattern=r"^[0-9a-f]+$")
+
+
+class ResourcePendingApprovalPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    key: str = Field(..., min_length=64, max_length=64, pattern=r"^[0-9a-f]+$")
+    tmdb_id: int = Field(..., gt=0)
+    media_title: str = Field(..., min_length=1, max_length=120)
+    media_type: Literal["movie", "tv"] = "tv"
+    season: Optional[int] = Field(None, ge=0, le=999)
+    episodes: list[int] = Field(default_factory=list, max_length=500)
+    specs: dict[str, Any] = Field(default_factory=dict)
+    confirmed: bool = False
+
+    @field_validator("media_title")
+    @classmethod
+    def validate_media_title(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("媒体名称不能为空")
+        return cleaned
+
+    @field_validator("episodes")
+    @classmethod
+    def validate_episodes(cls, value: list[int]) -> list[int]:
+        if any(number < 1 or number > 9999 for number in value):
+            raise ValueError("集号必须在 1 至 9999 之间")
+        return sorted(set(value))

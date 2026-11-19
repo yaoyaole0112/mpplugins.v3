@@ -172,7 +172,8 @@
           media_title: path.includes('state=pending') ? '待核验影片' : '测试电影',
           path: 'Film.2026.mkv', media_type: 'movie', tmdb_id: path.includes('state=pending') ? null : 123,
           specs: { resolution: '2160p' }, reason: path.includes('state=pending') ? '身份未确认，等待别名绑定或识别重试' : '',
-          task_name: '测试任务', last_seen: 1794711600, evidence_source: 'completed',
+          task_name: '测试任务', task_id: 'test-task', last_seen: 1794711600, evidence_source: 'completed',
+          actionable: path.includes('state=pending'), source_pending_count: 1,
         }, ...Array.from({ length: window.resourceflowExtraRecords }, (_, index) => ({
           key: `ledger-${index}`, title: `Search Ledger item-${index}`, media_type: 'tv', season: 1, episodes: [index + 1],
           media_title: '测试剧集',
@@ -211,6 +212,9 @@
           .map(([name, id]) => [name, Number(id)]))
         settings = { ...settings, ...body, identity_aliases, movie_identity_aliases, channels: body.channels.split('\n').filter(Boolean) }
         return { success: true, data: structuredClone(settings) }
+      }
+      if (path.endsWith('/resource-ledger/pending/approve')) {
+        return { success: true, message: '已提交人工核验，完成后记录会自动刷新' }
       }
       if (path === 'plugin/ResourceFlow/settings') {
         if (window.resourceflowFailStage === 'global') return { success: false, message: '模拟全局保存失败' }
