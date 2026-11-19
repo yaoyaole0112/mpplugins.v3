@@ -426,7 +426,8 @@ function channelRecordEpisodes(record) {
 
 function resourceRecordIdentity(record) {
   const name = record.media_title || '中文名待识别'
-  return `${name} · ${record.media_type === 'movie' ? '电影' : channelRecordEpisodes(record)}`
+  const episode = record.media_type === 'movie' ? '电影' : channelRecordEpisodes(record)
+  return [name, episode, record.tmdb_id ? `TMDB ${record.tmdb_id}` : '身份待确认'].join(' · ')
 }
 
 function channelRecordSpecs(record) {
@@ -1163,16 +1164,29 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               {{ activeResourceFilter.query || activeResourceFilter.media_type ? '无匹配记录' : '暂无记录' }}
             </div>
             <div class="channel-dedup__records">
-              <div v-for="row in resourceRows.items" :key="row.key" class="channel-dedup__record">
-                <div class="channel-dedup__record-main">
-                  <strong>{{ row.title || row.path || row.file_key || row.title_key }}</strong>
-                  <span class="channel-dedup__record-identity">{{ resourceRecordIdentity(row) }}</span>
-                  <small>{{ row.tmdb_id ? `TMDB ${row.tmdb_id}` : '身份待确认' }} · {{ channelRecordSpecs(row) }}</small>
+              <article v-for="row in resourceRows.items" :key="row.key" class="channel-dedup__record">
+                <div class="channel-dedup__record-head">
+                  <div class="channel-dedup__record-main">
+                    <div class="channel-dedup__record-identity channel-dedup__record-info">
+                      {{ resourceRecordIdentity(row) }}
+                      <template v-if="channelRecordSpecs(row)"> · {{ channelRecordSpecs(row) }}</template>
+                    </div>
+                  </div>
+                  <span class="channel-dedup__badge">
+                    <VIcon icon="mdi-help-circle-outline" size="16" />
+                    待核验
+                  </span>
                 </div>
+                <strong class="channel-dedup__record-title">
+                  {{ row.title || row.path || row.file_key || row.title_key }}
+                </strong>
                 <div class="channel-dedup__record-meta">
-                  <span>{{ row.reason || '身份或规格待核验' }}</span>
+                  <span>最近更新：{{ formatChannelTimestamp(row.last_seen) }}</span>
+                  <span>任务：{{ row.task_name || '-' }}</span>
+                  <span v-if="row.path">文件：{{ row.path }}</span>
                 </div>
-              </div>
+                <p class="channel-dedup__record-reason">{{ row.reason || '身份或规格待核验' }}</p>
+              </article>
             </div>
             <VPagination v-if="resourceRows.total > 20" v-model="resourcePage"
               :length="Math.ceil(resourceRows.total / 20)" :total-visible="3" @update:model-value="loadResourceRows" />
@@ -1436,10 +1450,57 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
 .channel-dedup__record {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-inline-size: 0;
+  padding: 20px 0;
+  border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  overflow-wrap: anywhere;
+}
+
+.channel-dedup__record-head {
+  display: flex;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 0;
-  border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  min-inline-size: 0;
+}
+
+.channel-dedup__record-info {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(var(--v-theme-on-surface), 0.055);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.channel-dedup__record-title {
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.channel-dedup__record-reason {
+  margin: 0;
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.channel-dedup__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  max-inline-size: 52%;
+  min-block-size: 32px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  color: rgb(219, 163, 75);
+  background: rgba(220, 150, 60, 0.13);
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .channel-dedup__record-main,
@@ -1452,23 +1513,32 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 .channel-dedup__record-main strong,
 .channel-dedup__record-main small,
 .channel-dedup__record-meta span,
-.channel-dedup__record-meta time {
+.channel-dedup__record-meta time,
+.channel-dedup__record-title {
   overflow-wrap: anywhere;
 }
 
 .channel-dedup__record-meta {
-  flex: 0 0 auto;
-  text-align: end;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
+  font-size: 14px;
+  line-height: 1.55;
 }
 
 @media (max-width: 600px) {
-  .channel-dedup__record {
-    flex-direction: column;
+  .channel-dedup__record-head {
+    gap: 8px;
   }
 
-  .channel-dedup__record-meta {
-    text-align: start;
+  .channel-dedup__badge {
+    max-inline-size: 56%;
+    white-space: normal;
   }
+
+  .channel-dedup__record-meta { flex-direction: column; align-items: flex-start; gap: 4px; }
 }
 
 .resourceflow-loading,

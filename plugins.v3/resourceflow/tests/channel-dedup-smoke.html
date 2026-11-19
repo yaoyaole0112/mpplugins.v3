@@ -171,7 +171,8 @@
           title: path.includes('state=pending') ? 'Unknown Resource' : 'Film Resource',
           media_title: path.includes('state=pending') ? '待核验影片' : '测试电影',
           path: 'Film.2026.mkv', media_type: 'movie', tmdb_id: path.includes('state=pending') ? null : 123,
-          specs: { resolution: '2160p' }, evidence_source: 'completed',
+          specs: { resolution: '2160p' }, reason: path.includes('state=pending') ? '身份未确认，等待别名绑定或识别重试' : '',
+          task_name: '测试任务', last_seen: 1794711600, evidence_source: 'completed',
         }, ...Array.from({ length: window.resourceflowExtraRecords }, (_, index) => ({
           key: `ledger-${index}`, title: `Search Ledger item-${index}`, media_type: 'tv', season: 1, episodes: [index + 1],
           media_title: '测试剧集',

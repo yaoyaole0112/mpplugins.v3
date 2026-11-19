@@ -355,7 +355,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_role("tab", name="共享已完成", exact=True).count() == 0
             await dialog.get_by_role("tab", name="身份待核验", exact=True).click()
             await dialog.get_by_text("Unknown Resource", exact=True).wait_for()
-            assert await dialog.get_by_text('待核验影片 · 电影', exact=True).count() == 1
+            assert await dialog.get_by_text('待核验影片 · 电影 · 身份待确认 · 分辨率 2160p', exact=True).count() == 1
+            assert await dialog.get_by_text('待核验', exact=True).count() == 1
             await verify_record_search(page, dialog, '身份待核验', card_bounds['height'], output, width, host_css)
             await page.screenshot(path=str(output / f'pending-{width}.png'), full_page=True)
             assert await close_button.is_visible()

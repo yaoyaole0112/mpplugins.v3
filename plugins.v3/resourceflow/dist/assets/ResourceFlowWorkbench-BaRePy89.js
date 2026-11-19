@@ -2011,9 +2011,14 @@ const _hoisted_66 = {
   class: "text-body-2 text-medium-emphasis"
 };
 const _hoisted_67 = { class: "channel-dedup__records" };
-const _hoisted_68 = { class: "channel-dedup__record-main" };
-const _hoisted_69 = { class: "channel-dedup__record-identity" };
-const _hoisted_70 = { class: "channel-dedup__record-meta" };
+const _hoisted_68 = { class: "channel-dedup__record-head" };
+const _hoisted_69 = { class: "channel-dedup__record-main" };
+const _hoisted_70 = { class: "channel-dedup__record-identity channel-dedup__record-info" };
+const _hoisted_71 = { class: "channel-dedup__badge" };
+const _hoisted_72 = { class: "channel-dedup__record-title" };
+const _hoisted_73 = { class: "channel-dedup__record-meta" };
+const _hoisted_74 = { key: 0 };
+const _hoisted_75 = { class: "channel-dedup__record-reason" };
 
 const {computed,inject,onMounted,onUnmounted,ref,watch} = await importShared('vue');
 
@@ -2423,6 +2428,11 @@ async function saveChannelDedup(shared) {
   channelDedup.value = data || channelDedup.value;
 }
 
+function formatChannelTimestamp(value) {
+  if (!value) return '尚未同步'
+  return new Date(Number(value) * 1000).toLocaleString()
+}
+
 function channelRecordEpisodes(record) {
   const season = String(record.season || 0).padStart(2, '0');
   const episodes = (record.episodes || []).map(number => `E${String(number).padStart(2, '0')}`).join(', ');
@@ -2431,7 +2441,8 @@ function channelRecordEpisodes(record) {
 
 function resourceRecordIdentity(record) {
   const name = record.media_title || '中文名待识别';
-  return `${name} · ${record.media_type === 'movie' ? '电影' : channelRecordEpisodes(record)}`
+  const episode = record.media_type === 'movie' ? '电影' : channelRecordEpisodes(record);
+  return [name, episode, record.tmdb_id ? `TMDB ${record.tmdb_id}` : '身份待确认'].join(' · ')
 }
 
 function channelRecordSpecs(record) {
@@ -3980,18 +3991,38 @@ return (_ctx, _cache) => {
                         : _createCommentVNode("", true),
                       _createElementVNode("div", _hoisted_67, [
                         (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(resourceRows.value.items, (row) => {
-                          return (_openBlock(), _createElementBlock("div", {
+                          return (_openBlock(), _createElementBlock("article", {
                             key: row.key,
                             class: "channel-dedup__record"
                           }, [
                             _createElementVNode("div", _hoisted_68, [
-                              _createElementVNode("strong", null, _toDisplayString(row.title || row.path || row.file_key || row.title_key), 1),
-                              _createElementVNode("span", _hoisted_69, _toDisplayString(resourceRecordIdentity(row)), 1),
-                              _createElementVNode("small", null, _toDisplayString(row.tmdb_id ? `TMDB ${row.tmdb_id}` : '身份待确认') + " · " + _toDisplayString(channelRecordSpecs(row)), 1)
+                              _createElementVNode("div", _hoisted_69, [
+                                _createElementVNode("div", _hoisted_70, [
+                                  _createTextVNode(_toDisplayString(resourceRecordIdentity(row)) + " ", 1),
+                                  (channelRecordSpecs(row))
+                                    ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
+                                        _createTextVNode(" · " + _toDisplayString(channelRecordSpecs(row)), 1)
+                                      ], 64))
+                                    : _createCommentVNode("", true)
+                                ])
+                              ]),
+                              _createElementVNode("span", _hoisted_71, [
+                                _createVNode(_component_VIcon, {
+                                  icon: "mdi-help-circle-outline",
+                                  size: "16"
+                                }),
+                                _cache[113] || (_cache[113] = _createTextVNode(" 待核验 ", -1))
+                              ])
                             ]),
-                            _createElementVNode("div", _hoisted_70, [
-                              _createElementVNode("span", null, _toDisplayString(row.reason || '身份或规格待核验'), 1)
-                            ])
+                            _createElementVNode("strong", _hoisted_72, _toDisplayString(row.title || row.path || row.file_key || row.title_key), 1),
+                            _createElementVNode("div", _hoisted_73, [
+                              _createElementVNode("span", null, "最近更新：" + _toDisplayString(formatChannelTimestamp(row.last_seen)), 1),
+                              _createElementVNode("span", null, "任务：" + _toDisplayString(row.task_name || '-'), 1),
+                              (row.path)
+                                ? (_openBlock(), _createElementBlock("span", _hoisted_74, "文件：" + _toDisplayString(row.path), 1))
+                                : _createCommentVNode("", true)
+                            ]),
+                            _createElementVNode("p", _hoisted_75, _toDisplayString(row.reason || '身份或规格待核验'), 1)
                           ]))
                         }), 128))
                       ]),
@@ -4039,7 +4070,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[41] || (_cache[41] = $event => (deleteDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[113] || (_cache[113] = [
+                  default: _withCtx(() => [...(_cache[114] || (_cache[114] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -4050,7 +4081,7 @@ return (_ctx, _cache) => {
                   loading: saving.value,
                   onClick: confirmDeleteTask
                 }, {
-                  default: _withCtx(() => [...(_cache[114] || (_cache[114] = [
+                  default: _withCtx(() => [...(_cache[115] || (_cache[115] = [
                     _createTextVNode("删除", -1)
                   ]))]),
                   _: 1
@@ -4073,7 +4104,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_VCard, { title: "清除任务数据" }, {
           default: _withCtx(() => [
             _createVNode(_component_VCardText, null, {
-              default: _withCtx(() => [...(_cache[115] || (_cache[115] = [
+              default: _withCtx(() => [...(_cache[116] || (_cache[116] = [
                 _createTextVNode("将清除当前任务的统计、运行诊断、托管和归档记录，下载器内的种子与文件不会删除。", -1)
               ]))]),
               _: 1
@@ -4085,7 +4116,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[43] || (_cache[43] = $event => (clearDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[116] || (_cache[116] = [
+                  default: _withCtx(() => [...(_cache[117] || (_cache[117] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -4096,7 +4127,7 @@ return (_ctx, _cache) => {
                   loading: saving.value,
                   onClick: confirmClearTask
                 }, {
-                  default: _withCtx(() => [...(_cache[117] || (_cache[117] = [
+                  default: _withCtx(() => [...(_cache[118] || (_cache[118] = [
                     _createTextVNode("清除", -1)
                   ]))]),
                   _: 1
@@ -4115,6 +4146,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-1c68b654"]]);
+const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-a9944f55"]]);
 
 export { ResourceFlowWorkbench as R };
