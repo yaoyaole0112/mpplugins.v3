@@ -268,7 +268,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.33"
+    plugin_version = "1.0.34"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -1993,6 +1993,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     def _explicit_download_type(values: list) -> Optional[str]:
         """只接受明确的分类或标签，避免将种子标题中的普通词误当类别。"""
         aliases = {
+            "short_drama": {"短剧", "微短剧", "短篇剧", "short drama", "short-drama", "micro drama",
+                            "micro-drama", "vertical drama"},
             "anime": {"动漫", "动画", "动画片", "番剧", "anime", "animation"},
             "variety": {"综艺", "真人秀", "综艺节目", "variety", "reality", "talk show"},
             "documentary": {"纪录", "纪录片", "记录片", "documentary"},
@@ -2011,7 +2013,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     def _download_type(self, torrent: TorrentInfo, cache: dict) -> Tuple[Optional[str], str]:
         """按明确站点分类及媒体题材分类；未识别时不允许通过筛选。"""
         category = self._explicit_download_type([torrent.category] + list(torrent.labels or []))
-        if category in {"anime", "variety", "documentary", "sports", "mv", "music"}:
+        if category in {"short_drama", "anime", "variety", "documentary", "sports", "mv", "music"}:
             return category, "站点分类或标签"
         key = (torrent.title or "", torrent.description or "", torrent.category or "")
         if key not in cache:

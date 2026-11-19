@@ -1,113 +1,113 @@
 
-.resourceflow-editor[data-v-c62caec4] {
+.resourceflow-editor[data-v-fa0451bf] {
   max-block-size: min(90dvh, 58rem);
 }
-.resourceflow-editor__toolbar[data-v-c62caec4] {
+.resourceflow-editor__toolbar[data-v-fa0451bf] {
   flex: 0 0 auto;
   padding-inline: 8px;
   z-index: 4;
   backdrop-filter: blur(var(--transparent-blur, 0px));
   background-color: rgba(var(--v-theme-surface), var(--transparent-opacity-heavy, 1));
 }
-.resourceflow-editor__body[data-v-c62caec4] {
+.resourceflow-editor__body[data-v-fa0451bf] {
   padding: 0;
 }
-.resourceflow-editor__form[data-v-c62caec4] {
+.resourceflow-editor__form[data-v-fa0451bf] {
   display: grid;
   grid-template-columns: 12rem auto minmax(0, 1fr) minmax(12rem, 0.34fr);
   min-block-size: 34rem;
 }
-.resourceflow-editor__tabs[data-v-c62caec4] {
+.resourceflow-editor__tabs[data-v-fa0451bf] {
   padding: 12px 8px;
 }
-.resourceflow-editor__window[data-v-c62caec4] {
+.resourceflow-editor__window[data-v-fa0451bf] {
   min-inline-size: 0;
   padding: 20px;
 }
-.editor-section[data-v-c62caec4] {
+.editor-section[data-v-fa0451bf] {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
-.editor-section + .editor-section[data-v-c62caec4] {
+.editor-section + .editor-section[data-v-fa0451bf] {
   margin-block-start: 28px;
   padding-block-start: 24px;
   border-block-start: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 }
-.editor-section__head[data-v-c62caec4] {
+.editor-section__head[data-v-fa0451bf] {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
-.editor-switches[data-v-c62caec4] {
+.editor-switches[data-v-fa0451bf] {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 24px;
 }
-.editor-recent-rule[data-v-c62caec4] {
+.editor-recent-rule[data-v-fa0451bf] {
   display: flex;
   align-items: center;
   gap: 12px 24px;
   min-inline-size: 0;
 }
-.editor-recent-rule__switch[data-v-c62caec4] {
+.editor-recent-rule__switch[data-v-fa0451bf] {
   flex: 0 1 auto;
   min-inline-size: 0;
 }
-.editor-recent-rule__days[data-v-c62caec4] {
+.editor-recent-rule__days[data-v-fa0451bf] {
   flex: 0 0 148px;
   max-inline-size: 148px;
   min-inline-size: 0;
 }
 @media (max-width: 599px) {
-.editor-recent-rule[data-v-c62caec4] { gap: 8px;
+.editor-recent-rule[data-v-fa0451bf] { gap: 8px;
 }
-.editor-recent-rule__days[data-v-c62caec4] { flex-basis: 100px; max-inline-size: 100px;
+.editor-recent-rule__days[data-v-fa0451bf] { flex-basis: 100px; max-inline-size: 100px;
 }
 }
-.editor-dedup-settings[data-v-c62caec4] {
+.editor-dedup-settings[data-v-fa0451bf] {
   align-self: flex-start;
 }
-.resourceflow-editor__summary[data-v-c62caec4] {
+.resourceflow-editor__summary[data-v-fa0451bf] {
   padding: 20px 16px;
   border-inline-start: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 }
-.resourceflow-editor__summary dl[data-v-c62caec4] {
+.resourceflow-editor__summary dl[data-v-fa0451bf] {
   display: grid;
   gap: 12px;
   margin: 18px 0 0;
 }
-.resourceflow-editor__summary dl > div[data-v-c62caec4] {
+.resourceflow-editor__summary dl > div[data-v-fa0451bf] {
   display: flex;
   justify-content: space-between;
   gap: 12px;
 }
-.resourceflow-editor__summary dt[data-v-c62caec4] {
+.resourceflow-editor__summary dt[data-v-fa0451bf] {
   color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
 }
-.resourceflow-editor__summary dd[data-v-c62caec4] {
+.resourceflow-editor__summary dd[data-v-fa0451bf] {
   margin: 0;
   text-align: end;
   overflow-wrap: anywhere;
 }
 @media (max-width: 959px) {
-.resourceflow-editor[data-v-c62caec4] {
+.resourceflow-editor[data-v-fa0451bf] {
     max-block-size: none;
 }
-.resourceflow-editor__form[data-v-c62caec4] {
+.resourceflow-editor__form[data-v-fa0451bf] {
     grid-template-columns: 1fr;
     min-block-size: 0;
 }
-.resourceflow-editor__tabs[data-v-c62caec4] {
+.resourceflow-editor__tabs[data-v-fa0451bf] {
     max-inline-size: 100%;
     padding-block: 0;
     overflow-x: auto;
 }
-.resourceflow-editor__window[data-v-c62caec4] {
+.resourceflow-editor__window[data-v-fa0451bf] {
     padding: 16px;
 }
-.resourceflow-editor__summary[data-v-c62caec4] {
+.resourceflow-editor__summary[data-v-fa0451bf] {
     border-inline-start: 0;
     border-block-start: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 }

@@ -272,6 +272,7 @@ async function saveTask() {
                   :items="[
                     { title: '电影', value: 'movie' },
                     { title: '剧集', value: 'tv' },
+                    { title: '短剧', value: 'short_drama' },
                     { title: '综艺', value: 'variety' },
                     { title: '动漫', value: 'anime' },
                     { title: '运动 / 体育', value: 'sports' },

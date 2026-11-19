@@ -92,7 +92,7 @@ class BrushTaskPayload(BaseModel):
     recent_episodes_days: int = Field(3, ge=1, le=365)
     spec_dedup_enabled: bool = True
     blacklist_site_ids: list[int] = Field(default_factory=list, max_length=100)
-    download_types: list[Literal["movie", "tv", "variety", "anime", "sports", "documentary", "mv", "music"]] = Field(default_factory=list)
+    download_types: list[Literal["movie", "tv", "short_drama", "variety", "anime", "sports", "documentary", "mv", "music"]] = Field(default_factory=list)
     site_skip_tips: bool = False
     rss_support: bool = False
     tag: Optional[str] = Field(None, validation_alias=AliasChoices("tag", "downloader_tag"))

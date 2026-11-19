@@ -588,6 +588,7 @@ return (_ctx, _cache) => {
                               items: [
                     { title: '电影', value: 'movie' },
                     { title: '剧集', value: 'tv' },
+                    { title: '短剧', value: 'short_drama' },
                     { title: '综艺', value: 'variety' },
                     { title: '动漫', value: 'anime' },
                     { title: '运动 / 体育', value: 'sports' },
@@ -1165,7 +1166,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const TaskEditorDialog = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-c62caec4"]]);
+const TaskEditorDialog = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-fa0451bf"]]);
 
 const specLabels = { resolution: '分辨率', effects: '特效', codec: '编码', source: '来源', fps: '帧率', size: '大小' };
 const qualityKeys = Object.keys(specLabels).filter(key => key !== 'size');

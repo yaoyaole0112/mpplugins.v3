@@ -22,6 +22,11 @@ class DownloadTypeTest(unittest.TestCase):
         self.assertEqual(self.classify(labels=["MV"])[0], "mv")
         self.plugin.chain.recognize_media.assert_not_called()
 
+    def test_short_drama_category_and_label_are_explicit_types(self):
+        self.assertEqual(self.classify(SimpleNamespace(type="电视剧"), category="短剧")[0], "short_drama")
+        self.assertEqual(self.classify(labels=["微短剧"])[0], "short_drama")
+        self.assertEqual(self.classify(category="short drama")[0], "short_drama")
+
     def test_genres_override_basic_site_category(self):
         for genre, expected in [(16, "anime"), (99, "documentary"), (10764, "variety"), (10767, "variety")]:
             with self.subTest(genre=genre):
@@ -45,8 +50,8 @@ class DownloadTypeTest(unittest.TestCase):
         self.classify(SimpleNamespace(type="电影"), cache=cache)
         self.plugin.chain.recognize_media.assert_called_once()
         self.assertEqual(BrushTaskConfig({}).download_types, [])
-        payload = BrushTaskPayload(name="task", site_id=1, downloader="qb", download_types=["anime"])
-        self.assertEqual(payload.download_types, ["anime"])
+        payload = BrushTaskPayload(name="task", site_id=1, downloader="qb", download_types=["short_drama"])
+        self.assertEqual(payload.download_types, ["short_drama"])
         with self.assertRaises(ValueError):
             BrushTaskPayload(name="task", site_id=1, downloader="qb", download_types=["invalid"])
 
