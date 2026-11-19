@@ -80,7 +80,7 @@ export function rejectionSummaries(row) {
   for (const item of row.rejected || []) {
     const reason = item.reason || ''
     const status = reason === '同规格已占位或已完成'
-      ? ['reserved', 'queued'].includes(item.state) ? '命中其他下载：正在下载' : '命中其他下载：已完成'
+      ? ['reserved', 'queued'].includes(item.state) ? '命中记录：正在下载' : '命中记录：已完成'
       : ''
     if (!reason && !item.owner) continue
     const key = JSON.stringify([status, reason])

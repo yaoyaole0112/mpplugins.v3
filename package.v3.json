@@ -67,7 +67,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流与Telegram共享下载审批，跨实例同规格下载前占位，无需公网入口。",
     "labels": "刷流,资源去重,Telegram",
-    "version": "1.0.32",
+    "version": "1.0.33",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -75,6 +75,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.33": "将本机下载申请中的同规格命中状态统一显示为“命中记录”，明确区分本机已过滤状态与其他下载方的命中记录。",
       "v1.0.32": "取消下载器专用共享占位标签，保留原刷流任务标签；本机申请状态筛选精简为已完成、已入队、已释放和已过滤；两类下载记录支持按下载方和媒体类型组合筛选，并明确区分本机申请状态与命中的同规格资源状态。",
       "v1.0.31": "修复协调 Bot 网络错误信息过于笼统及失败后固定频繁重试：区分代理、连接/响应超时、TLS、异常响应与 Bot API 错误，退避从5秒递增至最多5分钟（遵循Telegram限流等待），同一故障限频记录并在恢复后清除；补充requests运行依赖，不改变审批失败时暂停下载的安全策略。",
       "v1.0.30": "任务列表和任务标题仅在任务开启共享下载审批时显示“下载审批”，关闭时不显示标记。",
