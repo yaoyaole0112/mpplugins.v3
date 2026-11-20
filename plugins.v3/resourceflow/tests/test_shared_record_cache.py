@@ -7,7 +7,9 @@ import unittest
 from unittest.mock import Mock
 import uuid
 
-from resourceflow.shared_cache import ACTIVE_MAX_AGE, COMPLETED_MAX_AGE, SYNC_MAX_PARTS, SharedRecordCache
+from resourceflow.shared_cache import (
+    ACTIVE_MAX_AGE, COMPLETED_MAX_AGE, HIGH_RESOLUTION_WAIT, SYNC_MAX_PARTS, SharedRecordCache,
+)
 from resourceflow.shared_coordinator import CoordinatorStore
 from resourceflow.shared_protocol import RULE_DEFAULTS, SharedError, canonical, encode
 import test_shared_arbitration as arbitration
@@ -113,6 +115,25 @@ class SharedRecordCacheTests(unittest.TestCase):
         self.assertEqual(blocked[0][1]["_match_reason"], "已有2160p/4K高分辨率资源")
         self.assertFalse(self.match(file_row(3, 2, resolution="720p", effects="HDR"))[1])
 
+    def test_active_2160p_mirror_holds_lower_only_while_fresh_and_not_released(self):
+        claim = self.reserve(file_row(resolution="4K"))["approved"][0]["claim"]
+        low = file_row(2, 1, resolution="720p")
+        unrelated = file_row(3, 2, resolution="720p")
+        for state in ("reserved", "queued"):
+            self.sync()
+            available, blocked = self.match(low, unrelated)
+            self.assertEqual((available, blocked), self.store.filter_duplicates([low, unrelated]))
+            self.assertEqual(available, [unrelated])
+            self.assertEqual(blocked[0][1]["state"], state)
+            self.assertEqual(blocked[0][1]["_match_reason"], HIGH_RESOLUTION_WAIT)
+            self.assertEqual(self.match(low, age=ACTIVE_MAX_AGE), ([low], []))
+            if state == "reserved":
+                self.assertTrue(self.send("update", updates=[{"claim": claim, "state": "queued"}])["ok"])
+        self.assertTrue(self.send("update", confirmed_absent=True,
+                                  updates=[{"claim": claim, "state": "released"}])["ok"])
+        self.sync()
+        self.assertEqual(self.match(low), ([low], []))
+
     def test_mirror_display_time_order_and_search_by_reused_localized_name(self):
         old, new = [row["claim"] for row in self.reserve(dict(file_row(), media_title="剧集中文名"),
                                                           dict(file_row(2, 2), media_title=""))["approved"]]
@@ -215,6 +236,26 @@ class SharedRecordCacheTests(unittest.TestCase):
         self.assertEqual(plugin._add_local_prechecked_torrent.call_args.args[6]["accepted"], {"Show.S01E02.mkv"})
         fixture.downloader.start_torrents.assert_called_once()
 
+    def test_client_waits_for_4k_release_then_retries_same_pack(self):
+        high = self.reserve(file_row(resolution="2160p"))["approved"][0]["claim"]
+        fixture, plugin = self.client()
+        self.assertIsNone(fixture.add())
+        plugin._shared_exchange.assert_not_called()
+        plugin._add_local_prechecked_torrent.assert_not_called()
+
+        self.assertTrue(self.send("update", confirmed_absent=True,
+                                  updates=[{"claim": high, "state": "released"}])["ok"])
+        plugin._shared_cache_next_sync = 0
+        plugin._sync_shared_record_cache()
+        plugin._shared_exchange.reset_mock()
+        files = fixture.downloader.get_files.return_value
+        files[0]["priority"], files[1]["priority"] = 1, 1
+        self.assertEqual(fixture.add(), "a" * 40)
+        requests = [call.args[1] for call in plugin._shared_exchange.call_args_list]
+        self.assertEqual([row["op"] for row in requests], ["reserve", "update"])
+        self.assertEqual([row["episodes"] for row in requests[0]["files"]], [[1], [2]])
+        fixture.downloader.start_torrents.assert_called_once()
+
     def test_cache_hits_send_nothing_and_failed_sync_falls_back(self):
         self.reserve(file_row(), file_row(2, 2))
         fixture, plugin = self.client()
@@ -235,17 +276,15 @@ class SharedRecordCacheTests(unittest.TestCase):
                          ["sync_records", "reserve"])
         plugin._add_local_prechecked_torrent.assert_not_called()
 
-    def test_exclude_pack_and_coordinator_local_lookup_send_nothing(self):
-        self.store = CoordinatorStore(self.store.path, "resources", ["resolution"], 5,
-                                      {**RULE_DEFAULTS, "pack_policy": "exclude"})
-        self.reserve(file_row())
+    def test_coordinator_local_lookup_uses_authority_instead_of_mirror(self):
         fixture, plugin = self.client()
-        self.assertIsNone(fixture.add())
-        plugin._shared_exchange.assert_not_called()
+        # Both claims were added after the client's last mirror sync.
+        self.reserve(file_row(), file_row(2, 2))
         plugin._shared_settings = plugin._shared_settings.model_copy(update={"host_coordinator": True})
         plugin._shared_store = self.store
         self.assertIsNone(fixture.add())
         plugin._shared_exchange.assert_not_called()
+        plugin._add_local_prechecked_torrent.assert_not_called()
 
     def test_old_coordinator_does_not_receive_sync_requests(self):
         _, plugin = self.client()

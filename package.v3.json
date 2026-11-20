@@ -67,7 +67,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流与Telegram共享下载审批，跨实例同规格下载前占位，无需公网入口。",
     "labels": "刷流,资源去重,Telegram",
-    "version": "1.0.43",
+    "version": "1.0.44",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -75,6 +75,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.44": "同集 2160p/4K 占位或下载期间暂缓 1080p 及以下版本；完成后过滤，确认释放后可重新申请。协调端与本地共享记录预筛统一判定。",
       "v1.0.42": "隐藏固定资源去重策略并强制入队去重、包内逐文件去重、身份待核验及2160p优先；全局设置弹窗开启时暂停后台轮询，固定加载条高度以避免页面跳动。",
       "v1.0.43": "仅在 TMDB 与豆瓣均缺少逐集日期时启用连续集日期推断；增加可配置容差和可选 AI 官方排播核验，并记录来源与置信度。",
       "v1.0.41": "放宽全局设置布局并合并账号来源、协调端、最近审批确认和规则版本状态行；移除全局设置中的历史完成证据不完整提示；增加跨设备逐集 2160p/4K 完成记录优先规则，低分辨率同集候选在缓存预筛及协调端审批阶段均拦截。",

@@ -18,8 +18,9 @@ from .record_search import (
     localized_record_titles, matches_owner, matches_record, record_display_title, record_page,
 )
 from .shared_cache import (
+    HIGH_RESOLUTION_PACK_WAIT, HIGH_RESOLUTION_WAIT,
     RECORD_COLUMNS, SYNC_BATCH, SYNC_MAX_PARTS, SYNC_VERSION, display_record, filter_records,
-    has_2160p_conflict, same_resource,
+    find_resource_conflict, same_resource,
 )
 from .shared_history import AUTHORITY_VERSION
 from .shared_protocol import (
@@ -198,27 +199,18 @@ class CoordinatorStore:
             raise SharedError("整包处理策略与协调端不一致")
         approved, rejected, pending = [], [], []
         now = time.time()
+        wait_for_2160p = False
         for item in validated:
             rows = db.execute(
                 "SELECT * FROM claims WHERE group_id=? AND media_type=? AND tmdb_id=? "
                 "AND season IS ? AND state != 'released'",
                 (self.group, item["media_type"], item["tmdb_id"], item["season"]),
             ).fetchall()
-            conflict = None
-            existing_rows = [dict(row) for row in rows]
-            for row in existing_rows + pending:
-                high_resolution_row = row
-                if isinstance(row.get("episodes"), str) and isinstance(row.get("specs"), str):
-                    high_resolution_row = {**row, "episodes": json.loads(row["episodes"]),
-                                           "specs": json.loads(row["specs"])}
-                if (self.policy.get("rules", {}).get("prefer_2160p", True)
-                        and has_2160p_conflict(item, high_resolution_row)):
-                    conflict = {**row, "_match_reason": "已有2160p/4K高分辨率资源"}
-                    break
-                if self._same_identity_file(item, row, overlap=True):
-                    conflict = row
-                    break
+            conflict = find_resource_conflict(item, map(display_record, rows), self.policy)
+            if not conflict:
+                conflict = next((row for row in pending if self._same_identity_file(item, row, overlap=True)), None)
             if conflict:
+                wait_for_2160p |= conflict.get("_match_reason") == HIGH_RESOLUTION_WAIT
                 rejected.append({"id": item["id"], "reason": conflict.get("_match_reason", "同规格已占位或已完成"),
                                  "owner": conflict["label"], "state": conflict["state"],
                                  "claim": conflict["id"], "created": conflict["created"],
@@ -235,6 +227,11 @@ class CoordinatorStore:
             )
             pending.append(row)
             approved.append({"id": item["id"], "claim": claim})
+        if wait_for_2160p:
+            # A partial add would prevent a later retry of the same torrent hash.
+            rejected.extend({"id": item["id"], "reason": HIGH_RESOLUTION_PACK_WAIT} for item in approved)
+            return {"ok": True, "approved": [], "rejected": rejected,
+                    "pack_rejected": False, "policy": self.policy, **self.authority()}
         if rejected and body["pack_policy"] == "exclude":
             return {"ok": True, "approved": [], "rejected": rejected,
                     "pack_rejected": True, "policy": self.policy, **self.authority()}

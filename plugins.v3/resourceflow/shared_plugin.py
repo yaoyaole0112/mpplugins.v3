@@ -23,7 +23,10 @@ from .record_search import (
     matches_media_type, matches_owner, matches_record, record_display_title, record_owners, record_page,
     record_title_key,
 )
-from .shared_cache import SYNC_VERSION, SharedRecordCache, same_resource
+from .shared_cache import (
+    HIGH_RESOLUTION_PACK_WAIT, HIGH_RESOLUTION_WAIT, SYNC_VERSION,
+    SharedRecordCache, is_2160p_downgrade, same_resource,
+)
 from .shared_coordinator import BotWorker, CoordinatorStore
 from .shared_history import AUTHORITY_VERSION, completion_rows
 from .shared_models import SharedSettingsPayload
@@ -721,6 +724,8 @@ class SharedResourceMixin:
         for row in fields:
             conflict = rejected.get(row["id"])
             decision = "批准" if row["id"] in entry.get("approved", {}) else "排除"
+            if conflict and conflict.get("reason") in {HIGH_RESOLUTION_WAIT, HIGH_RESOLUTION_PACK_WAIT}:
+                decision = "暂缓"
             identity = (f"S{row['season']:02d}" + ",".join(f"E{ep:02d}" for ep in row["episodes"])
                         if row["media_type"] == "tv" else "电影")
             specs = ", ".join(f"{key}={value}" for key, value in sorted(row["specs"].items()))
@@ -866,6 +871,7 @@ class SharedResourceMixin:
                 continue
             for row in entry.get("files", []) or []:
                 if (self._shared_local_file_is_blocking(entry, row.get("id"))
+                        and not is_2160p_downgrade(candidate, row)
                         and same_resource(candidate, row, attributes, tolerance)):
                     return entry, row
         return None
@@ -1041,6 +1047,9 @@ class SharedResourceMixin:
                 )
                 candidates, local_blocked = self._shared_filter_local_duplicates(candidates, title)
                 candidates, shared_blocked = self._filter_shared_record_cache(candidates, title)
+                if any(row.get("_match_reason") == HIGH_RESOLUTION_WAIT for _, row in shared_blocked):
+                    logger.info(f"共享审批暂缓种子 {title}：同集2160p/4K占位未结束，下次刷流重新判断")
+                    return None
                 blocked_count = len(local_blocked) + len(shared_blocked)
                 if blocked_count and self._channel_dedup_pack_policy == "exclude":
                     logger.info(
@@ -1074,7 +1083,10 @@ class SharedResourceMixin:
                 self._accept_shared_reply(entry, reply)
                 if not entry["approved"]:
                     self._shared_phase(entry, "rejected")
-                    logger.info(f"共享审批排除 {title}：{len(entry.get('rejected') or [])} 个重复文件")
+                    if any(row.get("reason") == HIGH_RESOLUTION_WAIT for row in entry["rejected"]):
+                        logger.info(f"共享审批暂缓种子 {title}：同集2160p/4K占位未结束，下次刷流重新判断")
+                    else:
+                        logger.info(f"共享审批排除 {title}：{len(entry['rejected'])} 个重复文件")
                     return None
                 self._shared_phase(entry, "reserved")
                 if not self._shared_task_ready(task):

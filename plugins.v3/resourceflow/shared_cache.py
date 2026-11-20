@@ -18,6 +18,9 @@ SYNC_BATCH = 100
 SYNC_MAX_PARTS = 4
 ACTIVE_MAX_AGE = 120
 COMPLETED_MAX_AGE = 600
+HIGH_RESOLUTION_WAIT = "同集2160p/4K已占位或正在下载，低分辨率暂缓"
+HIGH_RESOLUTION_DONE = "已有2160p/4K高分辨率资源"
+HIGH_RESOLUTION_PACK_WAIT = "整包暂缓：等待包内其他文件的2160p/4K占位结果"
 RECORD_COLUMNS = ("id", "label", "title", "media_title", "media_type", "tmdb_id", "season", "episodes", "specs",
                   "state", "created", "updated", "request_id", "file_id")
 
@@ -43,17 +46,39 @@ def same_resource(candidate, record, attributes, tolerance, *, overlap=True):
     return specs_match(candidate, record, attributes, tolerance)
 
 
-def has_2160p_conflict(candidate, record):
+def is_2160p_downgrade(candidate, record):
     if (candidate.get("media_type") != "tv" or record.get("media_type") != "tv"
             or candidate.get("tmdb_id") != record.get("tmdb_id")
-            or candidate.get("season") != record.get("season")
-            or record.get("state") != "completed"):
+            or candidate.get("season") != record.get("season")):
         return False
     if not set(candidate.get("episodes") or []).intersection(record.get("episodes") or []):
         return False
     candidate_resolution = normalize_specs(candidate.get("specs") or {}).get("resolution")
     record_resolution = normalize_specs(record.get("specs") or {}).get("resolution")
-    return bool(candidate_resolution and candidate_resolution != "2160p" and record_resolution == "2160p")
+    return bool(record_resolution == "2160p"
+                and re.fullmatch(r"(?:1080|720|576|540|480|360|240|144)[pi]", candidate_resolution or "", re.I))
+
+
+def find_resource_conflict(candidate, records, rules):
+    """Prefer confirmed evidence over a temporary high-resolution hold."""
+    prefer_2160p = rules.get("rules", {}).get("prefer_2160p", True)
+    temporary = ordinary = None
+    for row in records:
+        state = row["state"]
+        if state not in {"reserved", "queued", "completed"}:
+            continue
+        if prefer_2160p and is_2160p_downgrade(candidate, row):
+            if state == "completed":
+                return {**row, "_match_reason": HIGH_RESOLUTION_DONE}
+            if temporary is None:
+                temporary = {**row, "_match_reason": HIGH_RESOLUTION_WAIT}
+            continue
+        if same_resource(candidate, row, rules["attributes"], rules["size_tolerance_pct"]):
+            if state == "completed":
+                return row
+            if ordinary is None:
+                ordinary = row
+    return temporary or ordinary
 
 
 class SharedRecordCache:
@@ -182,12 +207,7 @@ def filter_records(db, candidates, rules, *, mirror=False, group=None, completed
                 rows = db.execute(f"SELECT {','.join(RECORD_COLUMNS)} FROM claims WHERE group_id=? AND {match}",
                                   (group, *identity))
                 identities[identity] = [display_record(row) for row in rows]
-        hit = next((row for row in identities[identity]
-                    if same_resource(candidate, row, rules["attributes"], rules["size_tolerance_pct"])), None)
-        if not hit and rules.get("rules", {}).get("prefer_2160p", True):
-            hit = next((row for row in identities[identity] if has_2160p_conflict(candidate, row)), None)
-            if hit:
-                hit = {**hit, "_match_reason": "已有2160p/4K高分辨率资源"}
+        hit = find_resource_conflict(candidate, identities[identity], rules)
         if hit:
             blocked.append((candidate, hit))
         else:

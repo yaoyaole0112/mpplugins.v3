@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import uuid
 import zlib
 
+from resourceflow.shared_cache import HIGH_RESOLUTION_PACK_WAIT, HIGH_RESOLUTION_WAIT
 from resourceflow.shared_coordinator import BotWorker, CoordinatorStore
 from resourceflow.channel_dedup import parse_candidate_file
 from resourceflow.shared_models import SharedSettingsPayload
@@ -145,6 +146,43 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(same_quality["ok"], same_quality)
         self.assertEqual(len(other_episode["approved"]), 1)
         self.assertEqual(len(same_quality["approved"]), 1)
+
+    def test_2160p_holds_lower_pack_until_confirmed_release(self):
+        self.store = CoordinatorStore(self.path, "resources", ["effects"], 5, RULE_DEFAULTS)
+        high = {**file_row(resolution="4K", effects="SDR"), "tmdb_id": 272177,
+                "season": 3, "episodes": [5]}
+        low = {**high, "specs": {"resolution": "1080p", "effects": "HDR"}}
+        other = {**low, "id": "2" * 24, "episodes": [6]}
+        high_claim = self.send(self.request([high]))["approved"][0]["claim"]
+        peer = self.request([low, other], instance="b" * 32)
+        update = {"v": 1, "group": "resources", "instance": "a" * 32, "op": "update"}
+
+        for state in ("reserved", "queued"):
+            blocked = self.send(peer, sender=22)
+            self.assertEqual(blocked["approved"], [])
+            self.assertEqual(blocked["rejected"][0]["state"], state)
+            self.assertEqual(blocked["rejected"][0]["reason"], HIGH_RESOLUTION_WAIT)
+            self.assertEqual(blocked["rejected"][1]["reason"], HIGH_RESOLUTION_PACK_WAIT)
+            self.assertEqual(len(self.store.recent()), 1)
+            if state == "reserved":
+                self.assertTrue(self.send({**update, "updates": [{"claim": high_claim, "state": "queued"}]})["ok"])
+
+        release = {**update, "updates": [{"claim": high_claim, "state": "released"}]}
+        self.assertFalse(self.send(release)["ok"])
+        self.assertEqual(self.send(peer, sender=22)["approved"], [])
+        self.assertTrue(self.send({**release, "confirmed_absent": True})["ok"])
+        self.assertEqual(len(self.send(peer, sender=22)["approved"]), 2)
+
+    def test_2160p_completed_filters_only_overlapping_files_in_pack(self):
+        high = file_row(resolution="4k")
+        low = file_row(2, 1, resolution="1080p")
+        unrelated = file_row(3, 2, resolution="720p")
+        claim = self.send(self.request([high]))["approved"][0]["claim"]
+        self.assertTrue(self.send({"v": 1, "group": "resources", "instance": "a" * 32, "op": "update",
+                                   "updates": [{"claim": claim, "state": "completed"}]})["ok"])
+        reply = self.send(self.request([low, unrelated], instance="b" * 32), sender=22)
+        self.assertEqual([item["id"] for item in reply["approved"]], [unrelated["id"]])
+        self.assertEqual(reply["rejected"][0]["state"], "completed")
 
     def test_recent_claim_includes_creation_and_update_times_without_private_rpc(self):
         before = time.time()
