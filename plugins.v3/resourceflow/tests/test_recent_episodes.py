@@ -82,6 +82,108 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         self.assertEqual((multiple.begin_season, multiple.episode_list), (2, [3, 4]))
         self.assertEqual(unknown.episode_list, [])
 
+    def test_missing_episode_fallback_uses_latest_known_consecutive_anchor_without_cap(self):
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_tolerance_days = 7
+        plugin._recent_episode_evidence = {}
+        plugin.save_data = Mock()
+        dates = {8: "2026-11-18"}
+        sources = {8: "TMDB整季API"}
+        inferred = plugin._infer_missing_episode_dates(
+            "多喜一家人",
+            "多喜一家人.Still.A.Family.S01E09-E10.mkv",
+            SimpleNamespace(tmdb_id=294498),
+            1,
+            [9, 10],
+            dates,
+            sources,
+            date(2026, 11, 20),
+        )
+        self.assertEqual(inferred, {9, 10})
+        self.assertEqual(dates[9], "2026-11-18")
+        self.assertEqual(dates[10], "2026-11-18")
+        self.assertTrue(sources[9].startswith("日期推断"))
+        self.assertTrue(plugin.save_data.called)
+
+    def test_missing_episode_fallback_does_not_use_special_or_old_anchor(self):
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_tolerance_days = 7
+        plugin._recent_episode_evidence = {}
+        plugin.save_data = Mock()
+        for title in ("抢鲜版", "预告"):
+            dates = {8: "2026-11-18"}
+            sources = {8: "TMDB整季API"}
+            self.assertEqual(
+                plugin._infer_missing_episode_dates(
+                    title,
+                    f"{title}.S01E09.mkv",
+                    SimpleNamespace(tmdb_id=1),
+                    1,
+                    [9],
+                    dates,
+                    sources,
+                    date(2026, 11, 20),
+                ),
+                set(),
+            )
+        dates = {8: "2026-11-01"}
+        self.assertEqual(
+            plugin._infer_missing_episode_dates(
+                "正常剧",
+                "正常剧.S01E09.mkv",
+                SimpleNamespace(tmdb_id=1),
+                1,
+                [9],
+                dates,
+                {},
+                date(2026, 11, 20),
+            ),
+            set(),
+        )
+
+    def test_recent_episode_evidence_is_pruned_and_normalized(self):
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_episode_evidence = {
+            "ok": {
+                "tmdb_id": "123",
+                "season": "1",
+                "episode": "9",
+                "air_date": "2026-11-19",
+                "source": "官方排播",
+                "confidence": "high",
+                "updated_at": 4102444800,
+            },
+            "invalid": {"tmdb_id": 123, "updated_at": 4102444800},
+            "old": {
+                "tmdb_id": 123, "season": 1, "episode": 1,
+                "air_date": "2026-01-01", "updated_at": 1,
+            },
+        }
+        plugin.save_data = Mock()
+        plugin._prune_recent_episode_evidence()
+        self.assertEqual(plugin._recent_episode_evidence["ok"]["tmdb_id"], 123)
+        self.assertNotIn("invalid", plugin._recent_episode_evidence)
+        self.assertNotIn("old", plugin._recent_episode_evidence)
+        plugin.save_data.assert_called_once_with(
+            "recent_episode_evidence", plugin._recent_episode_evidence
+        )
+
+    def test_recent_ai_title_accepts_tmdb_aliases_and_season_suffix(self):
+        media = SimpleNamespace(
+            title="Still a Family",
+            en_title="Still a Family",
+            names=["多喜一家人"],
+        )
+        self.assertTrue(ResourceFlow._recent_episode_title_matches(
+            "多喜一家人", "Still a Family", media
+        ))
+        self.assertTrue(ResourceFlow._recent_episode_title_matches(
+            "多喜一家人 第1季", "Still a Family", media
+        ))
+        self.assertFalse(ResourceFlow._recent_episode_title_matches(
+            "完全不同的剧", "Still a Family", media
+        ))
+
     @patch.object(RequestUtils, "get_res")
     def test_douban_fallback_requires_explicit_episode_air_dates(self, get_res):
         class Response:

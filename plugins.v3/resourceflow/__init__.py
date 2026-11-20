@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import copy
 import hashlib
 import json
@@ -159,6 +160,11 @@ GLOBAL_DYNAMIC_DELETE_FIELDS = (
     "global_delete_size_range",
 )
 
+RECENT_DATE_FALLBACK_FIELDS = (
+    "recent_missing_date_tolerance_days",
+    "recent_missing_date_ai_enabled",
+)
+
 
 class BrushTaskConfig:
     """
@@ -274,7 +280,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.42"
+    plugin_version = "1.0.43"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -282,7 +288,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     auth_level = 2
 
     DATA_SCHEMA_VERSION = 2
-    CONFIG_SCHEMA_VERSION = 6
+    CONFIG_SCHEMA_VERSION = 7
     MAX_RUN_HISTORY = 50
     GLOBAL_BRUSH_TAG = "资源刷流"
     TASK_DATA_NAMES = ("torrents", "archived", "unmanaged", "statistic", "runs")
@@ -373,6 +379,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         self._channel_dedup_state = self.get_data("channel_dedup_state") or {
             "cursors": {}, "records": [], "last_poll_at": None, "last_error": "", "last_poll_ok": None,
         }
+        recent_evidence = self.get_data("recent_episode_evidence")
+        self._recent_episode_evidence = recent_evidence if isinstance(recent_evidence, dict) else {}
+        self._prune_recent_episode_evidence(save=False)
         self._prune_channel_dedup_records()
         repaired_frame_rates = repair_record_frame_rates(self._channel_dedup_state.get("records") or [])
         if repaired_frame_rates:
@@ -396,6 +405,18 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         self._global_proxy_delete, self._global_delete_size_range = self._validate_global_dynamic_delete_config(
             global_proxy_delete,
             raw_config.get("global_delete_size_range", legacy_delete_range),
+        )
+        self._recent_missing_date_tolerance_days = max(
+            1,
+            min(
+                int(BrushTaskConfig._parse_number(
+                    raw_config.get("recent_missing_date_tolerance_days", 7)
+                ) or 7),
+                30,
+            ),
+        )
+        self._recent_missing_date_ai_enabled = bool(
+            raw_config.get("recent_missing_date_ai_enabled", False)
         )
 
         task_rows = raw_config.get("tasks") if isinstance(raw_config.get("tasks"), list) else None
@@ -966,6 +987,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             setattr(self, f"_{field}", getattr(payload, field))
         for field in GLOBAL_DYNAMIC_DELETE_FIELDS:
             setattr(self, f"_{field}", getattr(payload, field))
+        for field in RECENT_DATE_FALLBACK_FIELDS:
+            setattr(self, f"_{field}", getattr(payload, field))
         if global_dynamic_delete_was_enabled and not self._global_dynamic_delete_enabled():
             for task in self._task_configs.values():
                 if task.proxy_delete and not task.delete_size_range:
@@ -1120,6 +1143,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         }
         config.update({field: getattr(self, f"_{field}", None) for field in GLOBAL_LIMIT_FIELDS})
         config.update({field: getattr(self, f"_{field}", None) for field in GLOBAL_DYNAMIC_DELETE_FIELDS})
+        config.update({field: getattr(self, f"_{field}", None) for field in RECENT_DATE_FALLBACK_FIELDS})
         config["shared"] = self._shared_config()
         return config
 
@@ -1619,6 +1643,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             "channel_dedup": self._channel_dedup_payload(include_records=False),
             **{field: getattr(self, f"_{field}", None) for field in GLOBAL_LIMIT_FIELDS},
             **{field: getattr(self, f"_{field}", None) for field in GLOBAL_DYNAMIC_DELETE_FIELDS},
+            **{field: getattr(self, f"_{field}", None) for field in RECENT_DATE_FALLBACK_FIELDS},
             "summary": aggregate,
             "tasks": task_rows,
             "options": {"sites": site_options, "downloaders": downloader_options},
@@ -3301,7 +3326,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         recent_selection = None
         if task.recent_episodes_only:
             recent_selection = self._recent_episode_file_selection(
-                torrent_content, torrent.title, task.recent_episodes_days, candidate_overrides
+                torrent_content,
+                torrent.title,
+                task.recent_episodes_days,
+                candidate_overrides,
+                task,
+                pending_source,
             )
             if recent_selection and prevalidated_recent_paths is not None:
                 recent_selection = {
@@ -4659,9 +4689,271 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         match = re.search(r"\b(\d{4})\b", str(year or ""))
         return int(match.group(1)) if match else None
 
+    @staticmethod
+    def _recent_date_blocked_title(title: str, path: str) -> bool:
+        """排除预告、抢鲜及花絮等不代表正片播出的文件。"""
+        text = normalize("NFKC", f"{title} {path}").lower()
+        return bool(re.search(
+            r"(?:预告|先行|抢鲜|花絮|特别篇|番外|彩蛋|preview|preair|advanced|bonus|"
+            r"teaser|trailer|special|clip)",
+            text,
+        ))
+
+    def _record_recent_episode_evidence(
+        self,
+        tmdb_id: int,
+        season: int,
+        episode: int,
+        air_date: str,
+        source: str,
+        confidence: str,
+    ) -> None:
+        """保存缺日期兜底证据，便于后续复核，不参与身份或共享审批裁决。"""
+        key = f"{int(tmdb_id)}:{int(season)}:{int(episode)}"
+        row = {
+            "tmdb_id": int(tmdb_id),
+            "season": int(season),
+            "episode": int(episode),
+            "air_date": air_date,
+            "source": str(source)[:300],
+            "confidence": str(confidence or "unknown")[:20],
+            "updated_at": time.time(),
+        }
+        evidence = getattr(self, "_recent_episode_evidence", {})
+        if not isinstance(evidence, dict):
+            evidence = {}
+        evidence[key] = row
+        cutoff = time.time() - 180 * 24 * 60 * 60
+        self._recent_episode_evidence = {
+            key: value for key, value in evidence.items()
+            if isinstance(value, dict) and float(value.get("updated_at") or 0) >= cutoff
+        }
+        self.save_data("recent_episode_evidence", self._recent_episode_evidence)
+
+    def _prune_recent_episode_evidence(self, save: bool = True) -> None:
+        """恢复并清理缺日期兜底证据，避免重启后只剩空内存缓存。"""
+        evidence = getattr(self, "_recent_episode_evidence", {})
+        if not isinstance(evidence, dict):
+            evidence = {}
+        cutoff = time.time() - 180 * 24 * 60 * 60
+        cleaned = {}
+        for key, value in evidence.items():
+            if not isinstance(value, dict):
+                continue
+            try:
+                updated_at = float(value.get("updated_at") or 0)
+                tmdb_id = int(value.get("tmdb_id"))
+                season = int(value.get("season"))
+                episode = int(value.get("episode"))
+            except (TypeError, ValueError):
+                continue
+            if updated_at < cutoff:
+                continue
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value.get("air_date") or "")):
+                continue
+            cleaned[str(key)] = {
+                **value,
+                "tmdb_id": tmdb_id,
+                "season": season,
+                "episode": episode,
+                "source": str(value.get("source") or "")[:300],
+                "confidence": str(value.get("confidence") or "unknown")[:20],
+                "updated_at": updated_at,
+            }
+        self._recent_episode_evidence = cleaned
+        if save:
+            self.save_data("recent_episode_evidence", cleaned)
+
+    @staticmethod
+    def _recent_episode_title_matches(item_title: str, prompt_title: str, media: Any) -> bool:
+        """允许 AI 使用 TMDB 官方中文名/别名返回，避免中英文标题差异误丢结果。"""
+        candidate = normalize_title(item_title)
+        if not candidate:
+            return True
+        aliases = {
+            str(prompt_title or ""),
+            str(getattr(media, "title", "") or ""),
+            str(getattr(media, "en_title", "") or ""),
+            str(getattr(media, "original_title", "") or ""),
+            str(getattr(media, "original_name", "") or ""),
+            str(getattr(media, "hk_title", "") or ""),
+            str(getattr(media, "tw_title", "") or ""),
+            str(getattr(media, "sg_title", "") or ""),
+        }
+        aliases.update(str(name) for name in (getattr(media, "names", None) or []))
+        normalized_aliases = {normalize_title(value) for value in aliases if normalize_title(value)}
+        if candidate in normalized_aliases:
+            return True
+        # A title may be returned with a season suffix; strip it only after
+        # the base title itself matches an official alias.
+        stripped = re.sub(
+            r"(?:[ ._-]*第\s*[0-9零〇一二两三四五六七八九十百]+\s*季|"
+            r"[ ._-]*season\s*[0-9]+)$",
+            "",
+            str(item_title or ""),
+            flags=re.I,
+        )
+        return normalize_title(stripped) in normalized_aliases
+
+    @staticmethod
+    def _parse_recent_ai_response(content: Any) -> list:
+        if isinstance(content, list):
+            content = "".join(
+                block.get("text", "") for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        if not isinstance(content, str):
+            raise ValueError("AI 未返回文本")
+        text = content.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I)
+        value = json.loads(text)
+        if isinstance(value, dict):
+            value = value.get("results", [])
+        if not isinstance(value, list):
+            raise ValueError("AI 未返回结果数组")
+        return value
+
+    def _recent_episode_ai_dates(
+        self,
+        title: str,
+        media: Any,
+        season: int,
+        episodes: list,
+    ) -> Dict[int, dict]:
+        """可选的联网 AI 逐集核验；只有高置信度且身份一致的结果可自动放行。"""
+        if not getattr(self, "_recent_missing_date_ai_enabled", False):
+            return {}
+        try:
+            from app.agent.llm.helper import LLMHelper
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            tmdb_id = getattr(media, "tmdb_id", None)
+            prompt = {
+                "title": str(getattr(media, "title", "") or title)[:160],
+                "tmdb_id": int(tmdb_id) if tmdb_id else None,
+                "season": int(season),
+                "episodes": [int(number) for number in episodes],
+                "today": datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat(),
+            }
+
+            async def request():
+                model = None
+                try:
+                    model = await asyncio.wait_for(
+                        LLMHelper.get_llm(
+                            streaming=False,
+                            thinking_level="off",
+                            web_search_mode="builtin",
+                        ),
+                        timeout=30,
+                    )
+                    response = await asyncio.wait_for(model.ainvoke([
+                        SystemMessage(content=(
+                            "你是影视播出日期核验助手。联网查找官方平台排播、剧方官微或官方追剧日历，"
+                            "核对剧名、TMDB ID、季号和集号。只返回 JSON 数组，格式为："
+                            '[{"title":"多喜一家人","tmdb_id":294498,"season":1,"episode":9,'
+                            '"date":"2026-11-19","confidence":"high","source":"官方来源名称或URL"}]。'
+                            "confidence 只能是 high、medium、low；没有可靠证据不要猜日期。"
+                        )),
+                        HumanMessage(content=json.dumps(prompt, ensure_ascii=False)),
+                    ]), timeout=90)
+                    return response.content
+                finally:
+                    if model is not None:
+                        await LLMHelper.close_llm(model)
+
+            results = self._parse_recent_ai_response(asyncio.run(request()))
+        except Exception as err:
+            logger.info(f"最近播出日期 AI 核验失败 {title}：{type(err).__name__}")
+            return {}
+        dates = {}
+        wanted = set(int(number) for number in episodes)
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("title") or "").strip() and not self._recent_episode_title_matches(
+                str(item.get("title") or ""), prompt["title"], media
+            ):
+                continue
+            if item.get("tmdb_id") not in (None, "", tmdb_id):
+                continue
+            if item.get("season") not in (None, "", int(season)):
+                continue
+            try:
+                number = int(item.get("episode"))
+            except (TypeError, ValueError):
+                continue
+            value = str(item.get("date") or "")
+            confidence = str(item.get("confidence") or "low").lower()
+            if number not in wanted or confidence not in {"high", "medium", "low"}:
+                continue
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                continue
+            source = str(item.get("source") or "AI 未提供来源")[:300]
+            dates[number] = {"date": value, "source": source, "confidence": confidence}
+            if getattr(media, "tmdb_id", None):
+                self._record_recent_episode_evidence(
+                    media.tmdb_id, season, number, value, source, confidence
+                )
+            logger.info(
+                f"最近播出日期 AI 核验 {title} S{season:02d}E{number:02d}："
+                f"{value}（{confidence}，{source}）"
+            )
+        return dates
+
+    def _infer_missing_episode_dates(
+        self,
+        title: str,
+        path: str,
+        media: Any,
+        season: int,
+        episodes: list,
+        dates: Dict[int, Optional[str]],
+        sources: Dict[int, str],
+        today: date,
+    ) -> Set[int]:
+        """仅在 TMDB/豆瓣逐集日期均缺失后，按最新连续已知集受限推断。"""
+        missing = [number for number in episodes if not dates.get(number)]
+        # 日期字典来自整季 API，已知锚点可能不在当前候选文件的集号内
+        # （例如 TMDB 有 E08，种子只有 E09-E10）。
+        known = [number for number, value in dates.items() if value]
+        if (
+            not missing
+            or not known
+            or self._recent_date_blocked_title(title, path)
+        ):
+            return set()
+        latest = max(known)
+        if any(number <= latest for number in missing):
+            return set()
+        if sorted(missing) != list(range(latest + 1, max(missing) + 1)):
+            return set()
+        latest_date = dates.get(latest)
+        if not latest_date or not self._air_date_is_recent(
+            latest_date, today, getattr(self, "_recent_missing_date_tolerance_days", 7)
+        ):
+            return set()
+        inferred = set(missing)
+        for number in inferred:
+            dates[number] = latest_date
+            sources[number] = f"日期推断（S{season:02d}E{latest:02d}={latest_date}，连续缺失）"
+            if getattr(media, "tmdb_id", None):
+                self._record_recent_episode_evidence(
+                    media.tmdb_id, season, number, latest_date, sources[number], "inferred"
+                )
+        logger.info(
+            f"最近播出日期推断 {title}：已知 S{season:02d}E{latest:02d}={latest_date}，"
+            f"连续缺失 {','.join(f'E{number:02d}' for number in sorted(inferred))}，"
+            f"容差 {getattr(self, '_recent_missing_date_tolerance_days', 7)} 天"
+        )
+        return inferred
+
     def _recent_episode_file_selection(
         self, torrent_content: Union[str, bytes], title: str, days: int = 3,
         candidate_overrides: Optional[dict] = None,
+        task: Optional[BrushTaskConfig] = None,
+        pending_source: Optional[dict] = None,
     ) -> Optional[dict]:
         """预检种子内视频，返回符合近期播出规则的文件路径及其名称。"""
         if not isinstance(torrent_content, bytes):
@@ -4764,6 +5056,61 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     for number in episodes:
                         if not dates.get(number) and douban_date_cache[douban_key].get(number):
                             dates[number], sources[number] = douban_date_cache[douban_key][number], "豆瓣"
+                # 只有 TMDB、TMDB 网页/单集接口与豆瓣都无法提供逐集日期时，
+                # 才进入受限日期推断，再按开关选择是否调用联网 AI。
+                if (
+                    not episode_group
+                    and any(not dates.get(number) for number in episodes)
+                    and not self._recent_date_blocked_title(title, path)
+                ):
+                    self._infer_missing_episode_dates(
+                        title, path, media, int(season), episodes, dates, sources, today
+                    )
+                    still_missing = [number for number in episodes if not dates.get(number)]
+                    if still_missing:
+                        ai_dates = self._recent_episode_ai_dates(
+                            title, media, int(season), still_missing
+                        )
+                        for number, result in ai_dates.items():
+                            if result["confidence"] == "high":
+                                dates[number] = result["date"]
+                                sources[number] = f"AI核验（{result['source']}）"
+                            elif result["confidence"] == "medium":
+                                logger.info(
+                                    f"最近播出日期待核验 {path}：S{season:02d}E{number:02d} "
+                                    f"仅有中置信度来源，暂不自动下载"
+                                )
+                                if task is not None and getattr(media, "tmdb_id", None):
+                                    candidate = parse_candidate_file(
+                                        path, None, title, "", allow_movie=True
+                                    ) or {}
+                                    candidate.update({
+                                        "path": path,
+                                        "media_type": "tv",
+                                        "tmdb_id": int(media.tmdb_id),
+                                        "title_key": normalize_title(
+                                            str(getattr(media, "title", "") or title)
+                                        ),
+                                        "title_keys": [normalize_title(
+                                            str(getattr(media, "title", "") or title)
+                                        )],
+                                        "season": int(season),
+                                        "episodes": [int(number)],
+                                        "specs": dict(candidate.get("specs") or parse_specs(path, None)),
+                                    })
+                                    self._pending_identity(
+                                        candidate,
+                                        title,
+                                        task,
+                                        f"近期播出日期待核验：S{season:02d}E{number:02d} "
+                                        f"AI 仅返回中置信度来源",
+                                        pending_source,
+                                    )
+                            else:
+                                logger.info(
+                                    f"最近播出日期排除 {path}：S{season:02d}E{number:02d} "
+                                    f"AI 来源置信度低，暂不自动下载"
+                                )
                 air_dates = [dates.get(number) for number in episodes]
                 if not episodes or any(not value for value in air_dates):
                     raise ValueError("季集号或 TMDB/豆瓣逐集播出日期缺失")

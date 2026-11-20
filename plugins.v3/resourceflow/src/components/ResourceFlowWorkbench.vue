@@ -102,6 +102,8 @@ const settingsDraft = ref({
   global_maxdlspeed: null,
   global_proxy_delete: false,
   global_delete_size_range: null,
+  recent_missing_date_tolerance_days: 7,
+  recent_missing_date_ai_enabled: false,
 })
 const hostToast = inject('moviepilot:toast', null)
 let refreshTimer
@@ -177,6 +179,8 @@ async function loadStatus({ preserveSelection = true, loadDetail = true, resetDr
       global_maxdlspeed: status.value.global_maxdlspeed ?? null,
       global_proxy_delete: Boolean(status.value.global_proxy_delete),
       global_delete_size_range: status.value.global_delete_size_range ?? null,
+      recent_missing_date_tolerance_days: Number(status.value.recent_missing_date_tolerance_days || 7),
+      recent_missing_date_ai_enabled: Boolean(status.value.recent_missing_date_ai_enabled),
     }
     const selectedStillExists = tasks.value.some(item => item.id === selectedTaskId.value)
     if (!preserveSelection || !selectedStillExists) selectedTaskId.value = tasks.value[0]?.id || ''
@@ -1098,6 +1102,16 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 label="全局总上传带宽（KB/s）" density="comfortable" clearable hide-details />
               <VTextField v-model.number="settingsDraft.global_maxdlspeed" type="number" min="0"
                 label="全局总下载带宽（KB/s）" density="comfortable" clearable hide-details />
+            </div>
+            <VDivider />
+            <div class="text-subtitle-2">缺失播出日期兜底</div>
+            <div class="global-settings__grid global-settings__recent-date">
+              <VTextField v-model.number="settingsDraft.recent_missing_date_tolerance_days"
+                type="number" min="1" max="30" step="1"
+                label="缺失日期容差天数" hint="仅在 TMDB、豆瓣都没有逐集日期时使用"
+                persistent-hint density="comfortable" hide-details="auto" />
+              <VSwitch v-model="settingsDraft.recent_missing_date_ai_enabled"
+                label="启用 AI 官方排播核验" color="primary" density="compact" hide-details inset />
             </div>
           </div>
           <VDivider />

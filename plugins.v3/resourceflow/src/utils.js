@@ -141,6 +141,10 @@ export function normalizeSettings(settings = {}) {
   result.global_delete_size_range = result.global_proxy_delete
     ? String(result.global_delete_size_range || '').trim() || null
     : null
+  result.recent_missing_date_tolerance_days = Math.min(
+    Math.max(Number(result.recent_missing_date_tolerance_days || 7), 1), 30,
+  )
+  result.recent_missing_date_ai_enabled = Boolean(result.recent_missing_date_ai_enabled)
   return result
 }
 
