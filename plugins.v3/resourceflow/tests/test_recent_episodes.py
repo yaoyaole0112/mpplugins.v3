@@ -1,7 +1,8 @@
+import json
 import unittest
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from app.sdk.media import MetaInfo
 from resourceflow import ResourceFlow, RequestUtils
@@ -14,13 +15,15 @@ class RecentEpisodeRuleTest(unittest.TestCase):
                      "_recent_episode_douban_id", "_douban_episode_air_dates"):
             getattr(ResourceFlow, name).cache_clear()
 
-    def select_files(self, paths, media, season_dates=(), days=3):
-        plugin = ResourceFlow.__new__(ResourceFlow)
+    def select_files(self, paths, media, season_dates=(), days=3, plugin=None):
+        plugin = plugin or ResourceFlow.__new__(ResourceFlow)
         plugin.chain = SimpleNamespace(recognize_media=Mock(return_value=media))
+        plugin.save_data = Mock()
         with patch("resourceflow.TorrentHelper") as torrent_helper, patch("resourceflow.TmdbChain") as tmdb:
             torrent_helper.return_value.get_fileinfo_from_torrent_content.return_value = (None, paths)
-            tmdb.return_value.tmdb_episodes.return_value = [
-                SimpleNamespace(episode_number=number, air_date=value) for number, value in season_dates
+            tmdb.return_value.tmdb_episodes.side_effect = lambda *, season, **_: [
+                SimpleNamespace(episode_number=number, air_date=value)
+                for number, value in (season_dates.get(season, ()) if isinstance(season_dates, dict) else season_dates)
             ]
             return plugin._recent_episode_file_selection(b"torrent", "test", days)
 
@@ -82,7 +85,7 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         self.assertEqual((multiple.begin_season, multiple.episode_list), (2, [3, 4]))
         self.assertEqual(unknown.episode_list, [])
 
-    def test_missing_episode_fallback_uses_latest_known_consecutive_anchor_without_cap(self):
+    def test_missing_episode_fallback_only_uses_numbers_above_latest_without_requiring_continuity(self):
         plugin = ResourceFlow.__new__(ResourceFlow)
         plugin._recent_missing_date_tolerance_days = 7
         plugin._recent_episode_evidence = {}
@@ -91,18 +94,19 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         sources = {8: "TMDB整季API"}
         inferred = plugin._infer_missing_episode_dates(
             "多喜一家人",
-            "多喜一家人.Still.A.Family.S01E09-E10.mkv",
+            "多喜一家人.Still.A.Family.S01.mkv",
             SimpleNamespace(tmdb_id=294498),
             1,
-            [9, 10],
+            [7, 11, 25],
             dates,
             sources,
             date(2026, 11, 20),
         )
-        self.assertEqual(inferred, {9, 10})
-        self.assertEqual(dates[9], "2026-11-18")
-        self.assertEqual(dates[10], "2026-11-18")
-        self.assertTrue(sources[9].startswith("日期推断"))
+        self.assertEqual(inferred, {11, 25})
+        self.assertNotIn(7, dates)
+        self.assertEqual(dates[11], "2026-11-18")
+        self.assertEqual(dates[25], "2026-11-18")
+        self.assertTrue(sources[11].startswith("日期推断"))
         self.assertTrue(plugin.save_data.called)
 
     def test_missing_episode_fallback_does_not_use_special_or_old_anchor(self):
@@ -183,6 +187,116 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         self.assertFalse(ResourceFlow._recent_episode_title_matches(
             "完全不同的剧", "Still a Family", media
         ))
+
+    def test_ai_calls_mp_local_search_when_builtin_is_unavailable_and_requires_real_evidence(self):
+        from app.agent.llm.helper import LLMHelper
+        from app.agent.llm.tools import ServerToolUnavailableError
+        from app.agent.tools.impl.search_web import SearchWebTool
+
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_ai_enabled = True
+        plugin.save_data = Mock()
+        media = SimpleNamespace(tmdb_id=294498, title="多喜一家人")
+        url = "https://v.qq.com/example/official-schedule.html"
+        quote = "2026年11月20日播出第11集"
+        row = {"url": url, "title": "多喜一家人 官方排播", "snippet": quote}
+        answer = {"title": media.title, "tmdb_id": 294498, "season": 1, "episode": 11,
+                  "date": "2026-11-20", "confidence": "high", "source": url, "quote": quote}
+        response = SimpleNamespace(content=json.dumps([
+            answer,
+            {**answer, "episode": 12, "source": "https://v.qq.com/guessed.html"},
+            {**answer, "episode": 13, "quote": "2026年11月20日播出第13集"},
+            {**answer, "episode": 14, "season": 2},
+            {**answer, "episode": 15, "tmdb_id": None},
+        ]))
+        model = SimpleNamespace(ainvoke=AsyncMock(return_value=response))
+        unavailable = ServerToolUnavailableError(provider="custom", model="test", tool_id="web_search")
+        with (
+            patch.object(LLMHelper, "get_llm", new=AsyncMock(side_effect=[unavailable, model])) as make,
+            patch.object(LLMHelper, "close_llm", new_callable=AsyncMock),
+            patch.object(SearchWebTool, "run", new=AsyncMock(return_value=json.dumps([row]))) as search,
+        ):
+            results = plugin._recent_episode_ai_dates(media.title, media, 1, [11, 12, 13, 14, 15])
+        self.assertNotIn("web_search_mode", make.await_args_list[0].kwargs)
+        self.assertEqual(make.await_args_list[1].kwargs["web_search_mode"], "local")
+        search.assert_awaited_once()
+        self.assertIn("search_results", model.ainvoke.await_args.args[0][-1].content)
+        self.assertEqual(set(results), {11, 13})
+        self.assertEqual(results[11]["confidence"], "high")
+        self.assertEqual(results[13]["confidence"], "medium")
+
+    def test_ai_respects_disabled_search_without_prompting_model(self):
+        from app.agent.llm.helper import LLMHelper
+
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_ai_enabled = True
+        model = SimpleNamespace(ainvoke=AsyncMock(), _moviepilot_server_tool_metadata={
+            "mode": "disabled", "use_local_web_search": False,
+        })
+        with (
+            patch.object(LLMHelper, "get_llm", new=AsyncMock(return_value=model)),
+            patch.object(LLMHelper, "close_llm", new_callable=AsyncMock),
+            patch("resourceflow.search_episode_evidence", new_callable=AsyncMock) as search,
+        ):
+            self.assertEqual(plugin._recent_episode_ai_dates("Show", SimpleNamespace(), 1, [11]), {})
+        model.ainvoke.assert_not_awaited()
+        search.assert_not_awaited()
+
+    def test_native_response_with_citation_but_no_matching_excerpt_cannot_pass(self):
+        from app.agent.llm.helper import LLMHelper
+
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_ai_enabled = True
+        plugin.save_data = Mock()
+        url = "https://v.qq.com/example/official-schedule.html"
+        response = SimpleNamespace(content=[{
+            "type": "text",
+            "text": json.dumps([{
+                "title": "Show", "tmdb_id": 123, "season": 1, "episode": 11, "date": "2026-11-20",
+                "source": url, "confidence": "high", "quote": "Episode 11: 2026-11-20",
+            }]),
+            "annotations": [{"type": "url_citation", "url": url}],
+        }])
+        bound = SimpleNamespace(ainvoke=AsyncMock(return_value=response))
+        tools = [{"type": "web_search"}]
+        model = SimpleNamespace(bind_tools=Mock(return_value=bound), _moviepilot_server_tool_metadata={
+            "server_tools": tools, "use_local_web_search": False,
+        })
+        with (
+            patch.object(LLMHelper, "get_llm", new=AsyncMock(return_value=model)),
+            patch.object(LLMHelper, "close_llm", new_callable=AsyncMock),
+            patch("resourceflow.search_episode_evidence", new=AsyncMock(return_value=[])) as search,
+        ):
+            result = plugin._recent_episode_ai_dates("Show", SimpleNamespace(tmdb_id=123), 1, [11])
+        model.bind_tools.assert_called_once_with(tools)
+        search.assert_awaited_once()
+        self.assertEqual(result[11]["confidence"], "medium")
+
+    @patch.object(ResourceFlow, "_recent_episode_douban_id", return_value="")
+    @patch.object(ResourceFlow, "_tmdb_web_episode_air_dates", return_value={})
+    @patch.object(ResourceFlow, "_tmdb_episode_air_date", return_value=None)
+    def test_pack_groups_season_before_inference_and_only_selects_matching_files(self, single, web, douban):
+        paths = [
+            "Still.A.Family.S01E12.mkv",
+            "Still.A.Family.S01E08.mkv",
+            "Still.A.Family.S01E11.mkv",
+            "Still.A.Family.S01E11.预告.mkv",
+            "Still.A.Family.S01E07.mkv",
+            "Still.A.Family.S02E11.mkv",
+        ]
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_episode_ai_dates = Mock(return_value={})
+        with patch("resourceflow.datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 11, 20)
+            result = self.select_files(paths, SimpleNamespace(tmdb_id=294498, title="多喜一家人"),
+                                       {1: [(8, "2026-11-18")]}, days=1, plugin=plugin)
+        # E08 has an explicit date outside the task cutoff. E07 is before the
+        # anchor, and a preview cannot borrow E11's inference from a real file.
+        self.assertEqual(result["accepted"], {paths[0], paths[2]})
+        self.assertEqual([item.args[2:] for item in plugin._recent_episode_ai_dates.call_args_list],
+                         [(1, [7]), (2, [11])])
+        self.assertEqual(web.call_count, 2)
+        self.assertEqual(douban.call_count, 2)
 
     @patch.object(RequestUtils, "get_res")
     def test_douban_fallback_requires_explicit_episode_air_dates(self, get_res):

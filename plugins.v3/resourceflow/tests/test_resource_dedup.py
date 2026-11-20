@@ -837,7 +837,9 @@ class ResourceMigrationTests(unittest.TestCase):
         plugin.init_plugin(config)
         saved = plugin.update_config.call_args.args[0]
         self.assertEqual(config, original)
-        self.assertEqual(saved['schema_version'], 6)
+        self.assertEqual(saved['schema_version'], ResourceFlow.CONFIG_SCHEMA_VERSION)
+        self.assertEqual(saved['recent_missing_date_tolerance_days'], 7)
+        self.assertFalse(saved['recent_missing_date_ai_enabled'])
         tasks = {row['id']: row for row in saved['tasks']}
         self.assertTrue(tasks['share']['spec_dedup_enabled'])
         self.assertEqual(saved['channel_dedup_identity_policy'], 'defer')
