@@ -1183,6 +1183,30 @@ class PluginSetupTests(unittest.TestCase):
         self.assertEqual(files[0]["tmdb_id"], 1633056)
         self.assertEqual(files[0]["specs"]["effects"], "SDR")
 
+    def test_year_season_is_resolved_to_standard_tv_season_for_shared_approval(self):
+        p = self.plugin
+        p._channel_dedup_attributes = ["resolution"]
+        p.chain.recognize_media.return_value = SimpleNamespace(
+            type="电视剧", tmdb_id=154770, title="你好，星期六", year="2022", names=["H!6"],
+        )
+        path = "你好，星期六.H!6.S2026E45.2026.1080p.WEB-DL.H265.AAC-ADWeb.mkv"
+        task = SimpleNamespace(id="task", spec_dedup_enabled=True, name="test")
+        with patch.object(p, "_tmdb_year_season", return_value=5) as season:
+            files, rejected = p._shared_candidates(
+                make_torrent([(path, 123456)]), "H!6 S2026E45", task, None,
+            )
+        self.assertFalse(rejected)
+        season.assert_called_once_with(154770, 2026)
+        self.assertEqual((files[0]["media_type"], files[0]["tmdb_id"], files[0]["season"],
+                          files[0]["episodes"]), ("tv", 154770, 5, [45]))
+        with patch.object(p, "_tmdb_year_season", return_value=None), patch.object(p, "_pending_identity") as pending:
+            files, rejected = p._shared_candidates(
+                make_torrent([(path, 123456)]), "H!6 S2026E45", task, None,
+            )
+        self.assertFalse(files)
+        self.assertEqual(rejected, [path])
+        self.assertEqual(pending.call_args.args[3], "年份季未匹配 TMDB 标准季号")
+
     def test_movie_candidate_reports_the_exact_missing_selected_spec(self):
         p = self.plugin
         p._channel_dedup_attributes = ["resolution", "fps"]

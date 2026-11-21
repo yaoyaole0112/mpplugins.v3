@@ -19,7 +19,7 @@ TEXT_FIELDS = (
 )
 SPEC_FIELDS = ("resolution", "effects", "codec", "source", "fps", "size")
 CHINESE_TITLE = re.compile(r"[\u3400-\u9fff]")
-CHINESE_TITLE_PREFIX = re.compile(r"^[\u3400-\u9fff][\u3400-\u9fff0-9 、，！：·？！《》「」“”'—-]*")
+CHINESE_TITLE_PREFIX = re.compile(r"^[\u3400-\u9fff][\u3400-\u9fff0-9 、，！：·？！《》「」“”',:!?—-]*")
 
 
 def record_title_key(row):

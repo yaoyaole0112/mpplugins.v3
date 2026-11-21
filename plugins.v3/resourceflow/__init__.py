@@ -65,8 +65,8 @@ from .recent_air_search import (
 )
 from .active_dedup import download_complete, download_files, download_state, paths_agree
 from .channel_dedup import (
-    filename_title_aliases, long_title_prefix_matches, normalize_title,
-    normalize_specs, parse_candidate_file, parse_channel_messages, parse_specs, parse_torrent_files,
+    filename_title_aliases, is_year_season, long_title_prefix_matches, normalize_title,
+    normalize_specs, parse_candidate_file, parse_channel_messages, parse_episode, parse_specs, parse_torrent_files,
     repair_record_frame_rates, same_release, specs_match,
 )
 
@@ -283,7 +283,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，支持 Telegram 和 Tailscale HTTPS 共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.47"
+    plugin_version = "1.0.48"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -3546,8 +3546,18 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             self._prune_pending_sources()
         with self._inflight_lock:
             rows = getattr(self, "_identity_pending" if state == "pending" else "_resource_ledger", {})
-            items = [{"key": key, **value} for key, value in rows.items()
-                     if not media_type or value.get("media_type") == media_type]
+            items = [{"key": key, **value} for key, value in rows.items()]
+        if state == "pending":
+            for row in items:
+                if row.get("media_type") == "movie" and row.get("tmdb_id"):
+                    continue
+                season, episodes = parse_episode(str(row.get("path") or "").replace("\\", "/").rsplit("/", 1)[-1])
+                if is_year_season(season) and episodes:
+                    row["source_season"] = season
+                    if row.get("media_type") != "tv" or row.get("season") is None:
+                        row.update(media_type="tv", season=season, episodes=episodes)
+        if media_type:
+            items = [row for row in items if row.get("media_type") == media_type]
         if state == "pending":
             sources = getattr(self, "_identity_pending_sources", {}) or {}
             items = [{
@@ -5038,6 +5048,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 season = meta.begin_season if meta.begin_season is not None else 1
                 if not episodes and meta.begin_episode:
                     episodes = list(range(meta.begin_episode, (meta.end_episode or meta.begin_episode) + 1))
+                source_season, source_episodes = parse_episode(path.rsplit("/", 1)[-1])
+                year_season = is_year_season(source_season) and bool(source_episodes)
                 override = (candidate_overrides or {}).get(str(path).replace("\\", "/")) or {}
                 if override.get("media_type") == "tv" and override.get("tmdb_id"):
                     episodes = list(override.get("episodes") or episodes)
@@ -5048,8 +5060,24 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     )
                     episode_group = None
                 else:
+                    if year_season:
+                        meta.begin_season = None
+                        meta.year = None
                     media = self.chain.recognize_media(meta=meta)
                     episode_group = meta.episode_group
+                    if year_season and not episode_group:
+                        tmdb_id = int(getattr(media, "tmdb_id", 0) or 0) if not self._is_movie(media) else 0
+                        season = self._tmdb_year_season(tmdb_id, source_season) if tmdb_id else None
+                        if season is None:
+                            if task:
+                                candidate = parse_candidate_file(path, None, title)
+                                if candidate:
+                                    self._pending_identity(candidate, title, task,
+                                                           "年份季未匹配 TMDB 标准季号", pending_source)
+                            raise ValueError(f"年份季 S{source_season} 未匹配 TMDB 标准季号")
+                        episodes = source_episodes
+                    elif year_season:
+                        raise ValueError("剧集组需人工核验标准季集号")
                 if self._is_movie(media):
                     movie_year = self._movie_year(media, meta.year)
                     if movie_year == today.year:
@@ -5479,9 +5507,11 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         names = {normalize_title(name) for name in raw_names} - {""}
         if not names:
             return None
+        source_season, _ = parse_episode(path.rsplit("/", 1)[-1])
+        year_season = is_year_season(source_season)
         key = (
             tuple(sorted(names)), str(getattr(meta, "year", "") or ""),
-            getattr(meta, "begin_season", None) or 1,
+            source_season if year_season else getattr(meta, "begin_season", None) or 1,
         )
         with self._channel_state_lock:
             bound_ids = {
@@ -5500,6 +5530,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             return None
         identity = None
         try:
+            if year_season:
+                # The release year labels the season, not the series premiere.
+                meta.begin_season = None
+                meta.year = None
             media = self.chain.recognize_media(meta=meta)
             evidence_names = set(raw_names)
             # A bracketed season label is not part of the series title, but its season must agree.
@@ -5523,7 +5557,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             chinese_aliases = {normalize_title(name) for name in raw_aliases if re.search(r"[\u3400-\u9fff]", name)}
             chinese_alias_match = chinese_names.intersection(chinese_aliases)
             year, media_year = str(meta.year or ""), str(getattr(media, "year", "") or "")
-            first_season = getattr(meta, "begin_season", None) in (None, 1)
+            first_season = not year_season and getattr(meta, "begin_season", None) in (None, 1)
             year_conflict = first_season and year and media_year and year != media_year
             chinese_conflict = bool(
                 chinese_names and (
@@ -5557,6 +5591,24 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 self._channel_identity_cache.clear()
             self._channel_identity_cache[key] = (time.monotonic() + (600 if identity else 60), identity)
         return identity
+
+    @staticmethod
+    @cached(maxsize=256, ttl=600, empty_ttl=60, skip_none=False, local_only=True)
+    def _tmdb_year_season(tmdb_id: int, year: int) -> Optional[int]:
+        """Map an explicit year-labelled season only when TMDB names exactly one match."""
+        try:
+            detail = TmdbApi(language="zh-CN").get_info(mtype=schemas.MediaType.TV, tmdbid=tmdb_id)
+            seasons = detail.get("seasons") or [] if isinstance(detail, dict) else []
+            matches = {
+                row["season_number"] for row in seasons
+                if isinstance(row, dict) and type(row.get("season_number")) is int
+                and 0 < row["season_number"] <= 999
+                and str(row.get("name") or "").strip() in {str(year), f"{year}年"}
+            }
+            return next(iter(matches)) if len(matches) == 1 else None
+        except Exception as err:
+            logger.info(f"TMDB 年份季映射失败 {tmdb_id} S{year}：{type(err).__name__}")
+            return None
 
     @staticmethod
     @cached(maxsize=512, ttl=300, skip_none=False, empty_ttl=60, local_only=True)

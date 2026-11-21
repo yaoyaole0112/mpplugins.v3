@@ -226,6 +226,18 @@ class ApprovalSearchTests(unittest.TestCase):
         self.plugin.chain.recognize_media.assert_not_called()
         self.plugin.save_data.assert_not_called()
 
+    def test_pending_year_season_repairs_legacy_movie_label_without_changing_identity(self):
+        stored = {"path": "你好，星期六.H!6.S2026E45.2026.1080p.mkv", "media_type": "movie",
+                  "tmdb_id": None, "season": None, "episodes": []}
+        self.plugin._identity_pending = {"legacy": stored}
+        result = self.plugin.get_resource_ledger(state="pending", media_type="tv", query="S2026E45").data
+        row, = result["items"]
+        self.assertEqual((row["media_type"], row["source_season"], row["season"], row["episodes"]),
+                         ("tv", 2026, 2026, [45]))
+        self.assertIsNone(row["tmdb_id"])
+        self.assertEqual(stored["media_type"], "movie")
+        self.plugin.save_data.assert_not_called()
+
     def test_localized_store_titles_and_existing_title_priority(self):
         self.plugin._shared_claims = {}
         self.plugin._shared_store = SimpleNamespace(media_titles=lambda: {("tv", 123): "共享中文剧名"})

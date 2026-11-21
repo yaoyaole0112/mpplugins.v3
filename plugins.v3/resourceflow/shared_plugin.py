@@ -17,7 +17,7 @@ from app.sdk.services import DownloaderHelper
 from app.modules.themoviedb.tmdbapi import TmdbApi
 
 from .active_dedup import download_files, paths_agree
-from .channel_dedup import normalize_specs, parse_candidate_file, parse_torrent_files
+from .channel_dedup import is_year_season, normalize_specs, parse_candidate_file, parse_torrent_files
 from .models import ChannelDedupSettingsPayload
 from .record_search import (
     filename_display_title, matches_media_type, matches_owner, matches_record, record_display_title,
@@ -962,10 +962,17 @@ class SharedResourceMixin:
             elif not self._verify_resource_identity(candidate, title, task):
                 reason = "媒体身份未确认（TMDB ID 或名称别名未匹配）"
             else:
+                source_season = candidate.get("season")
+                if candidate.get("media_type") == "tv" and is_year_season(source_season):
+                    season = self._tmdb_year_season(candidate["tmdb_id"], source_season)
+                    if season is None:
+                        reason = "年份季未匹配 TMDB 标准季号"
+                    else:
+                        candidate.update(source_season=source_season, season=season)
                 missing_specs = [
                     field for field in self._channel_dedup_attributes if not candidate["specs"].get(field)
                 ]
-                if missing_specs:
+                if missing_specs and not reason:
                     reason = f"缺少勾选规格：{', '.join(missing_specs)}"
             if reason:
                 rejected.append(item["path"])

@@ -3,6 +3,7 @@ import unittest
 from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from zoneinfo import ZoneInfo
 
 from app.sdk.media import MetaInfo
 from resourceflow import ResourceFlow, RequestUtils
@@ -11,7 +12,7 @@ from resourceflow.models import BrushTaskPayload
 
 class RecentEpisodeRuleTest(unittest.TestCase):
     def setUp(self):
-        for name in ("_tmdb_episode_air_date", "_tmdb_web_episode_air_dates",
+        for name in ("_tmdb_year_season", "_tmdb_episode_air_date", "_tmdb_web_episode_air_dates",
                      "_recent_episode_douban_id", "_douban_episode_air_dates"):
             getattr(ResourceFlow, name).cache_clear()
 
@@ -84,6 +85,25 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         self.assertEqual((single.begin_season, single.episode_list), (2, [3]))
         self.assertEqual((multiple.begin_season, multiple.episode_list), (2, [3, 4]))
         self.assertEqual(unknown.episode_list, [])
+
+    def test_recent_rule_looks_up_canonical_season_for_year_season(self):
+        path = "你好，星期六.H!6.S2026E45.2026.1080p.WEB-DL.H265.AAC-ADWeb.mkv"
+        media = SimpleNamespace(type="电视剧", tmdb_id=154770, title="你好，星期六", year="2022")
+        aired = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        with patch("resourceflow.TmdbApi") as tmdb:
+            tmdb.return_value.get_info.return_value = {"seasons": [
+                {"season_number": 4, "name": "2025"},
+                {"season_number": 5, "name": "2026"},
+            ]}
+            result = self.select_files([path], media, {5: [(45, aired)]}, days=3)
+            self.assertEqual(result["accepted"], {path})
+            tmdb.return_value.get_info.assert_called_once()
+        ResourceFlow._tmdb_year_season.cache_clear()
+        with patch("resourceflow.TmdbApi") as tmdb:
+            tmdb.return_value.get_info.return_value = {"seasons": [
+                {"season_number": 5, "name": "2026"}, {"season_number": 6, "name": "2026年"},
+            ]}
+            self.assertIsNone(self.select_files([path], media, {5: [(45, aired)]}, days=3))
 
     def test_missing_episode_fallback_only_uses_numbers_above_latest_without_requiring_continuity(self):
         plugin = ResourceFlow.__new__(ResourceFlow)

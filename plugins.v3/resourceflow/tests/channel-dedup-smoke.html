@@ -45,6 +45,7 @@
     })),
   }
   const authoritative = new URLSearchParams(location.search).get('authority') === '1'
+  const yearSeason = new URLSearchParams(location.search).get('yearSeason') === '1'
   settings.shared_authority = authoritative
   window.resourceflowRequests = []
   window.resourceflowFailSave = false
@@ -162,6 +163,12 @@
           state: 'idle', next_run_at: null }] : [],
       } }
       if (path.includes('/resource-ledger?')) {
+        if (yearSeason && path.includes('state=pending')) return { success: true, data: recordPage([{
+          key: 'year-season', title: 'H!6 S2026E45 1080p', media_title: '你好，星期六',
+          path: '你好，星期六.H!6.S2026E45.2026.1080p.mkv',
+          media_type: 'tv', season: 2026, source_season: 2026, episodes: [45],
+          actionable: true, specs: { resolution: '1080p', effects: 'SDR', codec: 'H.265', source: 'WEB-DL' },
+        }], path) }
         if (authoritative && !path.includes('state=pending')) {
           const items = shared.records.filter(row => row.state === 'completed').map(row => ({
             ...row, key: row.id, evidence_source: 'shared',
@@ -186,6 +193,13 @@
         }
         return { success: true, data }
       }
+      if (yearSeason && path.startsWith('media/search?')) return [
+        { tmdb_id: 154770, title: '你好，星期六', type: '电视剧', year: '2022' },
+        { tmdb_id: 123, title: '同名电影', type: '电影', year: '2026' },
+      ]
+      if (yearSeason && path.startsWith('media/seasons?')) return [
+        { name: '2025', season_number: 4 }, { name: '2026', season_number: 5 },
+      ]
       return { success: true, data: structuredClone(path.endsWith('/status') ? status : settings) }
     },
     post: async (path, body) => {

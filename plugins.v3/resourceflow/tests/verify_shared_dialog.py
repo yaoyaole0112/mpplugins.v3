@@ -122,10 +122,12 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
     await page.wait_for_function("""selector =>
         [...document.querySelectorAll(selector)].filter(item => item.getBoundingClientRect().width > 0).length === 20
     """, arg=selector)
-    if not ledger:
-        expected_total = {'本机下载申请': 130, '共享下载记录': 129}[tab]
-        assert await dialog.locator('.shared-settings__pagination .shared-settings__total').inner_text() == f'共 {expected_total} 条'
+    expected_total = {'本机下载申请': 130, '共享下载记录': 129, '下载待核验': 126}[tab]
+    total = dialog.locator('.shared-settings__pagination .shared-settings__total')
+    assert await total.inner_text() == f'共 {expected_total} 条'
     if ledger:
+        assert await dialog.locator('.channel-dedup__records + .shared-settings__pagination .shared-settings__total').count() == 1
+        assert await dialog.get_by_text(f'共 {expected_total} 条', exact=True).count() == 1
         layout = await dialog.locator('.channel-dedup__records').evaluate('''element => {
             const body = element.closest('.v-card-text')
             const style = getComputedStyle(element)
@@ -180,6 +182,7 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
     await dialog.get_by_text(f'{prefix}124', exact=True).wait_for()
     assert await dialog.locator(f'{selector}:visible').count() == 1
     assert await dialog.locator('.v-pagination:visible').count() == 0
+    assert await total.inner_text() == '共 1 条'
     if not ledger:
         toolbar = dialog.locator('.shared-settings__search:visible')
         owner_select, type_select = toolbar.locator('.v-select').nth(0), toolbar.locator('.v-select').nth(1)
@@ -704,6 +707,28 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert '2' * 32 not in await completed.inner_text()
             await verify_record_layout(dialog)
             await page.screenshot(path=str(output / f'pack-summary-{width}.png'), full_page=True)
+            await page.close()
+        for width in (1440, 390):
+            page = await browser.new_page(viewport={"width": width, "height": 900}, locale="zh-CN")
+            await page.goto(f"{base_url}/tests/channel-dedup-smoke.html?yearSeason=1")
+            await page.wait_for_function("window.resourceflowReady === true")
+            await page.evaluate("document.fonts.ready")
+            await page.get_by_role("button", name="共享下载审批", exact=True).click()
+            await page.get_by_role("tab", name="下载待核验", exact=True).click()
+            await page.get_by_role("button", name="核验并继续下载", exact=True).click()
+            manual = page.get_by_role("dialog").filter(has=page.get_by_text("人工核验并继续下载", exact=True))
+            assert await manual.get_by_label("季号", exact=True).input_value() == ""
+            assert await manual.get_by_label("集号", exact=True).input_value() == "45"
+            await manual.get_by_role("button", name="按名称查询媒体编号", exact=True).click()
+            await manual.get_by_text("剧集 · 2022 · TMDB 154770", exact=True).click()
+            await page.wait_for_function('document.querySelector("input[max=\\"999\\"]")?.value === "5"')
+            assert await manual.get_by_label("TMDB ID").input_value() == "154770"
+            await manual.get_by_label("我已核对以上媒体身份、季集号及规格").check()
+            await manual.get_by_role("button", name="重新核验并提交", exact=True).click()
+            await page.wait_for_function("""() => window.resourceflowRequests.some(item =>
+                item.method === 'POST' && item.path.endsWith('/resource-ledger/pending/approve')
+                && item.body.tmdb_id === 154770 && item.body.media_type === 'tv' && item.body.season === 5
+                && item.body.episodes.length === 1 && item.body.episodes[0] === 45)""")
             await page.close()
         await browser.close()
     print("Verified 1440, 768, 390 and 320: three record tabs keep dialog height; completed filter replaces separate ledger tab; pending search, filters, pagination and stale-response guards; global settings and task editor regressions")

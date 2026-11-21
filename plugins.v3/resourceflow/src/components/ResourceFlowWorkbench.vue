@@ -1,6 +1,7 @@
 <script setup>
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import TaskEditorDialog from './TaskEditorDialog.vue'
+import SharedRecordPagination from './SharedRecordPagination.vue'
 import SharedSettingsPanel from './SharedSettingsPanel.vue'
 import {
   cloneTask,
@@ -63,6 +64,12 @@ const pendingApprovalDialog = ref(false)
 const pendingApprovalSaving = ref(false)
 const pendingApprovalRow = ref(null)
 const pendingApprovalError = ref('')
+const pendingSearchOpen = ref(false)
+const pendingSearchQuery = ref('')
+const pendingSearchResults = ref([])
+const pendingSearchLoading = ref(false)
+const pendingSearchMessage = ref('')
+let pendingSearchVersion = 0
 const pendingApprovalForm = ref({
   tmdb_id: '', media_title: '', media_type: 'tv', season: 1, episodes: '', specs: {}, confirmed: false,
 })
@@ -427,12 +434,92 @@ function openPendingApproval(row) {
     tmdb_id: row.tmdb_id || '',
     media_title: row.media_title || '',
     media_type: row.media_type === 'movie' ? 'movie' : 'tv',
-    season: row.season ?? 1,
+    season: row.source_season && row.source_season === row.season ? '' : (row.season ?? 1),
     episodes: (row.episodes || []).join(','),
     specs: Object.fromEntries(channelDedup.value.attributes.map(key => [key, row.specs?.[key] ?? ''])),
     confirmed: false,
   }
   pendingApprovalDialog.value = true
+}
+
+watch(pendingApprovalDialog, (open) => {
+  if (!open) {
+    pendingSearchVersion += 1
+    pendingSearchOpen.value = false
+    pendingSearchLoading.value = false
+    pendingSearchResults.value = []
+    pendingSearchMessage.value = ''
+  }
+})
+
+function togglePendingSearch() {
+  pendingSearchOpen.value = !pendingSearchOpen.value
+  if (!pendingSearchOpen.value) {
+    pendingSearchVersion += 1
+    pendingSearchLoading.value = false
+    return
+  }
+  pendingSearchQuery.value = pendingApprovalForm.value.media_title
+  searchPendingMedia()
+}
+
+async function searchPendingMedia() {
+  const version = ++pendingSearchVersion
+  const title = (pendingSearchQuery.value || '').trim()
+  pendingSearchResults.value = []
+  pendingSearchMessage.value = ''
+  pendingSearchLoading.value = Boolean(title)
+  if (!title) return
+  try {
+    const params = new URLSearchParams({ title, type: 'media', media_source: 'themoviedb', count: '20' })
+    const rows = unwrapResponse(await props.api.get(`media/search?${params}`))
+    if (version !== pendingSearchVersion) return
+    const unique = new Map()
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const type = { 电视剧: 'tv', 剧集: 'tv', tv: 'tv', 电影: 'movie', movie: 'movie' }[row?.type]
+      const id = Number(row?.tmdb_id)
+      if (!type || !Number.isSafeInteger(id) || id <= 0 || !row.title) continue
+      unique.set(`${type}:${id}`, { id, type, title: row.title, year: row.year })
+    }
+    pendingSearchResults.value = [...unique.values()]
+    if (!unique.size) pendingSearchMessage.value = '未找到匹配的 TMDB 媒体'
+  } catch (err) {
+    if (version === pendingSearchVersion) pendingSearchMessage.value = err?.message || '媒体搜索失败'
+  } finally {
+    if (version === pendingSearchVersion) pendingSearchLoading.value = false
+  }
+}
+
+async function selectPendingMedia(row) {
+  const form = pendingApprovalForm.value
+  Object.assign(form, { tmdb_id: row.id, media_title: row.title, media_type: row.type, confirmed: false })
+  pendingSearchOpen.value = false
+  const version = ++pendingSearchVersion
+  pendingSearchLoading.value = false
+  const pending = pendingApprovalRow.value
+  const year = pending?.source_season
+  if (row.type !== 'tv' || !year) return
+  if (Number(pending.tmdb_id) === row.id && Number.isInteger(pending.season) && pending.season !== year) {
+    form.season = pending.season
+    return
+  }
+  form.season = ''
+  pendingSearchLoading.value = true
+  try {
+    const params = new URLSearchParams({ media_source: 'themoviedb', media_id: String(row.id) })
+    const seasons = unwrapResponse(await props.api.get(`media/seasons?${params}`))
+    if (version !== pendingSearchVersion || form.season !== '' || Number(form.tmdb_id) !== row.id
+        || form.media_type !== 'tv') return
+    const candidates = new Set((Array.isArray(seasons) ? seasons : [])
+      .filter(item => [`${year}`, `${year}年`].includes(String(item?.name || '').trim())
+        && Number.isInteger(item.season_number) && item.season_number > 0 && item.season_number <= 999)
+      .map(item => item.season_number))
+    if (candidates.size === 1) form.season = [...candidates][0]
+  } catch {
+    // Keep the standard season editable if the lookup is unavailable.
+  } finally {
+    if (version === pendingSearchVersion) pendingSearchLoading.value = false
+  }
 }
 
 function parseManualEpisodes(value) {
@@ -457,8 +544,11 @@ async function submitPendingApproval() {
   if (!row || pendingApprovalSaving.value) return
   const form = pendingApprovalForm.value
   const episodes = parseManualEpisodes(form.episodes)
-  if (!form.tmdb_id || !form.media_title.trim() || !form.confirmed
-    || (form.media_type === 'tv' && !episodes?.length)) {
+  const id = Number(form.tmdb_id)
+  const season = Number(form.season)
+  if (!Number.isSafeInteger(id) || id <= 0 || !form.media_title.trim() || !form.confirmed
+    || (form.media_type === 'tv' && (String(form.season ?? '').trim() === ''
+      || !Number.isInteger(season) || season < 0 || season > 999 || !episodes?.length))) {
     pendingApprovalError.value = '请填写 TMDB ID、媒体名称及有效的季集号。'
     return
   }
@@ -467,10 +557,10 @@ async function submitPendingApproval() {
   try {
     unwrapResponse(await props.api.post(`${pluginBase.value}/resource-ledger/pending/approve`, {
       key: row.key,
-      tmdb_id: Number(form.tmdb_id),
+      tmdb_id: id,
       media_title: form.media_title.trim(),
       media_type: form.media_type,
-      season: form.media_type === 'tv' ? Number(form.season) : null,
+      season: form.media_type === 'tv' ? season : null,
       episodes: form.media_type === 'tv' ? episodes : [],
       specs: form.specs,
       confirmed: form.confirmed,
@@ -1231,7 +1321,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               <VSelect v-model="activeResourceFilter.media_type" label="类型筛选" :items="resourceTypes"
                 density="comfortable" hide-details />
             </div>
-            <div class="text-caption text-medium-emphasis">共 {{ resourceRows.total }} 条</div>
             <div v-if="!ledgerLoading && !resourceRows.items?.length" class="text-body-2 text-medium-emphasis">
               {{ activeResourceFilter.query || activeResourceFilter.media_type ? '无匹配记录' : '暂无记录' }}
             </div>
@@ -1276,14 +1365,14 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 </p>
               </article>
             </div>
-            <VPagination v-if="resourceRows.total > 20" v-model="resourcePage"
-              :length="Math.ceil(resourceRows.total / 20)" :total-visible="3" @update:model-value="loadResourceRows" />
+            <SharedRecordPagination v-model="resourcePage" :total="resourceRows.total"
+              @update:model-value="loadResourceRows" />
           </div>
         </VCardText>
       </VCard>
     </VDialog>
 
-    <VDialog v-model="pendingApprovalDialog" max-width="42rem">
+    <VDialog v-model="pendingApprovalDialog" max-width="48rem">
       <VCard title="人工核验并继续下载">
         <VCardText class="pending-approval__body">
           <VAlert type="warning" variant="tonal" density="compact">
@@ -1291,19 +1380,43 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           </VAlert>
           <div class="pending-approval__grid">
             <VSelect v-model="pendingApprovalForm.media_type" label="媒体类型"
-              :items="[{ title: '剧集', value: 'tv' }, { title: '电影', value: 'movie' }]" />
-            <VTextField v-model="pendingApprovalForm.tmdb_id" label="TMDB ID" type="number" min="1" />
-            <VTextField v-model="pendingApprovalForm.media_title" label="中文媒体名" />
+              :items="[{ title: '剧集', value: 'tv' }, { title: '电影', value: 'movie' }]" hide-details />
+            <VTextField v-model="pendingApprovalForm.tmdb_id" label="TMDB ID" inputmode="numeric" hide-details>
+              <template #append-inner>
+                <VBtn icon="mdi-magnify" variant="text" size="small" type="button"
+                  aria-label="按名称查询媒体编号" title="按名称查询媒体编号"
+                  :aria-expanded="pendingSearchOpen" :disabled="pendingApprovalSaving" @click="togglePendingSearch" />
+              </template>
+            </VTextField>
+            <div v-if="pendingSearchOpen" class="pending-approval__lookup">
+              <form class="pending-approval__query" @submit.prevent="searchPendingMedia">
+                <VTextField v-model="pendingSearchQuery" label="搜索媒体名称" density="comfortable" clearable hide-details />
+                <VBtn type="submit" variant="tonal" color="primary" prepend-icon="mdi-magnify"
+                  :loading="pendingSearchLoading" :disabled="!pendingSearchQuery?.trim()">搜索</VBtn>
+              </form>
+              <div v-if="pendingSearchMessage" role="status" class="text-body-2 text-medium-emphasis">
+                {{ pendingSearchMessage }}
+              </div>
+              <VList v-if="pendingSearchResults.length" class="pending-approval__results" density="compact">
+                <VListItem v-for="row in pendingSearchResults" :key="`${row.type}:${row.id}`"
+                  :title="row.title" :subtitle="[row.type === 'tv' ? '剧集' : '电影', row.year, `TMDB ${row.id}`].filter(Boolean).join(' · ')"
+                  @click="selectPendingMedia(row)" />
+              </VList>
+            </div>
+            <VTextField v-model="pendingApprovalForm.media_title" label="中文媒体名" hide-details
+              class="pending-approval__name" />
             <template v-if="pendingApprovalForm.media_type === 'tv'">
-              <VTextField v-model="pendingApprovalForm.season" label="季号" type="number" min="0" />
-              <VTextField v-model="pendingApprovalForm.episodes" label="集号" placeholder="1, 2-4" />
+              <VTextField v-model="pendingApprovalForm.season" label="季号" type="number" min="0" max="999" hide-details
+                :placeholder="pendingApprovalRow?.source_season ? 'TMDB 标准季号' : undefined"
+                :loading="pendingSearchLoading && !pendingSearchOpen" />
+              <VTextField v-model="pendingApprovalForm.episodes" label="集号" placeholder="1, 2-4" hide-details />
             </template>
             <template v-for="field in channelDedupAttributes.filter(item =>
               channelDedup.attributes.includes(item.value))" :key="field.value">
               <VTextField v-model="pendingApprovalForm.specs[field.value]"
                 :label="field.value === 'size' ? '大小（字节）' : field.title"
                 :type="['size', 'fps'].includes(field.value) ? 'number' : 'text'"
-                :min="['size', 'fps'].includes(field.value) ? 0.001 : undefined" />
+                :min="['size', 'fps'].includes(field.value) ? 0.001 : undefined" hide-details />
             </template>
           </div>
           <VCheckbox v-model="pendingApprovalForm.confirmed" density="compact" hide-details
@@ -1311,7 +1424,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VAlert v-if="pendingApprovalError" type="error" variant="tonal" density="compact">
             {{ pendingApprovalError }}
           </VAlert>
-          <div v-if="pendingApprovalRow" class="text-caption text-medium-emphasis">
+          <div v-if="pendingApprovalRow" class="pending-approval__filename text-caption text-medium-emphasis">
             文件：{{ pendingApprovalRow.path }}
           </div>
         </VCardText>
@@ -1319,7 +1432,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VSpacer />
           <VBtn variant="text" :disabled="pendingApprovalSaving" @click="pendingApprovalDialog = false">取消</VBtn>
           <VBtn color="primary" variant="flat" :loading="pendingApprovalSaving"
-            :disabled="!pendingApprovalForm.confirmed" @click="submitPendingApproval">
+            :disabled="!pendingApprovalForm.confirmed || (pendingSearchLoading && !pendingSearchOpen)" @click="submitPendingApproval">
             重新核验并提交
           </VBtn>
         </VCardActions>
@@ -1638,13 +1751,19 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 .channel-dedup__record-progress { color: rgb(var(--v-theme-primary)); }
 .channel-dedup__record-error { color: rgb(var(--v-theme-error)); }
 
-.pending-approval__body { display: grid; gap: 14px; }
+.pending-approval__body { display: grid; gap: 20px; }
 .pending-approval__grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 12px;
+  gap: 16px 20px;
 }
 .pending-approval__grid > * { min-inline-size: 0; }
+.pending-approval__name, .pending-approval__lookup { grid-column: 1 / -1; }
+.pending-approval__lookup { display: grid; gap: 8px; }
+.pending-approval__query { display: grid; align-items: center; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+.pending-approval__results { max-block-size: 12rem; overflow: auto; }
+.pending-approval__results :deep(.v-list-item-title) { white-space: normal; overflow-wrap: anywhere; }
+.pending-approval__filename { overflow-wrap: anywhere; }
 
 .channel-dedup__badge {
   display: inline-flex;

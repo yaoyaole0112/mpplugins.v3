@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import SharedRecordPagination from './SharedRecordPagination.vue'
 import { unwrapResponse } from '../utils'
 import { claimLinkSummary, releaseDetails, requestMediaSummaries, rejectionSummaries, uniqueRequestRows } from '../sharedRecordDisplay'
 
@@ -342,13 +343,8 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
         </div>
       </article>
     </div>
-    <div v-if="activeFilter" class="shared-settings__pagination">
-      <div v-if="recordRows.total > 20" class="shared-settings__pagination-control">
-        <VPagination v-model="recordPage"
-          :length="Math.ceil(recordRows.total / 20)" :total-visible="3" @update:model-value="loadRecords" />
-      </div>
-      <span class="shared-settings__total text-caption text-medium-emphasis">共 {{ recordRows.total }} 条</span>
-    </div>
+    <SharedRecordPagination v-if="activeFilter" v-model="recordPage" :total="recordRows.total"
+      @update:model-value="loadRecords" />
   </template>
   </section>
 </template>
@@ -420,9 +416,6 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 .shared-settings__id { font-family: monospace; }
 .shared-settings__ids { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 18px; min-inline-size: 0; }
 .shared-settings__claim-meta { display: flex; flex-wrap: wrap; }
-.shared-settings__pagination { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; min-block-size: 52px; margin-block-start: 8px; }
-.shared-settings__pagination-control { grid-column: 2; min-inline-size: 0; }
-.shared-settings__total { grid-column: 3; justify-self: end; white-space: nowrap; }
 @media (min-width: 600px) and (max-width: 800px) {
   .shared-settings__search { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -433,9 +426,6 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
   .shared-settings__record-head .shared-settings__badge { max-inline-size: 56%; white-space: normal; }
   .shared-settings__meta { flex-direction: column; align-items: flex-start; gap: 4px; }
   .shared-settings__media-summary { font-size: 15px; }
-  .shared-settings__pagination { grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; }
-  .shared-settings__pagination-control { grid-column: 1; }
-  .shared-settings__total { grid-column: 2; }
   .shared-settings--compact .shared-settings__status > div { flex-wrap: wrap; white-space: normal; }
   .shared-settings__status dd { margin-inline-start: auto; }
 }

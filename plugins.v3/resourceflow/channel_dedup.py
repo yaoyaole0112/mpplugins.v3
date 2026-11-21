@@ -10,6 +10,7 @@ from urllib.parse import unquote
 
 ATTRIBUTES = ("resolution", "effects", "codec", "source", "fps", "size")
 VIDEO_EXTENSIONS = {"mkv", "mp4", "avi", "mov", "wmv", "m4v", "ts", "m2ts", "webm"}
+SEASON_NUMBER = r"(?:(?:19|20)\d{2}|\d{1,3})"
 EFFECT_PATTERNS = {
     "HDR": re.compile(r"(?<![A-Z0-9])(?:HDR[A-Z0-9]*|MAXPLUS(?![A-Z0-9]))"),
     "SDR": re.compile(r"(?<![A-Z0-9])SDR[A-Z0-9]*"),
@@ -25,11 +26,15 @@ def normalize_title(value: Any) -> str:
     return "".join(character.casefold() for character in normalize("NFKC", str(value or "")) if character.isalnum())
 
 
+def is_year_season(season: Any) -> bool:
+    return type(season) is int and 1900 <= season <= 2099
+
+
 def filename_title_aliases(value: Any) -> set[str]:
     """Keep title evidence that generic filename parsers may discard as bracketed tags."""
     name = normalize("NFKC", PurePosixPath(str(value or "").replace("\\", "/")).name)
     head = re.split(
-        r"(?i)(?:^|[ ._-])(?:S\s*\d{1,3}(?:\s*E\s*\d{1,4})?|E\d{1,4}|\d{1,3}x\d{1,4})(?!\d)",
+        rf"(?i)(?:^|[ ._-])(?:S\s*{SEASON_NUMBER}(?:\s*E\s*\d{{1,4}})?|E\d{{1,4}}|\d{{1,3}}x\d{{1,4}})(?!\d)",
         name, maxsplit=1,
     )[0]
     head = re.split(r"(?<!\d)(?:19|20)\d{2}(?!\d)", head, maxsplit=1)[0]
@@ -75,7 +80,7 @@ def long_title_prefix_matches(name: str, aliases: Iterable[str]) -> bool:
 
 def parse_episode(value: Any) -> tuple[Optional[int], list[int]]:
     text = normalize("NFKC", str(value or ""))
-    match = re.search(r"(?i)(?:^|[^A-Z0-9])S\s*(\d{1,3})\s*E\s*(\d{1,4})(.*)", text)
+    match = re.search(rf"(?i)(?:^|[^A-Z0-9])S\s*({SEASON_NUMBER})\s*E\s*(\d{{1,4}})(?!\d)(.*)", text)
     if match:
         season = int(match.group(1))
         first = int(match.group(2))
@@ -244,7 +249,7 @@ def parse_channel_message(
     elif season is None:
         season, episodes = parse_episode(title)
     if not title and filename:
-        title = re.split(r"(?i)[ ._-]S\d{1,3}E\d{1,4}", filename, maxsplit=1)[0]
+        title = re.split(rf"(?i)[ ._-]S{SEASON_NUMBER}E\d{{1,4}}", filename, maxsplit=1)[0]
         title = re.sub(r"\((?:19|20)\d{2}\)|\(tmdbid=\d+\)", "", title, flags=re.I)
     movie = bool(re.search(r"类型\s*[:：]\s*电影|themoviedb\.org/movie/", text))
     if not title or (not movie and (season is None or not episodes)):
@@ -331,16 +336,16 @@ def parse_candidate_file(
     season, episodes = parse_episode(filename)
     if season is None:
         episode_match = re.search(r"(?i)(?:^|[ ._-])E(\d{1,4})(?!\d)", filename)
-        season_match = re.search(r"(?i)(?:^|[^A-Z0-9])S(?:EASON[ ._-]*)?(\d{1,3})(?!\d)", f"{path} {title_hint}")
+        season_match = re.search(rf"(?i)(?:^|[^A-Z0-9])S(?:EASON[ ._-]*)?({SEASON_NUMBER})(?!\d)", f"{path} {title_hint}")
         if episode_match and season_match:
             season, episodes = int(season_match.group(1)), [int(episode_match.group(1))]
     movie = season is None and not episodes
-    if movie and re.search(r"(?i)(?:^|[^A-Z0-9])(?:S(?:EASON[ ._-]*)?\d{1,3}|E\d{1,4})(?!\d)|第\s*\d+\s*[季集]",
+    if movie and re.search(r"(?i)(?:^|[^A-Z0-9])(?:S(?:EASON[ ._-]*)?\d+|E\d{1,4})(?!\d)|第\s*\d+\s*[季集]",
                            f"{path} {title_hint}"):
         return None
     if movie and not allow_movie:
         return None
-    title_part = re.split(r"(?i)(?:^|[ ._-])(?:S\s*\d{1,3}\s*E\s*\d{1,4}|E\d{1,4}|\d{1,3}x\d{1,4})", filename, maxsplit=1)[0]
+    title_part = re.split(rf"(?i)(?:^|[ ._-])(?:S\s*{SEASON_NUMBER}\s*E\s*\d{{1,4}}|E\d{{1,4}}|\d{{1,3}}x\d{{1,4}})", filename, maxsplit=1)[0]
     title_part = re.sub(r"(?i)\b(?:19|20)\d{2}\b|\(?tmdbid\s*=\s*\d+\)?", " ", title_part)
     if movie:
         title_part = re.split(
@@ -349,7 +354,7 @@ def parse_candidate_file(
         )[0].strip(" ._-")
     title_key = normalize_title(title_part)
     if not title_key:
-        hinted_title = re.split(r"(?i)(?:^|[ ._-])S\s*\d{1,3}\s*E\s*\d{1,4}", str(title_hint), maxsplit=1)[0]
+        hinted_title = re.split(rf"(?i)(?:^|[ ._-])S\s*{SEASON_NUMBER}\s*E\s*\d{{1,4}}", str(title_hint), maxsplit=1)[0]
         hinted_title = re.sub(r"(?i)\b(?:19|20)\d{2}\b|\(?tmdbid\s*=\s*\d+\)?", " ", hinted_title)
         title_key = normalize_title(hinted_title)
     tmdb_id = _extract_tmdb_id(filename) or _extract_tmdb_id(title_hint)
