@@ -18,7 +18,9 @@ class RecentEpisodeRuleTest(unittest.TestCase):
 
     def select_files(self, paths, media, season_dates=(), days=3, plugin=None):
         plugin = plugin or ResourceFlow.__new__(ResourceFlow)
-        plugin.chain = SimpleNamespace(recognize_media=Mock(return_value=media))
+        if media and not hasattr(media, "type"):
+            media = SimpleNamespace(**vars(media), type="tv")
+        plugin._mp_recognize_media = Mock(return_value=media)
         plugin.save_data = Mock()
         with patch("resourceflow.TorrentHelper") as torrent_helper, patch("resourceflow.TmdbChain") as tmdb:
             torrent_helper.return_value.get_fileinfo_from_torrent_content.return_value = (None, paths)
@@ -398,7 +400,7 @@ class RecentEpisodeRuleTest(unittest.TestCase):
     @patch.object(ResourceFlow, "_tmdb_episode_air_date")
     def test_episode_group_never_falls_back_to_default_numbering(self, single, web, douban):
         meta = SimpleNamespace(
-            episode_list=[10], begin_season=3, begin_episode=10, end_episode=None, episode_group="group"
+            episode_list=[10], begin_season=3, end_season=None, episode_group="group"
         )
         with patch("resourceflow.MetaInfo", return_value=meta):
             self.assertIsNone(self.select_files(["Show.S03E10.mkv"], SimpleNamespace(tmdb_id=123)))

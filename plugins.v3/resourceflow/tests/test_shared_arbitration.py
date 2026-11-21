@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import copy
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,7 +14,9 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 import uuid
 import zlib
+from zoneinfo import ZoneInfo
 
+from app.sdk.media import MetaInfo
 from resourceflow.shared_cache import HIGH_RESOLUTION_PACK_WAIT, HIGH_RESOLUTION_WAIT
 from resourceflow.shared_coordinator import BotWorker, CoordinatorStore
 from resourceflow.channel_dedup import parse_candidate_file
@@ -460,9 +463,7 @@ class AdmissionTests(unittest.TestCase):
         self.downloader.start_torrents.side_effect = lambda value: self.events.append("start") or True
 
     def test_shared_media_title_uses_chinese_tmdb_detail_and_caches_it(self):
-        self.plugin.chain = SimpleNamespace(recognize_media=Mock(return_value=SimpleNamespace(
-            tmdb_id=253372, title="The Institute", names=[]
-        )))
+        media = SimpleNamespace(tmdb_id=253372, title="The Institute", names=[])
         candidate = {
             "tmdb_id": 253372, "media_type": "tv",
             "path": "The.Institute.S02E02.720p.WEB-DL.H264.mkv",
@@ -470,19 +471,17 @@ class AdmissionTests(unittest.TestCase):
         cache = {}
         with patch("resourceflow.shared_plugin.TmdbApi") as tmdb:
             tmdb.return_value.get_info.return_value = {"name": "奥德赛", "names": ["奥德赛", "The Odyssey"]}
-            self.assertEqual(self.plugin._shared_media_title(candidate, cache), "奥德赛")
-            self.assertEqual(self.plugin._shared_media_title(candidate, cache), "奥德赛")
+            self.assertEqual(self.plugin._shared_media_title(candidate, cache, media=media), "奥德赛")
+            self.assertEqual(self.plugin._shared_media_title(candidate, cache, media=media), "奥德赛")
             tmdb.return_value.get_info.assert_called_once()
 
     def test_shared_media_title_uses_bilingual_filename_when_tmdb_has_no_chinese_title(self):
-        self.plugin.chain = SimpleNamespace(recognize_media=Mock(return_value=SimpleNamespace(
-            tmdb_id=338938, title="I Miss You", names=[]
-        )))
+        media = SimpleNamespace(tmdb_id=338938, title="I Miss You", names=[])
         candidate = {"tmdb_id": 338938, "media_type": "tv",
                      "path": "后会友期.I.Miss.You.S01E10.2026.2160p.MGTV.WEB-DL.mkv"}
         with patch("resourceflow.shared_plugin.TmdbApi") as tmdb:
             tmdb.return_value.get_info.return_value = {"name": "I Miss You"}
-            self.assertEqual(self.plugin._shared_media_title(candidate, {}), "后会友期")
+            self.assertEqual(self.plugin._shared_media_title(candidate, {}, media=media), "后会友期")
 
     def add(self):
         return self.plugin._add_prechecked_torrent(b"torrent", None, self.task, self.downloader, Mock(),
@@ -850,6 +849,7 @@ class PluginSetupTests(unittest.TestCase):
     def setUp(self):
         self.plugin = ResourceFlow.__new__(ResourceFlow)
         self.plugin.chain = SimpleNamespace(recognize_media=Mock(return_value=None))
+        self.plugin._mp_recognize_media = self.plugin.chain.recognize_media
         tmdb = patch("resourceflow.shared_plugin.TmdbApi")
         tmdb.start().return_value.get_info.return_value = {}
         self.addCleanup(tmdb.stop)
@@ -1152,6 +1152,7 @@ class PluginSetupTests(unittest.TestCase):
 
     def test_real_candidate_parser_requires_only_selected_specs(self):
         p = self.plugin
+        p._mp_recognize_media.return_value = SimpleNamespace(type="电视剧", tmdb_id=123, title="Show")
         p._channel_dedup_attributes = ["resolution"]
         task = SimpleNamespace(spec_dedup_enabled=True, name="test")
         path = "Show.2026.(tmdbid=123).S02E05.1080p.mkv"
@@ -1182,6 +1183,126 @@ class PluginSetupTests(unittest.TestCase):
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0]["tmdb_id"], 1633056)
         self.assertEqual(files[0]["specs"]["effects"], "SDR")
+
+    def test_shared_accepts_mp_identity_even_when_site_translation_differs(self):
+        p = self.plugin
+        p._channel_dedup_attributes = ["resolution"]
+        p._shared_media_title = Mock(return_value="遗产疯云")
+        media = SimpleNamespace(type="电视剧", tmdb_id=275204, title="遗产疯云",
+                                original_name="Dhindora", year="2021")
+        p._mp_recognize_media.return_value = media
+        task = SimpleNamespace(id="task", spec_dedup_enabled=True, name="test")
+        paths = [f"[夸夸其谈 第二季].Dhindora.2026.S02E{ep:02d}.1080p.NF.WEB-DL.mkv" for ep in (6, 7, 8)]
+        p._identity_pending = {
+            "old": {"path": paths[0], "task_id": task.id, "task_name": task.name},
+            "manual": {"path": paths[1], "task_id": task.id, "task_name": task.name, "manual_state": "queued"},
+            "other": {"path": paths[0], "task_id": "another", "task_name": task.name},
+        }
+        files, rejected = p._shared_candidates(make_torrent([(path, 123456) for path in paths]),
+            "Dhindora 2026 S02 Complete 1080p NF WEB-DL H264 DDP5.1 Atmos-UBWEB", task, None)
+        self.assertFalse(rejected)
+        self.assertEqual([(row["tmdb_id"], row["season"], row["episodes"]) for row in files],
+                         [(275204, 2, [ep]) for ep in (6, 7, 8)])
+        self.assertEqual([call.args[0].begin_episode for call in p._mp_recognize_media.call_args_list], [6, 7, 8])
+        self.assertEqual(set(p._identity_pending), {"manual", "other"})
+
+    def test_shared_accepts_mp_identity_for_translated_and_variant_names(self):
+        task = SimpleNamespace(id="task", spec_dedup_enabled=True, name="test")
+        p = self.plugin
+        p._channel_dedup_attributes = ["resolution"]
+        p._shared_media_title = Mock(return_value="")
+        for file_title, release_title, media in (
+            ("[今天是太阳雨].Sunshine.Through.the.Rain.2026.S01E05",
+             "Sunshine Through the Rain 2026 S01E05",
+             SimpleNamespace(type="电视剧", tmdb_id=342265, title="一起淋场太阳雨",
+                             en_title="Sunshine Through the Rain", year="2026")),
+            ("[转生后的大圣女，极力隐瞒圣女的身分].Tensei.shita.Daiseijo.wa.Seijo.de.Aru.Koto.wo.2026.S01E09",
+             "Tensei shita Daiseijo wa Seijo de Aru Koto wo 2026 S01E09",
+             SimpleNamespace(type="电视剧", tmdb_id=285899, title="转生后的大圣女，极力隐瞒圣女的身份",
+                             names=["Tensei shita Daiseijo wa Seijo de Aru Koto wo Hitakakusu"], year="2026")),
+            ("[隐瞒圣女的身分].2026.S01E09", "隐瞒圣女的身分 2026 S01E09",
+             SimpleNamespace(type="电视剧", tmdb_id=285899, title="隐瞒圣女的身份", year="2026")),
+        ):
+            with self.subTest(title=file_title):
+                p._mp_recognize_media.reset_mock()
+                p._mp_recognize_media.return_value = media
+                path = file_title + ".2160p.WEB-DL.H265.mkv"
+                files, rejected = p._shared_candidates(
+                    make_torrent([(path, 123456)]), release_title + " 2160p WEB-DL H265", task, None)
+                self.assertFalse(rejected)
+                self.assertEqual([row["tmdb_id"] for row in files], [media.tmdb_id])
+                p._mp_recognize_media.assert_called_once()
+
+    def test_shared_reports_incomplete_mp_result_and_does_not_inherit_title_episodes(self):
+        p = self.plugin
+        p._channel_dedup_attributes = ["resolution"]
+        task = SimpleNamespace(id="task", spec_dedup_enabled=True, name="test")
+        for path, media, reason in (
+            ("Sunshine.(tmdbid=123).S01E05.1080p.mkv", None, "未确认电影或电视剧身份"),
+            ("Sunshine.S01E05.1080p.mkv", SimpleNamespace(type="电视剧"), "未返回 TMDB ID"),
+            ("Sunshine.S01E05.1080p.mkv", SimpleNamespace(type="电影", tmdb_id=123), "识别为电影"),
+            ("Sunshine.S01E05-E07/Broadcast.1080p.mkv",
+             SimpleNamespace(type="电视剧", tmdb_id=123), "单一季号和集号"),
+        ):
+            with self.subTest(reason=reason, path=path):
+                p._mp_recognize_media.return_value = media
+                with patch.object(p, "_pending_identity") as pending:
+                    files, rejected = p._shared_candidates(
+                        make_torrent([(path, 123456)]), "Sunshine 2026 S01E05-E07", task, None)
+                    self.assertFalse(files)
+                    self.assertEqual(rejected, [path])
+                    self.assertIn(reason, pending.call_args.args[3])
+
+    def test_mp_recognition_words_drive_recent_dates_and_shared_admission(self):
+        p = self.plugin
+        p._shared_settings = SharedSettingsPayload(enabled=True, bot_username="@testbot")
+        p._channel_dedup_attributes = ["resolution"]
+        p._mp_recognize_media.return_value = SimpleNamespace(
+            type="电视剧", tmdb_id=280042, title="野生的大魔王出现了！", year="2025")
+        task = SimpleNamespace(id="task", spec_dedup_enabled=True, name="test")
+        title = "Yasei no Last Boss ga Arawareta S02E09 2026 1080p CR WEB-DL H264 AAC-AnimeS@ADWeb"
+        path = title.replace(" ", ".") + ".mkv"
+        content = make_torrent([(path, 123456)])
+        aired = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        with patch("resourceflow.MetaInfo", side_effect=lambda value: MetaInfo(value, custom_words=[
+            "S02E09(?=.*ADWeb) => S01E21",
+        ])), patch("resourceflow.TmdbChain") as dates:
+            dates.return_value.tmdb_episodes.return_value = [SimpleNamespace(episode_number=21, air_date=aired)]
+            selection = p._recent_episode_file_selection(content, title, task=task)
+            self.assertEqual(selection["accepted"], {path})
+            files, rejected = p._shared_candidates(content, title, task, selection)
+        dates.return_value.tmdb_episodes.assert_called_once_with(tmdbid=280042, season=1, episode_group=None)
+        p._mp_recognize_media.assert_called_once()
+        self.assertFalse(rejected)
+        self.assertEqual((files[0]["tmdb_id"], files[0]["season"], files[0]["episodes"]), (280042, 1, [21]))
+        self.assertEqual(files[0]["path"], path)
+
+        with TemporaryDirectory() as directory:
+            store = CoordinatorStore(Path(directory) / "host.sqlite3", "resources", ["resolution"], 5)
+            fields = ("id", "title", "media_type", "tmdb_id", "media_title", "season", "episodes")
+            request_file = {field: files[0][field] for field in fields}
+            request_file["specs"] = {"resolution": "1080p"}
+            request = {"v": 1, "group": "resources", "op": "reserve",
+                       "revision": store.policy["revision"], "pack_policy": "partial", "files": [request_file]}
+            self.assertTrue(store.handle(11, uuid.uuid4().hex, {**request, "instance": "a" * 32})["approved"])
+            reply = store.handle(22, uuid.uuid4().hex, {**request, "instance": "b" * 32})
+            self.assertFalse(reply["approved"])
+            self.assertEqual(reply["rejected"][0]["reason"], "同规格已占位或已完成")
+
+    def test_shared_manual_identity_still_uses_the_confirmed_file_only(self):
+        p = self.plugin
+        p._channel_dedup_attributes = ["resolution"]
+        path, other = "Video.1080p.mkv", "Extra.1080p.mkv"
+        task = SimpleNamespace(id="task", spec_dedup_enabled=True, name="test")
+        overrides = {path: {"media_type": "tv", "tmdb_id": 280042, "media_title": "野生的大魔王出现了！",
+                            "season": 1, "episodes": [21]}}
+        files, rejected = p._shared_candidates(make_torrent([(path, 1), (other, 1)]),
+                                               "Release 1080p", task, {"accepted": {path}},
+                                               candidate_overrides=overrides)
+        self.assertFalse(rejected)
+        self.assertEqual([(f["path"], f["season"], f["episodes"]) for f in files], [(path, 1, [21])])
+        self.assertTrue(files[0]["manual_identity"])
+        p._mp_recognize_media.assert_not_called()
 
     def test_year_season_is_resolved_to_standard_tv_season_for_shared_approval(self):
         p = self.plugin

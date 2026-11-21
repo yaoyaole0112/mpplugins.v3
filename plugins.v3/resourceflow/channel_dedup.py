@@ -327,6 +327,15 @@ def parse_torrent_files(content: bytes) -> list[dict]:
         return []
 
 
+def candidate_file_specs(filename: str, size: Optional[int], title_hint: str = "", spec_hint: str = "") -> tuple[dict, list[str]]:
+    specs = merge_specs(parse_specs(filename, size), merge_specs(parse_specs(title_hint), parse_specs(spec_hint)))
+    # Missing effect labels follow the configured SDR naming convention, not a media probe.
+    if specs["effects"] is None:
+        specs["effects"] = "SDR"
+        return specs, ["effects"]
+    return specs, []
+
+
 def parse_candidate_file(
     path: str, size: Optional[int], title_hint: str = "", spec_hint: str = "", allow_movie: bool = False,
 ) -> Optional[dict]:
@@ -359,13 +368,7 @@ def parse_candidate_file(
         title_key = normalize_title(hinted_title)
     tmdb_id = _extract_tmdb_id(filename) or _extract_tmdb_id(title_hint)
     year_match = re.search(r"\b(?:19|20)\d{2}\b", filename) or re.search(r"\b(?:19|20)\d{2}\b", title_hint)
-    specs = merge_specs(parse_specs(filename, size), merge_specs(parse_specs(title_hint), parse_specs(spec_hint)))
-    inferred_attributes = []
-    # This is a filename convention, not a media probe. Explicit effect labels
-    # win; absent labels are treated as SDR for the user's selected-field match.
-    if specs["effects"] is None:
-        specs["effects"] = "SDR"
-        inferred_attributes.append("effects")
+    specs, inferred_attributes = candidate_file_specs(filename, size, title_hint, spec_hint)
     return {
         "path": str(path),
         "title_key": title_key,

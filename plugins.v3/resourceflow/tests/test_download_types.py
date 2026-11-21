@@ -11,6 +11,7 @@ class DownloadTypeTest(unittest.TestCase):
     def setUp(self):
         self.plugin = ResourceFlow.__new__(ResourceFlow)
         self.plugin.chain = SimpleNamespace(recognize_media=Mock())
+        self.plugin._mp_recognize_media = self.plugin.chain.recognize_media
 
     def classify(self, media=None, category=None, labels=None, description="", cache=None):
         self.plugin.chain.recognize_media.return_value = media

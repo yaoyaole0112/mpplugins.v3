@@ -17,7 +17,7 @@ from app.sdk.services import DownloaderHelper
 from app.modules.themoviedb.tmdbapi import TmdbApi
 
 from .active_dedup import download_files, paths_agree
-from .channel_dedup import is_year_season, normalize_specs, parse_candidate_file, parse_torrent_files
+from .channel_dedup import normalize_specs, parse_torrent_files
 from .models import ChannelDedupSettingsPayload
 from .record_search import (
     filename_display_title, matches_media_type, matches_owner, matches_record, record_display_title,
@@ -236,12 +236,16 @@ class SharedResourceMixin:
         if waiting or previous != digest({key: value for key, value in progress.items() if key != "last_sync_at"}):
             self.save_data("shared_history", progress)
 
+    def _shared_approved_paths(self, task, torrent_hash):
+        with self._shared_lock:
+            return {item["path"] for entry in self._shared_claims.values()
+                    if entry["hash"] == torrent_hash and entry["downloader"] == task.downloader
+                    for item in entry.get("files", []) if item["id"] in entry.get("approved", {})}
+
     def _capture_shared_completed(self, task, torrent_hash, records):
         """Keep a durable outbox only for verified completed files lacking an approval."""
         with self._shared_lock:
-            approved_paths = {item["path"] for entry in self._shared_claims.values()
-                              if entry["hash"] == torrent_hash and entry["downloader"] == task.downloader
-                              for item in entry.get("files", []) if item["id"] in entry.get("approved", {})}
+            approved_paths = self._shared_approved_paths(task, torrent_hash)
             outbox = dict(getattr(self, "_shared_completed_outbox", {}))
             for row in records:
                 if any(paths_agree(row["path"], path) for path in approved_paths):
@@ -942,6 +946,7 @@ class SharedResourceMixin:
     def _shared_candidates(self, content, title, task, selection, spec_hint="",
                            pending_source=None, candidate_overrides=None):
         paths = selection.get("accepted") if selection else None
+        recognized_files = (selection or {}).get("mp_files", {})
         rows, rejected = [], []
         display_titles = getattr(self, "_shared_media_title_cache", None)
         if not isinstance(display_titles, dict):
@@ -949,40 +954,29 @@ class SharedResourceMixin:
         for item in parse_torrent_files(content):
             if not self._video_file(item["path"]) or paths is not None and item["path"] not in paths:
                 continue
-            candidate = parse_candidate_file(item["path"], item.get("size"), title, spec_hint, allow_movie=True)
-            candidate = self._apply_pending_candidate_override(
-                candidate, item["path"], item.get("size"), candidate_overrides
+            candidate, media, reason = self._mp_resource_candidate(
+                item["path"], item.get("size"), title, spec_hint, candidate_overrides,
+                recognition=recognized_files.get(item["path"]),
             )
-            episode_group = getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None)
-            reason = ""
-            if not candidate:
-                reason = "无法解析媒体或季集身份"
-            elif episode_group and not candidate.get("manual_identity"):
-                reason = "剧集组需核验标准季集号"
-            elif not self._verify_resource_identity(candidate, title, task):
-                reason = "媒体身份未确认（TMDB ID 或名称别名未匹配）"
-            else:
-                source_season = candidate.get("season")
-                if candidate.get("media_type") == "tv" and is_year_season(source_season):
-                    season = self._tmdb_year_season(candidate["tmdb_id"], source_season)
-                    if season is None:
-                        reason = "年份季未匹配 TMDB 标准季号"
-                    else:
-                        candidate.update(source_season=source_season, season=season)
+            if not reason:
                 missing_specs = [
                     field for field in self._channel_dedup_attributes if not candidate["specs"].get(field)
                 ]
-                if missing_specs and not reason:
+                if missing_specs:
                     reason = f"缺少勾选规格：{', '.join(missing_specs)}"
             if reason:
                 rejected.append(item["path"])
-                if candidate:
-                    self._pending_identity(candidate, title, task, reason, pending_source)
+                self._pending_identity(candidate, title, task, reason, pending_source)
                 logger.info(f"资源刷流共享审批候选暂缓 {item['path']}：{reason}")
                 continue
             candidate["id"] = hashlib.sha256(item["path"].encode()).hexdigest()[:24]
             candidate["title"] = title[:160]
-            candidate["media_title"] = self._shared_media_title(candidate, display_titles)
+            if not candidate.get("manual_identity"):
+                candidate["media_title"] = (
+                    self._shared_media_title(candidate, display_titles, media=media)
+                    or candidate["media_title"]
+                )
+                self._resolve_pending_identity(candidate, task, automatic=True)
             rows.append(candidate)
         return rows, rejected
 
@@ -1050,7 +1044,7 @@ class SharedResourceMixin:
             )
         return available, blocked
 
-    def _shared_media_title(self, candidate, cache):
+    def _shared_media_title(self, candidate, cache, *, media=None):
         tmdb_id = candidate.get("tmdb_id")
         if not tmdb_id:
             return ""
@@ -1061,7 +1055,6 @@ class SharedResourceMixin:
         meta = MetaInfo(path.rsplit("/", 1)[-1])
         media_title = ""
         try:
-            media = self.chain.recognize_media(meta=meta)
             recognized_id = getattr(media, "tmdb_id", None)
             if recognized_id and int(recognized_id) != int(tmdb_id):
                 return ""
