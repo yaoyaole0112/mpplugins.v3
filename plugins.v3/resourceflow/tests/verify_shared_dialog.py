@@ -659,9 +659,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_text(f"关联占位：{'9' * 32}", exact=True).wait_for()
             assert "命中占位" not in await dialog.inner_text()
             await dialog.get_by_role("tab", name="下载待核验", exact=True).click()
-            await dialog.get_by_text("历史完成证据不完整：3 条，未导入共享记录。", exact=False).wait_for()
-            assert await dialog.get_by_text("历史完成证据不完整", exact=False).evaluate(
-                "element => element.classList.contains('v-alert--variant-tonal') || !!element.closest('.v-alert')")
+            assert await dialog.get_by_text("历史完成证据不完整", exact=False).count() == 0
+            await dialog.get_by_text("历史完成证据待同步：2 条；同步确认前暂缓新增下载。", exact=True).wait_for()
             await dialog.get_by_role("tab", name="共享下载记录", exact=True).click()
             await dialog.get_by_text(f"关联申请：{'b' * 32}", exact=True).wait_for()
             toolbar = dialog.locator('.shared-settings__search:visible')

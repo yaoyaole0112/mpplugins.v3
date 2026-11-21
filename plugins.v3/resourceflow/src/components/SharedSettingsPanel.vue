@@ -218,11 +218,6 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
     <VAlert v-if="state.history_sync?.pending" type="warning" variant="tonal" density="compact">
       历史完成证据待同步：{{ state.history_sync.pending }} 条；同步确认前暂缓新增下载。
     </VAlert>
-    <VAlert v-if="state.history_sync?.unverified && recordTab === 'pending' && mode !== 'settings'"
-      type="info" variant="tonal" density="compact">
-      历史完成证据不完整：{{ state.history_sync.unverified }} 条，未导入共享记录。
-      缺少身份、已勾规格或有效时间的旧证据会保留，补齐后才可重新校验；这不是正在等待同步的任务。
-    </VAlert>
     <template v-if="mode === 'settings'">
     <VAlert v-if="state.https_listener_error" type="warning" variant="tonal" density="compact">
       {{ state.https_listener_error }}

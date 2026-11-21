@@ -3,6 +3,8 @@
 import re
 import unicodedata
 
+from .channel_dedup import filename_title_aliases
+
 
 STATE_LABELS = {
     "requesting": "等待审批", "reserved": "已获准 已批准", "adding": "暂停添加中",
@@ -17,6 +19,7 @@ TEXT_FIELDS = (
 )
 SPEC_FIELDS = ("resolution", "effects", "codec", "source", "fps", "size")
 CHINESE_TITLE = re.compile(r"[\u3400-\u9fff]")
+CHINESE_TITLE_PREFIX = re.compile(r"^[\u3400-\u9fff][\u3400-\u9fff0-9 、，！：·？！《》「」“”'—-]*")
 
 
 def record_title_key(row):
@@ -39,12 +42,31 @@ def localized_record_titles(rows):
     return titles
 
 
-def record_display_title(row, titles):
+def filename_display_title(*values):
+    """Extract a readable Chinese title without binding or changing the media identity."""
+    for value in values:
+        if not isinstance(value, str) or not CHINESE_TITLE.search(value):
+            continue
+        name = unicodedata.normalize("NFKC", value.replace("\\", "/").rsplit("/", 1)[-1])
+        choices = []
+        for alias in filename_title_aliases(name):
+            match = CHINESE_TITLE_PREFIX.match(alias)
+            if match:
+                title = match[0].rstrip(" -·")
+                choices.append((name.find(title), -len(title), title))
+        if choices:
+            return min(choices)[2][:120]
+    return ""
+
+
+def record_display_title(row, titles, torrent_title=""):
     value = row.get("media_title")
     title = value.strip() if isinstance(value, str) else ""
     if CHINESE_TITLE.search(title):
         return title
-    return titles.get(record_title_key(row)) or title
+    return (titles.get(record_title_key(row))
+            or filename_display_title(row.get("path"), row.get("title"), torrent_title)
+            or title)
 
 
 def _normalize(value):

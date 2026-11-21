@@ -474,6 +474,16 @@ class AdmissionTests(unittest.TestCase):
             self.assertEqual(self.plugin._shared_media_title(candidate, cache), "奥德赛")
             tmdb.return_value.get_info.assert_called_once()
 
+    def test_shared_media_title_uses_bilingual_filename_when_tmdb_has_no_chinese_title(self):
+        self.plugin.chain = SimpleNamespace(recognize_media=Mock(return_value=SimpleNamespace(
+            tmdb_id=338938, title="I Miss You", names=[]
+        )))
+        candidate = {"tmdb_id": 338938, "media_type": "tv",
+                     "path": "后会友期.I.Miss.You.S01E10.2026.2160p.MGTV.WEB-DL.mkv"}
+        with patch("resourceflow.shared_plugin.TmdbApi") as tmdb:
+            tmdb.return_value.get_info.return_value = {"name": "I Miss You"}
+            self.assertEqual(self.plugin._shared_media_title(candidate, {}), "后会友期")
+
     def add(self):
         return self.plugin._add_prechecked_torrent(b"torrent", None, self.task, self.downloader, Mock(),
                                                    "a" * 40, None, "Show")

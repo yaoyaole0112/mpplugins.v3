@@ -1635,21 +1635,8 @@ return (_ctx, _cache) => {
           _: 1
         }))
       : _createCommentVNode$1("", true),
-    (state.value.history_sync?.unverified && __props.recordTab === 'pending' && __props.mode !== 'settings')
-      ? (_openBlock$1(), _createBlock$1(_component_VAlert, {
-          key: 4,
-          type: "info",
-          variant: "tonal",
-          density: "compact"
-        }, {
-          default: _withCtx$1(() => [
-            _createTextVNode$1(" 历史完成证据不完整：" + _toDisplayString$1(state.value.history_sync.unverified) + " 条，未导入共享记录。 缺少身份、已勾规格或有效时间的旧证据会保留，补齐后才可重新校验；这不是正在等待同步的任务。 ", 1)
-          ]),
-          _: 1
-        }))
-      : _createCommentVNode$1("", true),
     (__props.mode === 'settings')
-      ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 5 }, [
+      ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 4 }, [
           (state.value.https_listener_error)
             ? (_openBlock$1(), _createBlock$1(_component_VAlert, {
                 key: 0,
@@ -1844,7 +1831,7 @@ return (_ctx, _cache) => {
             ])
           ])
         ], 64))
-      : (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 6 }, [
+      : (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 5 }, [
           (activeFilter.value)
             ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_7$1, [
                 _createVNode$1(_component_VTextField, {
@@ -2025,7 +2012,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-90f5e936"]]);
+const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-2639cf22"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle} = await importShared('vue');
 

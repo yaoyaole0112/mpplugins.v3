@@ -7,7 +7,9 @@ import unittest
 from unittest.mock import Mock
 
 from resourceflow import ResourceFlow
-from resourceflow.record_search import matches_owner, matches_record, matches_media_type, record_page
+from resourceflow.record_search import (
+    matches_owner, matches_record, matches_media_type, record_display_title, record_page,
+)
 from resourceflow.shared_coordinator import CoordinatorStore
 
 
@@ -55,6 +57,14 @@ class RecordSearchTests(unittest.TestCase):
     def test_empty_missing_optional_fields(self):
         self.assertTrue(matches_record({}, None))
         self.assertFalse(matches_record({"specs": None, "episodes": None}, "missing"))
+
+    def test_chinese_filename_hints_do_not_override_known_names_or_use_subtitle_tags(self):
+        row = {**self.row, "media_title": "English", "path": "后会友期.I.Miss.You.S01E10.2160p.mkv"}
+        self.assertEqual(record_display_title(row, {("tv", 123): "已确认中文名"}), "已确认中文名")
+        self.assertEqual(record_display_title(row, {("movie", 123): "电影标题"}), "后会友期")
+        row["media_title"] = "记录自身中文名"
+        self.assertEqual(record_display_title(row, {("tv", 123): "已确认中文名"}), "记录自身中文名")
+        self.assertEqual(record_display_title({"title": "[简繁字幕].Gordon.S01E07.1080p.mkv"}, {}), "")
 
     def test_legacy_invalid_identity_fields_do_not_break_search(self):
         for fields in ({"season": ""}, {"season": 1, "episodes": ["unknown"]}, {"specs": []}):
@@ -202,12 +212,19 @@ class ApprovalSearchTests(unittest.TestCase):
         self.assertNotIn("tmdb_id", result)
 
     def test_pending_chinese_filename_is_only_display_hint(self):
-        self.plugin._identity_pending = {"unknown": {"path": "测试剧集.S01E05.1080p.mkv", "media_type": "tv",
-                                                    "season": 1, "episodes": [5]}}
-        result = self.plugin.get_resource_ledger(state="pending").data["items"][0]
-        self.assertEqual(result["media_title"], "测试剧集")
+        self.plugin._identity_pending = {"unknown": {
+            "path": "[好搭档2].Good.Partner.2.2026.S02E01.1080p.HamiVideo.WEB-DL.H264.AAC-UBWEB.mkv",
+            "title": "Good Partner 2 2026 S02E01 1080p", "media_type": "tv", "season": 2, "episodes": [1],
+            "reason": "媒体身份未确认（TMDB ID 或名称别名未匹配）",
+        }}
+        self.plugin.chain = SimpleNamespace(recognize_media=Mock(side_effect=AssertionError("No recognition calls")))
+        result = self.plugin.get_resource_ledger(state="pending", query="好搭档2 S02E01").data["items"][0]
+        self.assertEqual(result["media_title"], "好搭档2")
+        self.assertEqual(result["reason"], "媒体身份未确认（TMDB ID 或名称别名未匹配）")
         self.assertNotIn("tmdb_id", result)
         self.assertNotIn("media_title", self.plugin._identity_pending["unknown"])
+        self.plugin.chain.recognize_media.assert_not_called()
+        self.plugin.save_data.assert_not_called()
 
     def test_localized_store_titles_and_existing_title_priority(self):
         self.plugin._shared_claims = {}
@@ -267,6 +284,21 @@ class StoreSearchTests(unittest.TestCase):
             db.execute("UPDATE claims SET media_title='其他共享组' WHERE group_id='other'")
             db.execute("UPDATE claims SET media_title='最新中文名称' WHERE id='124'")
         self.assertEqual(self.store.media_titles(), {("tv", 123): "最新中文名称"})
+
+    def test_existing_bilingual_claim_titles_are_searchable_without_updating_the_ledger(self):
+        with self.store.connect() as db:
+            db.executemany(
+                "UPDATE claims SET tmdb_id=338938, episodes=?, title=?, media_title=? WHERE id=?",
+                [(f"[{episode}]", f"后会友期.I.Miss.You.S01.2026/后会友期.I.Miss.You.S01E{episode:02d}.2026.2160p.mkv",
+                  stored_title, str(episode))
+                 for episode, stored_title in ((9, ""), (10, "Miss You"))],
+            )
+        result = self.store.search_records(query="后会友期 TMDB 338938", page_size=10)
+        self.assertEqual([(row["episodes"], row["media_title"]) for row in result["items"]],
+                         [([10], "后会友期"), ([9], "后会友期")])
+        with self.store.connect() as db:
+            self.assertEqual({row[0]: row[1] for row in db.execute(
+                "SELECT id,media_title FROM claims WHERE tmdb_id=338938")}, {"9": "", "10": "Miss You"})
 
     def test_sort_on_download_time_and_search_reused_chinese_title(self):
         with self.store.connect() as db:

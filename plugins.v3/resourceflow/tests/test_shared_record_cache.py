@@ -147,6 +147,16 @@ class SharedRecordCacheTests(unittest.TestCase):
         self.assertEqual(first["media_title"], "剧集中文名")
         self.assertEqual(self.cache.media_titles("other-scope"), {})
 
+    def test_mirror_displays_chinese_name_from_original_title_without_changing_dedup(self):
+        candidate = dict(file_row(), tmdb_id=338938, media_title="Miss You",
+                         title="后会友期.I.Miss.You.S01E01.2026.2160p.MGTV.WEB-DL.H265.AAC-ADWeb.mkv")
+        self.reserve(candidate)
+        self.sync()
+        row, = self.cache.search(self.scope, "后会友期", "", 1, 20, "tv")["items"]
+        self.assertEqual((row["media_title"], row["tmdb_id"]), ("后会友期", 338938))
+        self.assertTrue(self.match(candidate)[1])
+        self.assertEqual(self.cache.media_titles(self.scope), {})
+
     def test_mirror_owner_filter_happens_before_paging_and_returns_all_owners(self):
         self.reserve(file_row())
         second = self.reserve(file_row(2, 2), instance="b" * 32, sender=22)

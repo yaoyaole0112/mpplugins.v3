@@ -20,8 +20,8 @@ from .active_dedup import download_files, paths_agree
 from .channel_dedup import normalize_specs, parse_candidate_file, parse_torrent_files
 from .models import ChannelDedupSettingsPayload
 from .record_search import (
-    matches_media_type, matches_owner, matches_record, record_display_title, record_owners, record_page,
-    record_title_key,
+    filename_display_title, matches_media_type, matches_owner, matches_record, record_display_title,
+    record_owners, record_page, record_title_key,
 )
 from .shared_cache import (
     HIGH_RESOLUTION_PACK_WAIT, HIGH_RESOLUTION_WAIT, SYNC_VERSION,
@@ -541,7 +541,7 @@ class SharedResourceMixin:
             "file_count": len(files), "completed": len(row.get("done") or []),
             "files": [{**{key: item.get(key) for key in
                          ("id", "path", "media_type", "tmdb_id", "season", "episodes")},
-                       "media_title": record_display_title(item, titles or {}),
+                       "media_title": record_display_title(item, titles or {}, row["title"]),
                        "specs": normalize_specs(item.get("specs") or {}),
                        "decision": "approved" if item.get("id") in approved else
                        "rejected" if item.get("id") in decisions else
@@ -638,8 +638,8 @@ class SharedResourceMixin:
     @staticmethod
     def _shared_record_display_page(data, kind):
         def display_title(row, torrent_title):
-            if row.get("media_title"):
-                return row
+            if name := record_display_title(row, {}, torrent_title):
+                return {**row, "media_title": name}
             # Parse only the visible page, without performing TMDB lookups while listing history.
             for value in (row.get("path"), torrent_title):
                 if (isinstance(value, str) and value and (name := MetaInfo(value.rsplit("/", 1)[-1]).name)
@@ -1092,7 +1092,7 @@ class SharedResourceMixin:
             except Exception:
                 pass
         if not media_title:
-            media_title = next(
+            media_title = filename_display_title(path, candidate.get("title")) or next(
                 (str(getattr(meta, field, "") or "").strip()
                  for field in ("cn_name", "name")
                  if re.search(r"[\u3400-\u9fff]", str(getattr(meta, field, "") or ""))),
@@ -1141,12 +1141,9 @@ class SharedResourceMixin:
         return record_title_key(row)
 
     def _resource_record_title(self, row, titles):
-        title = row.get("media_title")
-        if isinstance(title, str) and re.search(r"[\u3400-\u9fff]", title):
-            return title.strip()[:120]
-        title = titles.get(self._resource_title_key(row))
-        if isinstance(title, str) and re.search(r"[\u3400-\u9fff]", title):
-            return title.strip()[:120]
+        title = record_display_title(row, titles)
+        if title and re.search(r"[\u3400-\u9fff]", title):
+            return title
         # Pending identities may only have a Chinese filename. This is a display hint, not a binding.
         for value in (row.get("path"), row.get("title")):
             if not isinstance(value, str) or not re.search(r"[\u3400-\u9fff]", value):
@@ -1154,7 +1151,7 @@ class SharedResourceMixin:
             name = getattr(MetaInfo(value.rsplit("/", 1)[-1]), "cn_name", "")
             if isinstance(name, str) and re.search(r"[\u3400-\u9fff]", name):
                 return name.strip()[:120]
-        return ""
+        return title
 
     def _add_prechecked_torrent(self, content, cookies, task, downloader, service, expected_hash, selection, title,
                                spec_hint="", pending_source=None, candidate_overrides=None):
