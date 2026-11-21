@@ -1,6 +1,6 @@
 # 资源刷流
 
-版本：1.0.45。由原刷流插件 6.4.4 独立复制，插件 ID 为 `ResourceFlow`，
+版本：1.0.46。由原刷流插件 6.4.4 独立复制，插件 ID 为 `ResourceFlow`，
 目录为 `resourceflow`。原 `BrushFlow` 的代码、配置和任务均不修改，不自动导入或接管。
 默认下载标签为 `资源刷流-站点名`，不要与其他刷流任务共用下载标签或同一下载任务。
 
@@ -38,10 +38,10 @@ TMDB 与豆瓣均缺日期时，按包内同剧同季汇总候选。最新已知
 连续失败从 5 秒起步指数退避，最多 5 分钟，同一原因限频记录，连接恢复后清除状态。
 Telegram 限流按服务端等待时间重试，停止线程时仍可及时退出。审批异常时继续暂停下载，不会绕过协调端。
 
-## Telegram 共享审批
+## 共享下载审批
 
-双方实例均完成本地选种和近期播出逐文件筛选后，使用已授权的 Telegram
-个人账号，向同一个独立 Bot 申请共享下载资格。不读取频道，不通过频道发布推断下载。
+双方实例均完成本地选种和近期播出逐文件筛选后，通过 Telegram Bot 或 Tailscale 私网 HTTPS
+向同一个协调端申请共享下载资格。不读取频道，不通过频道发布推断下载。
 只有协调端确认批准并持久化占位，才会暂停添加种子、选择获准文件；
 协调端确认入队后才启动下载。电影按媒体类型与 TMDB ID 匹配，剧集另加季集号。
 只比较勾选的全部规格；未选字段忽略。共享模式强制核验身份与已勾规格，未知时不抢占。
@@ -57,12 +57,50 @@ Telegram 限流按服务端等待时间重试，停止线程时仍可及时退�
 该判断不依赖“全局去重字段”是否勾选分辨率，由共享记录预筛和协调端最终审批共同执行，
 请先更新运行协调端的设备。
 
-协调端是本插件内置的 Bot 长轮询线程和 SQLite 数据库，不监听公网端口，
+Telegram 入口是本插件内置的 Bot 长轮询线程，不监听公网端口，
 不需要公网 IP、域名或端口映射。只在一台 NAS 开启协调端；其他实例只启用参与审批。
-双方及协调端都需要能访问 Telegram。不要将协调 Bot Token 配置给其他 Bot 接收器，
+使用 Telegram 通道的设备需要能访问 Telegram。不要将协调 Bot Token 配置给其他 Bot 接收器，
 也不要在多台 NAS 上同时运行同一个 Bot Token 的协调端。
 
-## 配置顺序
+## Tailscale 私网 HTTPS 迁移
+
+1. 先更新协调机和客户端的资源刷流。原配置默认走 Telegram，不自动切换。保留双方的共享组、协调 Bot 用户名和本机实例 ID，保留原协调库；不要新建另一个监听协调端。
+2. 分别为协调机和客户端生成独立密钥和 SHA-256 指纹。在各自可信终端执行以下命令一次，仅将密钥通过安全渠道交给对应设备；协调端的设备列表只填指纹，不填原密钥。
+
+   ```sh
+   key=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+   printf '密钥：%s\nSHA-256：' "$key"
+   printf '%s' "$key" | sha256sum
+   unset key
+   ```
+
+3. 协调端全局设置开启“提供私网 HTTPS 审批入口”，暂时保留 Telegram 入口和原传输方式。“允许的私网设备”每行填写 `本机实例ID 原Telegram个人账号数字ID 密钥SHA-256指纹`，中间用空格。两端的实例 ID 可各自在全局设置复制。个人账号必须与旧占位的原绑定一致，不用 Bot ID。保存后查看“共享账本 ID”。
+4. 从 Tailscale Serve 私网 `443` 只代理 `/resourceflow-approval/v1/rpc` 到资源刷流接口，禁止用 Funnel、映射 MoviePilot 端口或放通整个子网。协调端插件只监听 `/config/plugins/ResourceFlow/approval-private/rpc.sock`。Docker 里可用一个小转发容器，共用专用 Tailscale 容器网络命名空间，把该 socket 接到命名空间自己的 `127.0.0.1:18764`。例如（把 `MP_CONFIG` 改成协调机 MoviePilot `/config` 对应的宿主机路径）：
+
+   ```sh
+   SOCKET_DIR="$MP_CONFIG/plugins/ResourceFlow/approval-private"
+   test -S "$SOCKET_DIR/rpc.sock"
+   docker run -d --name resourceflow-approval-relay \
+     --network container:tailscale-resourceflow --restart unless-stopped \
+     --cap-drop ALL --security-opt no-new-privileges --read-only \
+     --mount "type=bind,src=$SOCKET_DIR,dst=/run/resourceflow,readonly" \
+     --entrypoint socat docksal/socat:latest \
+     'TCP-LISTEN:18764,bind=127.0.0.1,reuseaddr,fork,max-children=16' \
+     'UNIX-CONNECT:/run/resourceflow/rpc.sock'
+   docker exec tailscale-resourceflow tailscale serve --bg --https=443 \
+     --set-path=/resourceflow-approval/v1/rpc \
+     'http://127.0.0.1:18764/resourceflow-approval/v1/rpc'
+   ```
+
+   只允许对端设备访问专用协调节点 TCP `443`。转发容器不发布端口，不挂载 Docker Socket、配置目录或媒体目录。若重建专用 Tailscale 容器，也要重建转发容器，让它引用新的网络命名空间。客户端容器如无法正常解析 Tailscale 域名，修复容器 DNS，或重建时保留原参数并用 Docker `--add-host` 持久化该域名与 Tailscale IP 的映射。
+5. 逐台将“审批传输”改为“Tailscale 私网 HTTPS”，填写本机密钥。远端客户端还要填协调端完整 Tailscale 域名和共享账本 ID；协调机本地通过同一个 Unix socket 请求。保存会先验证凭证、账本和未完成占位，成功后再保存。之后点“测试审批连接”，核对规则版本并查看原下载记录。确认所有实例均已切换后，再关闭协调机的 Telegram 审批入口。
+
+两种入口在迁移期间共用同一 SQLite 权威库、实例绑定和请求编号，原记录和未完成占位均保留。
+选择 HTTPS 后，增量同步、占位、入队、完成和释放只走私网，不会自动回退 Telegram。
+HTTPS 使用正常证书校验，不通过 MoviePilot 代理、不跟随重定向；请求失败时新增下载暂缓，
+待恢复后沿用原申请继续核验。只有在 Telegram 入口仍可用时，才能手动切回原通道。
+
+## Telegram 配置顺序
 
 1. 在 BotFather 创建独立的协调 Bot，记录 Bot 用户名与 Token。
 2. 双方启用“自动生成ED2K链接”插件并分别完成个人账号授权，使用各自 Session，
@@ -97,7 +135,7 @@ Bot Token、用户 Session、站点下载链接、Cookie、Passkey 均不会写�
   活跃占位缓存最多用两分钟，已完成记录最多用十分钟；初次同步未完成、增量落后、缓存过期或同步失败时，回退协调端审批。
   两台设备同时缓存未命中，仍只能有一台获准。审批未确认绝不启动下载；入队、完成和释放状态继续按原流程回报。
 - 镜像追平后，客户端的共享下载记录列表用本地数据搜索和翻页。日志中的“共享下载记录本地命中”表示已省去一次候选申请；
-  同步仍需 Telegram，整体流量是否下降取决于候选重复率。
+  同步使用所选传输，整体审批请求数取决于候选重复率。
 
 ## 生命周期与故障
 

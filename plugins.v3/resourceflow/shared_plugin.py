@@ -1,4 +1,4 @@
-"""Download admission and conservative recovery for cross-instance Telegram arbitration."""
+"""Download admission and conservative recovery for cross-instance arbitration."""
 
 import copy
 import hashlib
@@ -29,6 +29,7 @@ from .shared_cache import (
 )
 from .shared_coordinator import BotWorker, CoordinatorStore
 from .shared_history import AUTHORITY_VERSION, completion_rows
+from .shared_http import ApprovalServer, HTTPSApprovalRPC, approval_socket
 from .shared_models import SharedSettingsPayload
 from .shared_protocol import RULE_DEFAULTS, SharedError, digest, policy
 from .telegram_rpc import TelegramRPC, ed2k_account
@@ -80,7 +81,14 @@ class SharedResourceMixin:
             if self._shared_settings.host_coordinator:
                 self._ensure_shared_worker()
                 self._apply_shared_policy(self._shared_store.policy)
-                response = {"policy": self._shared_store.policy, **self._shared_store.authority()}
+                response = getattr(self, "_shared_probe", None)
+                if self._shared_settings.transport == "https" and (
+                    not response or time.time() - getattr(self, "_shared_policy_checked_at", 0) >= 600
+                ):
+                    response = self._shared_exchange(uuid.uuid4().hex, {"op": "policy"})
+                    self._shared_policy_checked_at = time.time()
+                elif self._shared_settings.transport == "telegram":
+                    response = {"policy": self._shared_store.policy, **self._shared_store.authority()}
             else:
                 response = getattr(self, "_shared_probe", None)
                 if not response or time.time() - getattr(self, "_shared_policy_checked_at", 0) >= 600:
@@ -88,7 +96,7 @@ class SharedResourceMixin:
                     self._shared_policy_checked_at = time.time()
                 self._apply_shared_policy(response.get("policy"))
             self._shared_probe = response
-            if self._shared_settings.host_coordinator:
+            if self._shared_settings.host_coordinator and self._shared_settings.transport == "telegram":
                 self._shared_policy_checked_at = time.time()
             self._require_shared_authority(response)
             self._sync_shared_history(store=self._shared_store if self._shared_settings.host_coordinator else None)
@@ -319,7 +327,7 @@ class SharedResourceMixin:
                     self._shared_policy_changed()
                 return response
             finally:
-                if store and changed and not self._shared_worker:
+                if store and changed and not self._shared_store:
                     self._shared_stopping = False
                     self._start_shared_worker()
 
@@ -327,7 +335,7 @@ class SharedResourceMixin:
         return None
 
     def request_channel_dedup_poll(self) -> schemas.Response:
-        return schemas.Response(success=False, message="资源刷流不读取频道，请使用 Telegram 共享审批")
+        return schemas.Response(success=False, message="资源刷流不读取频道，请使用共享下载审批")
 
     def request_shared_reconcile(self) -> schemas.Response:
         from app.runtime.thread import ThreadHelper
@@ -346,11 +354,13 @@ class SharedResourceMixin:
         self._shared_lock = getattr(self, "_shared_lock", threading.RLock())
         self._shared_rpc_lock = getattr(self, "_shared_rpc_lock", threading.RLock())
         self._shared_worker = None
+        self._shared_http_server = None
+        self._shared_http_error = ""
+        self._shared_http_retry_at = 0
         self._shared_store = None
         self._shared_stopping = False
         self._shared_transport_lock = threading.Lock()
         self._shared_worker_retry_at = 0
-        self._shared_error = self.get_data("shared_retry_error") or ""
         self._shared_last_ok = None
         raw = dict(config.get("shared") or {})
         instance_id = raw.pop("instance_id", None)
@@ -361,7 +371,7 @@ class SharedResourceMixin:
         self._shared_completed_outbox = self.get_data("shared_completed_outbox") or {}
         self._shared_integrity_error = ""
         self._shared_audit_at = 0
-        self._shared_retry_at = float(self.get_data("shared_retry_at") or 0)
+        self._load_shared_backoff()
         self._shared_probe = None
         self._shared_cache = None
         self._shared_cache_next_sync = 0
@@ -377,11 +387,42 @@ class SharedResourceMixin:
         value = getattr(self, "_shared_settings", SharedSettingsPayload()).model_dump()
         return {**value, "instance_id": getattr(self, "_shared_instance_id", "")}
 
+    def _shared_backoff_key(self, key):
+        return f"{key}_https" if self._shared_settings.transport == "https" else key
+
+    def _load_shared_backoff(self):
+        self._shared_retry_at = float(self.get_data(self._shared_backoff_key("shared_retry_at")) or 0)
+        self._shared_error = self.get_data(self._shared_backoff_key("shared_retry_error")) or ""
+
+    def _save_shared_backoff(self, retry_at, error):
+        self._shared_retry_at = retry_at
+        self.save_data(self._shared_backoff_key("shared_retry_at"), retry_at)
+        self.save_data(self._shared_backoff_key("shared_retry_error"), error)
+
+    def _start_shared_http(self):
+        self._shared_http_error = ""
+        if self._shared_settings.https_listener and self._shared_store is not None:
+            try:
+                self._shared_store.verify_peer_owners(self._shared_settings.https_peers)
+                self._shared_http_server = ApprovalServer(
+                    approval_socket(self.get_data_path()), self._shared_store, self._shared_settings.https_peers,
+                )
+            except SharedError as error:
+                self._shared_http_error = str(error)
+            except (OSError, RuntimeError) as error:
+                self._shared_http_error = f"私网审批入口启动失败（{type(error).__name__}）"
+
+    def _stop_shared_http(self):
+        listener = getattr(self, "_shared_http_server", None)
+        if listener:
+            listener.stop()
+            self._shared_http_server = None
+
     def _start_shared_worker(self):
         config = self._shared_settings
         if not config.host_coordinator:
             return
-        if not config.bot_token:
+        if config.telegram_listener and not config.bot_token and not config.https_listener:
             self._shared_error = "协调端尚未配置 Bot Token"
             self._shared_worker_retry_at = time.time() + 30
             return
@@ -393,13 +434,6 @@ class SharedResourceMixin:
                 self._shared_rules(),
             )
             self._sync_shared_history(store=self._shared_store)
-            self._shared_worker = BotWorker(
-                self._shared_store, config.bot_token, config.bot_username, config.allowed_users,
-                proxies=settings.PROXY,
-            )
-            self._shared_worker.start()
-            self._shared_error = ""
-            self._shared_worker_retry_at = 0
         except Exception as error:
             self._shared_store = None
             self._shared_worker = None
@@ -407,12 +441,48 @@ class SharedResourceMixin:
             detail = str(error).strip().replace("\n", " ")[:160]
             cause = f"{type(error).__name__}: {detail}" if detail else type(error).__name__
             self._shared_error = f"协调服务启动失败（{cause}），30 秒后自动重试"
+            return
+        self._start_shared_http()
+        self._start_shared_bot()
+
+    def _start_shared_bot(self):
+        config = self._shared_settings
+        self._shared_worker_retry_at = 0
+        if not config.telegram_listener:
+            return
+        try:
+            if not config.bot_token:
+                raise SharedError("协调端尚未配置 Bot Token")
+            self._shared_worker = BotWorker(
+                self._shared_store, config.bot_token, config.bot_username, config.allowed_users,
+                proxies=settings.PROXY,
+            )
+            self._shared_worker.start()
+            if config.transport == "telegram" and not self._shared_retry_at:
+                self._shared_error = ""
+        except Exception as error:
+            self._shared_worker = None
+            self._shared_worker_retry_at = time.time() + 30
+            if config.transport == "telegram":
+                detail = str(error) if isinstance(error, SharedError) else type(error).__name__
+                self._shared_error = f"协调 Bot 启动失败（{detail}），30 秒后自动重试"
 
     def _ensure_shared_worker(self):
         if self._shared_stopping:
             raise SharedError("本机协调端正在停止或重启，暂缓新增下载")
         if not self._shared_settings.host_coordinator:
             raise SharedError("当前实例未启用本机协调端")
+        if self._shared_settings.transport == "https":
+            listener = getattr(self, "_shared_http_server", None)
+            if not self._shared_store and time.time() >= self._shared_worker_retry_at:
+                self._start_shared_worker()
+            elif self._shared_store and not listener and time.time() >= getattr(self, "_shared_http_retry_at", 0):
+                self._shared_http_retry_at = time.time() + 30
+                self._start_shared_http()
+            listener = getattr(self, "_shared_http_server", None)
+            if self._shared_store and listener and listener.thread.is_alive():
+                return
+            raise SharedError(getattr(self, "_shared_http_error", "") or self._shared_error or "本机私网审批入口尚未就绪")
         worker = self._shared_worker
         if worker and worker.thread and worker.thread.is_alive() and self._shared_store:
             if worker.ready_event.is_set():
@@ -426,8 +496,11 @@ class SharedResourceMixin:
             reason = self._shared_error or "协调服务启动失败"
             raise SharedError(f"{reason}，暂缓新增下载")
         self._shared_worker = None
-        self._shared_store = None
-        self._start_shared_worker()
+        if self._shared_store and self._shared_settings.https_listener:
+            self._start_shared_bot()
+        else:
+            self._shared_store = None
+            self._start_shared_worker()
         worker = self._shared_worker
         if not self._shared_store or not worker or not worker.thread or not worker.thread.is_alive():
             raise SharedError(f"{self._shared_error or '本机协调端启动失败'}，暂缓新增下载")
@@ -437,6 +510,7 @@ class SharedResourceMixin:
 
     def _stop_shared(self):
         self._shared_stopping = True
+        self._stop_shared_http()
         worker = getattr(self, "_shared_worker", None)
         if worker:
             worker.stop()
@@ -481,14 +555,20 @@ class SharedResourceMixin:
     def get_shared_status(self) -> schemas.Response:
         config = self._shared_config()
         token = config.pop("bot_token", None)
+        https_token = config.pop("https_token", None)
+        listener = getattr(self, "_shared_http_server", None)
+        store = getattr(self, "_shared_store", None)
+        https_running = bool(listener and listener.thread.is_alive())
         worker = getattr(self, "_shared_worker", None)
         claims = list(getattr(self, "_shared_claims", {}).values())
         return schemas.Response(success=True, data={
-            **config, "token_configured": bool(token),
-            "coordinator_running": bool(worker and worker.thread and worker.thread.is_alive()
+            **config, "token_configured": bool(token), "https_token_configured": bool(https_token),
+            "https_running": https_running, "https_listener_error": getattr(self, "_shared_http_error", ""),
+            "coordinator_authority_id": store.authority()["authority_id"] if store else "",
+            "coordinator_running": https_running or bool(worker and worker.thread and worker.thread.is_alive()
                                          and getattr(worker, "ready_event", None)
                                          and worker.ready_event.is_set()),
-            "last_error": self._shared_error or (worker.last_error if worker else ""),
+            "last_error": self._shared_error or (worker.last_error if worker and config["transport"] == "telegram" else ""),
             "last_ok": self._shared_last_ok, "coordinator_last_ok": worker.last_ok if worker else None,
             "retry_at": self._shared_retry_at,
             "policy": self._local_shared_policy()
@@ -576,9 +656,11 @@ class SharedResourceMixin:
         try:
             with self._shared_rpc_lock, self._shared_lock:
                 previous = self._shared_settings
-                if payload.bot_token is None:
-                    payload = payload.model_copy(update={"bot_token": previous.bot_token})
-                if payload.host_coordinator and not payload.bot_token:
+                payload = payload.model_copy(update={
+                    key: getattr(previous, key) for key in ("bot_token", "https_token")
+                    if getattr(payload, key) is None
+                })
+                if payload.host_coordinator and payload.telegram_listener and not payload.bot_token:
                     raise SharedError("运行协调端必须填写独立 Bot Token")
                 unfinished = any(row["phase"] not in {"released", "completed", "rejected"}
                                  for row in self._shared_claims.values())
@@ -587,8 +669,41 @@ class SharedResourceMixin:
                 if unfinished and route_changed:
                     raise SharedError("仍有未完成共享申请，不能更换 Bot、Token 或共享组")
                 store = self._shared_store
+                http_changed = (payload.https_listener, payload.https_peers) != (
+                    previous.https_listener, previous.https_peers)
+                http_client_changed = (payload.https_host, payload.https_token, payload.https_authority_id) != (
+                    previous.https_host, previous.https_token, previous.https_authority_id)
+                switching = payload.transport != previous.transport
+                if payload.host_coordinator and payload.transport == "https" and (payload.enabled or unfinished):
+                    token_hash = hashlib.sha256((payload.https_token or "").encode()).hexdigest()
+                    if not any(peer.instance_id == self._shared_instance_id and peer.token_hash == token_hash
+                               for peer in payload.https_peers):
+                        raise SharedError("本机私网审批密钥与允许设备列表中的本机实例不匹配")
+                if payload.host_coordinator and payload.https_listener and store and not route_changed:
+                    store.verify_peer_owners(payload.https_peers)
+                if payload.transport == "https" and (payload.enabled or unfinished) and (
+                    switching or http_client_changed or not previous.enabled
+                ):
+                    if payload.host_coordinator and (http_changed or not store or route_changed):
+                        raise SharedError("请先单独开启并保存私网审批入口，再切换本机传输方式")
+                    known = (getattr(self, "_shared_probe", None) or {}).get("authority_id")
+                    if known and not payload.host_coordinator and known != payload.https_authority_id:
+                        raise SharedError("私网审批账本 ID 与当前协调端不一致，仍保留原连接")
+                    response = self._https_shared_exchange(payload, uuid.uuid4().hex, {"op": "policy"})
+                    self._require_shared_authority(response)
+                    links = [{"claim": claim, "request_id": row["request_id"], "file_id": file_id}
+                             for row in self._shared_claims.values() for file_id, claim in row.get("approved", {}).items()
+                             if row["phase"] not in {"completed", "released", "rejected"}]
+                    for start in range(0, len(links), 100):
+                        batch = links[start:start + 100]
+                        result = self._https_shared_exchange(payload, uuid.uuid4().hex, {"op": "inspect", "claims": batch})
+                        if {row["claim"] for row in result.get("claims", []) if row.get("state") != "missing"} != {
+                            row["claim"] for row in batch
+                        }:
+                            raise SharedError("私网审批未能核验原有占位，仍保留原连接")
                 restart = (route_changed or payload.host_coordinator != previous.host_coordinator
-                           or payload.allowed_users != previous.allowed_users)
+                           or payload.allowed_users != previous.allowed_users
+                           or payload.telegram_listener != previous.telegram_listener)
                 if restart:
                     self._stop_shared()
                     self._shared_stopping = False
@@ -597,18 +712,25 @@ class SharedResourceMixin:
                         self._start_shared_worker()
                         raise SharedError("协调端仍有其他实例未完成的占位，不能更换连接或关闭协调端")
                 self._shared_settings = payload
-                if route_changed or payload.host_coordinator != previous.host_coordinator:
+                if route_changed or switching or http_client_changed or payload.host_coordinator != previous.host_coordinator:
                     self._shared_probe = None
                     self._shared_policy_checked_at = 0
                     self._shared_cache_next_sync = 0
                     self._shared_cache_activity = time.time()
                     self._shared_cache_sync_failed = False
                 self._shared_stopping = False
-                self._shared_error = ""
+                if switching:
+                    self._load_shared_backoff()
+                if payload.transport == "https" and http_client_changed:
+                    self._save_shared_backoff(0, "")
+                    self._shared_error = ""
                 self._shared_worker_retry_at = 0
                 self._save_config()
                 if restart:
                     self._start_shared_worker()
+                elif payload.host_coordinator and http_changed:
+                    self._stop_shared_http()
+                    self._start_shared_http()
                 self._refresh_scheduler()
             return self.get_shared_status()
         except (SharedError, ValueError) as error:
@@ -634,6 +756,23 @@ class SharedResourceMixin:
             reason = getattr(self, "_shared_error", "") or "上次连接失败"
             raise SharedError(f"共享审批退避等待，约 {remaining} 秒后重试；上次原因：{reason}")
 
+    def _https_shared_exchange(self, config, request_id, value):
+        body = {"v": 1, "group": config.group, "instance": self._shared_instance_id,
+                "label": config.instance_label, **value}
+        local_socket = None
+        authority = config.https_authority_id
+        if config.host_coordinator:
+            if config is self._shared_settings:
+                self._ensure_shared_worker()
+            store = self._shared_store
+            listener = getattr(self, "_shared_http_server", None)
+            if not store or not listener or not listener.thread.is_alive():
+                raise SharedError("本机私网审批入口尚未就绪")
+            authority = store.authority()["authority_id"]
+            local_socket = approval_socket(self.get_data_path())
+        return HTTPSApprovalRPC(config.https_host, config.https_token, authority,
+                                local_socket=local_socket).exchange(request_id, body)
+
     def _shared_exchange(self, request_id, value):
         # Several site tasks can enter the same refresh cycle together. Recheck
         # the shared backoff after waiting for the transport lock so queued
@@ -644,10 +783,13 @@ class SharedResourceMixin:
             body = {"v": 1, "group": config.group, "instance": self._shared_instance_id,
                     "label": config.instance_label, **value}
             try:
-                account = ed2k_account(settings.PROXY)
-                rpc = (TelegramRPC(account, config.bot_username, timeout=20) if value.get("op") == "sync_records"
-                       else TelegramRPC(account, config.bot_username))
-                result = rpc.exchange(request_id, body)
+                if config.transport == "https":
+                    result = self._https_shared_exchange(config, request_id, value)
+                else:
+                    account = ed2k_account(settings.PROXY)
+                    rpc = (TelegramRPC(account, config.bot_username, timeout=20) if value.get("op") == "sync_records"
+                           else TelegramRPC(account, config.bot_username))
+                    result = rpc.exchange(request_id, body)
                 if value.get("op") != "policy":
                     self._require_shared_authority(result)
                     previous = (getattr(self, "_shared_probe", None) or {}).get("authority_id")
@@ -658,18 +800,15 @@ class SharedResourceMixin:
                         raise SharedError(self._shared_integrity_error)
                 self._shared_last_ok, self._shared_error = time.time(), ""
                 if self._shared_retry_at:
-                    self._shared_retry_at = 0
-                    self.save_data("shared_retry_at", 0)
-                    self.save_data("shared_retry_error", "")
+                    self._save_shared_backoff(0, "")
                 return result
             except SharedError as error:
                 self._shared_error = str(error)
                 if getattr(error, "definitive", False):
                     self._shared_policy_checked_at = 0
                 elif value.get("op") != "sync_records" or getattr(error, "retry_after", 0):
-                    self._shared_retry_at = time.time() + max(15, getattr(error, "retry_after", 15))
-                    self.save_data("shared_retry_at", self._shared_retry_at)
-                    self.save_data("shared_retry_error", self._shared_error)
+                    self._save_shared_backoff(time.time() + max(15, getattr(error, "retry_after", 15)),
+                                              self._shared_error)
                 raise
 
     def _save_shared(self):

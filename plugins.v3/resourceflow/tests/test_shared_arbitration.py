@@ -909,7 +909,8 @@ class PluginSetupTests(unittest.TestCase):
             host_coordinator=True, bot_username="@testbot", bot_token="12345:" + "x" * 30,
             allowed_users=[11], instance_label="old")
         p._shared_worker = SimpleNamespace(thread=None, last_error="", last_ok=None)
-        p._shared_store = SimpleNamespace(recent=lambda: [], has_unfinished=lambda: True)
+        p._shared_store = SimpleNamespace(recent=lambda: [], has_unfinished=lambda: True,
+                                         authority=lambda: {"authority_id": "a" * 32})
         p._stop_shared = Mock()
         response = p.update_shared_settings(p._shared_settings.model_copy(update={"instance_label": "NAS A"}))
         self.assertTrue(response.success)

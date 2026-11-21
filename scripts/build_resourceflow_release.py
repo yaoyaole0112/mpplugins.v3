@@ -49,7 +49,7 @@ def build_release(root, output):
     names = {name for _, name in files}
     required = {"__init__.py", "models.py", "channel_dedup.py", "active_dedup.py", "resource_dedup.py",
                 "shared_protocol.py", "shared_coordinator.py", "shared_plugin.py", "shared_models.py", "telegram_rpc.py",
-                "record_search.py", "shared_history.py", "shared_cache.py", "dist/assets/remoteEntry.js"}
+                "record_search.py", "shared_history.py", "shared_cache.py", "shared_http.py", "dist/assets/remoteEntry.js"}
     if not required.issubset(names):
         raise ValueError("Release is missing runtime modules or the built frontend")
     output.mkdir(parents=True, exist_ok=True)

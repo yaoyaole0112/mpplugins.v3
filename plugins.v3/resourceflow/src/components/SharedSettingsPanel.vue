@@ -14,10 +14,16 @@ const state = ref({ requests: [], records: [] })
 const draft = ref({
   enabled: false, host_coordinator: false, bot_username: '', group: 'resources',
   instance_label: '我的资源刷流', bot_token: '', allowed_users: '',
+  transport: 'telegram', telegram_listener: true, https_listener: false,
+  https_host: '', https_authority_id: '', https_token: '', https_peers: '',
 })
 const busy = ref(false)
 const ready = ref(false)
 const canTest = computed(() => Boolean(state.value.bot_username))
+const transportOptions = [
+  { value: 'telegram', title: 'Telegram Bot' },
+  { value: 'https', title: 'Tailscale 私网 HTTPS' },
+]
 const error = ref('')
 const recordRows = ref({ items: [], total: 0 })
 const requestRows = computed(() => uniqueRequestRows(recordRows.value.items).map(row => ({
@@ -127,6 +133,10 @@ async function load(reset = false) {
     bot_username: data.bot_username || '', group: data.group || 'resources',
     instance_label: data.instance_label || '我的资源刷流', bot_token: '',
     allowed_users: (data.allowed_users || []).join(', '),
+    transport: data.transport || 'telegram', telegram_listener: data.telegram_listener !== false,
+    https_listener: Boolean(data.https_listener), https_host: data.https_host || '',
+    https_authority_id: data.https_authority_id || '', https_token: '',
+    https_peers: (data.https_peers || []).map(peer => `${peer.instance_id} ${peer.sender} ${peer.token_hash}`).join('\n'),
   }
   await recordsPromise
 }
@@ -149,6 +159,16 @@ async function save() {
     }
     const payload = { ...draft.value, allowed_users: [...new Set(users.map(Number))] }
     if (!payload.bot_token) delete payload.bot_token
+    if (!payload.https_token) delete payload.https_token
+    payload.https_peers = draft.value.https_peers.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => {
+      const [instance_id, rawSender, token_hash, extra] = line.split(/\s+/)
+      const sender = Number(rawSender)
+      if (extra || !/^[a-f0-9]{32}$/.test(instance_id) || !/^\d+$/.test(rawSender)
+        || !Number.isSafeInteger(sender) || sender <= 0 || !/^[a-f0-9]{64}$/.test(token_hash)) {
+        throw new Error('私网设备格式无效：每行填写实例 ID、个人账号数字 ID、密钥 SHA-256 指纹')
+      }
+      return { instance_id, sender, token_hash }
+    })
     unwrapResponse(await props.api.post(`${props.pluginBase}/shared/settings`, payload))
     await load(true)
     return state.value
@@ -204,24 +224,48 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
       缺少身份、已勾规格或有效时间的旧证据会保留，补齐后才可重新校验；这不是正在等待同步的任务。
     </VAlert>
     <template v-if="mode === 'settings'">
-    <div class="text-subtitle-2">Telegram 共享审批</div>
+    <VAlert v-if="state.https_listener_error" type="warning" variant="tonal" density="compact">
+      {{ state.https_listener_error }}
+    </VAlert>
+    <div class="text-subtitle-2">共享下载审批</div>
     <div class="shared-settings__grid">
       <VSwitch v-model="draft.enabled" label="启用共享下载审批" color="primary" density="compact" hide-details inset />
       <VSwitch v-model="draft.host_coordinator" label="在本机运行协调端" color="primary" density="compact" hide-details inset />
-      <VTextField v-model="draft.bot_username" label="协调 Bot 用户名" placeholder="@resource_bot" density="comfortable" hide-details />
+      <VSelect v-model="draft.transport" label="审批传输" :items="transportOptions" density="comfortable" hide-details />
       <VTextField v-model="draft.group" label="共享组" density="comfortable" hide-details />
+      <VTextField v-model="draft.bot_username" label="协调 Bot 用户名（现有账本保留原值）"
+        placeholder="@resource_bot" density="comfortable" hide-details />
       <VTextField v-model="draft.instance_label" label="本机名称" maxlength="80" density="comfortable" hide-details />
       <VTextField :model-value="state.instance_id || '-'" label="本机实例 ID"
         class="shared-settings__instance" readonly density="comfortable" hide-details />
     </div>
-    <div v-if="draft.host_coordinator" class="shared-settings__grid shared-settings__credentials">
+    <div v-if="draft.host_coordinator" class="shared-settings__grid">
+      <VSwitch v-model="draft.telegram_listener" label="提供 Telegram 审批入口" color="primary" density="compact" hide-details inset />
+      <VSwitch v-model="draft.https_listener" label="提供私网 HTTPS 审批入口" color="primary" density="compact" hide-details inset />
+    </div>
+    <div v-if="draft.host_coordinator && draft.telegram_listener" class="shared-settings__grid shared-settings__credentials">
       <VTextField v-model="draft.bot_token" type="password" autocomplete="new-password"
         :label="state.token_configured ? '协调 Bot Token（已保存）' : '协调 Bot Token'" density="comfortable" hide-details />
       <VTextarea v-model="draft.allowed_users" label="允许的个人账号 ID" rows="1" density="comfortable"
         placeholder="123456789, 987654321; 112233445" auto-grow hide-details />
     </div>
+    <div v-if="draft.host_coordinator && draft.https_listener" class="shared-settings__grid">
+      <VTextField :model-value="state.coordinator_authority_id || ''" label="共享账本 ID"
+        class="shared-settings__instance" readonly density="comfortable" hide-details />
+      <VTextarea v-model="draft.https_peers" label="允许的私网设备（实例 ID / 个人账号 ID / 密钥指纹）"
+        rows="2" max-rows="6" density="comfortable" auto-grow hide-details />
+    </div>
+    <div v-if="draft.transport === 'https'" class="shared-settings__grid">
+      <VTextField v-if="!draft.host_coordinator" v-model="draft.https_host" label="协调端 Tailscale HTTPS 域名"
+        placeholder="approval.example.ts.net" density="comfortable" hide-details />
+      <VTextField v-if="!draft.host_coordinator" v-model="draft.https_authority_id" label="协调端共享账本 ID"
+        class="shared-settings__instance" density="comfortable" hide-details />
+      <VTextField v-model="draft.https_token" type="password" autocomplete="new-password"
+        :label="state.https_token_configured ? '本机私网审批密钥（已保存）' : '本机私网审批密钥'"
+        density="comfortable" hide-details />
+    </div>
     <dl class="shared-settings__status">
-      <div><dt>账号来源：</dt><dd>插件（自动生成ED2K链接）</dd></div>
+      <div><dt>审批传输：</dt><dd>{{ state.transport === 'https' ? 'Tailscale HTTPS' : 'Telegram（自动生成ED2K链接）' }}</dd></div>
       <div><dt>协调端：</dt><dd>{{ state.host_coordinator ? state.coordinator_running ? '本机运行中' : '本机未运行' : '远端' }}</dd></div>
       <div><dt>最近审批确认：</dt><dd>{{ timestamp(state.last_ok || state.coordinator_last_ok) }}</dd></div>
       <div><dt>协调端规则版本：</dt><dd>{{ state.probe?.policy?.revision?.slice(0, 12) || '-' }}</dd></div>

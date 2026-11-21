@@ -73,9 +73,18 @@ def decode(parts):
         raw = inflater.decompress(compressed, MAX_BYTES + 1)
         if len(raw) > MAX_BYTES or inflater.unconsumed_tail or not inflater.eof or inflater.unused_data:
             raise ValueError()
-        def invalid_constant(value):
-            raise ValueError("Non-finite JSON constant")
+        return decode_json(raw)
+    except (ValueError, TypeError, RecursionError, zlib.error):
+        raise SharedError("无法解码协议消息") from None
 
+
+def decode_json(raw):
+    def invalid_constant(_):
+        raise ValueError()
+
+    try:
+        if len(raw) > MAX_BYTES:
+            raise ValueError()
         value = json.loads(raw, parse_constant=invalid_constant)
         if not isinstance(value, dict):
             raise ValueError()
@@ -89,7 +98,7 @@ def decode(parts):
             elif isinstance(item, list):
                 stack.extend((child, depth + 1) for child in item)
         return value
-    except (ValueError, TypeError, RecursionError, zlib.error):
+    except (ValueError, TypeError, RecursionError):
         raise SharedError("无法解码协议消息") from None
 
 

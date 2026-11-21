@@ -245,6 +245,13 @@ class CoordinatorStore:
         return {"ok": True, "approved": approved, "rejected": rejected,
                 "pack_rejected": False, "policy": self.policy, **self.authority()}
 
+    def verify_peer_owners(self, peers):
+        with self.connect() as db:
+            for peer in peers:
+                row = db.execute("SELECT sender FROM owners WHERE instance=?", (peer.instance_id,)).fetchone()
+                if row and row["sender"] != peer.sender:
+                    raise SharedError(f"实例 {peer.instance_id} 的个人账号 ID 与原审批账本不一致")
+
     def authority(self):
         return {"authority_version": AUTHORITY_VERSION, "authority_id": self.meta("authority_id"),
                 "record_sync_version": SYNC_VERSION}

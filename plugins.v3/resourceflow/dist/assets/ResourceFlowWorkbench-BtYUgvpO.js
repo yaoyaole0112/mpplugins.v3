@@ -1269,80 +1269,92 @@ const {toDisplayString:_toDisplayString$1,createTextVNode:_createTextVNode$1,res
 
 const _hoisted_1$1 = { class: "shared-settings__grid" };
 const _hoisted_2$1 = {
-  key: 0,
+  key: 1,
+  class: "shared-settings__grid"
+};
+const _hoisted_3$1 = {
+  key: 2,
   class: "shared-settings__grid shared-settings__credentials"
 };
-const _hoisted_3$1 = { class: "shared-settings__status" };
 const _hoisted_4$1 = {
+  key: 3,
+  class: "shared-settings__grid"
+};
+const _hoisted_5$1 = {
+  key: 4,
+  class: "shared-settings__grid"
+};
+const _hoisted_6$1 = { class: "shared-settings__status" };
+const _hoisted_7$1 = {
   key: 0,
   class: "shared-settings__search"
 };
-const _hoisted_5$1 = {
+const _hoisted_8$1 = {
   key: 1,
   class: "shared-settings__records"
 };
-const _hoisted_6$1 = {
+const _hoisted_9$1 = {
   key: 0,
   class: "text-body-2 text-medium-emphasis"
 };
-const _hoisted_7$1 = { class: "shared-settings__record-head" };
-const _hoisted_8$1 = {
+const _hoisted_10$1 = { class: "shared-settings__record-head" };
+const _hoisted_11$1 = {
   key: 0,
   class: "shared-settings__heading"
 };
-const _hoisted_9$1 = { key: 1 };
-const _hoisted_10$1 = ["data-tone"];
-const _hoisted_11$1 = {
+const _hoisted_12$1 = { key: 1 };
+const _hoisted_13$1 = ["data-tone"];
+const _hoisted_14$1 = {
   key: 0,
   class: "shared-settings__torrent-title"
 };
-const _hoisted_12$1 = { class: "shared-settings__meta text-caption" };
-const _hoisted_13$1 = { key: 0 };
-const _hoisted_14$1 = { key: 1 };
-const _hoisted_15$1 = {
+const _hoisted_15$1 = { class: "shared-settings__meta text-caption" };
+const _hoisted_16$1 = { key: 0 };
+const _hoisted_17$1 = { key: 1 };
+const _hoisted_18$1 = {
   key: 1,
   class: "shared-settings__error text-body-2"
 };
-const _hoisted_16$1 = {
+const _hoisted_19$1 = {
   key: 2,
   class: "shared-settings__error text-body-2"
 };
-const _hoisted_17$1 = { class: "shared-settings__ids" };
-const _hoisted_18$1 = { class: "shared-settings__id text-caption" };
-const _hoisted_19$1 = {
+const _hoisted_20$1 = { class: "shared-settings__ids" };
+const _hoisted_21$1 = { class: "shared-settings__id text-caption" };
+const _hoisted_22$1 = {
   key: 0,
   class: "shared-settings__id text-caption"
 };
-const _hoisted_20$1 = {
+const _hoisted_23$1 = {
   key: 2,
   class: "shared-settings__records"
 };
-const _hoisted_21$1 = {
+const _hoisted_24$1 = {
   key: 0,
   class: "text-body-2 text-medium-emphasis"
 };
-const _hoisted_22$1 = { class: "shared-settings__record-head" };
-const _hoisted_23$1 = { class: "shared-settings__heading" };
-const _hoisted_24$1 = { class: "shared-settings__preview shared-settings__media-summary shared-settings__info text-body-2" };
-const _hoisted_25$1 = ["data-tone"];
-const _hoisted_26$1 = { class: "shared-settings__torrent-title" };
-const _hoisted_27$1 = { class: "shared-settings__meta shared-settings__claim-meta text-caption" };
-const _hoisted_28$1 = { class: "shared-settings__claim-owner" };
-const _hoisted_29$1 = { class: "shared-settings__ids" };
-const _hoisted_30$1 = { class: "shared-settings__id text-caption" };
-const _hoisted_31$1 = {
+const _hoisted_25$1 = { class: "shared-settings__record-head" };
+const _hoisted_26$1 = { class: "shared-settings__heading" };
+const _hoisted_27$1 = { class: "shared-settings__preview shared-settings__media-summary shared-settings__info text-body-2" };
+const _hoisted_28$1 = ["data-tone"];
+const _hoisted_29$1 = { class: "shared-settings__torrent-title" };
+const _hoisted_30$1 = { class: "shared-settings__meta shared-settings__claim-meta text-caption" };
+const _hoisted_31$1 = { class: "shared-settings__claim-owner" };
+const _hoisted_32$1 = { class: "shared-settings__ids" };
+const _hoisted_33$1 = { class: "shared-settings__id text-caption" };
+const _hoisted_34$1 = {
   key: 0,
   class: "shared-settings__id text-caption"
 };
-const _hoisted_32$1 = {
+const _hoisted_35$1 = {
   key: 3,
   class: "shared-settings__pagination"
 };
-const _hoisted_33$1 = {
+const _hoisted_36$1 = {
   key: 0,
   class: "shared-settings__pagination-control"
 };
-const _hoisted_34$1 = { class: "shared-settings__total text-caption text-medium-emphasis" };
+const _hoisted_37$1 = { class: "shared-settings__total text-caption text-medium-emphasis" };
 
 const {computed: computed$1,onMounted: onMounted$1,onUnmounted: onUnmounted$1,ref: ref$1,watch: watch$1} = await importShared('vue');
 
@@ -1364,10 +1376,16 @@ const state = ref$1({ requests: [], records: [] });
 const draft = ref$1({
   enabled: false, host_coordinator: false, bot_username: '', group: 'resources',
   instance_label: '我的资源刷流', bot_token: '', allowed_users: '',
+  transport: 'telegram', telegram_listener: true, https_listener: false,
+  https_host: '', https_authority_id: '', https_token: '', https_peers: '',
 });
 const busy = ref$1(false);
 const ready = ref$1(false);
 const canTest = computed$1(() => Boolean(state.value.bot_username));
+const transportOptions = [
+  { value: 'telegram', title: 'Telegram Bot' },
+  { value: 'https', title: 'Tailscale 私网 HTTPS' },
+];
 const error = ref$1('');
 const recordRows = ref$1({ items: [], total: 0 });
 const requestRows = computed$1(() => uniqueRequestRows(recordRows.value.items).map(row => ({
@@ -1477,6 +1495,10 @@ async function load(reset = false) {
     bot_username: data.bot_username || '', group: data.group || 'resources',
     instance_label: data.instance_label || '我的资源刷流', bot_token: '',
     allowed_users: (data.allowed_users || []).join(', '),
+    transport: data.transport || 'telegram', telegram_listener: data.telegram_listener !== false,
+    https_listener: Boolean(data.https_listener), https_host: data.https_host || '',
+    https_authority_id: data.https_authority_id || '', https_token: '',
+    https_peers: (data.https_peers || []).map(peer => `${peer.instance_id} ${peer.sender} ${peer.token_hash}`).join('\n'),
   };
   await recordsPromise;
 }
@@ -1499,6 +1521,16 @@ async function save() {
     }
     const payload = { ...draft.value, allowed_users: [...new Set(users.map(Number))] };
     if (!payload.bot_token) delete payload.bot_token;
+    if (!payload.https_token) delete payload.https_token;
+    payload.https_peers = draft.value.https_peers.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => {
+      const [instance_id, rawSender, token_hash, extra] = line.split(/\s+/);
+      const sender = Number(rawSender);
+      if (extra || !/^[a-f0-9]{32}$/.test(instance_id) || !/^\d+$/.test(rawSender)
+        || !Number.isSafeInteger(sender) || sender <= 0 || !/^[a-f0-9]{64}$/.test(token_hash)) {
+        throw new Error('私网设备格式无效：每行填写实例 ID、个人账号数字 ID、密钥 SHA-256 指纹')
+      }
+      return { instance_id, sender, token_hash }
+    });
     unwrapResponse(await props.api.post(`${props.pluginBase}/shared/settings`, payload));
     await load(true);
     return state.value
@@ -1542,9 +1574,9 @@ __expose({ save, test, ready, busy, canTest, refresh: () => perform(() => load()
 return (_ctx, _cache) => {
   const _component_VAlert = _resolveComponent$1("VAlert");
   const _component_VSwitch = _resolveComponent$1("VSwitch");
+  const _component_VSelect = _resolveComponent$1("VSelect");
   const _component_VTextField = _resolveComponent$1("VTextField");
   const _component_VTextarea = _resolveComponent$1("VTextarea");
-  const _component_VSelect = _resolveComponent$1("VSelect");
   const _component_VIcon = _resolveComponent$1("VIcon");
   const _component_VPagination = _resolveComponent$1("VPagination");
 
@@ -1618,7 +1650,20 @@ return (_ctx, _cache) => {
       : _createCommentVNode$1("", true),
     (__props.mode === 'settings')
       ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 5 }, [
-          _cache[16] || (_cache[16] = _createElementVNode$1("div", { class: "text-subtitle-2" }, "Telegram 共享审批", -1)),
+          (state.value.https_listener_error)
+            ? (_openBlock$1(), _createBlock$1(_component_VAlert, {
+                key: 0,
+                type: "warning",
+                variant: "tonal",
+                density: "compact"
+              }, {
+                default: _withCtx$1(() => [
+                  _createTextVNode$1(_toDisplayString$1(state.value.https_listener_error), 1)
+                ]),
+                _: 1
+              }))
+            : _createCommentVNode$1("", true),
+          _cache[23] || (_cache[23] = _createElementVNode$1("div", { class: "text-subtitle-2" }, "共享下载审批", -1)),
           _createElementVNode$1("div", _hoisted_1$1, [
             _createVNode$1(_component_VSwitch, {
               modelValue: draft.value.enabled,
@@ -1638,11 +1683,11 @@ return (_ctx, _cache) => {
               "hide-details": "",
               inset: ""
             }, null, 8, ["modelValue"]),
-            _createVNode$1(_component_VTextField, {
-              modelValue: draft.value.bot_username,
-              "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((draft.value.bot_username) = $event)),
-              label: "协调 Bot 用户名",
-              placeholder: "@resource_bot",
+            _createVNode$1(_component_VSelect, {
+              modelValue: draft.value.transport,
+              "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((draft.value.transport) = $event)),
+              label: "审批传输",
+              items: transportOptions,
               density: "comfortable",
               "hide-details": ""
             }, null, 8, ["modelValue"]),
@@ -1654,8 +1699,16 @@ return (_ctx, _cache) => {
               "hide-details": ""
             }, null, 8, ["modelValue"]),
             _createVNode$1(_component_VTextField, {
+              modelValue: draft.value.bot_username,
+              "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((draft.value.bot_username) = $event)),
+              label: "协调 Bot 用户名（现有账本保留原值）",
+              placeholder: "@resource_bot",
+              density: "comfortable",
+              "hide-details": ""
+            }, null, 8, ["modelValue"]),
+            _createVNode$1(_component_VTextField, {
               modelValue: draft.value.instance_label,
-              "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((draft.value.instance_label) = $event)),
+              "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((draft.value.instance_label) = $event)),
               label: "本机名称",
               maxlength: "80",
               density: "comfortable",
@@ -1672,9 +1725,31 @@ return (_ctx, _cache) => {
           ]),
           (draft.value.host_coordinator)
             ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_2$1, [
+                _createVNode$1(_component_VSwitch, {
+                  modelValue: draft.value.telegram_listener,
+                  "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((draft.value.telegram_listener) = $event)),
+                  label: "提供 Telegram 审批入口",
+                  color: "primary",
+                  density: "compact",
+                  "hide-details": "",
+                  inset: ""
+                }, null, 8, ["modelValue"]),
+                _createVNode$1(_component_VSwitch, {
+                  modelValue: draft.value.https_listener,
+                  "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((draft.value.https_listener) = $event)),
+                  label: "提供私网 HTTPS 审批入口",
+                  color: "primary",
+                  density: "compact",
+                  "hide-details": "",
+                  inset: ""
+                }, null, 8, ["modelValue"])
+              ]))
+            : _createCommentVNode$1("", true),
+          (draft.value.host_coordinator && draft.value.telegram_listener)
+            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_3$1, [
                 _createVNode$1(_component_VTextField, {
                   modelValue: draft.value.bot_token,
-                  "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((draft.value.bot_token) = $event)),
+                  "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((draft.value.bot_token) = $event)),
                   type: "password",
                   autocomplete: "new-password",
                   label: state.value.token_configured ? '协调 Bot Token（已保存）' : '协调 Bot Token',
@@ -1683,7 +1758,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue", "label"]),
                 _createVNode$1(_component_VTextarea, {
                   modelValue: draft.value.allowed_users,
-                  "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((draft.value.allowed_users) = $event)),
+                  "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((draft.value.allowed_users) = $event)),
                   label: "允许的个人账号 ID",
                   rows: "1",
                   density: "comfortable",
@@ -1693,31 +1768,88 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"])
               ]))
             : _createCommentVNode$1("", true),
-          _createElementVNode$1("dl", _hoisted_3$1, [
-            _cache[15] || (_cache[15] = _createElementVNode$1("div", null, [
-              _createElementVNode$1("dt", null, "账号来源："),
-              _createElementVNode$1("dd", null, "插件（自动生成ED2K链接）")
-            ], -1)),
+          (draft.value.host_coordinator && draft.value.https_listener)
+            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_4$1, [
+                _createVNode$1(_component_VTextField, {
+                  "model-value": state.value.coordinator_authority_id || '',
+                  label: "共享账本 ID",
+                  class: "shared-settings__instance",
+                  readonly: "",
+                  density: "comfortable",
+                  "hide-details": ""
+                }, null, 8, ["model-value"]),
+                _createVNode$1(_component_VTextarea, {
+                  modelValue: draft.value.https_peers,
+                  "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((draft.value.https_peers) = $event)),
+                  label: "允许的私网设备（实例 ID / 个人账号 ID / 密钥指纹）",
+                  rows: "2",
+                  "max-rows": "6",
+                  density: "comfortable",
+                  "auto-grow": "",
+                  "hide-details": ""
+                }, null, 8, ["modelValue"])
+              ]))
+            : _createCommentVNode$1("", true),
+          (draft.value.transport === 'https')
+            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_5$1, [
+                (!draft.value.host_coordinator)
+                  ? (_openBlock$1(), _createBlock$1(_component_VTextField, {
+                      key: 0,
+                      modelValue: draft.value.https_host,
+                      "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((draft.value.https_host) = $event)),
+                      label: "协调端 Tailscale HTTPS 域名",
+                      placeholder: "approval.example.ts.net",
+                      density: "comfortable",
+                      "hide-details": ""
+                    }, null, 8, ["modelValue"]))
+                  : _createCommentVNode$1("", true),
+                (!draft.value.host_coordinator)
+                  ? (_openBlock$1(), _createBlock$1(_component_VTextField, {
+                      key: 1,
+                      modelValue: draft.value.https_authority_id,
+                      "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((draft.value.https_authority_id) = $event)),
+                      label: "协调端共享账本 ID",
+                      class: "shared-settings__instance",
+                      density: "comfortable",
+                      "hide-details": ""
+                    }, null, 8, ["modelValue"]))
+                  : _createCommentVNode$1("", true),
+                _createVNode$1(_component_VTextField, {
+                  modelValue: draft.value.https_token,
+                  "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((draft.value.https_token) = $event)),
+                  type: "password",
+                  autocomplete: "new-password",
+                  label: state.value.https_token_configured ? '本机私网审批密钥（已保存）' : '本机私网审批密钥',
+                  density: "comfortable",
+                  "hide-details": ""
+                }, null, 8, ["modelValue", "label"])
+              ]))
+            : _createCommentVNode$1("", true),
+          _createElementVNode$1("dl", _hoisted_6$1, [
             _createElementVNode$1("div", null, [
-              _cache[12] || (_cache[12] = _createElementVNode$1("dt", null, "协调端：", -1)),
+              _cache[19] || (_cache[19] = _createElementVNode$1("dt", null, "审批传输：", -1)),
+              _createElementVNode$1("dd", null, _toDisplayString$1(state.value.transport === 'https' ? 'Tailscale HTTPS' : 'Telegram（自动生成ED2K链接）'), 1)
+            ]),
+            _createElementVNode$1("div", null, [
+              _cache[20] || (_cache[20] = _createElementVNode$1("dt", null, "协调端：", -1)),
               _createElementVNode$1("dd", null, _toDisplayString$1(state.value.host_coordinator ? state.value.coordinator_running ? '本机运行中' : '本机未运行' : '远端'), 1)
             ]),
             _createElementVNode$1("div", null, [
-              _cache[13] || (_cache[13] = _createElementVNode$1("dt", null, "最近审批确认：", -1)),
+              _cache[21] || (_cache[21] = _createElementVNode$1("dt", null, "最近审批确认：", -1)),
               _createElementVNode$1("dd", null, _toDisplayString$1(timestamp(state.value.last_ok || state.value.coordinator_last_ok)), 1)
             ]),
             _createElementVNode$1("div", null, [
-              _cache[14] || (_cache[14] = _createElementVNode$1("dt", null, "协调端规则版本：", -1)),
+              _cache[22] || (_cache[22] = _createElementVNode$1("dt", null, "协调端规则版本：", -1)),
               _createElementVNode$1("dd", null, _toDisplayString$1(state.value.probe?.policy?.revision?.slice(0, 12) || '-'), 1)
             ])
           ])
         ], 64))
       : (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 6 }, [
           (activeFilter.value)
-            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_4$1, [
+            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_7$1, [
                 _createVNode$1(_component_VTextField, {
                   modelValue: activeFilter.value.query,
-                  "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((activeFilter.value.query) = $event)),
+                  "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((activeFilter.value.query) = $event)),
                   label: "搜索记录",
                   "prepend-inner-icon": "mdi-magnify",
                   clearable: "",
@@ -1727,7 +1859,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"]),
                 _createVNode$1(_component_VSelect, {
                   modelValue: activeFilter.value.owner,
-                  "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((activeFilter.value.owner) = $event)),
+                  "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((activeFilter.value.owner) = $event)),
                   label: "下载方筛选",
                   items: ownerOptions.value,
                   "item-title": "title",
@@ -1738,7 +1870,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue", "items"]),
                 _createVNode$1(_component_VSelect, {
                   modelValue: activeFilter.value.media_type,
-                  "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((activeFilter.value.media_type) = $event)),
+                  "onUpdate:modelValue": _cache[16] || (_cache[16] = $event => ((activeFilter.value.media_type) = $event)),
                   label: "类型筛选",
                   items: mediaTypeOptions,
                   "item-title": "title",
@@ -1748,7 +1880,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"]),
                 _createVNode$1(_component_VSelect, {
                   modelValue: activeFilter.value.status,
-                  "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((activeFilter.value.status) = $event)),
+                  "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((activeFilter.value.status) = $event)),
                   label: "状态筛选",
                   items: statusOptions.value,
                   density: "comfortable",
@@ -1757,18 +1889,18 @@ return (_ctx, _cache) => {
               ]))
             : _createCommentVNode$1("", true),
           (__props.recordTab === 'requests')
-            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_5$1, [
+            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_8$1, [
                 (!recordsLoading.value && !recordRows.value.items.length)
-                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_6$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.owner || activeFilter.value.media_type || activeFilter.value.status ? '无匹配记录' : '暂无共享申请'), 1))
+                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_9$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.owner || activeFilter.value.media_type || activeFilter.value.status ? '无匹配记录' : '暂无共享申请'), 1))
                   : _createCommentVNode$1("", true),
                 (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(requestRows.value, (row) => {
                   return (_openBlock$1(), _createElementBlock$1("article", {
                     key: row.request_id,
                     class: "shared-settings__record"
                   }, [
-                    _createElementVNode$1("div", _hoisted_7$1, [
+                    _createElementVNode$1("div", _hoisted_10$1, [
                       (row.mediaSummaries.length)
-                        ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_8$1, [
+                        ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_11$1, [
                             (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(row.mediaSummaries, (summary, index) => {
                               return (_openBlock$1(), _createElementBlock$1("div", {
                                 key: index,
@@ -1778,7 +1910,7 @@ return (_ctx, _cache) => {
                               ]))
                             }), 128))
                           ]))
-                        : (_openBlock$1(), _createElementBlock$1("strong", _hoisted_9$1, _toDisplayString$1(row.title), 1)),
+                        : (_openBlock$1(), _createElementBlock$1("strong", _hoisted_12$1, _toDisplayString$1(row.title), 1)),
                       _createElementVNode$1("span", {
                         class: "shared-settings__badge",
                         "data-tone": phaseColors[row.phase] || 'secondary'
@@ -1788,28 +1920,28 @@ return (_ctx, _cache) => {
                           size: "16"
                         }, null, 8, ["icon"]),
                         _createTextVNode$1(" " + _toDisplayString$1(requestSummary(row)), 1)
-                      ], 8, _hoisted_10$1)
+                      ], 8, _hoisted_13$1)
                     ]),
                     (row.mediaSummaries.length)
-                      ? (_openBlock$1(), _createElementBlock$1("strong", _hoisted_11$1, _toDisplayString$1(row.title), 1))
+                      ? (_openBlock$1(), _createElementBlock$1("strong", _hoisted_14$1, _toDisplayString$1(row.title), 1))
                       : _createCommentVNode$1("", true),
-                    _createElementVNode$1("div", _hoisted_12$1, [
+                    _createElementVNode$1("div", _hoisted_15$1, [
                       _createElementVNode$1("span", null, "申请时间：" + _toDisplayString$1(timestamp(row.created)), 1),
                       _createElementVNode$1("span", null, "最近更新：" + _toDisplayString$1(timestamp(row.updated)), 1),
                       (row.download_started_at)
-                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_13$1, "下载开始：" + _toDisplayString$1(timestamp(row.download_started_at)), 1))
+                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_16$1, "下载开始：" + _toDisplayString$1(timestamp(row.download_started_at)), 1))
                         : _createCommentVNode$1("", true),
                       (row.timeout_at)
-                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_14$1, "超时处理：" + _toDisplayString$1(timestamp(row.timeout_at)), 1))
+                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_17$1, "超时处理：" + _toDisplayString$1(timestamp(row.timeout_at)), 1))
                         : _createCommentVNode$1("", true),
                       _createElementVNode$1("span", null, "任务：" + _toDisplayString$1(row.task_name || row.task_id || '-'), 1),
                       _createElementVNode$1("span", null, "下载器：" + _toDisplayString$1(row.downloader || '-'), 1)
                     ]),
                     (row.error && row.phase !== 'rejected')
-                      ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_15$1, _toDisplayString$1(row.error), 1))
+                      ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_18$1, _toDisplayString$1(row.error), 1))
                       : _createCommentVNode$1("", true),
                     (row.integrity_error)
-                      ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_16$1, _toDisplayString$1(row.integrity_error), 1))
+                      ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_19$1, _toDisplayString$1(row.integrity_error), 1))
                       : _createCommentVNode$1("", true),
                     (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(row.rejectionSummaries, (reason, index) => {
                       return (_openBlock$1(), _createElementBlock$1("p", {
@@ -1817,28 +1949,28 @@ return (_ctx, _cache) => {
                         class: "shared-settings__reason text-body-2"
                       }, _toDisplayString$1(reason), 1))
                     }), 128)),
-                    _createElementVNode$1("div", _hoisted_17$1, [
-                      _createElementVNode$1("span", _hoisted_18$1, "申请编号：" + _toDisplayString$1(row.request_id), 1),
+                    _createElementVNode$1("div", _hoisted_20$1, [
+                      _createElementVNode$1("span", _hoisted_21$1, "申请编号：" + _toDisplayString$1(row.request_id), 1),
                       (row.claimSummary)
-                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_19$1, " 关联占位：" + _toDisplayString$1(row.claimSummary), 1))
+                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_22$1, " 关联占位：" + _toDisplayString$1(row.claimSummary), 1))
                         : _createCommentVNode$1("", true)
                     ])
                   ]))
                 }), 128))
               ]))
             : (__props.recordTab === 'records' && (state.value.host_coordinator || state.value.enabled))
-              ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_20$1, [
+              ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_23$1, [
                   (!recordsLoading.value && !recordRows.value.items.length)
-                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_21$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.owner || activeFilter.value.media_type || activeFilter.value.status ? '无匹配记录' : '暂无共享占位'), 1))
+                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_24$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.owner || activeFilter.value.media_type || activeFilter.value.status ? '无匹配记录' : '暂无共享占位'), 1))
                     : _createCommentVNode$1("", true),
                   (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(recordRows.value.items, (row) => {
                     return (_openBlock$1(), _createElementBlock$1("article", {
                       key: row.id,
                       class: "shared-settings__record"
                     }, [
-                      _createElementVNode$1("div", _hoisted_22$1, [
-                        _createElementVNode$1("div", _hoisted_23$1, [
-                          _createElementVNode$1("div", _hoisted_24$1, [
+                      _createElementVNode$1("div", _hoisted_25$1, [
+                        _createElementVNode$1("div", _hoisted_26$1, [
+                          _createElementVNode$1("div", _hoisted_27$1, [
                             _createElementVNode$1("span", null, _toDisplayString$1(_unref$1(releaseDetails)(row)), 1)
                           ])
                         ]),
@@ -1851,18 +1983,18 @@ return (_ctx, _cache) => {
                             size: "16"
                           }, null, 8, ["icon"]),
                           _createTextVNode$1(" " + _toDisplayString$1(phaseNames[row.state] || row.state), 1)
-                        ], 8, _hoisted_25$1)
+                        ], 8, _hoisted_28$1)
                       ]),
-                      _createElementVNode$1("strong", _hoisted_26$1, _toDisplayString$1(row.title), 1),
-                      _createElementVNode$1("div", _hoisted_27$1, [
+                      _createElementVNode$1("strong", _hoisted_29$1, _toDisplayString$1(row.title), 1),
+                      _createElementVNode$1("div", _hoisted_30$1, [
                         _createElementVNode$1("span", null, "下载时间：" + _toDisplayString$1(timestamp(row.created)), 1),
                         _createElementVNode$1("span", null, "最近更新：" + _toDisplayString$1(timestamp(row.updated)), 1),
-                        _createElementVNode$1("span", _hoisted_28$1, "下载方：" + _toDisplayString$1(row.label || '-'), 1)
+                        _createElementVNode$1("span", _hoisted_31$1, "下载方：" + _toDisplayString$1(row.label || '-'), 1)
                       ]),
-                      _createElementVNode$1("div", _hoisted_29$1, [
-                        _createElementVNode$1("span", _hoisted_30$1, "占位编号：" + _toDisplayString$1(row.id), 1),
+                      _createElementVNode$1("div", _hoisted_32$1, [
+                        _createElementVNode$1("span", _hoisted_33$1, "占位编号：" + _toDisplayString$1(row.id), 1),
                         (row.request_id)
-                          ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_31$1, "关联申请：" + _toDisplayString$1(row.request_id), 1))
+                          ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_34$1, "关联申请：" + _toDisplayString$1(row.request_id), 1))
                           : _createCommentVNode$1("", true)
                       ])
                     ]))
@@ -1870,13 +2002,13 @@ return (_ctx, _cache) => {
                 ]))
               : _createCommentVNode$1("", true),
           (activeFilter.value)
-            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_32$1, [
+            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_35$1, [
                 (recordRows.value.total > 20)
-                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_33$1, [
+                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_36$1, [
                       _createVNode$1(_component_VPagination, {
                         modelValue: recordPage.value,
                         "onUpdate:modelValue": [
-                          _cache[11] || (_cache[11] = $event => ((recordPage).value = $event)),
+                          _cache[18] || (_cache[18] = $event => ((recordPage).value = $event)),
                           loadRecords
                         ],
                         length: Math.ceil(recordRows.value.total / 20),
@@ -1884,7 +2016,7 @@ return (_ctx, _cache) => {
                       }, null, 8, ["modelValue", "length"])
                     ]))
                   : _createCommentVNode$1("", true),
-                _createElementVNode$1("span", _hoisted_34$1, "共 " + _toDisplayString$1(recordRows.value.total) + " 条", 1)
+                _createElementVNode$1("span", _hoisted_37$1, "共 " + _toDisplayString$1(recordRows.value.total) + " 条", 1)
               ]))
             : _createCommentVNode$1("", true)
         ], 64))
@@ -1893,7 +2025,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-9404c352"]]);
+const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-90f5e936"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle} = await importShared('vue');
 

@@ -281,9 +281,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     """
 
     plugin_name = "资源刷流"
-    plugin_desc = "独立资源刷流与 Telegram 共享下载审批，跨实例同规格下载前占位。"
+    plugin_desc = "独立资源刷流，支持 Telegram 和 Tailscale HTTPS 共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.45"
+    plugin_version = "1.0.46"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -516,9 +516,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             {"path": "/shared/records", "endpoint": self.get_shared_records, "methods": ["GET"],
              "auth": "bear", "summary": "搜索筛选共享申请与占位记录"},
             {"path": "/shared/settings", "endpoint": self.update_shared_settings, "methods": ["POST"],
-             "auth": "bear", "summary": "保存 Telegram 共享审批设置"},
+             "auth": "bear", "summary": "保存共享下载审批设置"},
             {"path": "/shared/test", "endpoint": self.test_shared_connection, "methods": ["POST"],
-             "auth": "bear", "summary": "测试 Bot 私聊审批与规则版本"},
+             "auth": "bear", "summary": "测试审批连接与规则版本"},
             {"path": "/shared/reconcile", "endpoint": self.request_shared_reconcile, "methods": ["POST"],
              "auth": "bear", "summary": "核验未完成共享申请"},
             {
