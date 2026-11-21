@@ -35,6 +35,12 @@ from .shared_protocol import RULE_DEFAULTS, SharedError, digest, policy
 from .telegram_rpc import TelegramRPC, ed2k_account
 
 
+QB_FILE_RETRY_INTERVAL = 3
+QB_FILE_RETRY_ATTEMPTS = 3
+QB_FILE_RETRY_WINDOW = 18
+QB_FILE_WAIT_MESSAGE = "QB 文件清单暂不可用，选集核验后自动启动"
+
+
 class SharedResourceMixin:
     _shared_cache = None
     _shared_cache_activity = 0
@@ -363,6 +369,7 @@ class SharedResourceMixin:
         self._shared_http_retry_at = 0
         self._shared_store = None
         self._shared_stopping = False
+        self._shared_qb_file_retries = {}
         self._shared_transport_lock = threading.Lock()
         self._shared_worker_retry_at = 0
         self._shared_last_ok = None
@@ -514,6 +521,7 @@ class SharedResourceMixin:
 
     def _stop_shared(self):
         self._shared_stopping = True
+        self._shared_qb_file_retries = {}
         self._stop_shared_http()
         worker = getattr(self, "_shared_worker", None)
         if worker:
@@ -527,8 +535,11 @@ class SharedResourceMixin:
         rejected = row.get("rejected") or []
         decisions = {item["id"]: item for item in rejected if isinstance(item, dict) and "id" in item}
         task = getattr(self, "_task_configs", {}).get(row.get("task_id"))
+        phase = row["phase"]
+        if phase == "awaiting_start" and row.get("selection_pending") and row.get("qb_file_list_pending"):
+            phase = "awaiting_qb_files"
         return {
-            "request_id": row["request_id"], "title": row["title"], "phase": row["phase"],
+            "request_id": row["request_id"], "title": row["title"], "phase": phase,
             "task_id": row["task_id"], "task_name": getattr(task, "name", None),
             "download_owners": sorted({
                 *([getattr(getattr(self, "_shared_settings", None), "instance_label", "")]
@@ -1244,6 +1255,15 @@ class SharedResourceMixin:
                     self._shared_phase(entry, "uncertain", error="添加或选集未确认，保留占位等待核验")
                     return None
                 entry["selection_pending"] = bool(selection.get("selection_pending"))
+                if entry["selection_pending"] and selection.get("qb_file_list_unavailable"):
+                    self._shared_phase(entry, "awaiting_start", qb_file_list_pending=True, error=QB_FILE_WAIT_MESSAGE)
+                    logger.info(f"共享审批等待 QB 文件清单 {title}：申请 {request_id}；Hash {expected_hash}")
+                    if not self._shared_stopping:
+                        now = time.monotonic()
+                        self._shared_qb_file_retries[request_id] = (
+                            QB_FILE_RETRY_ATTEMPTS, now + QB_FILE_RETRY_INTERVAL, now + QB_FILE_RETRY_WINDOW
+                        )
+                    return result
                 self._shared_phase(entry, "awaiting_start")
                 self._start_shared_download(entry, task, downloader)
                 logger.info(f"共享审批通过 {title}：批准 {len(paths)} 个文件，下载器已确认")
@@ -1390,6 +1410,52 @@ class SharedResourceMixin:
             f"下载器 {entry['downloader']}；Hash {entry['hash']}"
         )
 
+    def retry_shared_qb_files(self):
+        """Short, local retries for new paused QB torrents; regular reconciliation is the fallback."""
+        retries = getattr(self, "_shared_qb_file_retries", None)
+        if not retries or self._shared_stopping or not self._shared_rpc_lock.acquire(blocking=False):
+            return
+        try:
+            with self._shared_lock:
+                now = time.monotonic()
+                processed = 0
+                for request_id, (remaining, due, expires) in list(retries.items()):
+                    if self._shared_stopping or retries is not self._shared_qb_file_retries:
+                        return
+                    entry = self._shared_claims.get(request_id)
+                    if (time.monotonic() >= expires or not entry or entry["phase"] != "awaiting_start"
+                            or not entry.get("approved") or not entry.get("attempted_add")
+                            or not entry.get("selection_pending") or not entry.get("qb_file_list_pending")
+                            or entry.get("action")):
+                        retries.pop(request_id, None)
+                        continue
+                    if due > now or processed >= 10:
+                        continue
+                    if (not self._shared_settings.enabled or getattr(self, "_shared_integrity_error", "")
+                            or time.time() < getattr(self, "_shared_retry_at", 0)):
+                        continue
+                    processed += 1
+                    if remaining > 1:
+                        retries[request_id] = (remaining - 1, time.monotonic() + QB_FILE_RETRY_INTERVAL, expires)
+                    else:
+                        retries.pop(request_id, None)
+                    self._reconcile_shared_entry_safely(entry)
+                    if not entry.get("qb_file_list_pending"):
+                        retries.pop(request_id, None)
+        finally:
+            self._shared_rpc_lock.release()
+
+    def _reconcile_shared_entry_safely(self, entry):
+        try:
+            self._reconcile_shared_entry(entry)
+        except SharedError as error:
+            if getattr(error, "definitive", False) and entry["phase"] == "requesting":
+                entry["phase"] = "rejected"
+            if str(error) != QB_FILE_WAIT_MESSAGE or entry.get("error") != QB_FILE_WAIT_MESSAGE:
+                self._shared_phase(entry, entry["phase"], error=str(error))
+        except Exception:
+            self._shared_phase(entry, entry["phase"], error="下载器或共享状态待核验")
+
     def reconcile_shared_claims(self):
         if self._shared_stopping or not self._shared_rpc_lock.acquire(blocking=False):
             return
@@ -1416,14 +1482,7 @@ class SharedResourceMixin:
                 pending.sort(key=lambda row: row.get("checked_at", 0))
                 for entry in pending[:10]:
                     entry["checked_at"] = time.time()
-                    try:
-                        self._reconcile_shared_entry(entry)
-                    except SharedError as error:
-                        if getattr(error, "definitive", False) and entry["phase"] == "requesting":
-                            entry["phase"] = "rejected"
-                        self._shared_phase(entry, entry["phase"], error=str(error))
-                    except Exception:
-                        self._shared_phase(entry, entry["phase"], error="下载器或共享状态待核验")
+                    self._reconcile_shared_entry_safely(entry)
                 if self._shared_settings.enabled:
                     self._sync_shared_record_cache()
         finally:
@@ -1482,11 +1541,17 @@ class SharedResourceMixin:
         if entry["phase"] in {"adding", "uncertain", "reserved", "requesting"} or entry.get("selection_pending"):
             if not task or not self._shared_task_ready(task, entry["hash"]):
                 raise SharedError("原任务不可运行，保留暂停任务等待核验")
-            if not self._select_recent_episode_files(downloader, entry["hash"],
-                    {"accepted": {row["path"] for row in approved}, "hold_paused": True}, kind, task.name):
-                raise SharedError("重启后选集未确认，保持暂停")
+            selection = {"accepted": {row["path"] for row in approved}, "hold_paused": True,
+                         "shared_request_id": entry["request_id"]}
+            if not self._select_recent_episode_files(downloader, entry["hash"], selection, kind, task.name):
+                waiting = bool(selection.get("qb_file_list_unavailable"))
+                message = QB_FILE_WAIT_MESSAGE if waiting else "选集未确认，保持暂停"
+                if waiting != bool(entry.get("qb_file_list_pending")):
+                    self._shared_phase(entry, "awaiting_start", selection_pending=True,
+                                       qb_file_list_pending=waiting, error=message)
+                raise SharedError(message)
             entry["selection_pending"] = False
-            self._shared_phase(entry, "awaiting_start")
+            self._shared_phase(entry, "awaiting_start", qb_file_list_pending=False, error="")
         snapshot = download_files(downloader.get_files(entry["hash"]), kind)
         if not snapshot:
             raise SharedError("无法核验实际文件选择，保留共享占位")

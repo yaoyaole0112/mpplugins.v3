@@ -114,6 +114,14 @@ class ApprovalSearchTests(unittest.TestCase):
         self.assertEqual(self.plugin.get_shared_records(status="rejected").data["total"], 1)
         self.assertEqual(self.plugin.get_shared_records(query="private-passkey").data["total"], 0)
 
+    def test_waiting_qb_files_is_searchable_and_not_already_queued(self):
+        self.plugin._shared_claims["0"].update(
+            phase="awaiting_start", selection_pending=True, qb_file_list_pending=True)
+        pending = self.plugin.get_shared_records(status="awaiting_qb_files", query="等待 QB 文件清单").data
+        self.assertEqual(pending["total"], 1)
+        self.assertEqual(pending["items"][0]["phase"], "awaiting_qb_files")
+        self.assertEqual(self.plugin.get_shared_records(status="queued", query="S01E01").data["total"], 0)
+
     def test_download_owner_and_media_type_filters_apply_before_paging(self):
         for index in range(125):
             row = self.plugin._shared_claims[str(index)]

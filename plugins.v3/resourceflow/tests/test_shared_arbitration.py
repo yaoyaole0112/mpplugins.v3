@@ -422,6 +422,7 @@ class AdmissionTests(unittest.TestCase):
         p._shared_stopping = False
         p._shared_lock, p._shared_rpc_lock = threading.RLock(), threading.Lock()
         p._shared_claims, p._inflight_entries = {}, {}
+        p._shared_qb_file_retries = {}
         p._inflight_lock = threading.RLock()
         p._inflight_key = lambda downloader, torrent_hash: f"{downloader}:{torrent_hash}"
         p._channel_dedup_attributes, p._channel_dedup_size_tolerance_pct = ["resolution"], 5
@@ -591,6 +592,72 @@ class AdmissionTests(unittest.TestCase):
         self.plugin._select_recent_episode_files.assert_called_once()
         self.assertFalse(self.entry()["selection_pending"])
         self.assertEqual(self.entry()["phase"], "queued")
+
+    def add_waiting_for_qb_files(self):
+        p = self.plugin
+        p._select_recent_episode_files = ResourceFlow._select_recent_episode_files
+        self.downloader.get_files.return_value = None
+
+        def paused_add(*args):
+            self.events.append("add")
+            selection = args[6]
+            self.assertFalse(p._select_recent_episode_files(self.downloader, "a" * 40, selection, "qbittorrent", "test"))
+            selection["selection_pending"] = True
+            return "a" * 40
+
+        p._add_local_prechecked_torrent.side_effect = paused_add
+        with patch("resourceflow.shared_plugin.time.monotonic", return_value=100):
+            self.assertEqual(self.add(), "a" * 40)
+        self.downloader.get_torrents.return_value = ([{"tags": self.task.brush_tag}], False)
+        self.assertEqual(p._shared_request_status(self.entry())["phase"], "awaiting_qb_files")
+        self.assertEqual(self.events, ["reserve", "add"])
+
+    def test_short_qb_file_retry_selects_and_starts_without_new_reservation(self):
+        self.add_waiting_for_qb_files()
+        p = self.plugin
+        selected = [
+            {"index": 0, "name": "Show.S01E01.mkv", "size": 10, "progress": 0, "priority": 1},
+            {"index": 1, "name": "Show.S01E02.mkv", "size": 10, "progress": 0, "priority": 0},
+        ]
+        self.downloader.get_files.side_effect = [[], selected, selected, selected]
+        with patch("resourceflow.shared_plugin.time.monotonic", return_value=103):
+            p.retry_shared_qb_files()
+        self.assertEqual(self.events, ["reserve", "add"])
+        self.downloader.start_torrents.assert_not_called()
+        with patch("resourceflow.shared_plugin.time.monotonic", return_value=106):
+            p.retry_shared_qb_files()
+        self.assertEqual(self.events, ["reserve", "add", "update", "start"])
+        self.assertEqual(p._shared_request_status(self.entry())["phase"], "queued")
+        self.assertEqual(self.entry()["error"], "")
+        self.assertFalse(p._shared_qb_file_retries)
+        self.assertEqual(
+            [call.kwargs for call in self.downloader.set_files.call_args_list],
+            [{"torrent_hash": "a" * 40, "file_ids": [1], "priority": 0},
+             {"torrent_hash": "a" * 40, "file_ids": [0], "priority": 1}],
+        )
+
+    def test_short_qb_file_retries_stop_after_budget_without_releasing(self):
+        self.add_waiting_for_qb_files()
+        for clock in (102, 103, 106, 109, 112):
+            with patch("resourceflow.shared_plugin.time.monotonic", return_value=clock):
+                self.plugin.retry_shared_qb_files()
+        self.assertEqual(self.downloader.get_files.call_count, 4)  # Initial lookup and three retries.
+        self.assertEqual(self.events, ["reserve", "add"])
+        self.assertFalse(self.plugin._shared_qb_file_retries)
+        self.assertEqual(self.plugin._shared_request_status(self.entry())["phase"], "awaiting_qb_files")
+
+    def test_short_qb_file_retry_does_not_start_with_unapproved_file_still_selected(self):
+        self.add_waiting_for_qb_files()
+        self.downloader.get_files.return_value = [
+            {"index": 0, "name": "Show.S01E01.mkv", "size": 10, "progress": 0, "priority": 1},
+            {"index": 1, "name": "Show.S01E02.mkv", "size": 10, "progress": 0, "priority": 1},
+        ]
+        with patch("resourceflow.shared_plugin.time.monotonic", return_value=103):
+            self.plugin.retry_shared_qb_files()
+        self.assertEqual(self.events, ["reserve", "add"])
+        self.assertEqual(self.plugin._shared_request_status(self.entry())["phase"], "awaiting_start")
+        self.assertIn("未经批准", self.entry()["error"])
+        self.assertFalse(self.plugin._shared_qb_file_retries)
 
     def test_task_off_bypasses_shared_transport(self):
         self.task.spec_dedup_enabled = False

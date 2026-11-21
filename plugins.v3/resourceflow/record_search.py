@@ -8,7 +8,7 @@ from .channel_dedup import filename_title_aliases
 
 STATE_LABELS = {
     "requesting": "等待审批", "reserved": "已获准 已批准", "adding": "暂停添加中",
-    "awaiting_start": "等待入队确认", "timeout_cancel_pending": "超时取消中",
+    "awaiting_start": "等待入队确认", "awaiting_qb_files": "等待 QB 文件清单", "timeout_cancel_pending": "超时取消中",
     "queued": "已入队", "completed": "已完成 已下载", "released": "已释放",
     "rejected": "已过滤 已排除", "uncertain": "待核验",
 }

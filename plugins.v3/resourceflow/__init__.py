@@ -54,7 +54,7 @@ from app.sdk.network import RequestUtils
 from app.sdk.utilities import StringUtils
 
 from .models import ResourceFlowSettingsPayload, BrushTaskPayload, BrushTaskStatePayload
-from .shared_plugin import SharedResourceMixin
+from .shared_plugin import QB_FILE_RETRY_INTERVAL, SharedResourceMixin
 from .models import (
     ChannelDedupSettingsPayload, ResourceLedgerDeletePayload, ResourcePendingApprovalPayload,
     migrated_identity_policy, task_spec_dedup_enabled,
@@ -284,7 +284,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，支持 Telegram 和 Tailscale HTTPS 共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.49"
+    plugin_version = "1.0.50"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -716,6 +716,11 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             services.append({
                 "id": "SharedResourceReconcile", "name": "共享审批状态核验",
                 "trigger": "interval", "func": self.reconcile_shared_claims, "kwargs": {"minutes": 1},
+            })
+            services.append({
+                "id": "SharedResourceQBFileRetry", "name": "共享审批 QB 文件清单短重试",
+                "trigger": "interval", "func": self.retry_shared_qb_files,
+                "kwargs": {"seconds": QB_FILE_RETRY_INTERVAL},
             })
         return services
 
@@ -5850,13 +5855,18 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     def _select_recent_episode_files(downloader: Any, torrent_hash: str, selection: dict,
                                      downloader_type: str, task_name: str) -> bool:
         """暂停状态下只选择通过日期核验的视频；操作失败时保持暂停。"""
+        shared_qb = downloader_type == "qbittorrent" and bool(selection.get("shared_request_id"))
+        selection.pop("qb_file_list_unavailable", None)
         try:
             if not downloader.stop_torrents(torrent_hash):
                 logger.error(f"刷流任务 [{task_name}] 无法确认暂停，未执行选集")
                 return False
             files = downloader.get_files(torrent_hash)
             if not files:
-                logger.error(f"刷流任务 [{task_name}] 获取种子文件清单失败，任务保持暂停")
+                if shared_qb:
+                    selection["qb_file_list_unavailable"] = True
+                else:
+                    logger.error(f"刷流任务 [{task_name}] 获取种子文件清单失败，任务保持暂停")
                 return False
             wanted, unwanted = [], []
             for index, item in enumerate(files):

@@ -1453,23 +1453,23 @@ let searchTimer;
 let recordsGeneration = 0;
 const phaseNames = {
   requesting: '等待审批', reserved: '已获准', adding: '暂停添加中', awaiting_start: '等待入队确认',
-  timeout_cancel_pending: '超时取消中',
+  awaiting_qb_files: '等待 QB 文件清单', timeout_cancel_pending: '超时取消中',
   queued: '已入队', completed: '已完成', released: '已释放', rejected: '已过滤', uncertain: '待核验',
 };
 const phaseColors = {
-  requesting: 'info', reserved: 'success', adding: 'info', awaiting_start: 'warning',
+  requesting: 'info', reserved: 'success', adding: 'info', awaiting_start: 'warning', awaiting_qb_files: 'warning',
   queued: 'info', timeout_cancel_pending: 'warning', completed: 'success', released: 'secondary', rejected: 'error', uncertain: 'warning',
 };
 const phaseIcons = {
   requesting: 'mdi-clock-outline', reserved: 'mdi-check-circle-outline', adding: 'mdi-clock-outline',
-  awaiting_start: 'mdi-clock-outline', timeout_cancel_pending: 'mdi-clock-alert-outline',
+  awaiting_start: 'mdi-clock-outline', awaiting_qb_files: 'mdi-clock-outline', timeout_cancel_pending: 'mdi-clock-alert-outline',
   queued: 'mdi-check-circle-outline', completed: 'mdi-check-circle-outline',
   released: 'mdi-minus-circle-outline', rejected: 'mdi-close-circle-outline', uncertain: 'mdi-help-circle-outline',
 };
 const statusOptions = computed$1(() => [
   { value: '', title: '全部状态' },
   ...(props.recordTab === 'requests'
-    ? ['completed', 'queued', 'released', 'rejected']
+    ? ['completed', 'queued', 'awaiting_qb_files', 'released', 'rejected']
     : ['reserved', 'queued', 'completed', 'released'])
     .map(value => ({ value, title: phaseNames[value] })),
 ]);
@@ -1512,7 +1512,7 @@ function requestSummary(row) {
   const rejected = row.rejected?.length || 0;
   const completed = Number(row.completed || 0);
   if (row.phase === 'rejected') return `${phaseNames.rejected}（${rejected || row.file_count || 0}）`
-  if (row.phase === 'queued' || row.phase === 'awaiting_start') return `已入队（${approved}）`
+  if (row.phase === 'queued') return `已入队（${approved}）`
   if (row.phase === 'completed') return `已完成（${completed || approved}）`
   if (['reserved', 'adding'].includes(row.phase)) return `已批准（${approved}）`
   return phaseNames[row.phase] || row.phase
@@ -2040,7 +2040,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-69843f49"]]);
+const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-e446aa56"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle,withModifiers:_withModifiers} = await importShared('vue');
 

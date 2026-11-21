@@ -224,7 +224,7 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
         await page.get_by_role('option', name='已过滤', exact=True).wait_for()
         options = await page.get_by_role('option').all_text_contents()
         assert {option.strip() for option in options} == {
-            '全部状态', '已完成', '已入队', '已释放', '已过滤'}, options
+            '全部状态', '已完成', '已入队', '等待 QB 文件清单', '已释放', '已过滤'}, options
     await page.get_by_role('option', name=value, exact=True).click()
     await page.wait_for_function("""selector =>
         [...document.querySelectorAll(selector)].filter(item => item.getBoundingClientRect().width > 0).length === 1
