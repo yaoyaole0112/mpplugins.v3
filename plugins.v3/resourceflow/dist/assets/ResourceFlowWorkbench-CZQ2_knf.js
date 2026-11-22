@@ -4378,7 +4378,7 @@ return (_ctx, _cache) => {
                                         onClick: $event => (openPendingApproval(row))
                                       }, {
                                         default: _withCtx(() => [...(_cache[121] || (_cache[121] = [
-                                          _createTextVNode(" 核验并下载 ", -1)
+                                          _createTextVNode(" 核验下载 ", -1)
                                         ]))]),
                                         _: 1
                                       }, 8, ["disabled", "onClick"]))
@@ -4734,6 +4734,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-8a27e3b2"]]);
+const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-828518b7"]]);
 
 export { ResourceFlowWorkbench as R };

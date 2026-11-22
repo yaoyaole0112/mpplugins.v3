@@ -371,7 +371,7 @@ async def verify(base_url, output, executable_path, host_css=None):
                     fits: element.scrollWidth <= element.clientWidth + 1}
             }""")
             assert all(action_layout.values()), action_layout
-            await dialog.get_by_role("button", name="核验并下载", exact=True).click()
+            await dialog.get_by_role("button", name="核验下载", exact=True).click()
             manual_dialog = page.get_by_role("dialog").filter(has=page.get_by_text("人工核验并继续下载", exact=True))
             await manual_dialog.get_by_label("TMDB ID").fill("123")
             await manual_dialog.get_by_label("我已核对以上媒体身份、季集号及规格").check()
@@ -736,7 +736,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.evaluate("document.fonts.ready")
             await page.get_by_role("button", name="共享下载审批", exact=True).click()
             await page.get_by_role("tab", name="下载待核验", exact=True).click()
-            await page.get_by_role("button", name="核验并下载", exact=True).click()
+            await page.get_by_role("button", name="核验下载", exact=True).click()
             manual = page.get_by_role("dialog").filter(has=page.get_by_text("人工核验并继续下载", exact=True))
             assert await manual.get_by_label("季号", exact=True).input_value() == ""
             assert await manual.get_by_label("集号", exact=True).input_value() == "45"

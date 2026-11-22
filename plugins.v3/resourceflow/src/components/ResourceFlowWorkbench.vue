@@ -1375,7 +1375,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                       prepend-icon="mdi-check-circle-outline"
                       :disabled="pendingRejectingKey === row.key"
                       @click="openPendingApproval(row)">
-                      核验并下载
+                      核验下载
                     </VBtn>
                   </div>
                 </div>
