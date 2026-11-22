@@ -8,6 +8,7 @@ const props = defineProps({
   task: { type: Object, default: () => ({}) },
   sites: { type: Array, default: () => [] },
   downloaders: { type: Array, default: () => [] },
+  downloadCategories: { type: Array, default: () => [] },
   globalDynamicDelete: { type: Boolean, default: false },
   saving: { type: Boolean, default: false },
 })
@@ -28,6 +29,19 @@ const downloaderTag = computed({
 })
 const siteName = computed(() => props.sites.find(item => item.value === Number(localTask.value.site_id))?.title || '未选择')
 const scheduleText = computed(() => localTask.value.cron || `每 ${localTask.value.brush_interval || 10} 分钟`)
+const legacyTypes = {
+  movie: '电影', tv: '剧集', short_drama: '短剧', variety: '综艺', anime: '动漫',
+  sports: '体育', documentary: '纪录片', mv: 'MV', music: '音乐',
+}
+const legacyFilter = computed(() => localTask.value.download_categories === null && localTask.value.download_types?.length)
+const categoryOptions = computed(() => {
+  const options = [...props.downloadCategories]
+  const available = new Set(options.map(item => item.value))
+  for (const value of localTask.value.download_categories || []) {
+    if (!available.has(value)) options.push({ value, title: `${value.split(':').slice(1).join(':')}（已不可用）` })
+  }
+  return options
+})
 
 // 每次打开弹窗都从服务端任务快照重新创建本地草稿。
 watch(
@@ -256,38 +270,26 @@ async function saveTask() {
                       hide-details
                     />
                 </div>
+                <div v-if="legacyFilter" class="text-body-2 text-medium-emphasis mb-2">
+                  当前沿用旧下载类型：{{ localTask.download_types.map(value => legacyTypes[value] || value).join('、') }}
+                </div>
                 <VSelect
-                  v-model="localTask.blacklist_site_ids"
-                  :items="sites"
-                  label="种子黑名单"
+                  :model-value="localTask.download_categories || []"
+                  :items="categoryOptions"
+                  label="下载类型（MoviePilot 整理分类）"
+                  open-text="打开 MoviePilot 整理分类"
+                  close-text="关闭 MoviePilot 整理分类"
+                  no-data-text="MoviePilot 暂无可用整理分类"
                   multiple
                   chips
                   closable-chips
                   clearable
-                  hint="所选站点之间按完整种子名称互相排重；当前任务站点需包含在选择中"
+                  :hint="legacyFilter ? '选择整理分类后将替换旧规则' : '留空不限制；选定后仅下载匹配整理分类的种子'"
                   persistent-hint
+                  @update:model-value="value => localTask.download_categories = value || []"
                 />
-                <VSelect
-                  v-model="localTask.download_types"
-                  :items="[
-                    { title: '电影', value: 'movie' },
-                    { title: '剧集', value: 'tv' },
-                    { title: '短剧', value: 'short_drama' },
-                    { title: '综艺', value: 'variety' },
-                    { title: '动漫', value: 'anime' },
-                    { title: '运动 / 体育', value: 'sports' },
-                    { title: '纪录片', value: 'documentary' },
-                    { title: 'MV', value: 'mv' },
-                    { title: '音乐', value: 'music' },
-                  ]"
-                  label="下载类型"
-                  multiple
-                  chips
-                  closable-chips
-                  clearable
-                  hint="留空不限制；选择后仅下载匹配类型，无法识别的种子将被排除"
-                  persistent-hint
-                />
+                <VBtn v-if="legacyFilter" variant="text" color="primary" size="small"
+                  @click="localTask.download_categories = []">取消旧类型限制</VBtn>
               </section>
 
               <section class="editor-section">

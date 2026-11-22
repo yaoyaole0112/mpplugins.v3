@@ -105,6 +105,20 @@ class StoreTests(unittest.TestCase):
     def send(self, body, sender=11, rid=None):
         return self.store.handle(sender, rid or uuid.uuid4().hex, body)
 
+    def test_status_report_fills_blank_site_without_overwriting_it(self):
+        claim = self.send(self.request())["approved"][0]["claim"]
+        for (state, name, expected) in (
+            ("queued", "https://private.invalid/x?token=secret", ""),
+            ("completed", "  观众  ", "观众"),
+            ("completed", "其他站点", "观众"),
+        ):
+            reply = self.send({
+                "v": 1, "group": "resources", "instance": "a" * 32, "op": "update",
+                "site_name": name, "updates": [{"claim": claim, "state": state}],
+            })
+            self.assertTrue(reply["ok"], reply)
+            self.assertEqual(self.store.recent()[0]["site_name"], expected)
+
     def test_concurrent_clients_only_one_wins_and_reopen_preserves_claim(self):
         barrier = threading.Barrier(2)
 
@@ -492,6 +506,18 @@ class AdmissionTests(unittest.TestCase):
 
     def entry(self):
         return next(iter(self.plugin._shared_claims.values()))
+
+    def test_reserve_and_queue_upload_actual_site_without_task_registry(self):
+        self.plugin._task_configs.clear()
+        self.assertEqual(self.plugin._add_prechecked_torrent(
+            b"torrent", None, self.task, self.downloader, Mock(), "a" * 40, None, "Show",
+            site_name="  观众  ",
+        ), "a" * 40)
+        self.assertEqual(self.entry()["site_name"], "观众")
+        self.assertEqual(
+            [call.args[1].get("site_name") for call in self.plugin._shared_exchange.call_args_list],
+            ["观众", "观众"],
+        )
 
     def test_atomic_approval_then_paused_subset_then_queue_ack_then_start(self):
         self.assertEqual(self.add(), "a" * 40)
@@ -949,7 +975,7 @@ class PluginSetupTests(unittest.TestCase):
 
         def start():
             p._shared_store = store
-            p._shared_worker = worker
+            p._shared_http_server = worker
 
         p._start_shared_worker = Mock(side_effect=start)
         p._ensure_shared_worker()
@@ -1170,31 +1196,29 @@ class PluginSetupTests(unittest.TestCase):
     def test_definitive_refusal_does_not_backoff_other_requests(self):
         error = SharedError("规格数值无效")
         error.definitive = True
-        with patch("resourceflow.shared_plugin.ed2k_account"), patch(
-                "resourceflow.shared_plugin.TelegramRPC") as rpc:
-            rpc.return_value.exchange.side_effect = [error, {"ok": True}]
+        with patch.object(self.plugin, "_https_shared_exchange") as rpc:
+            rpc.side_effect = [error, {"ok": True}]
             with self.assertRaisesRegex(SharedError, "规格数值无效"):
                 self.plugin._shared_exchange("a" * 32, {"op": "policy"})
             self.assertEqual(self.plugin._shared_retry_at, 0)
             self.assertTrue(self.plugin._shared_exchange("b" * 32, {"op": "policy"})["ok"])
-            self.assertEqual(rpc.return_value.exchange.call_count, 2)
+            self.assertEqual(rpc.call_count, 2)
 
     def test_transport_failure_backs_off_with_reason_and_success_clears_state(self):
         p = self.plugin
-        with patch("resourceflow.shared_plugin.ed2k_account"), patch(
-                "resourceflow.shared_plugin.TelegramRPC") as rpc:
-            rpc.return_value.exchange.side_effect = [SharedError("Telegram 请求超时"), {"ok": True}]
-            with self.assertRaisesRegex(SharedError, "Telegram 请求超时"):
+        with patch.object(p, "_https_shared_exchange") as rpc:
+            rpc.side_effect = [SharedError("HTTPS 请求超时"), {"ok": True}]
+            with self.assertRaisesRegex(SharedError, "HTTPS 请求超时"):
                 p._shared_exchange("a" * 32, {"op": "policy"})
             self.assertGreater(p._shared_retry_at, time.time())
-            p.save_data.assert_any_call("shared_retry_error", "Telegram 请求超时")
-            with self.assertRaisesRegex(SharedError, "退避等待.*上次原因：Telegram 请求超时"):
+            p.save_data.assert_any_call("shared_retry_error_https", "HTTPS 请求超时")
+            with self.assertRaisesRegex(SharedError, "退避等待.*上次原因：HTTPS 请求超时"):
                 p._shared_exchange("b" * 32, {"op": "policy"})
-            self.assertEqual(rpc.return_value.exchange.call_count, 1)
+            self.assertEqual(rpc.call_count, 1)
             p._shared_retry_at = time.time() - 1
             self.assertTrue(p._shared_exchange("b" * 32, {"op": "policy"})["ok"])
             self.assertEqual(p._shared_retry_at, 0)
-            p.save_data.assert_any_call("shared_retry_error", "")
+            p.save_data.assert_any_call("shared_retry_error_https", "")
 
     def test_stopped_message_is_distinct_from_backoff(self):
         self.plugin._shared_stopping = True
@@ -1210,10 +1234,12 @@ class PluginSetupTests(unittest.TestCase):
         app.post("/rules")(self.plugin.update_channel_dedup_settings)
         self.plugin._refresh_scheduler = Mock()
         with TestClient(app) as client:
-            response = client.post("/shared/settings", json={"enabled": True, "bot_username": "@testbot"})
+            response = client.post("/shared/settings", json={"enabled": False, "bot_username": "@testbot"})
             self.assertEqual(response.status_code, 200)
             self.assertTrue(response.json()["success"])
             self.assertNotIn("bot_token", response.json()["data"])
+            self.assertNotIn("bot_username", response.json()["data"])
+            self.assertFalse(client.post("/shared/settings", json={"enabled": True}).json()["success"])
             response = client.post("/rules", json={"attributes": ["resolution"], "enabled": False})
             self.assertEqual(response.status_code, 200)
             self.assertFalse(response.json()["success"])

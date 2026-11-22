@@ -8,6 +8,13 @@ from .shared_protocol import digest
 
 
 AUTHORITY_VERSION = 2
+SITE_METADATA_VERSION = 1
+
+
+def site_label(value):
+    if isinstance(value, str) and not any(mark in value for mark in (":", "/", "\\", "@", "?", "=")):
+        return " ".join(value.split())[:80]
+    return ""
 
 
 def completion_rows(records, attributes):
@@ -61,5 +68,9 @@ def completion_rows(records, attributes):
             # Preserve original approval links when repairing a confirmed completed request.
             row.update(links)
             row["id"] = digest(row)[:24]
-            rows[row["id"]] = row
+            name = site_label(record.get("site_name"))
+            if name:
+                row["site_name"] = name
+            if name or row["id"] not in rows:
+                rows[row["id"]] = row
     return list(rows.values()), skipped

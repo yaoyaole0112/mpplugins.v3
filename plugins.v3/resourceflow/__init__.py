@@ -25,6 +25,7 @@ from fastapi import Query
 
 from app import schemas
 from app.application.configuration import get_configured_system_config
+from app.application.classification.reference import classification_category_resolver_snapshot
 from app.application.torrent.download import TorrentHelper
 from app.api.endpoints.plugin import register_plugin_api
 from app.chain.download import DownloadChain
@@ -32,6 +33,7 @@ from app.chain.media import MediaChain
 from app.chain.tmdb import TmdbChain
 from app.chain.torrents import TorrentsChain
 from app.sdk.cache import cached, fresh
+from app.sdk.classification import classify_media
 from app.sdk.config import settings
 from app.sdk.media import MediaInfo
 from app.sdk.events import Event, eventmanager
@@ -117,7 +119,7 @@ TASK_CONFIG_FIELDS = (
     "recent_episodes_only",
     "recent_episodes_days",
     "spec_dedup_enabled",
-    "blacklist_site_ids",
+    "download_categories",
     "download_types",
     "site_skip_tips",
     "rss_support",
@@ -225,11 +227,10 @@ class BrushTaskConfig:
             int(self._parse_number(config.get("recent_episodes_days")) or 3), 365
         ))
         self.spec_dedup_enabled = bool(task_spec_dedup_enabled(config))
-        self.blacklist_site_ids = list(dict.fromkeys(
-            int(site_id) for site_id in config.get("blacklist_site_ids", [])
-            if str(site_id).isdigit() and int(site_id) > 0
-        ))
-        self.download_types = list(dict.fromkeys(config.get("download_types") or []))
+        categories = config.get("download_categories")
+        self.download_categories = list(dict.fromkeys(categories)) if isinstance(categories, list) else None
+        self.download_types = list(dict.fromkeys(config.get("download_types") or [])) \
+            if self.download_categories is None else []
         self.site_skip_tips = bool(config.get("site_skip_tips", False))
         self.rss_support = bool(config.get("rss_support", False))
         self.tag = self._read_tag(config)
@@ -283,9 +284,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     """
 
     plugin_name = "资源刷流"
-    plugin_desc = "独立资源刷流，支持 Telegram 和 Tailscale HTTPS 共享下载审批。"
+    plugin_desc = "独立资源刷流，通过 Tailscale 私网 HTTPS 进行共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.52"
+    plugin_version = "1.0.54"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -293,7 +294,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     auth_level = 2
 
     DATA_SCHEMA_VERSION = 2
-    CONFIG_SCHEMA_VERSION = 7
+    CONFIG_SCHEMA_VERSION = 8
     MAX_RUN_HISTORY = 50
     GLOBAL_BRUSH_TAG = "资源刷流"
     TASK_DATA_NAMES = ("torrents", "archived", "unmanaged", "statistic", "runs")
@@ -431,6 +432,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         if migrated:
             task_rows = self._migrate_legacy_config(raw_config)
         task_rows = task_rows or []
+        self._global_torrent_blacklist_enabled = bool(raw_config.get(
+            "global_torrent_blacklist_enabled",
+            any(row.get("blacklist_site_ids") for row in task_rows if isinstance(row, dict)),
+        ))
 
         self._task_configs: Dict[str, BrushTaskConfig] = {}
         restored_tags = False
@@ -1002,6 +1007,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         global_dynamic_delete_was_enabled = self._global_dynamic_delete_enabled()
         self._enabled = payload.enabled
         self._show_sidebar_nav = payload.show_sidebar_nav
+        if "global_torrent_blacklist_enabled" in payload.model_fields_set:
+            self._global_torrent_blacklist_enabled = payload.global_torrent_blacklist_enabled
         for field in GLOBAL_LIMIT_FIELDS:
             setattr(self, f"_{field}", getattr(payload, field))
         for field in GLOBAL_DYNAMIC_DELETE_FIELDS:
@@ -1053,7 +1060,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             return schemas.Response(success=False, message="任务正在执行，请稍后再修改")
         task_data = self._task_configs[task_id].to_dict()
         # 请求里省略的字段保持原值，避免旧前端把下载器标签等配置覆盖为空。
-        task_data.update(payload.model_dump(exclude_unset=True))
+        changes = payload.model_dump(exclude_unset=True)
+        if task_data["download_categories"] is not None and changes.get("download_categories") is None:
+            changes.pop("download_categories", None)
+        task_data.update(changes)
         task_data["id"] = task_id
         task = BrushTaskConfig(task_data)
         if not self._validate_task_reference(task):
@@ -1145,6 +1155,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             "schema_version": self.CONFIG_SCHEMA_VERSION,
             "enabled": bool(getattr(self, "_enabled", False)),
             "show_sidebar_nav": bool(getattr(self, "_show_sidebar_nav", True)),
+            "global_torrent_blacklist_enabled": bool(getattr(self, "_global_torrent_blacklist_enabled", False)),
             "channel_dedup_enabled": bool(getattr(self, "_channel_dedup_enabled", False)),
             "channel_dedup_cancel_downloading": bool(getattr(self, "_channel_dedup_cancel_downloading", False)),
             "channel_dedup_inflight_enabled": True,
@@ -1659,13 +1670,17 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         return {
             "enabled": self.get_state(),
             "show_sidebar_nav": self._show_sidebar_nav,
+            "global_torrent_blacklist_enabled": bool(getattr(self, "_global_torrent_blacklist_enabled", False)),
             "channel_dedup": self._channel_dedup_payload(include_records=False),
             **{field: getattr(self, f"_{field}", None) for field in GLOBAL_LIMIT_FIELDS},
             **{field: getattr(self, f"_{field}", None) for field in GLOBAL_DYNAMIC_DELETE_FIELDS},
             **{field: getattr(self, f"_{field}", None) for field in RECENT_DATE_FALLBACK_FIELDS},
             "summary": aggregate,
             "tasks": task_rows,
-            "options": {"sites": site_options, "downloaders": downloader_options},
+            "options": {
+                "sites": site_options, "downloaders": downloader_options,
+                "download_categories": self._mp_download_category_options(),
+            },
         }
 
     def _task_summary(
@@ -2035,14 +2050,13 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 logger.info(f"刷流任务 [{task.name}] 排除种子 {torrent.title}："
                             f"标题命中 MoviePilot 文件整理屏蔽词 {matched.pattern!r}")
                 continue
-            if task.download_types:
-                media_type, source = self._download_type(torrent, type_cache)
-                if media_type not in task.download_types:
-                    reason = f"下载类型未选择：{media_type}" if media_type else "下载类型无法识别"
-                    report["reason_counts"][reason] += 1
-                    logger.info(f"刷流任务 [{task.name}] 排除种子 {torrent.title}：{reason}（{source}）")
-                    continue
-                logger.info(f"刷流任务 [{task.name}] 下载类型通过 {torrent.title}：{media_type}（{source}）")
+            category_ok, category_reason = self._download_category_filter(task, torrent, type_cache)
+            if not category_ok:
+                report["reason_counts"][category_reason] += 1
+                logger.info(f"刷流任务 [{task.name}] 排除种子 {torrent.title}：{category_reason}")
+                continue
+            if category_reason:
+                logger.info(f"刷流任务 [{task.name}] {category_reason}：{torrent.title}")
             hash_string = self.__download(torrent, transfer_patterns=transfer_patterns)
             if not hash_string:
                 report["reason_counts"]["下载预检未通过或下载器添加失败"] += 1
@@ -2091,6 +2105,50 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     @staticmethod
     def _match_mp_transfer_exclude(value: str, patterns: tuple[re.Pattern, ...]) -> Optional[re.Pattern]:
         return next((pattern for pattern in patterns if pattern.search(value or "")), None)
+
+    MP_CATEGORY_TYPES = {"movie": MediaType.MOVIE, "tv": MediaType.TV, "music": MediaType.MUSIC}
+
+    @classmethod
+    def _mp_download_category_options(cls) -> list[dict]:
+        resolver = classification_category_resolver_snapshot()
+        return [
+            {"value": f"{kind}:{'/'.join(path)}", "title": f"{media_type.value} · {'/'.join(path)}"}
+            for kind, media_type in cls.MP_CATEGORY_TYPES.items()
+            for path in resolver.category_paths(media_type)
+        ]
+
+    def _download_category_filter(self, task: BrushTaskConfig, torrent: TorrentInfo, cache: dict) -> Tuple[bool, str]:
+        categories = task.download_categories
+        if categories is None:
+            if not task.download_types:
+                return True, ""
+            kind, source = self._download_type(torrent, cache)
+            if kind in task.download_types:
+                return True, f"旧下载类型通过：{kind}（{source}）"
+            return False, f"旧下载类型未通过：{kind or '无法识别'}（{source}）"
+        if not categories:
+            return True, ""
+        key = (torrent.title or "", torrent.description or "", torrent.category or "")
+        if key not in cache:
+            try:
+                media = self._mp_recognize_media(MetaInfo(torrent.title or "", torrent.description))
+                if media:
+                    media = classify_media(media)
+                    kind = next((kind for kind, item in self.MP_CATEGORY_TYPES.items()
+                                 if media.type in (item, item.value, kind)), "")
+                    result = classification_category_resolver_snapshot().resolve_media(media)
+                    if kind and result.path and result.state in {"resolved", "legacy"}:
+                        cache[key] = f"{kind}:{'/'.join(result.path)}"
+            except Exception as err:
+                logger.warning(f"MoviePilot 整理分类识别失败 {torrent.title}：{type(err).__name__}")
+            cache.setdefault(key, None)
+        category = cache[key]
+        if not category:
+            return False, "无法确认 MoviePilot 整理分类"
+        path = category.partition(":")[2]
+        if category not in categories:
+            return False, f"MoviePilot 整理分类未选择：{path}"
+        return True, f"MoviePilot 整理分类通过（{path}）"
 
     @staticmethod
     def _explicit_download_type(values: list) -> Optional[str]:
@@ -2203,10 +2261,14 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         """按种子黑名单规则规范化完整标题，不忽略大小写。"""
         return normalize("NFC", str(title or "").strip())
 
-    @staticmethod
-    def _blacklist_other_site_names(task: BrushTaskConfig) -> Optional[Set[str]]:
-        """取当前任务站点之外的已选站点名称。"""
-        selected_ids = set(task.blacklist_site_ids or [])
+    def _blacklist_other_site_names(self, task: BrushTaskConfig) -> Optional[Set[str]]:
+        """启用共享审批的任务站点构成全局的完整种子标题排重组。"""
+        if not getattr(self, "_global_torrent_blacklist_enabled", False):
+            return set()
+        selected_ids = {
+            row.site_id for row in tuple(self._task_configs.values())
+            if row.site_id and row.spec_dedup_enabled
+        }
         if task.site_id not in selected_ids:
             return set()
         names = set()
@@ -3471,6 +3533,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 spec_hint=" ".join([torrent.description or "", *(torrent.labels or [])]),
                 pending_source=pending_source,
                 candidate_overrides=candidate_overrides,
+                site_name=getattr(torrent, "site_name", None),
             )
             reservation["added"] = bool(result)
             if result:
@@ -3842,10 +3905,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     raise ValueError("MoviePilot 文件整理屏蔽词不可用")
                 if matched := self._match_mp_transfer_exclude(torrent.title, transfer_patterns):
                     raise ValueError(f"标题命中 MoviePilot 文件整理屏蔽词 {matched.pattern!r}")
-                if task.download_types:
-                    kind, reason = self._download_type(torrent, {})
-                    if kind not in task.download_types:
-                        raise ValueError(f"下载类型复核未通过：{reason}")
+                category_ok, category_reason = self._download_category_filter(task, torrent, {})
+                if not category_ok:
+                    raise ValueError(category_reason)
                 result = self.__download(
                     torrent, candidate_overrides={file_path: override}, manual_path=file_path,
                     torrent_content_override=content, transfer_patterns=transfer_patterns,

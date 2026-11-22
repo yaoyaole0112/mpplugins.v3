@@ -109,6 +109,7 @@ const settingsDraft = ref({
   global_maxupspeed: null,
   global_maxdlspeed: null,
   global_proxy_delete: false,
+  global_torrent_blacklist_enabled: false,
   global_delete_size_range: null,
   recent_missing_date_tolerance_days: 7,
   recent_missing_date_ai_enabled: false,
@@ -186,6 +187,7 @@ async function loadStatus({ preserveSelection = true, loadDetail = true, resetDr
       global_maxupspeed: status.value.global_maxupspeed ?? null,
       global_maxdlspeed: status.value.global_maxdlspeed ?? null,
       global_proxy_delete: Boolean(status.value.global_proxy_delete),
+      global_torrent_blacklist_enabled: Boolean(status.value.global_torrent_blacklist_enabled),
       global_delete_size_range: status.value.global_delete_size_range ?? null,
       recent_missing_date_tolerance_days: Number(status.value.recent_missing_date_tolerance_days || 7),
       recent_missing_date_ai_enabled: Boolean(status.value.recent_missing_date_ai_enabled),
@@ -1173,6 +1175,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
       :task="editorTask"
       :sites="status.options.sites"
       :downloaders="status.options.downloaders"
+      :download-categories="status.options.download_categories || []"
       :global-dynamic-delete="Boolean(status.global_proxy_delete)"
       :saving="saving"
       @save="saveTask"
@@ -1196,20 +1199,17 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             <VProgressLinear :class="{ 'global-settings__progress--idle': !loading && !channelDedupLoading }"
               indeterminate />
           </div>
-          <div class="channel-dedup__section">
+          <section class="global-settings__section">
+            <h3><VIcon icon="mdi-cog-outline" />基础</h3>
             <div class="global-settings__toggles">
               <VSwitch v-model="settingsDraft.enabled" label="启用插件"
                 color="primary" density="compact" hide-details inset />
               <VSwitch v-model="settingsDraft.show_sidebar_nav" label="显示侧栏入口"
                 color="primary" density="compact" hide-details inset />
-              <VSwitch v-model="settingsDraft.global_proxy_delete" label="全局动态删种"
-                color="primary" density="compact" hide-details inset />
             </div>
-            <div v-if="settingsDraft.global_proxy_delete" class="global-settings__grid">
-              <VTextField v-model="settingsDraft.global_delete_size_range"
-                label="全局动态删种阈值（GB）" placeholder="50-100" density="comfortable" clearable hide-details />
-            </div>
-            <VDivider />
+          </section>
+          <section class="global-settings__section">
+            <h3><VIcon icon="mdi-gauge" />运行限额与删种</h3>
             <div class="global-settings__grid global-settings__limits">
               <VTextField v-model.number="settingsDraft.global_disksize" type="number" min="0"
                 label="全局保种体积（GB）" density="comfortable" clearable hide-details />
@@ -1220,8 +1220,15 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               <VTextField v-model.number="settingsDraft.global_maxdlspeed" type="number" min="0"
                 label="全局总下载带宽（KB/s）" density="comfortable" clearable hide-details />
             </div>
-            <VDivider />
-            <div class="text-subtitle-2">缺失播出日期兜底</div>
+            <div class="global-settings__grid">
+              <VSwitch v-model="settingsDraft.global_proxy_delete" label="全局动态删种"
+                color="primary" density="compact" hide-details inset />
+              <VTextField v-if="settingsDraft.global_proxy_delete" v-model="settingsDraft.global_delete_size_range"
+                label="全局动态删种阈值（GB）" placeholder="50-100" density="comfortable" clearable hide-details />
+            </div>
+          </section>
+          <section class="global-settings__section">
+            <h3><VIcon icon="mdi-calendar-clock-outline" />缺失播出日期兜底</h3>
             <div class="global-settings__grid global-settings__recent-date">
               <VTextField v-model.number="settingsDraft.recent_missing_date_tolerance_days"
                 type="number" min="1" max="30" step="1"
@@ -1230,15 +1237,14 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               <VSwitch v-model="settingsDraft.recent_missing_date_ai_enabled"
                 label="启用 AI 官方排播核验" color="primary" density="compact" hide-details inset />
             </div>
-          </div>
-          <VDivider />
-          <SharedSettingsPanel v-if="settingsDialog" ref="sharedSettingsPanel" mode="settings"
-            :api="api" :plugin-base="pluginBase"
-            @host-change="sharedHost = $event" @policy-synced="loadChannelDedup()" />
-          <template v-if="sharedHost">
-            <VDivider />
-            <div class="channel-dedup__section">
-              <div class="text-subtitle-2">全局去重字段</div>
+          </section>
+          <section class="global-settings__section">
+            <h3><VIcon icon="mdi-filter-check-outline" />选种与去重</h3>
+            <VSwitch v-model="settingsDraft.global_torrent_blacklist_enabled" label="种子黑名单"
+              hint="开启共享下载审批的任务站点之间，按完整种子名称排重"
+              persistent-hint color="primary" density="compact" inset />
+            <template v-if="sharedHost">
+              <h4 class="text-subtitle-2">共享规格去重字段</h4>
               <div class="global-settings__spec-row">
                 <div class="global-settings__attributes">
                   <VCheckbox v-for="attribute in channelDedupAttributes" :key="attribute.value"
@@ -1249,23 +1255,28 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                   class="global-settings__unknown" label="候选缺少勾选规格时" density="comfortable"
                   :disabled="!channelDedupDraft.attributes.length" hide-details />
               </div>
+              <div v-if="channelDedupDraft.attributes.includes('size')" class="global-settings__grid">
+                <VTextField v-model.number="channelDedupDraft.size_tolerance_pct"
+                  type="number" min="0" max="20" step="1" suffix="%" label="单集文件大小容差" density="comfortable"
+                  hint="按种子内单个视频文件大小比较，不使用整包总大小" persistent-hint />
+              </div>
+            </template>
+          </section>
+          <section class="global-settings__section">
+            <h3><VIcon icon="mdi-shield-link-variant-outline" />共享下载审批 <span>Tailscale 私网 HTTPS</span></h3>
+            <SharedSettingsPanel v-if="settingsDialog" ref="sharedSettingsPanel" mode="settings"
+              :api="api" :plugin-base="pluginBase"
+              @host-change="sharedHost = $event" @policy-synced="loadChannelDedup()" />
+          </section>
+          <section class="global-settings__section">
+            <h3><VIcon icon="mdi-tag-multiple-outline" />别名绑定</h3>
+            <div class="global-settings__grid global-settings__aliases">
+              <VTextarea v-model="channelDedupDraft.identity_aliases" label="剧名别名绑定（可选）"
+                placeholder="剧名别名 = TMDB剧集ID" rows="2" density="comfortable" auto-grow hide-details />
+              <VTextarea v-model="channelDedupDraft.movie_identity_aliases" label="电影别名绑定（可选）"
+                placeholder="电影别名 = TMDB电影ID" rows="2" density="comfortable" auto-grow hide-details />
             </div>
-            <div v-if="channelDedupDraft.attributes.includes('size')" class="global-settings__grid">
-              <VTextField
-                v-model.number="channelDedupDraft.size_tolerance_pct" type="number" min="0" max="20" step="1"
-                suffix="%" label="单集文件大小容差" density="comfortable"
-                hint="按种子内单个视频文件大小比较，不使用整包总大小" persistent-hint />
-            </div>
-            <VDivider />
-          </template>
-          <VDivider />
-          <div class="text-subtitle-2">别名绑定</div>
-          <div class="global-settings__grid global-settings__aliases">
-            <VTextarea v-model="channelDedupDraft.identity_aliases" label="剧名别名绑定（可选）"
-              placeholder="剧名别名 = TMDB剧集ID" rows="2" density="comfortable" auto-grow hide-details />
-            <VTextarea v-model="channelDedupDraft.movie_identity_aliases" label="电影别名绑定（可选）"
-              placeholder="电影别名 = TMDB电影ID" rows="2" density="comfortable" auto-grow hide-details />
-          </div>
+          </section>
         </VCardText>
         <footer class="global-settings__footer">
           <div class="global-settings__footer-group">
@@ -1608,7 +1619,37 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 .channel-dedup__search { grid-template-columns: minmax(0, 1fr) 160px; }
 
 .global-settings__body {
-  gap: 18px;
+  gap: 0;
+}
+
+.global-settings__section {
+  display: grid;
+  gap: 14px;
+  min-inline-size: 0;
+  padding-block: 16px;
+}
+
+.global-settings__section + .global-settings__section {
+  border-block-start: thin solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
+.global-settings__section h3 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.global-settings__section h3 > .v-icon {
+  color: rgb(var(--v-theme-primary));
+}
+
+.global-settings__section h3 > span:not(.v-icon) {
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
+  font-size: 0.8125rem;
+  font-weight: 400;
 }
 
 .global-settings__progress {
@@ -1675,21 +1716,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 }
 
 @media (max-width: 599px) {
-  .global-settings__toggles {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    align-items: start;
-    gap: 8px;
-  }
-  .channel-dedup__body .global-settings__toggles :deep(.v-selection-control) {
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-  }
-  .channel-dedup__body .global-settings__toggles :deep(.v-label) {
-    margin-inline: 0;
-    text-align: center;
-  }
+  .global-settings__toggles { gap: 4px 14px; }
   .global-settings__footer { padding: 8px; gap: 4px; }
   .global-settings__footer-group { gap: 0; }
 }

@@ -4,6 +4,9 @@ from collections import Counter
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from app.application.classification.reference import ClassificationCategoryResolver
+from app.schemas import MediaType
+
 from resourceflow import ResourceFlow, BrushTaskConfig
 from resourceflow.models import BrushTaskPayload
 
@@ -80,6 +83,41 @@ class DownloadTypeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             BrushTaskPayload(name="task", site_id=1, downloader="qb", download_types=["invalid"])
 
+    def test_effective_moviepilot_category_is_exact_and_supports_custom_paths(self):
+        policy = SimpleNamespace(revision=1, categories=[
+            SimpleNamespace(id="custom", name="精选", path=["影片", "独立制作"],
+                            enabled=True, media_type=MediaType.MOVIE.value),
+        ])
+        resolver = ClassificationCategoryResolver(lambda: policy)
+        selected = SimpleNamespace(category_id="custom", category_path=["旧目录"])
+        media = SimpleNamespace(type=MediaType.MOVIE, library_category="外语电影",
+                                classification=SimpleNamespace(effective=selected, recommended=None))
+        self.plugin._mp_recognize_media.return_value = media
+        torrent = SimpleNamespace(title="Custom Movie", category="外语电影", description="")
+        task = BrushTaskConfig({"download_categories": ["movie:影片/独立制作"], "download_types": ["tv"]})
+        cache = {}
+        with patch("resourceflow.classification_category_resolver_snapshot", return_value=resolver):
+            self.assertEqual(self.plugin._mp_download_category_options(), [
+                {"value": "movie:影片/独立制作", "title": "电影 · 影片/独立制作"},
+            ])
+            self.assertTrue(self.plugin._download_category_filter(task, torrent, cache)[0])
+            task.download_categories = ["tv:影片/独立制作", "movie:外语电影"]
+            self.assertEqual(self.plugin._download_category_filter(task, torrent, cache),
+                             (False, "MoviePilot 整理分类未选择：影片/独立制作"))
+            policy.categories[0].enabled = False
+            self.assertFalse(self.plugin._download_category_filter(task, torrent, {})[0])
+        self.assertEqual(task.download_types, [])
+
+    def test_category_filter_fails_closed_without_moviepilot_identity(self):
+        self.plugin._mp_recognize_media.return_value = None
+        task = BrushTaskConfig({"download_categories": ["tv:国产剧"]})
+        torrent = SimpleNamespace(title="Example", category="国产剧", description="")
+        self.assertEqual(self.plugin._download_category_filter(task, torrent, {}),
+                         (False, "无法确认 MoviePilot 整理分类"))
+        self.assertEqual(self.plugin._download_category_filter(
+            BrushTaskConfig({"download_categories": [], "download_types": ["movie"]}), torrent, {}),
+            (True, ""))
+
     def test_filter_stops_unselected_type_before_downloader(self):
         task = BrushTaskConfig({"name": "test", "download_types": ["anime"], "except_subscribe": False})
         self.plugin._get_task_config = Mock(return_value=task)
@@ -107,8 +145,8 @@ class DownloadTypeTest(unittest.TestCase):
         self.plugin._ResourceFlow__download.assert_called_once_with(torrents[0], transfer_patterns=patterns)
         self.assertEqual(self.plugin.chain.recognize_media.call_count, 3)
         self.assertEqual(report["reason_counts"]["命中 MoviePilot 文件整理屏蔽词"], 1)
-        self.assertEqual(report["reason_counts"]["下载类型未选择：movie"], 1)
-        self.assertEqual(report["reason_counts"]["下载类型无法识别"], 1)
+        self.assertEqual(sum(count for reason, count in report["reason_counts"].items()
+                             if reason.startswith("旧下载类型未通过：")), 2)
 
 
 if __name__ == "__main__":

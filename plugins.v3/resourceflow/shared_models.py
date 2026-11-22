@@ -1,5 +1,5 @@
 import re
-from typing import Literal, Optional
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -19,13 +19,8 @@ class SharedSettingsPayload(BaseModel):
 
     enabled: bool = False
     host_coordinator: bool = False
-    bot_username: str = ""
     group: str = "resources"
     instance_label: str = Field("我的资源刷流", min_length=1, max_length=80)
-    bot_token: Optional[str] = Field(None, max_length=200)
-    allowed_users: list[int] = Field(default_factory=list, max_length=100)
-    transport: Literal["telegram", "https"] = "telegram"
-    telegram_listener: bool = True
     https_listener: bool = False
     https_host: str = Field("", max_length=135)
     https_authority_id: str = Field("", pattern=r"^(?:[a-f0-9]{32})?$")
@@ -54,21 +49,6 @@ class SharedSettingsPayload(BaseModel):
             raise ValueError("不同实例必须使用独立的私网审批密钥")
         return peers
 
-    @field_validator("bot_username", mode="before")
-    @classmethod
-    def username(cls, value):
-        name = str(value or "").strip().lstrip("@")
-        if name and (not re.fullmatch(r"[A-Za-z0-9_]{5,32}", name) or not name.lower().endswith("bot")):
-            raise ValueError("请输入协调 Bot 的 @用户名")
-        return "@" + name if name else ""
-
-    @field_validator("bot_token")
-    @classmethod
-    def token(cls, value):
-        if value is not None and value and not re.fullmatch(r"\d{5,20}:[A-Za-z0-9_-]{20,100}", value):
-            raise ValueError("Bot Token 格式无效")
-        return value
-
     @field_validator("group", "instance_label")
     @classmethod
     def text(cls, value):
@@ -84,29 +64,10 @@ class SharedSettingsPayload(BaseModel):
             raise ValueError("共享组只支持英文、数字、横线和下划线")
         return value
 
-    @field_validator("allowed_users")
+    @model_validator(mode="before")
     @classmethod
-    def users(cls, value):
-        if any(user <= 0 or user >= 2**53 for user in value):
-            raise ValueError("白名单须为 Telegram 个人账号的数字 ID")
-        return list(dict.fromkeys(value))
-
-    @model_validator(mode="after")
-    def destination_required(self):
-        if (self.enabled or self.host_coordinator) and not self.bot_username:
-            raise ValueError("请填写协调 Bot 用户名")
-        if self.host_coordinator and self.telegram_listener and not self.allowed_users:
-            raise ValueError("运行协调端必须设置个人账号白名单")
-        if self.host_coordinator and not (self.telegram_listener or self.https_listener):
-            raise ValueError("协调端必须启用至少一种审批入口")
-        if self.host_coordinator and self.https_listener and not self.https_peers:
-            raise ValueError("请先配置允许的私网设备")
-        if self.host_coordinator and self.transport == "https" and not self.https_listener:
-            raise ValueError("本机使用私网审批前须启用私网审批入口")
-        if self.enabled and self.host_coordinator and self.transport == "telegram" and not self.telegram_listener:
-            raise ValueError("本机使用 Telegram 审批时不能停用 Telegram 审批入口")
-        if self.enabled and self.transport == "https" and not self.host_coordinator and not (
-            self.https_host and self.https_authority_id
-        ):
-            raise ValueError("请填写协调端 Tailscale 域名及共享账本 ID")
-        return self
+    def ignore_retired_transport_fields(cls, value):
+        if isinstance(value, dict):
+            retired = {"bot_username", "bot_token", "allowed_users", "transport", "telegram_listener"}
+            return {key: item for key, item in value.items() if key not in retired}
+        return value

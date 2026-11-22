@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from zoneinfo import ZoneInfo
 
 from app.sdk.media import MetaInfo
-from resourceflow import ResourceFlow, RequestUtils
+from resourceflow import BrushTaskConfig, ResourceFlow, RequestUtils
 from resourceflow.models import BrushTaskPayload
 
 
@@ -529,13 +529,22 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         self.assertTrue(second[0])
         self.assertEqual(history_oper.return_value.query.call_count, 1)
 
-    def test_blacklist_site_ids_are_deduplicated_and_positive(self):
-        payload = BrushTaskPayload(
-            name="task", site_id=1, downloader="qb", blacklist_site_ids=[2, 2, 3]
-        )
-        self.assertEqual(payload.blacklist_site_ids, [2, 3])
-        with self.assertRaises(ValueError):
-            BrushTaskPayload(name="task", site_id=1, downloader="qb", blacklist_site_ids=[0])
+    def test_blacklist_membership_follows_shared_task_sites(self):
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        first = BrushTaskConfig({"site_id": 1, "spec_dedup_enabled": True})
+        second = BrushTaskConfig({"site_id": 2, "spec_dedup_enabled": True})
+        third = BrushTaskConfig({"site_id": 3, "spec_dedup_enabled": False, "blacklist_site_ids": [1, 3]})
+        plugin._task_configs = {task.id: task for task in (first, second, third)}
+        with patch("resourceflow.SiteOper") as sites:
+            sites.return_value.get.return_value = SimpleNamespace(name="其他站")
+            self.assertEqual(plugin._blacklist_other_site_names(first), set())
+            plugin._global_torrent_blacklist_enabled = True
+            self.assertEqual(plugin._blacklist_other_site_names(first), {"其他站"})
+            self.assertEqual(plugin._blacklist_other_site_names(third), set())
+            sites.return_value.get.assert_called_once_with(2)
+            second.spec_dedup_enabled = False
+            self.assertEqual(plugin._blacklist_other_site_names(first), set())
+            self.assertNotIn("blacklist_site_ids", third.to_dict())
 
 
 if __name__ == "__main__":

@@ -65,9 +65,9 @@
   },
   "ResourceFlow": {
     "name": "资源刷流",
-    "description": "独立资源刷流，支持 Telegram 或 Tailscale HTTPS 共享下载审批，跨实例同规格下载前占位。",
-    "labels": "刷流,资源去重,Telegram,Tailscale",
-    "version": "1.0.52",
+    "description": "独立资源刷流，使用 Tailscale 私网 HTTPS 共享下载审批，跨实例同规格下载前占位。",
+    "labels": "刷流,资源去重,Tailscale",
+    "version": "1.0.54",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -75,6 +75,8 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.54": "下载筛选对齐 MoviePilot 整理分类；种子黑名单集中管理并自动纳入共享审批任务的站点；全局设置分区，审批仅保留 Tailscale 私网 HTTPS，沿用原账本。",
+      "v1.0.53": "共享审批与状态回报同步实际站点显示名；原下载端可从已核对的本机历史补报空白站点。",
       "v1.0.52": "将下载待核验列表中的按钮文字缩短为「核验下载」。",
       "v1.0.51": "统一共享审批筛选布局，显示下载站点，待核验支持驳回；整包逐文件识别失败时用种子标题补查。选种沿用 MoviePilot 文件整理屏蔽词和分类，提前拦截重复种子。",
       "v1.0.50": "QB 获批种子文件清单暂不可用时，新增短间隔后台重试和独立等待状态；确认实际选集后才启动下载。",

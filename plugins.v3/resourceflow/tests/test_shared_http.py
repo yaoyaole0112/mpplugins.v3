@@ -117,17 +117,19 @@ class PluginHTTPSMigrationTest(TestCase):
 
     def test_https_failure_cannot_post_to_bot_or_mark_request_denied(self):
         self.plugin._shared_settings = self.https
-        with patch.object(self.plugin, "_https_shared_exchange", side_effect=SharedError("offline")), \
-                patch("resourceflow.shared_plugin.ed2k_account") as account, self.assertRaises(SharedError) as failed:
+        with patch.object(self.plugin, "_https_shared_exchange", side_effect=SharedError("offline")) as exchange, \
+                self.assertRaises(SharedError) as failed:
             self.plugin._shared_exchange(uuid4().hex, {"op": "policy"})
         self.assertFalse(getattr(failed.exception, "definitive", False))
-        account.assert_not_called()
+        exchange.assert_called_once()
         self.assertIn("shared_retry_at_https", [call.args[0] for call in self.plugin.save_data.call_args_list])
 
     def test_migrating_does_not_use_telegram_backoff_and_keeps_instance(self):
         p = self.plugin
         original_instance = p._shared_instance_id
-        p._shared_retry_at = 10**10
+        p.get_data.side_effect = {"shared_retry_at": 10**10}.get
+        p._load_shared_backoff()
+        self.assertEqual(p._shared_retry_at, 0)
         p._shared_claims = {"r": {"request_id": "r", "phase": "queued", "approved": {"f": "claim"}}}
         with patch.object(p, "_https_shared_exchange", side_effect=[
             {"authority_id": self.authority, "authority_version": 2},
@@ -157,7 +159,8 @@ class PluginHTTPSMigrationTest(TestCase):
         p._channel_dedup_attributes = ["resolution"]
         config = p._shared_settings
         from resourceflow.shared_protocol import digest
-        route = digest([config.bot_username, config.group])[:16]
+        old_bot = "@TestBot"
+        route = digest([old_bot, config.group])[:16]
         original = CoordinatorStore(Path(directory.name) / f"coordinator-{route}.sqlite3",
                                     config.group, ["resolution"], 5, RULE_DEFAULTS)
         authority = original.authority()
@@ -165,16 +168,26 @@ class PluginHTTPSMigrationTest(TestCase):
                     op="policy")
         original.handle(11, uuid4().hex, body)
         token = self.https.https_token
-        p._shared_settings = SharedSettingsPayload(enabled=True, host_coordinator=True,
-            bot_username=config.bot_username, group=config.group, transport="https",
-            https_listener=True, telegram_listener=False, https_token=token, https_peers=[
-                ApprovalPeer(sender=11, instance_id=p._shared_instance_id,
-                             token_hash=sha256(token.encode()).hexdigest())
-            ])
-        with patch.object(p, "_sync_shared_history"), patch("resourceflow.shared_plugin.BotWorker") as bot:
-            p._start_shared_worker()
+        old_config = {"shared": dict(enabled=True, host_coordinator=True,
+            bot_username=old_bot, bot_token="unused", group=config.group, transport="https",
+            https_listener=True, telegram_listener=True, https_token=token, instance_id=p._shared_instance_id,
+            https_peers=[dict(sender=11, instance_id=p._shared_instance_id,
+                              token_hash=sha256(token.encode()).hexdigest())])}
+        with patch.object(p, "_sync_shared_history"):
+            p._init_shared(old_config)
             result = p._shared_exchange(uuid4().hex, {"op": "policy"})
-        bot.assert_not_called()
         self.assertEqual(result["authority_id"], authority["authority_id"])
         self.assertEqual(result["user_id"], 11)
         self.assertNotIn("https_token", p.get_shared_status().data)
+        self.assertNotIn("legacy_namespace", p.get_shared_status().data)
+        self.assertNotIn("bot_token", p._shared_config())
+        self.assertEqual(p._shared_config()["legacy_namespace"], old_bot)
+
+    def test_retired_telegram_configuration_starts_without_any_network_fallback(self):
+        p = self.plugin
+        p._shared_settings = SharedSettingsPayload(
+            enabled=True, transport="telegram", bot_username="@testbot", bot_token="old-token")
+        with patch("resourceflow.shared_plugin.HTTPSApprovalRPC") as rpc:
+            with self.assertRaisesRegex(SharedError, "填写本机私网审批密钥"):
+                p._shared_exchange(uuid4().hex, {"op": "policy"})
+            rpc.assert_not_called()

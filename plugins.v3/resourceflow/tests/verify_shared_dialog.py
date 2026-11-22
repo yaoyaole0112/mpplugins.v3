@@ -1,8 +1,9 @@
-"""Shared settings browser checks against a mock API, without real Telegram traffic."""
+"""Shared settings browser checks against a mock API, without real approval traffic."""
 
 import argparse
 import asyncio
 from pathlib import Path
+import re
 
 from playwright.async_api import async_playwright
 
@@ -57,12 +58,15 @@ async def verify_settings_layout(dialog, width):
         const boxes = [...element.children].map(child => child.getBoundingClientRect())
         return {inline: boxes.every((box, index) => !index || box.left >= boxes[index - 1].right),
             aligned: boxes.every(box => Math.abs(box.top - boxes[0].top) < 2),
+            stacked: boxes.every((box, index) => !index || box.top >= boxes[index - 1].bottom - 1),
             fits: element.scrollWidth <= element.clientWidth + 1}
     }''')
-    assert all(toggles.values()), (width, toggles)
+    assert toggles['fits'] and (
+        (toggles['inline'] and toggles['aligned']) or (width < 360 and toggles['stacked'])
+    ), (width, toggles)
     assert await dialog.locator('.global-settings__toggles label').all_text_contents() == [
-        '启用插件', '显示侧栏入口', '全局动态删种']
-    for selector in ('.global-settings__aliases', '.shared-settings__credentials'):
+        '启用插件', '显示侧栏入口']
+    for selector in ('.global-settings__aliases', '.shared-settings__grid:has(textarea)'):
         layout = await dialog.locator(selector).evaluate('''element => {
             const [first, second] = [...element.children].map(child => child.getBoundingClientRect())
             return {inline: second.left >= first.right && Math.abs(first.top - second.top) < 2,
@@ -399,7 +403,9 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_label("本机名称", exact=True).wait_for()
             await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
             assert await dialog.get_by_label("启用共享下载审批", exact=True).is_checked()
-            assert await dialog.get_by_label("协调 Bot 用户名（现有账本保留原值）", exact=True).input_value() == "@testbot"
+            assert await dialog.get_by_text("Tailscale 私网 HTTPS", exact=True).count() == 1
+            assert await dialog.get_by_text(re.compile(r"Telegram|协调 Bot")).count() == 0
+            assert await dialog.get_by_label("协调端 Tailscale HTTPS 域名", exact=True).input_value() == "approval.example.ts.net"
             assert await dialog.get_by_role("tab").count() == 0
             assert await dialog.locator('.shared-settings__records').count() == 0
             global_bounds = await dialog.bounding_box()
@@ -409,13 +415,14 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label('显示侧栏入口', exact=True).is_checked()
             assert await dialog.get_by_label('全局保种体积（GB）', exact=True).count() == 1
             assert await dialog.get_by_label('全局同时下载任务数', exact=True).count() == 1
-            assert await dialog.get_by_text("全局去重字段", exact=True).count() == 0
+            assert await dialog.get_by_text("共享规格去重字段", exact=True).count() == 0
             assert await dialog.get_by_text("资源去重规则", exact=True).count() == 0
             assert await dialog.locator('.channel-dedup__body').evaluate('''element =>
                 element.querySelector('input[type=number]').compareDocumentPosition(
                     element.querySelector('.shared-settings')) & Node.DOCUMENT_POSITION_FOLLOWING''')
             await dialog.get_by_label("本机名称", exact=True).fill("NAS A 修改后")
             await dialog.get_by_label('全局保种体积（GB）', exact=True).fill('500')
+            await dialog.get_by_label('种子黑名单', exact=True).check()
             await dialog.get_by_label('剧名别名绑定（可选）', exact=True).fill('玫瑰 = 123')
             if width == 1440:
                 await page.wait_for_timeout(31000)
@@ -424,54 +431,57 @@ async def verify(base_url, output, executable_path, host_css=None):
                 assert await dialog.get_by_label("本机名称", exact=True).input_value() == "NAS A 修改后"
             await dialog.get_by_role("button", name="保存设置", exact=True).click()
             await page.wait_for_function("""window.resourceflowRequests.some(item =>
-                item.path === 'plugin/ResourceFlow/settings' && item.body.global_disksize === 500)""")
+                item.path === 'plugin/ResourceFlow/settings' && item.body.global_disksize === 500
+                && item.body.global_torrent_blacklist_enabled === true)""")
             await page.wait_for_function("!document.querySelector('button.v-btn--loading')")
             await dialog.get_by_role("button", name="关闭", exact=True).click()
             await page.get_by_role("button", name="全局设置", exact=True).click()
             await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
             assert await dialog.get_by_label("本机名称", exact=True).input_value() == "NAS A 修改后"
             assert await dialog.get_by_label('全局保种体积（GB）', exact=True).input_value() == '500'
+            assert await dialog.get_by_label('种子黑名单', exact=True).is_checked()
             assert await dialog.get_by_label('剧名别名绑定（可选）', exact=True).input_value() == '玫瑰 = 123'
             client_saves = await page.evaluate("""window.resourceflowRequests.filter(item =>
                 item.path.endsWith('/channel-dedup/settings'))""")
             assert client_saves and all("attributes" not in row["body"] for row in client_saves)
             await dialog.get_by_role("button", name="测试审批连接", exact=True).click()
-            await dialog.get_by_text("本机 Telegram ID", exact=True).wait_for()
+            await page.wait_for_function("""window.resourceflowRequests.some(item => item.path.endsWith('/shared/test'))""")
             assert await dialog.get_by_role("button", name="采用协调端匹配字段", exact=True).count() == 0
             await dialog.get_by_label("在本机运行协调端", exact=True).check()
-            await dialog.get_by_text("全局去重字段", exact=True).wait_for()
-            await dialog.get_by_text("资源去重规则", exact=True).wait_for()
+            await dialog.get_by_label("提供私网 HTTPS 审批入口", exact=True).check()
+            await dialog.get_by_text("共享规格去重字段", exact=True).wait_for()
             assert await dialog.get_by_label("分辨率", exact=True).is_checked()
             for label in ("特效", "编码", "来源", "帧率", "大小"):
                 assert not await dialog.get_by_label(label, exact=True).is_checked()
-            token = dialog.get_by_label("协调 Bot Token（已保存）", exact=True)
+            token = dialog.get_by_label("本机私网审批密钥（已保存）", exact=True)
             assert await token.get_attribute("type") == "password"
-            await token.fill("123456:FAKE_TOKEN_FOR_UI_TEST_ONLY_12345")
-            users = dialog.get_by_label("允许的个人账号 ID", exact=True)
-            for invalid in ('11;abc', '-22', '1.5', '9007199254740992'):
+            await token.fill("A" * 43)
+            users = dialog.get_by_label("允许的私网设备", exact=True)
+            for invalid in ('11;abc', f'{"a" * 32} -22 {"b" * 64}'):
                 await users.fill(invalid)
                 before = await page.evaluate("window.resourceflowRequests.filter(item => item.method === 'POST').length")
                 await dialog.get_by_role('button', name='保存设置', exact=True).click()
-                await dialog.get_by_text('全局设置未全部保存：白名单须为个人账号数字 ID', exact=True).wait_for()
+                await dialog.get_by_text(re.compile('全局设置未全部保存：私网设备格式无效')).wait_for()
                 assert before == await page.evaluate("window.resourceflowRequests.filter(item => item.method === 'POST').length")
-            mixed_users = "11,22;11；22、11 22\n11\t22，11"
+            mixed_users = f'{"a" * 32} 11 {"b" * 64}'
             await users.fill(mixed_users)
             await dialog.get_by_role('button', name='刷新共享状态', exact=True).click()
             await page.wait_for_function("!document.querySelector('.global-settings__footer button:disabled')")
             assert await users.input_value() == mixed_users
-            assert await token.input_value() == '123456:FAKE_TOKEN_FOR_UI_TEST_ONLY_12345'
+            assert await token.input_value() == "A" * 43
             await dialog.get_by_label('全局同时下载任务数', exact=True).fill('6')
             await dialog.get_by_role("button", name="保存设置", exact=True).click()
             await page.wait_for_function("""window.resourceflowRequests.some(item =>
                 item.path.endsWith('/shared/settings') && item.body.host_coordinator === true
-                && item.body.allowed_users.join(',') === '11,22')""")
+                && item.body.https_peers[0].sender === 11
+                && !('bot_username' in item.body) && !('transport' in item.body))""")
             await page.wait_for_function("""window.resourceflowRequests.some(item =>
                 item.path.endsWith('/channel-dedup/settings') && item.body.attributes?.length === 1
                 && item.body.attributes[0] === 'resolution' && item.body.enabled === false
                 && item.body.channels === '' && item.body.size_tolerance_pct === 3)""")
             await page.wait_for_function("document.querySelector('input[type=password]').value === ''")
             await page.wait_for_function("!document.querySelector('button.v-btn--loading')")
-            assert await users.input_value() == '11, 22'
+            assert await users.input_value() == mixed_users
             assert await dialog.get_by_label('全局同时下载任务数', exact=True).input_value() == '6'
             await verify_settings_layout(dialog, width)
             await dialog.get_by_label('全局动态删种', exact=True).check()
@@ -485,7 +495,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.screenshot(path=str(output / f"global-settings-{width}.png"), full_page=True)
             await dialog.get_by_label("本机名称", exact=True).scroll_into_view_if_needed()
             await page.screenshot(path=str(output / f"global-shared-{width}.png"), full_page=True)
-            await dialog.get_by_text("全局去重字段", exact=True).scroll_into_view_if_needed()
+            await dialog.get_by_text("共享规格去重字段", exact=True).scroll_into_view_if_needed()
             await page.screenshot(path=str(output / f"global-policy-{width}.png"), full_page=True)
             await dialog.locator('.global-settings__aliases').scroll_into_view_if_needed()
             await page.screenshot(path=str(output / f"global-aliases-{width}.png"), full_page=True)
@@ -501,7 +511,7 @@ async def verify(base_url, output, executable_path, host_css=None):
                     }''', scheme)
                     await dialog.locator(".v-card-text").evaluate("element => { element.scrollTop = 0 }")
                     await page.screenshot(path=str(output / f'global-glass-{scheme}-{width}.png'), full_page=True)
-                    await dialog.get_by_text("全局去重字段", exact=True).scroll_into_view_if_needed()
+                    await dialog.get_by_text("共享规格去重字段", exact=True).scroll_into_view_if_needed()
                     await page.screenshot(path=str(output / f'global-policy-glass-{scheme}-{width}.png'), full_page=True)
                     await verify_settings_layout(dialog, width)
                     assert await dialog.locator(".v-card-text").evaluate("element => element.scrollWidth <= element.clientWidth + 1")
@@ -633,6 +643,11 @@ async def verify(base_url, output, executable_path, host_css=None):
             await approval.scroll_into_view_if_needed()
             await page.screenshot(path=str(output / f'task-approval-{width}.png'), full_page=True)
             await editor.get_by_role('tab', name='选种规则').click()
+            assert await editor.get_by_text('当前沿用旧下载类型：剧集', exact=True).count() == 1
+            assert await editor.get_by_label('种子黑名单', exact=True).count() == 0
+            await editor.get_by_label('打开 MoviePilot 整理分类', exact=True).press('Enter')
+            await page.get_by_role('option', name='电影 · 精选/独立制作', exact=True).click()
+            await page.keyboard.press('Escape')
             recent = editor.get_by_label('仅下载最近播出剧集', exact=True)
             await recent.check()
             recent_row = editor.locator('.editor-recent-rule')
@@ -654,7 +669,9 @@ async def verify(base_url, output, executable_path, host_css=None):
             await editor.get_by_role('button', name='保存任务', exact=True).click()
             await page.wait_for_function('''window.resourceflowRequests.some(item =>
                 item.method === 'PUT' && item.body.spec_dedup_enabled === true
-                && item.body.recent_episodes_days === 7)''')
+                && item.body.recent_episodes_days === 7
+                && item.body.download_categories.join() === 'movie:精选/独立制作'
+                && !('blacklist_site_ids' in item.body))''')
             await editor.wait_for(state='hidden')
             await approval_badge.wait_for()
             assert await task_item.get_by_text('下载审批 · Test Site · QB', exact=True).count() == 1
@@ -757,11 +774,75 @@ async def verify(base_url, output, executable_path, host_css=None):
         print('MoviePilot host stylesheet verified with glass light/dark overrides')
 
 
+async def verify_selection_settings(base_url, output, executable_path, host_css=None):
+    output.mkdir(exist_ok=True, parents=True)
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(executable_path=executable_path, args=["--no-sandbox"])
+        for width in (1440, 768, 390, 320):
+            page = await browser.new_page(viewport={"width": width, "height": 900}, locale="zh-CN")
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            await page.goto(f"{base_url}/tests/channel-dedup-smoke.html?task=traffic")
+            await page.wait_for_function("window.resourceflowReady === true")
+            if host_css:
+                await page.add_style_tag(path=str(host_css))
+                await page.evaluate("""() => {
+                    window.resourceflowSetTheme("dark")
+                    for (const element of [document.documentElement, document.body]) {
+                        element.dataset.theme = "glass"
+                        element.dataset.glassColorScheme = "dark"
+                    }
+                }""")
+            dialog = page.get_by_role("dialog")
+            await page.get_by_role("button", name="全局设置", exact=True).click()
+            await dialog.get_by_role("button", name="测试审批连接", exact=True).wait_for()
+            await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
+            assert await dialog.locator(".global-settings__section > h3").all_text_contents() == [
+                "基础", "运行限额与删种", "缺失播出日期兜底", "选种与去重",
+                "共享下载审批 Tailscale 私网 HTTPS", "别名绑定",
+            ]
+            assert await dialog.get_by_text(re.compile(r"Telegram|协调 Bot")).count() == 0
+            assert await dialog.get_by_label("协调端 Tailscale HTTPS 域名").input_value() == "approval.example.ts.net"
+            await dialog.get_by_label("种子黑名单", exact=True).check()
+            await dialog.get_by_role("button", name="保存设置", exact=True).click()
+            await page.wait_for_function("""window.resourceflowRequests.some(item =>
+                item.path === 'plugin/ResourceFlow/settings' && item.body.global_torrent_blacklist_enabled)""")
+            assert await page.evaluate("""window.resourceflowRequests.filter(item =>
+                item.path.endsWith('/shared/settings')).every(item =>
+                !['bot_username', 'bot_token', 'allowed_users', 'transport'].some(key => key in item.body))""")
+            assert await dialog.locator(".v-card-text").evaluate("el => el.scrollWidth <= el.clientWidth + 1")
+            await dialog.get_by_label("在本机运行协调端", exact=True).check()
+            await dialog.get_by_label("提供私网 HTTPS 审批入口", exact=True).check()
+            await verify_settings_layout(dialog, width)
+            await dialog.locator(".v-card-text").evaluate("el => { el.scrollTop = 0 }")
+            await page.screenshot(path=str(output / f"global-settings-{width}.png"))
+            await dialog.get_by_role("button", name="关闭", exact=True).click()
+            await page.locator("button:has(.mdi-pencil-outline)").click()
+            await dialog.get_by_role("tab", name="选种规则").click()
+            assert await dialog.get_by_text("当前沿用旧下载类型：剧集", exact=True).count() == 1
+            assert await dialog.get_by_label("种子黑名单", exact=True).count() == 0
+            await dialog.get_by_label("打开 MoviePilot 整理分类", exact=True).press("Enter")
+            await page.get_by_role("option", name="电影 · 精选/独立制作", exact=True).click()
+            await page.keyboard.press("Escape")
+            await dialog.get_by_text("电影 · 精选/独立制作", exact=True).wait_for()
+            await page.screenshot(path=str(output / f"selection-{width}.png"))
+            await dialog.get_by_role("button", name="保存任务", exact=True).click()
+            await page.wait_for_function("""window.resourceflowRequests.some(item =>
+                item.method === 'PUT' && item.body.download_categories.join() === 'movie:精选/独立制作'
+                && !('blacklist_site_ids' in item.body))""")
+            assert not errors, errors
+            await page.close()
+        await browser.close()
+    print("Verified HTTPS-only settings and MoviePilot classification at 1440, 768, 390 and 320px")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--executable-path", default="/opt/google/chrome/chrome")
     parser.add_argument("--host-css", type=Path)
+    parser.add_argument("--settings-only", action="store_true")
     args = parser.parse_args()
-    asyncio.run(verify(args.base_url, args.output, args.executable_path, args.host_css))
+    check = verify_selection_settings if args.settings_only else verify
+    asyncio.run(check(args.base_url, args.output, args.executable_path, args.host_css))

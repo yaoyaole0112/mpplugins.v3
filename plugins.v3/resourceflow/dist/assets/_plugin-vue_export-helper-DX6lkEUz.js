@@ -44,7 +44,7 @@ const taskDefaults = {
   recent_episodes_only: false,
   recent_episodes_days: 3,
   spec_dedup_enabled: true,
-  blacklist_site_ids: [],
+  download_categories: null,
   download_types: [],
   site_skip_tips: false,
   rss_support: false,
@@ -119,7 +119,10 @@ function normalizeTask(task) {
     result[key] = String(result[key] || '').trim() || null;
   });
   result.site_id = Number(result.site_id);
-  result.blacklist_site_ids = [...new Set((result.blacklist_site_ids || []).map(Number).filter(value => value > 0))];
+  delete result.blacklist_site_ids;
+  if (Array.isArray(result.download_categories)) {
+    result.download_categories = [...new Set(result.download_categories)];
+  }
   result.download_types = [...new Set(result.download_types || [])];
   result.brush_interval = Number(result.brush_interval || 10);
   result.check_interval = Number(result.check_interval || 5);

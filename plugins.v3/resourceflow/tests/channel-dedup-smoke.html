@@ -24,10 +24,17 @@
 
   let savedTask = new URLSearchParams(location.search).get('task') === 'traffic'
     ? cloneTask({ id: 'saved-traffic', name: '【分享】Saved Traffic', site_id: 1, downloader: 'QB',
-      spec_dedup_enabled: false }) : null
+      spec_dedup_enabled: false, download_types: ['tv'] }) : null
   const status = {
     enabled: true, show_sidebar_nav: true, tasks: [],
-    summary: { task_count: 15, running_count: 14 }, options: { sites: [{ value: 1, title: 'Test Site' }], downloaders: [{ value: 'QB', title: 'QB' }] },
+    summary: { task_count: 15, running_count: 14 }, options: {
+      sites: [{ value: 1, title: 'Test Site' }], downloaders: [{ value: 'QB', title: 'QB' }],
+      download_categories: [
+        { value: 'movie:外语电影', title: '电影 · 外语电影' },
+        { value: 'tv:国产剧', title: '电视剧 · 国产剧' },
+        { value: 'movie:精选/独立制作', title: '电影 · 精选/独立制作' },
+      ],
+    },
   }
   let settings = {
     enabled: true, channels: ['@example_channel'], attributes: ['resolution', 'effects', 'codec', 'source'],
@@ -54,9 +61,11 @@
   window.resourceflowSlowSearch = false
   window.resourceflowPendingRejected = false
   let shared = {
-    enabled: true, host_coordinator: false, bot_username: '@testbot', group: 'resources',
+    enabled: true, host_coordinator: false, group: 'resources', transport: 'https',
+    https_host: 'approval.example.ts.net', https_authority_id: 'e'.repeat(32),
+    coordinator_authority_id: 'e'.repeat(32), https_token_configured: true,
     last_ok: 1794711660,
-    instance_label: '本机测试', instance_id: 'a'.repeat(32), allowed_users: [11, 22], token_configured: true,
+    instance_label: '本机测试', instance_id: 'a'.repeat(32),
     requests: [{ request_id: 'b'.repeat(32), title: 'Show S01E05', phase: 'queued', approved: 1,
       created: 1794711600, updated: 1794711660, task_name: 'Test Task', site_name: 'Test Site',
       downloader: 'QB', file_count: 2, completed: 0,
@@ -212,8 +221,9 @@
       window.resourceflowRequests.push({ method: 'POST', path, body })
       if (path.endsWith('/shared/settings')) {
         if (window.resourceflowFailSave) return { success: false, message: '模拟共享保存失败' }
-        const { bot_token, ...publicSettings } = body
-        shared = { ...shared, ...publicSettings, token_configured: Boolean(bot_token || shared.token_configured) }
+        const { https_token, ...publicSettings } = body
+        shared = { ...shared, ...publicSettings, https_token_configured: Boolean(https_token || shared.https_token_configured),
+          https_running: Boolean(publicSettings.host_coordinator && publicSettings.https_listener) }
         return { success: true, data: structuredClone(shared) }
       }
       if (path.endsWith('/shared/test')) {

@@ -244,18 +244,55 @@ class SharedAuthorityTests(unittest.TestCase):
         self.assertEqual(p._shared_exchange.call_count, count)
         self.assertEqual(len(self.store.recent()), 1)
 
-    def test_coordinator_imports_history_before_starting_bot_listener(self):
+    def test_backfills_linked_record_once_from_own_torrent_history(self):
+        p = self.make_plugin()
+        request_id, file_id, claim = "c" * 32, "d" * 24, "e" * 32
+        p._shared_claims = {request_id: {
+            "request_id": request_id, "phase": "completed", "approved": {file_id: claim},
+            "files": [{**evidence(), "id": file_id}], "done": [file_id],
+            "created": time.time() - 100, "updated": time.time() - 50,
+            "task_id": "site-task", "hash": "f" * 40,
+        }}
+        p._get_task_data = Mock(return_value={})
+        p._sync_shared_history()
+        before = self.store.recent()[0]
+        self.assertEqual(before["site_name"], "")
+        original_ids = set(p._shared_history["acknowledged"])
+
+        p._get_task_data.side_effect = lambda task, kind: (
+            {"f" * 40: {"site_name": "  观众  "}} if (task, kind) == ("site-task", "archived") else {}
+        )
+        p._shared_probe.pop("site_metadata_version")
+        requests = p._shared_exchange.call_count
+        p._sync_shared_history()
+        self.assertEqual(p._shared_exchange.call_count, requests)
+        p._shared_probe.update(self.store.authority())
+        p._sync_shared_history()
+        self.assertEqual(self.store.recent(), [{**before, "site_name": "观众"}])
+        self.assertEqual(set(p._shared_history["acknowledged"]), original_ids)
+        self.assertEqual(p._shared_exchange.call_count, requests + 1)
+        p._sync_shared_history()
+        self.assertEqual(p._shared_exchange.call_count, requests + 1)
+
+    def test_history_of_another_instance_cannot_fill_existing_blank_site(self):
+        _, rows = self.import_rows()
+        peer = self.send("import_completed", 22, "b" * 32, files=[{**rows[0], "site_name": "观众"}])
+        self.assertTrue(peer["ok"])
+        self.assertEqual(len(self.store.recent()), 1)
+        self.assertEqual(self.store.recent()[0]["site_name"], "")
+
+    def test_coordinator_imports_history_before_starting_https_listener(self):
         p = self.make_plugin()
         p._shared_settings = p._shared_settings.model_copy(update={
-            "host_coordinator": True, "bot_token": "test-only", "group": "resources"})
+            "host_coordinator": True, "https_listener": True, "group": "resources"})
         p.get_data_path = Mock(return_value=Path(self.temp.name))
         p._resource_ledger = {"old": evidence()}
-        with patch("resourceflow.shared_plugin.BotWorker") as worker:
+        with patch.object(p, "_start_shared_http") as listener:
             def ready():
                 self.assertEqual(p._shared_store.recent()[0]["state"], "completed")
-            worker.return_value.start.side_effect = ready
+            listener.side_effect = ready
             p._start_shared_worker()
-            worker.return_value.start.assert_called_once()
+            listener.assert_called_once()
         self.assertEqual(p._shared_error, "")
 
     def test_history_sync_failure_cannot_reach_downloader_add(self):
@@ -329,9 +366,8 @@ class SharedAuthorityTests(unittest.TestCase):
 
     def test_database_replacement_during_admission_requires_resync(self):
         p = self.make_plugin()
-        with patch("resourceflow.shared_plugin.ed2k_account"), patch(
-                "resourceflow.shared_plugin.TelegramRPC") as rpc:
-            rpc.return_value.exchange.return_value = {
+        with patch.object(p, "_https_shared_exchange") as rpc:
+            rpc.return_value = {
                 "ok": True, "authority_version": 2, "authority_id": "f" * 32,
                 "approved": [], "rejected": [],
             }

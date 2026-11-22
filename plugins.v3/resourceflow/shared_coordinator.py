@@ -22,7 +22,7 @@ from .shared_cache import (
     RECORD_COLUMNS, SYNC_BATCH, SYNC_MAX_PARTS, SYNC_VERSION, display_record, filter_records,
     find_resource_conflict, same_resource,
 )
-from .shared_history import AUTHORITY_VERSION
+from .shared_history import AUTHORITY_VERSION, SITE_METADATA_VERSION, site_label
 from .shared_protocol import (
     MAX_PARTS, SharedError, canonical, decode, digest, encode, parse_part, policy,
 )
@@ -200,7 +200,7 @@ class CoordinatorStore:
             raise SharedError("整包处理策略无效")
         if self.policy.get("rules") and body["pack_policy"] != self.policy["rules"]["pack_policy"]:
             raise SharedError("整包处理策略与协调端不一致")
-        site_name = self._site_label(body.get("site_name"))
+        site_name = site_label(body.get("site_name"))
         approved, rejected, pending = [], [], []
         now = time.time()
         wait_for_2160p = False
@@ -258,7 +258,7 @@ class CoordinatorStore:
 
     def authority(self):
         return {"authority_version": AUTHORITY_VERSION, "authority_id": self.meta("authority_id"),
-                "record_sync_version": SYNC_VERSION}
+                "record_sync_version": SYNC_VERSION, "site_metadata_version": SITE_METADATA_VERSION}
 
     def _sync_records(self, db, request_id, body):
         cursor = body.get("cursor")
@@ -342,8 +342,10 @@ class CoordinatorStore:
                 raise SharedError("历史完成证据与原占位身份或归属不一致")
             if linked:
                 claim = linked["id"]
-                db.execute("UPDATE claims SET state='completed',specs=?,updated=? WHERE id=?",
-                           (canonical(item["specs"]), time.time(), claim))
+                specs = canonical(item["specs"])
+                if linked["state"] != "completed" or linked["specs"] != specs:
+                    db.execute("UPDATE claims SET state='completed',specs=?,updated=? WHERE id=?",
+                               (specs, time.time(), claim))
             elif old and db.execute("SELECT 1 FROM claims WHERE id=? AND state='completed'",
                                     (old["claim_id"],)).fetchone():
                 claim = old["claim_id"]
@@ -368,8 +370,13 @@ class CoordinatorStore:
                          source.get("original_request") or request_id, source.get("original_file") or item["id"],
                          item["media_type"], item["tmdb_id"], item["season"], canonical(item["episodes"]),
                          canonical(item["specs"]), item["title"], item["media_title"],
-                         self._site_label(source.get("site_name")), "completed",
+                         site_label(source.get("site_name")), "completed",
                          completed_at, time.time()))
+            if name := site_label(source.get("site_name")):
+                db.execute("UPDATE claims SET site_name=? WHERE id=? AND group_id=? "
+                           "AND instance=? AND sender IN (?,0) AND state='completed' AND site_name='' AND file_id=?",
+                           (name, claim, self.group, instance, sender,
+                            source.get("original_file") if linked else item["id"]))
             db.execute("INSERT OR REPLACE INTO completion_imports VALUES (?,?,?,?,?)",
                        (self.group, instance, item["id"], self.policy["revision"], claim))
             imported.append({"id": item["id"], "claim": claim})
@@ -449,17 +456,12 @@ class CoordinatorStore:
                 "episodes": episodes, "specs": specs, "title": str(row.get("title", ""))[:160],
                 "media_title": media_title[:120]}
 
-    @staticmethod
-    def _site_label(value):
-        if isinstance(value, str) and not any(mark in value for mark in (":", "/", "\\", "@")):
-            return " ".join(value.split())[:80]
-        return ""
-
     def _update(self, db, sender, instance, body):
         updates = body.get("updates")
         if not isinstance(updates, list) or not 1 <= len(updates) <= 500:
             raise SharedError("无效的状态回报")
         changes = []
+        name = site_label(body.get("site_name"))
         for item in updates:
             if not isinstance(item, dict):
                 raise SharedError("无效的状态回报")
@@ -481,8 +483,9 @@ class CoordinatorStore:
                 candidate = {**dict(row), "episodes": json.loads(row["episodes"]), "specs": json.loads(row["specs"])}
                 if any(self._same_identity_file(candidate, other, overlap=True) for other in completed):
                     raise SharedError("启动前核验发现同规格资源已完成，保持暂停，不重复下载")
-            changes.append((target, time.time(), row["id"]))
-        db.executemany("UPDATE claims SET state=?, updated=? WHERE id=?", changes)
+            changes.append((target, time.time(), name, row["id"]))
+        db.executemany("UPDATE claims SET state=?, updated=?, "
+                       "site_name=CASE WHEN site_name='' THEN ? ELSE site_name END WHERE id=?", changes)
         return {"ok": True, "updated": len(changes), **self.authority()}
 
     def recent(self, limit=100):

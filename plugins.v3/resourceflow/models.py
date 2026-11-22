@@ -91,7 +91,8 @@ class BrushTaskPayload(BaseModel):
     recent_episodes_only: bool = False
     recent_episodes_days: int = Field(3, ge=1, le=365)
     spec_dedup_enabled: bool = True
-    blacklist_site_ids: list[int] = Field(default_factory=list, max_length=100)
+    # None retains the legacy filter; an explicit empty list means unrestricted.
+    download_categories: Optional[list[str]] = Field(None, max_length=200)
     download_types: list[Literal["movie", "tv", "short_drama", "variety", "anime", "sports", "documentary", "mv", "music"]] = Field(default_factory=list)
     site_skip_tips: bool = False
     rss_support: bool = False
@@ -169,12 +170,13 @@ class BrushTaskPayload(BaseModel):
             raise ValueError("下载器标签不能包含逗号")
         return value
 
-    @field_validator("blacklist_site_ids")
+    @field_validator("download_categories")
     @classmethod
-    def normalize_blacklist_site_ids(cls, value: list[int]) -> list[int]:
-        """去重并保持所选站点顺序。"""
-        if any(site_id <= 0 for site_id in value):
-            raise ValueError("种子黑名单站点必须是有效站点")
+    def normalize_download_categories(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is None:
+            return None
+        if any(not re.fullmatch(r"(?:movie|tv|music):[^\r\n]{1,1024}", item) for item in value):
+            raise ValueError("MoviePilot 整理分类格式无效")
         return list(dict.fromkeys(value))
 
     @field_validator("size", "seeder", "pubtime", "delete_size_range")
@@ -234,6 +236,7 @@ class ResourceFlowSettingsPayload(BaseModel):
     global_maxupspeed: Optional[float] = Field(None, gt=0)
     global_maxdlspeed: Optional[float] = Field(None, gt=0)
     global_proxy_delete: bool = False
+    global_torrent_blacklist_enabled: bool = False
     global_delete_size_range: Optional[str] = None
     recent_missing_date_tolerance_days: int = Field(7, ge=1, le=30)
     recent_missing_date_ai_enabled: bool = False
