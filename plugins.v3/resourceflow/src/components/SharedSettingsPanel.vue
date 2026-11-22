@@ -10,7 +10,7 @@ const props = defineProps({
   mode: { type: String, default: 'records' },
   recordTab: { type: String, default: 'requests' },
 })
-const emit = defineEmits(['host-change', 'policy-synced', 'loading-change'])
+const emit = defineEmits(['host-change', 'policy-synced', 'loading-change', 'test-result'])
 const state = ref({ requests: [], records: [] })
 const draft = ref({
   enabled: false, host_coordinator: false, group: 'resources',
@@ -68,7 +68,7 @@ const phaseIcons = {
 const statusOptions = computed(() => [
   { value: '', title: '全部状态' },
   ...(props.recordTab === 'requests'
-    ? ['completed', 'queued', 'awaiting_qb_files', 'released', 'rejected']
+    ? ['completed', 'queued', 'released', 'rejected']
     : ['reserved', 'queued', 'completed', 'released'])
     .map(value => ({ value, title: phaseNames[value] })),
 ])
@@ -167,11 +167,21 @@ async function save() {
   } finally { busy.value = false }
 }
 
-function test() {
-  return perform(async () => {
+async function test() {
+  busy.value = true
+  error.value = ''
+  try {
     state.value = unwrapResponse(await props.api.post(`${props.pluginBase}/shared/test`, {}))
     emit('policy-synced')
-  })
+    emit('test-result', { success: true, type: 'success', message: '审批连接测试成功，规则版本已同步' })
+    return state.value
+  } catch (failure) {
+    const message = failure?.message || '审批连接测试失败'
+    emit('test-result', { success: false, type: 'error', message: `审批连接测试失败：${message}` })
+    return null
+  } finally {
+    busy.value = false
+  }
 }
 
 onMounted(() => perform(() => load(true)))
@@ -210,29 +220,34 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
     <VAlert v-if="state.https_listener_error" type="warning" variant="tonal" density="compact">
       {{ state.https_listener_error }}
     </VAlert>
-    <div class="shared-settings__grid">
+    <div class="shared-settings__grid shared-settings__grid--switches">
       <VSwitch v-model="draft.enabled" label="启用共享下载审批" color="primary" density="compact" hide-details inset />
       <VSwitch v-model="draft.host_coordinator" label="在本机运行协调端" color="primary" density="compact" hide-details inset />
+    </div>
+    <div class="shared-settings__grid shared-settings__grid--identity">
       <VTextField v-model="draft.group" label="共享组" density="comfortable" hide-details />
       <VTextField v-model="draft.instance_label" label="本机名称" maxlength="80" density="comfortable" hide-details />
       <VTextField :model-value="state.instance_id || '-'" label="本机实例 ID"
         class="shared-settings__instance" readonly density="comfortable" hide-details />
     </div>
-    <div v-if="draft.host_coordinator" class="shared-settings__grid">
-      <VSwitch v-model="draft.https_listener" label="提供私网 HTTPS 审批入口" color="primary" density="compact" hide-details inset />
+    <div v-if="draft.host_coordinator" class="shared-settings__subsection">
+      <VSwitch v-model="draft.https_listener" label="提供私网 HTTPS 审批入口"
+        color="primary" density="compact" hide-details inset />
+      <div v-if="draft.https_listener" class="shared-settings__grid shared-settings__grid--coordinator">
+        <VTextField :model-value="state.coordinator_authority_id || ''" label="共享账本 ID"
+          class="shared-settings__instance" readonly density="comfortable" hide-details />
+        <VTextarea v-model="draft.https_peers" label="允许的私网设备"
+          hint="每行：实例 ID、账本所有者 ID、密钥指纹（空格分隔）" persistent-hint
+          rows="2" max-rows="6" density="comfortable" auto-grow />
+      </div>
     </div>
-    <div v-if="draft.host_coordinator && draft.https_listener" class="shared-settings__grid">
-      <VTextField :model-value="state.coordinator_authority_id || ''" label="共享账本 ID"
-        class="shared-settings__instance" readonly density="comfortable" hide-details />
-      <VTextarea v-model="draft.https_peers" label="允许的私网设备"
-        hint="每行：实例 ID、账本所有者 ID、密钥指纹（空格分隔）" persistent-hint
-        rows="2" max-rows="6" density="comfortable" auto-grow />
-    </div>
-    <div class="shared-settings__grid">
-      <VTextField v-if="!draft.host_coordinator" v-model="draft.https_host" label="协调端 Tailscale HTTPS 域名"
+    <div v-else class="shared-settings__grid shared-settings__grid--remote">
+      <VTextField v-model="draft.https_host" label="协调端 Tailscale HTTPS 域名"
         placeholder="approval.example.ts.net" density="comfortable" hide-details />
-      <VTextField v-if="!draft.host_coordinator" v-model="draft.https_authority_id" label="协调端共享账本 ID"
+      <VTextField v-model="draft.https_authority_id" label="协调端共享账本 ID"
         class="shared-settings__instance" density="comfortable" hide-details />
+    </div>
+    <div class="shared-settings__grid shared-settings__grid--token">
       <VTextField v-model="draft.https_token" type="password" autocomplete="new-password"
         :label="state.https_token_configured ? '本机私网审批密钥（已保存）' : '本机私网审批密钥'"
         density="comfortable" hide-details />
@@ -277,7 +292,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
           <span>申请时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
           <span v-if="row.download_started_at">下载开始：{{ timestamp(row.download_started_at) }}</span>
           <span v-if="row.timeout_at">超时处理：{{ timestamp(row.timeout_at) }}</span>
-          <span>站点：{{ row.site_name || '-' }}</span><span>下载器：{{ row.downloader || '-' }}</span>
+          <span>站点：{{ row.site_name || '-' }}</span>
         </div>
         <p v-if="row.error && row.phase !== 'rejected'" class="shared-settings__error text-body-2">{{ row.error }}</p>
         <p v-if="row.integrity_error" class="shared-settings__error text-body-2">{{ row.integrity_error }}</p>
@@ -332,6 +347,10 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 .shared-settings__search { grid-template-columns: minmax(0, 1fr) minmax(150px, 210px) 160px minmax(150px, 170px); }
 .shared-settings__grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 16px 24px; min-inline-size: 0; }
 .shared-settings__grid > * { min-inline-size: 0; }
+.shared-settings__subsection { display: grid; gap: 16px; min-inline-size: 0; }
+.shared-settings__grid--switches { align-items: center; }
+.shared-settings__grid--identity,
+.shared-settings__grid--token { padding-block-start: 2px; }
 .shared-settings__instance :deep(input) { font-family: monospace; font-size: 11px; }
 .shared-settings__status { margin: 0; display: grid; gap: 10px; }
 .shared-settings__status > div { display: flex; justify-content: space-between; gap: 12px; }

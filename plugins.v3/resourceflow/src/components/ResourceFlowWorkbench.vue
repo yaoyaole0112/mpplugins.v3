@@ -47,6 +47,7 @@ const deleteDialog = ref(false)
 const clearDialog = ref(false)
 const settingsDialog = ref(false)
 const settingsError = ref('')
+const settingsTestFeedback = ref(null)
 const settingsReady = ref(false)
 const channelDedupDialog = ref(false)
 const channelDedupLoading = ref(false)
@@ -306,6 +307,7 @@ async function runOperation(operation) {
 
 async function openSettings() {
   settingsError.value = ''
+  settingsTestFeedback.value = null
   settingsReady.value = false
   settingsDialog.value = true
   await loadStatus({ loadDetail: false, resetDraft: true })
@@ -1210,6 +1212,12 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           </section>
           <section class="global-settings__section">
             <h3><VIcon icon="mdi-gauge" />运行限额与删种</h3>
+            <div class="global-settings__grid global-settings__delete-policy">
+              <VSwitch v-model="settingsDraft.global_proxy_delete" label="全局动态删种"
+                color="primary" density="compact" hide-details inset />
+              <VTextField v-if="settingsDraft.global_proxy_delete" v-model="settingsDraft.global_delete_size_range"
+                label="全局动态删种阈值（GB）" placeholder="50-100" density="comfortable" clearable hide-details />
+            </div>
             <div class="global-settings__grid global-settings__limits">
               <VTextField v-model.number="settingsDraft.global_disksize" type="number" min="0"
                 label="全局保种体积（GB）" density="comfortable" clearable hide-details />
@@ -1219,12 +1227,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 label="全局总上传带宽（KB/s）" density="comfortable" clearable hide-details />
               <VTextField v-model.number="settingsDraft.global_maxdlspeed" type="number" min="0"
                 label="全局总下载带宽（KB/s）" density="comfortable" clearable hide-details />
-            </div>
-            <div class="global-settings__grid">
-              <VSwitch v-model="settingsDraft.global_proxy_delete" label="全局动态删种"
-                color="primary" density="compact" hide-details inset />
-              <VTextField v-if="settingsDraft.global_proxy_delete" v-model="settingsDraft.global_delete_size_range"
-                label="全局动态删种阈值（GB）" placeholder="50-100" density="comfortable" clearable hide-details />
             </div>
           </section>
           <section class="global-settings__section">
@@ -1263,10 +1265,11 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             </template>
           </section>
           <section class="global-settings__section">
-            <h3><VIcon icon="mdi-shield-link-variant-outline" />共享下载审批 <span>Tailscale 私网 HTTPS</span></h3>
+            <h3><VIcon icon="mdi-shield-link-variant-outline" />共享下载审批</h3>
             <SharedSettingsPanel v-if="settingsDialog" ref="sharedSettingsPanel" mode="settings"
               :api="api" :plugin-base="pluginBase"
-              @host-change="sharedHost = $event" @policy-synced="loadChannelDedup()" />
+              @host-change="sharedHost = $event" @policy-synced="loadChannelDedup()"
+              @test-result="settingsTestFeedback = $event" />
           </section>
           <section class="global-settings__section">
             <h3><VIcon icon="mdi-tag-multiple-outline" />别名绑定</h3>
@@ -1280,12 +1283,19 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
         </VCardText>
         <footer class="global-settings__footer">
           <div class="global-settings__footer-group">
+            <div v-if="settingsTestFeedback" class="global-settings__test-feedback"
+              :data-tone="settingsTestFeedback.type" role="status">
+              <VIcon :icon="settingsTestFeedback.success ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'"
+                size="18" />
+              <span>{{ settingsTestFeedback.message }}</span>
+            </div>
             <VTooltip text="测试审批连接">
               <template #activator="{ props: tip }">
                 <VBtn v-bind="tip" aria-label="测试审批连接" variant="text"
                   :icon="$vuetify.display.xs ? 'mdi-connection' : undefined"
                   :prepend-icon="$vuetify.display.xs ? undefined : 'mdi-connection'"
                   :disabled="saving || !sharedSettingsPanel?.ready || sharedSettingsPanel?.busy || !sharedSettingsPanel?.canTest"
+                  :loading="sharedSettingsPanel?.busy"
                   @click="sharedSettingsPanel?.test()">
                   <VIcon v-if="$vuetify.display.xs" icon="mdi-connection" />
                   <template v-else>测试审批连接</template>
@@ -1395,7 +1405,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 </strong>
                 <div class="channel-dedup__record-meta">
                   <span>最近更新：{{ formatChannelTimestamp(row.last_seen) }}</span>
-                  <span>任务：{{ row.task_name || '-' }}</span>
+                  <span>站点：{{ row.task_name || '-' }}</span>
                   <span v-if="row.path">文件：{{ row.path }}</span>
                 </div>
                 <p class="channel-dedup__record-reason">{{ row.reason || '身份或规格待核验' }}</p>
@@ -1668,6 +1678,11 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   min-inline-size: 0;
 }
 
+.global-settings__delete-policy,
+.global-settings__recent-date {
+  align-items: center;
+}
+
 .global-settings__toggles {
   display: flex;
   flex-wrap: wrap;
@@ -1704,6 +1719,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   flex: 0 0 auto;
   justify-content: space-between;
   align-items: center;
+  position: relative;
   gap: 8px;
   padding: 12px 20px;
 }
@@ -1715,10 +1731,40 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   min-inline-size: 0;
 }
 
+.global-settings__test-feedback {
+  display: inline-flex;
+  align-items: center;
+  flex: 1 1 18rem;
+  min-inline-size: 0;
+  max-inline-size: min(18rem, 100%);
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.global-settings__test-feedback[data-tone="success"] {
+  color: rgb(var(--v-theme-success));
+  background: rgba(var(--v-theme-success), 0.12);
+}
+
+.global-settings__test-feedback[data-tone="error"] {
+  color: rgb(var(--v-theme-error));
+  background: rgba(var(--v-theme-error), 0.12);
+}
+
 @media (max-width: 599px) {
   .global-settings__toggles { gap: 4px 14px; }
   .global-settings__footer { padding: 8px; gap: 4px; }
   .global-settings__footer-group { gap: 0; }
+  .global-settings__test-feedback {
+    position: absolute;
+    inset-inline: 8px;
+    inset-block-end: calc(100% + 4px);
+    max-inline-size: none;
+  }
 }
 
 @media (min-width: 600px) {

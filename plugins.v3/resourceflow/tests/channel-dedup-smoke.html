@@ -58,6 +58,7 @@
   window.resourceflowFailSave = false
   window.resourceflowFailStage = ''
   window.resourceflowFailSharedLoad = false
+  window.resourceflowFailSharedTest = false
   window.resourceflowSlowSearch = false
   window.resourceflowPendingRejected = false
   let shared = {
@@ -227,6 +228,7 @@
         return { success: true, data: structuredClone(shared) }
       }
       if (path.endsWith('/shared/test')) {
+        if (window.resourceflowFailSharedTest) return { success: false, message: '模拟审批测试失败' }
         shared.probe = { user_id: 11, policy: { revision: 'c'.repeat(64), attributes: ['resolution'], size_tolerance_pct: 3 } }
         settings = { ...settings, attributes: ['resolution'], size_tolerance_pct: 3 }
         return { success: true, data: structuredClone(shared) }

@@ -87,6 +87,19 @@ async def verify_settings_layout(dialog, width):
     heights = await dialog.locator('.global-settings__limits .v-field').evaluate_all(
         'elements => elements.map(element => element.getBoundingClientRect().height)')
     assert all(value >= 48 for value in heights), (width, heights)
+    delete_policy = await dialog.locator('.global-settings__delete-policy').evaluate('''element => {
+        const toggle = element.querySelector('.v-selection-control').getBoundingClientRect()
+        const limits = element.nextElementSibling.getBoundingClientRect()
+        return {above: toggle.bottom <= limits.top + 1, fits: element.scrollWidth <= element.clientWidth + 1}
+    }''')
+    assert delete_policy['above'] and delete_policy['fits'], (width, delete_policy)
+    recent_date = await dialog.locator('.global-settings__recent-date').evaluate('''element => {
+        const field = element.querySelector('.v-field').getBoundingClientRect()
+        const toggle = element.querySelector('.v-selection-control').getBoundingClientRect()
+        return {centered: Math.abs(field.top + field.height / 2 - toggle.top - toggle.height / 2) < 3,
+            fits: element.scrollWidth <= element.clientWidth + 1}
+    }''')
+    assert recent_date['fits'] and (width < 600 or recent_date['centered']), (width, recent_date)
     status = await dialog.locator('.shared-settings__status').evaluate('''element =>
         [...element.children].slice(0, 3).map(child => child.getBoundingClientRect().top)''')
     if width >= 600:
@@ -112,6 +125,9 @@ async def verify_settings_layout(dialog, width):
             fits: element.scrollWidth <= element.clientWidth + 1}
     }''')
     assert footer['count'] == 4 and all(footer[key] for key in ('aligned', 'separate', 'left', 'right', 'fits')), (width, footer)
+    if await dialog.locator('.global-settings__test-feedback').count():
+        feedback = await dialog.locator('.global-settings__test-feedback').bounding_box()
+        assert feedback and feedback['width'] > 0 and feedback['height'] > 0
     assert await dialog.locator('.global-settings__body button[aria-label="测试审批连接"]').count() == 0
     assert await dialog.locator('.global-settings__footer button[aria-label="测试审批连接"] .mdi-connection').count() == 1
     assert await dialog.locator('.v-card-text').evaluate(
@@ -228,7 +244,7 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
         await page.get_by_role('option', name='已过滤', exact=True).wait_for()
         options = await page.get_by_role('option').all_text_contents()
         assert {option.strip() for option in options} == {
-            '全部状态', '已完成', '已入队', '等待 QB 文件清单', '已释放', '已过滤'}, options
+            '全部状态', '已完成', '已入队', '已释放', '已过滤'}, options
     await page.get_by_role('option', name=value, exact=True).click()
     await page.wait_for_function("""selector =>
         [...document.querySelectorAll(selector)].filter(item => item.getBoundingClientRect().width > 0).length === 1
@@ -293,7 +309,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert '最近更新：' in await first.inner_text()
             assert '站点：Test Site' in await first.inner_text()
             assert '任务：' not in await first.inner_text()
-            assert '下载器：' in await first.inner_text()
+            assert '下载器：' not in await first.inner_text()
             assert '最近更新' in await first.inner_text()
             assert '已入队（1）' in await first.locator('.shared-settings__record-head').inner_text()
             assert await first.locator('.shared-settings__record-head .shared-settings__badge').count() == 1
@@ -362,6 +378,9 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_role("tab", name="下载待核验", exact=True).click()
             await dialog.get_by_text("Unknown Resource", exact=True).wait_for()
             await dialog.locator('.v-card-text').evaluate('element => { element.scrollTop = 0 }')
+            pending_first = dialog.locator('.channel-dedup__record').first
+            assert '站点：测试任务' in await pending_first.inner_text()
+            assert '任务：' not in await pending_first.inner_text()
             pending_position = await search_box.bounding_box()
             for axis in ('x', 'y'):
                 assert abs(pending_position[axis] - search_position[axis]) <= 1, (search_position, pending_position)
@@ -403,7 +422,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_label("本机名称", exact=True).wait_for()
             await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
             assert await dialog.get_by_label("启用共享下载审批", exact=True).is_checked()
-            assert await dialog.get_by_text("Tailscale 私网 HTTPS", exact=True).count() == 1
+            assert await dialog.get_by_text("共享下载审批", exact=True).count() >= 1
+            assert await dialog.get_by_text("Tailscale 私网 HTTPS", exact=True).count() == 0
             assert await dialog.get_by_text(re.compile(r"Telegram|协调 Bot")).count() == 0
             assert await dialog.get_by_label("协调端 Tailscale HTTPS 域名", exact=True).input_value() == "approval.example.ts.net"
             assert await dialog.get_by_role("tab").count() == 0
@@ -446,6 +466,11 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert client_saves and all("attributes" not in row["body"] for row in client_saves)
             await dialog.get_by_role("button", name="测试审批连接", exact=True).click()
             await page.wait_for_function("""window.resourceflowRequests.some(item => item.path.endsWith('/shared/test'))""")
+            await dialog.get_by_text("审批连接测试成功，规则版本已同步", exact=True).wait_for()
+            await page.evaluate("window.resourceflowFailSharedTest = true")
+            await dialog.get_by_role("button", name="测试审批连接", exact=True).click()
+            await dialog.get_by_text("审批连接测试失败：模拟审批测试失败", exact=True).wait_for()
+            await page.evaluate("window.resourceflowFailSharedTest = false")
             assert await dialog.get_by_role("button", name="采用协调端匹配字段", exact=True).count() == 0
             await dialog.get_by_label("在本机运行协调端", exact=True).check()
             await dialog.get_by_label("提供私网 HTTPS 审批入口", exact=True).check()
@@ -799,7 +824,7 @@ async def verify_selection_settings(base_url, output, executable_path, host_css=
             await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
             assert await dialog.locator(".global-settings__section > h3").all_text_contents() == [
                 "基础", "运行限额与删种", "缺失播出日期兜底", "选种与去重",
-                "共享下载审批 Tailscale 私网 HTTPS", "别名绑定",
+                "共享下载审批", "别名绑定",
             ]
             assert await dialog.get_by_text(re.compile(r"Telegram|协调 Bot")).count() == 0
             assert await dialog.get_by_label("协调端 Tailscale HTTPS 域名").input_value() == "approval.example.ts.net"
