@@ -281,11 +281,14 @@ async def verify(base_url, output, executable_path, host_css=None):
             records = dialog.locator('.shared-settings__records')
             first = records.locator('article').first
             await first.get_by_text("申请时间", exact=False).wait_for()
+            search_box = dialog.locator('.approval-search:visible input').first
+            search_position = await search_box.bounding_box()
             assert '2026' in await first.inner_text()
             assert '11:00:00' in await first.inner_text()
             assert '申请时间：' in await first.inner_text()
             assert '最近更新：' in await first.inner_text()
-            assert '任务：' in await first.inner_text()
+            assert '站点：Test Site' in await first.inner_text()
+            assert '任务：' not in await first.inner_text()
             assert '下载器：' in await first.inner_text()
             assert '最近更新' in await first.inner_text()
             assert '已入队（1）' in await first.locator('.shared-settings__record-head').inner_text()
@@ -354,6 +357,10 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_role("tab", name="共享已完成", exact=True).count() == 0
             await dialog.get_by_role("tab", name="下载待核验", exact=True).click()
             await dialog.get_by_text("Unknown Resource", exact=True).wait_for()
+            await dialog.locator('.v-card-text').evaluate('element => { element.scrollTop = 0 }')
+            pending_position = await search_box.bounding_box()
+            for axis in ('x', 'y'):
+                assert abs(pending_position[axis] - search_position[axis]) <= 1, (search_position, pending_position)
             assert await dialog.get_by_text('待核验影片 · 电影 · 身份待确认 · 分辨率 2160p', exact=True).count() == 1
             assert await dialog.locator('.channel-dedup__badge').count() == 0
             action_layout = await dialog.locator('.channel-dedup__record-actions').first.evaluate("""element => {
@@ -364,7 +371,7 @@ async def verify(base_url, output, executable_path, host_css=None):
                     fits: element.scrollWidth <= element.clientWidth + 1}
             }""")
             assert all(action_layout.values()), action_layout
-            await dialog.get_by_role("button", name="核验并继续下载", exact=True).click()
+            await dialog.get_by_role("button", name="核验并下载", exact=True).click()
             manual_dialog = page.get_by_role("dialog").filter(has=page.get_by_text("人工核验并继续下载", exact=True))
             await manual_dialog.get_by_label("TMDB ID").fill("123")
             await manual_dialog.get_by_label("我已核对以上媒体身份、季集号及规格").check()
@@ -374,16 +381,25 @@ async def verify(base_url, output, executable_path, host_css=None):
                 && item.body.tmdb_id === 123 && item.body.confirmed === true)""")
             await verify_record_search(page, dialog, '下载待核验', card_bounds['height'], output, width, host_css)
             await page.screenshot(path=str(output / f'pending-{width}.png'), full_page=True)
+            await dialog.get_by_role("button", name="驳回申请", exact=True).click()
+            await page.wait_for_function("""() =>
+                [...document.querySelectorAll('.channel-dedup__record')]
+                  .filter(item => item.getBoundingClientRect().width > 0).length === 0""")
+            assert await dialog.get_by_text('共 0 条', exact=True).count() == 1
+            await dialog.get_by_role('button', name='刷新资源记录', exact=True).click()
+            await dialog.locator('.channel-dedup__loading').wait_for(state='hidden')
+            assert await dialog.get_by_text("Unknown Resource", exact=True).count() == 0
             assert await close_button.is_visible()
             await close_button.click()
             assert await page.evaluate("""window.resourceflowRequests.filter(item =>
                 item.method === 'POST').map(item => item.path)""") == [
-                'plugin/ResourceFlow/resource-ledger/pending/approve']
+                'plugin/ResourceFlow/resource-ledger/pending/approve',
+                'plugin/ResourceFlow/resource-ledger/pending/reject']
             await page.get_by_role("button", name="全局设置", exact=True).click()
             await dialog.get_by_label("本机名称", exact=True).wait_for()
             await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
             assert await dialog.get_by_label("启用共享下载审批", exact=True).is_checked()
-            assert await dialog.get_by_label("协调 Bot 用户名", exact=True).input_value() == "@testbot"
+            assert await dialog.get_by_label("协调 Bot 用户名（现有账本保留原值）", exact=True).input_value() == "@testbot"
             assert await dialog.get_by_role("tab").count() == 0
             assert await dialog.locator('.shared-settings__records').count() == 0
             global_bounds = await dialog.bounding_box()
@@ -508,10 +524,15 @@ async def verify(base_url, output, executable_path, host_css=None):
                 '本机下载申请', '共享下载记录', '下载待核验']
             await dialog.get_by_role("tab", name="共享下载记录", exact=True).click()
             await dialog.get_by_text("朋友A", exact=False).wait_for()
+            shared_position = await search_box.bounding_box()
+            for axis in ('x', 'y'):
+                assert abs(shared_position[axis] - search_position[axis]) <= 1, (search_position, shared_position)
             claim = dialog.locator('.shared-settings__records article').first
             assert '下载时间：' in await claim.inner_text()
             assert '最近更新' in await claim.inner_text()
             assert '下载方：朋友A' in await claim.inner_text()
+            metadata = await claim.locator('.shared-settings__claim-meta > span').all_text_contents()
+            assert metadata[-2:] == ['站点：Test Site', '下载方：朋友A'], metadata
             assert '占位编号：' in await claim.inner_text()
             claim_identity = await claim.locator('.shared-settings__preview').inner_text()
             assert '玫瑰战争 · S01E05 · TMDB 123 · 分辨率 1080p' in claim_identity
@@ -715,7 +736,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.evaluate("document.fonts.ready")
             await page.get_by_role("button", name="共享下载审批", exact=True).click()
             await page.get_by_role("tab", name="下载待核验", exact=True).click()
-            await page.get_by_role("button", name="核验并继续下载", exact=True).click()
+            await page.get_by_role("button", name="核验并下载", exact=True).click()
             manual = page.get_by_role("dialog").filter(has=page.get_by_text("人工核验并继续下载", exact=True))
             assert await manual.get_by_label("季号", exact=True).input_value() == ""
             assert await manual.get_by_label("集号", exact=True).input_value() == "45"

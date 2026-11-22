@@ -22,6 +22,7 @@ class ResourceDedupTests(unittest.TestCase):
         self.plugin._resource_ledger = {}
         self.plugin._resource_forgotten = {}
         self.plugin._identity_pending = {}
+        self.plugin._identity_pending_rejected = {}
         self.plugin._channel_dedup_movie_identity_aliases = {}
         self.plugin._channel_dedup_state['records'] = []
         self.plugin._channel_dedup_attributes = ['resolution']
@@ -345,6 +346,21 @@ class ResourceDedupTests(unittest.TestCase):
         self.task.spec_dedup_enabled = False
         self.plugin._pending_identity(unknown, 'Unknown', self.task, 'unverified')
         self.assertFalse(self.plugin._identity_pending)
+
+    def test_rejected_pending_candidate_is_removed_and_suppressed_on_rescan(self):
+        unknown = self.candidate('Unknown.2026.S01E01.1080p.mkv')
+        key = evidence_key({**unknown, "title_key": unknown.get("title_key") or unknown.get("path")})
+        self.plugin._pending_identity(unknown, "Unknown", self.task, "unverified")
+        self.assertIn(key, self.plugin._identity_pending)
+
+        response = self.plugin.reject_pending_resource(ResourceLedgerDeletePayload(key=key))
+
+        self.assertTrue(response.success)
+        self.assertNotIn(key, self.plugin._identity_pending)
+        self.assertIn(key, self.plugin._identity_pending_rejected)
+        self.plugin._pending_identity(unknown, "Unknown", self.task, "unverified")
+        self.assertNotIn(key, self.plugin._identity_pending)
+        self.plugin.save_data.assert_any_call("resource_identity_pending_rejected", self.plugin._identity_pending_rejected)
 
     def test_task_update_preserves_switch_when_omitted_and_other_selection_rules(self):
         self.task.spec_dedup_enabled = False

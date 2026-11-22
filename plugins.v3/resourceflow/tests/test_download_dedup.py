@@ -1,8 +1,10 @@
+import re
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, PropertyMock, patch
 
 from resourceflow import ResourceFlow, BrushTaskConfig, TorrentHelper, TorrentInfo
+from test_channel_dedup import bencode
 
 
 TORRENT_CONTENT = (
@@ -14,6 +16,7 @@ TORRENT_CONTENT = (
 class DownloadDedupTest(unittest.TestCase):
     def setUp(self):
         self.plugin = ResourceFlow.__new__(ResourceFlow)
+        self.plugin._mp_transfer_exclude_patterns = Mock(return_value=())
         self.task = BrushTaskConfig({
             "name": "test", "downloader": "QB", "tag": "resourceflow-test",
             "spec_dedup_enabled": False,
@@ -77,6 +80,67 @@ class DownloadDedupTest(unittest.TestCase):
                 self.downloader.get_torrents.assert_called_with(ids=[self.expected_hash])
                 self.plugin._recent_episode_file_selection.assert_not_called()
                 self.assert_existing_task_untouched()
+
+    def test_existing_hash_does_not_parse_files_or_create_pending_identity(self):
+        self.plugin._resource_identity_deferred = Mock(return_value=True)
+        self.plugin._pending_identity = Mock()
+        self.plugin._mp_transfer_exclude_patterns.return_value = (re.compile("Preview", re.I),)
+        self.downloader.get_torrents.return_value = ([{"hash": self.expected_hash}], False)
+        with patch("resourceflow.parse_torrent_files") as parse, patch("resourceflow.logger") as logger:
+            self.assertIsNone(self.download())
+        parse.assert_not_called()
+        self.plugin._pending_identity.assert_not_called()
+        self.assertIn("原任务的添加来源未核实", str(logger.info.call_args_list))
+        self.assert_existing_task_untouched()
+
+    def test_transfer_screen_stops_title_before_fetching_torrent(self):
+        self.plugin._mp_transfer_exclude_patterns.return_value = (re.compile("加更篇|PREVIEW", re.I),)
+        self.torrent.title = "Natural High S04E29 Preview"
+        self.assertIsNone(self.download())
+        self.download_chain.return_value.download_torrent.assert_not_called()
+        self.downloader.get_torrents.assert_not_called()
+        self.assert_existing_task_untouched()
+
+    def test_transfer_screen_checks_torrent_folders_and_filenames_including_manual_entry(self):
+        self.task.recent_episodes_only = True
+        for root, filename in (("Bonus.Pack", "Show.S04E29.mkv"), ("Show", "Show.S04E29.加更篇.mkv")):
+            content = bencode({"info": {
+                "name": root, "piece length": 16384, "pieces": b"a" * 20,
+                "files": [{"path": [filename], "length": 7}, {"path": ["Show.S04E28.mkv"], "length": 10}],
+            }})
+            self.plugin._mp_transfer_exclude_patterns.return_value = (re.compile("加更篇|bonus", re.I),)
+            for manual in (None, "Show.S04E28.mkv"):
+                with self.subTest(root=root, manual=manual):
+                    self.assertIsNone(self.plugin._ResourceFlow__download(
+                        self.torrent, manual_path=manual, torrent_content_override=content,
+                    ))
+                    self.plugin._recent_episode_file_selection.assert_not_called()
+                    self.assert_existing_task_untouched()
+
+    def test_transfer_screen_leaves_clean_torrent_eligible(self):
+        self.plugin._mp_transfer_exclude_patterns.return_value = (re.compile("加更篇|preview", re.I),)
+        with patch("resourceflow.logger") as logger:
+            self.assertEqual(self.download(), self.expected_hash)
+        self.assertIn("入口 自动刷流", str(logger.info.call_args_list))
+        self.assertIn(f"Hash {self.expected_hash}；共享审批 未启用", str(logger.info.call_args_list))
+
+    def test_magnet_is_held_if_transfer_screen_cannot_check_paths(self):
+        self.torrent.enclosure = f"magnet:?xt=urn:btih:{self.expected_hash}"
+        self.plugin._mp_transfer_exclude_patterns.return_value = (re.compile("preview", re.I),)
+        self.assertIsNone(self.download())
+        self.downloader.get_torrents.assert_called_once_with(ids=[self.expected_hash])
+        self.assert_existing_task_untouched()
+
+    def test_reads_current_mp_transfer_words_as_case_insensitive_regex(self):
+        with patch("resourceflow.get_configured_system_config") as config:
+            config.return_value.get.return_value = ["", r"加更篇|PREVIEW\b"]
+            patterns = ResourceFlow._mp_transfer_exclude_patterns()
+            config.return_value.get.assert_called_once()
+            self.assertEqual(config.return_value.get.call_args.args[0].value, "TransferExcludeWords")
+            self.assertEqual(len(patterns), 1)
+            self.assertTrue(patterns[0].search("a.preview.mkv"))
+            config.return_value.get.return_value = ["["]
+            self.assertIsNone(ResourceFlow._mp_transfer_exclude_patterns())
 
     def test_query_failure_prevents_add(self):
         for result in (([], True), ([{"hash": self.expected_hash}], True)):

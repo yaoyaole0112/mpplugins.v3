@@ -529,7 +529,16 @@ class SharedResourceMixin:
             self._shared_worker = None
         self._shared_store = None
 
-    def _shared_request_status(self, row, titles=None):
+    def _shared_request_site(self, row, sites):
+        if row.get("site_name"):
+            return row["site_name"]
+        task = getattr(self, "_task_configs", {}).get(row.get("task_id"))
+        site_id = getattr(task, "site_id", None)
+        if site_id and site_id not in sites:
+            sites[site_id] = self._get_site_name(site_id)
+        return sites.get(site_id) or ""
+
+    def _shared_request_status(self, row, titles=None, sites=None):
         files = row.get("files") or []
         approved = row.get("approved") or {}
         rejected = row.get("rejected") or []
@@ -540,7 +549,8 @@ class SharedResourceMixin:
             phase = "awaiting_qb_files"
         return {
             "request_id": row["request_id"], "title": row["title"], "phase": phase,
-            "task_id": row["task_id"], "task_name": getattr(task, "name", None),
+            "task_id": row["task_id"], "task_name": row.get("task_name") or getattr(task, "name", None),
+            "site_name": self._shared_request_site(row, sites if sites is not None else {}),
             "download_owners": sorted({
                 *([getattr(getattr(self, "_shared_settings", None), "instance_label", "")]
                   if approved else []),
@@ -576,6 +586,7 @@ class SharedResourceMixin:
         https_running = bool(listener and listener.thread.is_alive())
         worker = getattr(self, "_shared_worker", None)
         claims = list(getattr(self, "_shared_claims", {}).values())
+        sites = {}
         return schemas.Response(success=True, data={
             **config, "token_configured": bool(token), "https_token_configured": bool(https_token),
             "https_running": https_running, "https_listener_error": getattr(self, "_shared_http_error", ""),
@@ -588,7 +599,7 @@ class SharedResourceMixin:
             "retry_at": self._shared_retry_at,
             "policy": self._local_shared_policy()
             if self._channel_dedup_attributes else None,
-            "requests": [self._shared_request_status(row)
+            "requests": [self._shared_request_status(row, sites=sites)
                          for row in sorted(claims, key=lambda row: row.get("updated", 0), reverse=True)[:100]],
             "records": self._shared_store.recent() if self._shared_store else [],
             "probe": self._shared_probe,
@@ -633,8 +644,9 @@ class SharedResourceMixin:
                 data = record_page([], page, page_size)
         else:
             titles = self._resource_display_titles()
+            sites = {}
             with self._shared_lock:
-                rows = [self._shared_request_status(row, titles) for row in self._shared_claims.values()]
+                rows = [self._shared_request_status(row, titles, sites) for row in self._shared_claims.values()]
             owners = set()
             filtered = []
             for row in rows:
@@ -650,8 +662,7 @@ class SharedResourceMixin:
             data = {**record_page(rows, page, page_size), "owners": sorted(owners, key=str.casefold)}
         return schemas.Response(success=True, data=self._shared_record_display_page(data, kind))
 
-    @staticmethod
-    def _shared_record_display_page(data, kind):
+    def _shared_record_display_page(self, data, kind):
         def display_title(row, torrent_title):
             if name := record_display_title(row, {}, torrent_title):
                 return {**row, "media_title": name}
@@ -665,7 +676,16 @@ class SharedResourceMixin:
         if kind == "requests":
             return {**data, "items": [{**row, "files": [display_title(item, row["title"]) for item in row["files"]]}
                                       for row in data["items"]]}
-        return {**data, "items": [display_title(row, row.get("title")) for row in data["items"]]}
+        sites = {}
+        claims = getattr(self, "_shared_claims", {})
+        items = []
+        for row in data["items"]:
+            item = display_title(row, row.get("title"))
+            entry = claims.get(row.get("request_id"))
+            if not item.get("site_name") and entry and row["id"] in (entry.get("approved") or {}).values():
+                item = {**item, "site_name": self._shared_request_site(entry, sites)}
+            items.append(item)
+        return {**data, "items": items}
 
     def update_shared_settings(self, payload: SharedSettingsPayload) -> schemas.Response:
         try:
@@ -959,6 +979,7 @@ class SharedResourceMixin:
         paths = selection.get("accepted") if selection else None
         recognized_files = (selection or {}).get("mp_files", {})
         rows, rejected = [], []
+        title_cache = {}
         display_titles = getattr(self, "_shared_media_title_cache", None)
         if not isinstance(display_titles, dict):
             display_titles = self._shared_media_title_cache = {}
@@ -967,7 +988,7 @@ class SharedResourceMixin:
                 continue
             candidate, media, reason = self._mp_resource_candidate(
                 item["path"], item.get("size"), title, spec_hint, candidate_overrides,
-                recognition=recognized_files.get(item["path"]),
+                recognition=recognized_files.get(item["path"]), title_cache=title_cache,
             )
             if not reason:
                 missing_specs = [
@@ -1210,6 +1231,7 @@ class SharedResourceMixin:
                     raise SharedError("共享审批候选身份或规格不完整，本次不添加下载")
                 current_policy = self._local_shared_policy()
                 request_id = uuid.uuid4().hex
+                site_name = CoordinatorStore._site_label(self._shared_request_site({"task_id": task.id}, {}))
                 body = {"op": "reserve", "revision": current_policy["revision"],
                         "pack_policy": self._channel_dedup_pack_policy,
                         "files": [{**{key: row.get(key) for key in
@@ -1220,8 +1242,11 @@ class SharedResourceMixin:
                                        "resolution": row["specs"].get("resolution"),
                                    }}
                                   for row in candidates]}
+                if site_name:
+                    body["site_name"] = site_name
                 entry = {"request_id": request_id, "body": body, "title": title[:160],
-                         "task_id": task.id, "downloader": task.downloader, "hash": expected_hash,
+                         "task_id": task.id, "task_name": task.name, "site_name": site_name or "",
+                         "downloader": task.downloader, "hash": expected_hash,
                          "files": candidates, "phase": "requesting", "updated": time.time(),
                          "created": time.time(), "attempted_add": False}
                 self._shared_claims[request_id] = entry

@@ -168,6 +168,15 @@ class SharedRecordCacheTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["label"], "NAS-B")
         self.assertEqual(result["owners"], ["NAS-A", "NAS-B"])
 
+    def test_site_name_is_stored_synced_searchable_and_optional_for_old_records(self):
+        self.reserve(file_row(), site_name="憨憨")
+        self.reserve(file_row(2, 2))
+        self.sync()
+        result = self.cache.search(self.scope, "憨憨", "", 1, 20, "tv")
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["site_name"], "憨憨")
+        self.assertEqual(self.store.search_records(query="S01E02")["items"][0]["site_name"], "")
+
     def test_expiry_and_scope_fail_open_only_to_reserve(self):
         completed, active = [row["claim"] for row in self.reserve(file_row(), file_row(2, 2))["approved"]]
         self.send("update", updates=[{"claim": completed, "state": "completed"}, {"claim": active, "state": "queued"}])

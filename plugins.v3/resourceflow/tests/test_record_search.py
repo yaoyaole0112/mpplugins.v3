@@ -262,7 +262,10 @@ class StoreSearchTests(unittest.TestCase):
         self.store = CoordinatorStore(Path(self.temp.name) / "store.sqlite3", "resources", ["resolution"], 5)
         with self.store.connect() as db:
             db.executemany(
-                "INSERT INTO claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO claims (
+                    id, group_id, sender, instance, label, request_id, file_id, media_type,
+                    tmdb_id, season, episodes, specs, title, media_title, state, created, updated
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(str(index), "resources" if index < 125 else "other", 11, "instance-secret", "边城旧事",
                   "request-secret", "file", "tv", 123, 1, f"[{index + 1}]",
                   '{"resolution":"1080p","effects":"HDR Vivid"}', f"Show {index}", "玫瑰战争",

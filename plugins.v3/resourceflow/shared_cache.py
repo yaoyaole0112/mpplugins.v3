@@ -21,7 +21,7 @@ COMPLETED_MAX_AGE = 600
 HIGH_RESOLUTION_WAIT = "同集2160p/4K已占位或正在下载，低分辨率暂缓"
 HIGH_RESOLUTION_DONE = "已有2160p/4K高分辨率资源"
 HIGH_RESOLUTION_PACK_WAIT = "整包暂缓：等待包内其他文件的2160p/4K占位结果"
-RECORD_COLUMNS = ("id", "label", "title", "media_title", "media_type", "tmdb_id", "season", "episodes", "specs",
+RECORD_COLUMNS = ("id", "label", "title", "media_title", "site_name", "media_type", "tmdb_id", "season", "episodes", "specs",
                   "state", "created", "updated", "request_id", "file_id")
 
 
@@ -141,7 +141,9 @@ class SharedRecordCache:
                             or row.get("state") not in {"reserved", "queued", "completed", "released"}
                             or row.get("media_type") not in {"tv", "movie"}
                             or type(row.get("tmdb_id")) is not int or not isinstance(row.get("episodes"), list)
-                            or not isinstance(row.get("specs"), dict) or "season" not in row):
+                            or not isinstance(row.get("specs"), dict) or "season" not in row
+                            or "site_name" in row and (not isinstance(row.get("site_name"), str)
+                                                       or len(row["site_name"]) > 80)):
                         raise SharedError("共享记录数据无效")
                     db.execute("INSERT OR REPLACE INTO mirror VALUES (?,?,?,?,?,?,?)", (
                         claim, row["media_type"], row["tmdb_id"], row["season"], row["state"], row["updated"],

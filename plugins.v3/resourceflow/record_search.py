@@ -14,7 +14,7 @@ STATE_LABELS = {
 }
 TEXT_FIELDS = (
     "key", "id", "request_id", "title", "media_title", "path", "file_key", "title_key",
-    "task_id", "task_name", "downloader", "label", "owner", "download_owners", "reason", "error",
+    "task_id", "task_name", "site_name", "downloader", "label", "owner", "download_owners", "reason", "error",
     "channel", "evidence_source",
 )
 SPEC_FIELDS = ("resolution", "effects", "codec", "source", "fps", "size")

@@ -1,3 +1,4 @@
+import re
 import unittest
 from collections import Counter
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from resourceflow.models import BrushTaskPayload
 class DownloadTypeTest(unittest.TestCase):
     def setUp(self):
         self.plugin = ResourceFlow.__new__(ResourceFlow)
+        self.plugin._mp_transfer_exclude_patterns = Mock(return_value=())
         self.plugin.chain = SimpleNamespace(recognize_media=Mock())
         self.plugin._mp_recognize_media = self.plugin.chain.recognize_media
 
@@ -19,10 +21,25 @@ class DownloadTypeTest(unittest.TestCase):
                                   category=category, labels=labels or [])
         return self.plugin._download_type(torrent, cache if cache is not None else {})
 
-    def test_special_site_category_does_not_need_network(self):
+    def test_special_site_category_is_a_fallback(self):
         self.assertEqual(self.classify(category="体育")[0], "sports")
-        self.assertEqual(self.classify(labels=["MV"])[0], "mv")
-        self.plugin.chain.recognize_media.assert_not_called()
+        self.assertIsNone(self.classify(labels=["MV"])[0])
+        self.plugin.chain.recognize_media.assert_called()
+
+    def test_mp_library_category_wins_over_station_music_tag(self):
+        media = SimpleNamespace(type="电视剧", library_category="动画/国漫", genre_ids=[])
+        kind, source = self.classify(media=media, category="音乐")
+        self.assertEqual(kind, "anime")
+        self.assertEqual(source, "MoviePilot 整理分类：动画/国漫")
+
+    def test_episodic_title_cannot_be_classified_music_by_site_alone(self):
+        self.assertIsNone(self.classify(category="音乐")[0])
+        torrent = SimpleNamespace(title="Example Artist 2026", category="音乐", labels=[], description="")
+        self.assertEqual(self.plugin._download_type(torrent, {})[0], "music")
+
+    def test_custom_category_name_falls_back_to_mp_type_not_station_category(self):
+        media = SimpleNamespace(type="电影", library_category="精选收藏/独立制作")
+        self.assertEqual(self.classify(media=media, category="动漫")[0], "movie")
 
     def test_short_drama_category_and_label_are_explicit_types(self):
         self.assertEqual(self.classify(SimpleNamespace(type="电视剧"), category="短剧")[0], "short_drama")
@@ -76,7 +93,10 @@ class DownloadTypeTest(unittest.TestCase):
             SimpleNamespace(title="Anime", description="", category="动漫", labels=[], pubdate="", size=1),
             SimpleNamespace(title="Film", description="", category="电影", labels=[], pubdate="", size=1),
             SimpleNamespace(title="Unknown", description="", category=None, labels=[], pubdate="", size=1),
+            SimpleNamespace(title="Show 加更篇", description="", category="动漫", labels=[], pubdate="", size=1),
         ]
+        patterns = (re.compile("加更篇", re.I),)
+        self.plugin._mp_transfer_exclude_patterns.return_value = patterns
         self.plugin.chain.recognize_media.return_value = None
         report = {"reason_counts": Counter(), "blacklist_excluded": 0, "added_count": 0, "added_titles": []}
         with patch("resourceflow.TorrentsChain") as chain:
@@ -84,7 +104,9 @@ class DownloadTypeTest(unittest.TestCase):
             self.plugin._ResourceFlow__brush_site_torrents(
                 SimpleNamespace(name="site", domain="example.org"), {}, {}, set(), report, 0
             )
-        self.plugin._ResourceFlow__download.assert_called_once_with(torrents[0])
+        self.plugin._ResourceFlow__download.assert_called_once_with(torrents[0], transfer_patterns=patterns)
+        self.assertEqual(self.plugin.chain.recognize_media.call_count, 3)
+        self.assertEqual(report["reason_counts"]["命中 MoviePilot 文件整理屏蔽词"], 1)
         self.assertEqual(report["reason_counts"]["下载类型未选择：movie"], 1)
         self.assertEqual(report["reason_counts"]["下载类型无法识别"], 1)
 

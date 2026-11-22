@@ -306,7 +306,7 @@ def parse_channel_messages(channel: str, message_id: int, message_date: Any, tex
     return [record for record in records if record]
 
 
-def parse_torrent_files(content: bytes) -> list[dict]:
+def parse_torrent_files(content: bytes, *, include_full_path: bool = False) -> list[dict]:
     """Use MoviePilot's existing torrentool parser and root-relative file convention."""
     if not isinstance(content, bytes) or not content or len(content) > 16 * 1024 * 1024:
         return []
@@ -318,10 +318,13 @@ def parse_torrent_files(content: bytes) -> list[dict]:
         single_file = len(files) == 1 and files[0].name == torrent.name
         result = []
         for entry in files:
-            path = PurePosixPath(entry.name)
+            full_path = path = PurePosixPath(entry.name)
             if not single_file and path.parts and path.parts[0] == torrent.name:
                 path = path.relative_to(torrent.name)
-            result.append({"path": str(path), "size": entry.length})
+            item = {"path": str(path), "size": entry.length}
+            if include_full_path:
+                item["full_path"] = str(full_path)
+            result.append(item)
         return result
     except Exception:
         return []

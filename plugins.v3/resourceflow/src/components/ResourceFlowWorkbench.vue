@@ -64,6 +64,7 @@ const pendingApprovalDialog = ref(false)
 const pendingApprovalSaving = ref(false)
 const pendingApprovalRow = ref(null)
 const pendingApprovalError = ref('')
+const pendingRejectingKey = ref('')
 const pendingSearchOpen = ref(false)
 const pendingSearchQuery = ref('')
 const pendingSearchResults = ref([])
@@ -376,7 +377,10 @@ async function loadResourceRows() {
   })
   try {
     const data = unwrapResponse(await props.api.get(`${pluginBase.value}/resource-ledger?${params}`))
-    if (generation === resourceGeneration) resourceRows.value = data || { total: 0, items: [] }
+    if (generation === resourceGeneration) {
+      resourceRows.value = data || { total: 0, items: [] }
+      resourcePage.value = data?.page || 1
+    }
   } catch (err) {
     if (generation === resourceGeneration) channelDedupError.value = err?.message || '读取下载待核验记录失败'
   } finally {
@@ -581,6 +585,29 @@ async function submitPendingApproval() {
     pendingApprovalError.value = err?.message || '提交人工核验失败'
   } finally {
     pendingApprovalSaving.value = false
+  }
+}
+
+async function rejectPendingResource(row) {
+  if (!row?.key || pendingRejectingKey.value) return
+  pendingRejectingKey.value = row.key
+  channelDedupError.value = ''
+  try {
+    unwrapResponse(await props.api.post(`${pluginBase.value}/resource-ledger/pending/reject`, {
+      key: row.key,
+    }))
+    if (resourceRows.value.items.some(item => item.key === row.key)) {
+      resourceRows.value = {
+        ...resourceRows.value,
+        items: resourceRows.value.items.filter(item => item.key !== row.key),
+        total: Math.max(0, resourceRows.value.total - 1),
+      }
+    }
+    await loadResourceRows()
+  } catch (err) {
+    channelDedupError.value = err?.message || '驳回待核验申请失败'
+  } finally {
+    pendingRejectingKey.value = ''
   }
 }
 
@@ -1310,12 +1337,13 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             <VTab v-if="sharedRecordsHost" value="records">共享下载记录</VTab>
             <VTab value="pending">下载待核验</VTab>
           </VTabs>
-          <SharedSettingsPanel v-if="channelDedupDialog"
+          <div class="channel-dedup__tab-content">
+          <SharedSettingsPanel v-if="channelDedupDialog" v-show="approvalTab !== 'pending'"
             ref="sharedRecordsPanel" :api="api" :plugin-base="pluginBase" :record-tab="approvalTab"
             @host-change="sharedRecordsHost = $event"
             @loading-change="sharedRecordsLoading = $event" />
           <div v-if="approvalTab === 'pending'" class="channel-dedup__section">
-            <div class="channel-dedup__search">
+            <div class="channel-dedup__search approval-search">
               <VTextField v-model="activeResourceFilter.query" label="搜索记录" prepend-inner-icon="mdi-magnify"
                 clearable maxlength="200" density="comfortable" hide-details />
               <VSelect v-model="activeResourceFilter.media_type" label="类型筛选" :items="resourceTypes"
@@ -1334,12 +1362,20 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                     </div>
                   </div>
                   <div class="channel-dedup__record-actions">
+                    <VBtn size="small" density="compact" variant="tonal"
+                      class="channel-dedup__pending-action"
+                      color="error" prepend-icon="mdi-close-circle-outline"
+                      :loading="pendingRejectingKey === row.key"
+                      :disabled="Boolean(pendingRejectingKey) || row.manual_state === 'queued' || row.manual_state === 'processing'"
+                      @click="rejectPendingResource(row)">
+                      驳回申请
+                    </VBtn>
                     <VBtn v-if="row.actionable" size="small" density="compact" variant="tonal"
                       class="channel-dedup__pending-action"
                       prepend-icon="mdi-check-circle-outline"
-                      :disabled="row.manual_state === 'queued' || row.manual_state === 'processing'"
+                      :disabled="pendingRejectingKey === row.key"
                       @click="openPendingApproval(row)">
-                      核验并继续下载
+                      核验并下载
                     </VBtn>
                   </div>
                 </div>
@@ -1367,6 +1403,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             </div>
             <SharedRecordPagination v-model="resourcePage" :total="resourceRows.total"
               @update:model-value="loadResourceRows" />
+          </div>
           </div>
         </VCardText>
       </VCard>
@@ -1565,8 +1602,10 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   flex-shrink: 0;
 }
 
-.channel-dedup__search { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 12px; }
-.channel-dedup__search > * { min-inline-size: 0; }
+.channel-dedup__tab-content { min-inline-size: 0; padding-block-start: 16px; }
+.channel-dedup__tab-content :deep(.approval-search) { display: grid; gap: 12px; }
+.channel-dedup__tab-content :deep(.approval-search > *) { min-inline-size: 0; }
+.channel-dedup__search { grid-template-columns: minmax(0, 1fr) 160px; }
 
 .global-settings__body {
   gap: 18px;
@@ -1821,7 +1860,10 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   .pending-approval__grid { grid-template-columns: minmax(0, 1fr); }
   .channel-dedup__record-head {
     gap: 8px;
+    flex-wrap: wrap;
   }
+  .channel-dedup__record-main { flex: 1 0 100%; }
+  .channel-dedup__record-actions { margin-inline-start: auto; }
 
   .channel-dedup__badge {
     max-inline-size: 56%;

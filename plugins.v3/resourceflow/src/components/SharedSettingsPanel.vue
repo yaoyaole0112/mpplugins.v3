@@ -199,12 +199,11 @@ watch(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.own
   // Keep the previous page visible while the next response is in flight.
   // Clearing it here caused the dialog to collapse and visibly jump on every
   // search, tab switch, and periodic refresh.
-  recordsLoading.value = true
+  recordsLoading.value = Boolean(activeFilter.value)
   recordPage.value = 1
   if (!activeFilter.value) return
   const delay = values[0] === previous[0] && values[2] === previous[2]
     && values[3] === previous[3] && values[4] === previous[4] ? 300 : 0
-  recordsLoading.value = true
   searchTimer = setTimeout(loadRecords, delay)
 })
 onUnmounted(() => { clearTimeout(searchTimer); recordsGeneration += 1 })
@@ -268,7 +267,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
     </dl>
     </template>
     <template v-else>
-    <div v-if="activeFilter" class="shared-settings__search">
+    <div v-if="activeFilter" class="shared-settings__search approval-search">
       <VTextField v-model="activeFilter.query" label="搜索记录" prepend-inner-icon="mdi-magnify"
         clearable maxlength="200" density="comfortable" hide-details />
       <VSelect v-model="activeFilter.owner" label="下载方筛选" :items="ownerOptions"
@@ -301,7 +300,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
           <span>申请时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
           <span v-if="row.download_started_at">下载开始：{{ timestamp(row.download_started_at) }}</span>
           <span v-if="row.timeout_at">超时处理：{{ timestamp(row.timeout_at) }}</span>
-          <span>任务：{{ row.task_name || row.task_id || '-' }}</span><span>下载器：{{ row.downloader || '-' }}</span>
+          <span>站点：{{ row.site_name || '-' }}</span><span>下载器：{{ row.downloader || '-' }}</span>
         </div>
         <p v-if="row.error && row.phase !== 'rejected'" class="shared-settings__error text-body-2">{{ row.error }}</p>
         <p v-if="row.integrity_error" class="shared-settings__error text-body-2">{{ row.integrity_error }}</p>
@@ -335,6 +334,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
         <strong class="shared-settings__torrent-title">{{ row.title }}</strong>
         <div class="shared-settings__meta shared-settings__claim-meta text-caption">
           <span>下载时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
+          <span>站点：{{ row.site_name || '-' }}</span>
           <span class="shared-settings__claim-owner">下载方：{{ row.label || '-' }}</span>
         </div>
         <div class="shared-settings__ids">
@@ -352,8 +352,7 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 <style scoped>
 .shared-settings { display: flex; flex-direction: column; gap: 20px; min-inline-size: 0; }
 .shared-settings--compact { gap: 18px; }
-.shared-settings__search { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 210px) minmax(130px, 160px) minmax(150px, 170px); gap: 12px; }
-.shared-settings__search > * { min-inline-size: 0; }
+.shared-settings__search { grid-template-columns: minmax(0, 1fr) minmax(150px, 210px) 160px minmax(150px, 170px); }
 .shared-settings__grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 16px 24px; min-inline-size: 0; }
 .shared-settings__grid > * { min-inline-size: 0; }
 .shared-settings__instance :deep(input) { font-family: monospace; font-size: 11px; }

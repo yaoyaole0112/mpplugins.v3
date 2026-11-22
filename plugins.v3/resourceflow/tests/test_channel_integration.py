@@ -23,6 +23,7 @@ def make_torrent(paths):
 class ChannelIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.plugin = ResourceFlow.__new__(ResourceFlow)
+        self.plugin._mp_transfer_exclude_patterns = Mock(return_value=())
         self.plugin._enabled = True
         self.plugin._channel_stopping = False
         self.plugin._channel_generation = 0

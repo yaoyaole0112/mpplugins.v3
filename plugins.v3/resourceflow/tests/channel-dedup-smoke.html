@@ -52,12 +52,14 @@
   window.resourceflowFailStage = ''
   window.resourceflowFailSharedLoad = false
   window.resourceflowSlowSearch = false
+  window.resourceflowPendingRejected = false
   let shared = {
     enabled: true, host_coordinator: false, bot_username: '@testbot', group: 'resources',
     last_ok: 1794711660,
     instance_label: '本机测试', instance_id: 'a'.repeat(32), allowed_users: [11, 22], token_configured: true,
     requests: [{ request_id: 'b'.repeat(32), title: 'Show S01E05', phase: 'queued', approved: 1,
-      created: 1794711600, updated: 1794711660, task_name: 'Test Site', downloader: 'QB', file_count: 2, completed: 0,
+      created: 1794711600, updated: 1794711660, task_name: 'Test Task', site_name: 'Test Site',
+      downloader: 'QB', file_count: 2, completed: 0,
       rejected: [{ id: '2'.repeat(24), reason: '同规格已占位或已完成', owner: '朋友A' }],
       files: [1, 2].map(number => ({ id: String(number).repeat(24),
         path: `Show.S01E0${number + 4}.2026.1080p.WEB-DL.H264.AAC.mkv`, tmdb_id: 123,
@@ -78,13 +80,14 @@
       rejected: [], files: [] },
     { request_id: 'f'.repeat(32), title: 'Released Request', phase: 'released', approved: 0,
       rejected: [], files: [] }],
-    records: [{ id: 'b'.repeat(32), title: 'Show S01E05', label: '朋友A', state: 'reserved', tmdb_id: 123,
+    records: [{ id: 'b'.repeat(32), title: 'Show S01E05', label: '朋友A', site_name: 'Test Site',
+      state: 'reserved', tmdb_id: 123,
       media_title: '玫瑰战争',
       season: 1, episodes: [5], media_type: 'tv', created: 1794711600, updated: 1794711660,
       specs: { resolution: '1080p', effects: 'SDR', fps: 23.976, size: 1251017826 } },
       ...['completed', 'queued', 'released'].map((state, index) => ({
         id: `${state}-${index}`, title: 'Yowaki MAX Reijou na no ni Ratsuwan Konyakusha-sama no Kake ni Notteshimatta 2026 S01E07 1080p CR WEB-DL H264 AAC-UBWEB',
-        label: '边城旧事', state, tmdb_id: 303060, media_type: 'tv', season: 1, episodes: [7],
+        label: '边城旧事', site_name: '测试站点', state, tmdb_id: 303060, media_type: 'tv', season: 1, episodes: [7],
         media_title: '弱气MAX的大小姐、居然接受了铁腕未婚夫的赌约',
         created: 1794711600, updated: 1794711660,
         specs: { resolution: '1080p', effects: 'SDR', codec: 'H.264', source: 'WEB-DL', size: 1501017826 },
@@ -187,7 +190,9 @@
           media_title: '测试剧集',
           tmdb_id: 333, specs: { resolution: '1080p' }, evidence_source: 'completed',
         }))]
-        const data = recordPage(items, path)
+        const visibleItems = path.includes('state=pending') && window.resourceflowPendingRejected
+          ? items.filter(item => item.key !== 'a'.repeat(64)) : items
+        const data = recordPage(visibleItems, path)
         if (window.resourceflowSlowSearch && new URLSearchParams(path.split('?')[1]).get('query') === 'Slow') {
           await new Promise(resolve => setTimeout(resolve, 900))
         }
@@ -230,6 +235,10 @@
       }
       if (path.endsWith('/resource-ledger/pending/approve')) {
         return { success: true, message: '已提交人工核验，完成后记录会自动刷新' }
+      }
+      if (path.endsWith('/resource-ledger/pending/reject')) {
+        window.resourceflowPendingRejected = true
+        return { success: true, message: '已驳回申请；同一候选不会再次显示' }
       }
       if (path === 'plugin/ResourceFlow/settings') {
         if (window.resourceflowFailStage === 'global') return { success: false, message: '模拟全局保存失败' }

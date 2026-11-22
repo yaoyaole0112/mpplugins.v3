@@ -216,7 +216,9 @@ class StoreTests(unittest.TestCase):
             )""")
         migrated = CoordinatorStore(old_path, "resources", ["resolution"], 5)
         with migrated.connect() as db:
-            self.assertIn("media_title", {row["name"] for row in db.execute("PRAGMA table_info(claims)")})
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(claims)")}
+            self.assertIn("media_title", columns)
+            self.assertIn("site_name", columns)
 
     def test_selected_resolution_only_ignores_unknown_or_different_other_fields(self):
         self.assertTrue(self.send(self.request())["approved"])
@@ -1319,6 +1321,38 @@ class PluginSetupTests(unittest.TestCase):
                     self.assertFalse(files)
                     self.assertEqual(rejected, [path])
                     self.assertIn(reason, pending.call_args.args[3])
+
+    def test_shared_identity_falls_back_to_release_title_without_inheriting_pack_episodes(self):
+        p = ResourceFlow.__new__(ResourceFlow)
+        media = SimpleNamespace(type="电视剧", tmdb_id=153217, title="二十世纪电气目录")
+        p._mp_recognize_media = Mock(side_effect=[None, media, None])
+        p._channel_dedup_attributes = ["resolution"]
+        p._shared_media_title_cache = {}
+        p._shared_media_title = Mock(return_value=media.title)
+        p._pending_identity = Mock()
+        p._resolve_pending_identity = Mock()
+        task = SimpleNamespace(id="task", name="HH", site_id=1, spec_dedup_enabled=True)
+        paths = [f"20th Century Electric Catalogue S01E{ep}.mkv" for ep in (12, 13)]
+        title = "Sparks of Tomorrow S01 Complete 2026 1080p NF WEB-DL x264 AAC 2.0-COLAWEB"
+
+        files, rejected = p._shared_candidates(make_torrent([(path, 123456) for path in paths]), title, task, None)
+
+        self.assertFalse(rejected)
+        self.assertEqual([(row["media_type"], row["tmdb_id"], row["season"], row["episodes"])
+                          for row in files], [("tv", 153217, 1, [12]), ("tv", 153217, 1, [13])])
+        self.assertEqual(p._mp_recognize_media.call_count, 3)
+        self.assertIn("Sparks", p._mp_recognize_media.call_args_list[1].args[0].org_string)
+
+    def test_release_title_does_not_override_confirmed_file_identity(self):
+        p = self.plugin
+        existing = SimpleNamespace(type="电影", tmdb_id=123)
+        p._mp_recognize_media.return_value = existing
+        _, media, _, _, reason = p._mp_file_recognition(
+            "Different.S01E12.mkv", standard_only=True, title_hint="Sparks of Tomorrow S01 Complete",
+        )
+        self.assertIs(media, existing)
+        self.assertIn("识别为电影", reason)
+        p._mp_recognize_media.assert_called_once()
 
     def test_mp_recognition_words_drive_recent_dates_and_shared_admission(self):
         p = self.plugin

@@ -47,7 +47,7 @@ class CoordinatorStore:
                     instance TEXT NOT NULL, label TEXT NOT NULL, request_id TEXT NOT NULL,
                     file_id TEXT NOT NULL, media_type TEXT NOT NULL, tmdb_id INTEGER NOT NULL,
                     season INTEGER, episodes TEXT NOT NULL, specs TEXT NOT NULL,
-                    title TEXT NOT NULL, media_title TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL, media_title TEXT NOT NULL DEFAULT '', site_name TEXT NOT NULL DEFAULT '',
                     state TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS claims_identity
                     ON claims(group_id, media_type, tmdb_id, season, state);
@@ -64,6 +64,8 @@ class CoordinatorStore:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(claims)")}
             if "media_title" not in columns:
                 db.execute("ALTER TABLE claims ADD COLUMN media_title TEXT NOT NULL DEFAULT ''")
+            if "site_name" not in columns:
+                db.execute("ALTER TABLE claims ADD COLUMN site_name TEXT NOT NULL DEFAULT ''")
             db.execute("INSERT OR IGNORE INTO meta VALUES ('authority_id', ?)", (canonical(uuid.uuid4().hex),))
             db.executescript("""
                 BEGIN IMMEDIATE;
@@ -74,8 +76,9 @@ class CoordinatorStore:
                 CREATE TRIGGER IF NOT EXISTS claim_changes_insert AFTER INSERT ON claims BEGIN
                     INSERT OR REPLACE INTO claim_changes(group_id,claim_id) VALUES (NEW.group_id,NEW.id);
                 END;
-                CREATE TRIGGER IF NOT EXISTS claim_changes_update AFTER UPDATE OF
-                    id,group_id,label,title,media_title,media_type,tmdb_id,season,episodes,specs,
+                DROP TRIGGER IF EXISTS claim_changes_update;
+                CREATE TRIGGER claim_changes_update AFTER UPDATE OF
+                    id,group_id,label,title,media_title,site_name,media_type,tmdb_id,season,episodes,specs,
                     state,created,updated,request_id,file_id ON claims BEGIN
                     INSERT OR REPLACE INTO claim_changes(group_id,claim_id)
                         SELECT OLD.group_id,OLD.id WHERE OLD.group_id!=NEW.group_id OR OLD.id!=NEW.id;
@@ -197,6 +200,7 @@ class CoordinatorStore:
             raise SharedError("整包处理策略无效")
         if self.policy.get("rules") and body["pack_policy"] != self.policy["rules"]["pack_policy"]:
             raise SharedError("整包处理策略与协调端不一致")
+        site_name = self._site_label(body.get("site_name"))
         approved, rejected, pending = [], [], []
         now = time.time()
         wait_for_2160p = False
@@ -222,7 +226,7 @@ class CoordinatorStore:
                 label=str(body.get("label") or instance[:8])[:80], request_id=request_id,
                 file_id=item["id"], media_type=item["media_type"], tmdb_id=item["tmdb_id"],
                 season=item["season"], episodes=canonical(item["episodes"]), specs=canonical(item["specs"]),
-                title=item["title"], media_title=item["media_title"],
+                title=item["title"], media_title=item["media_title"], site_name=site_name,
                 state="reserved", created=now, updated=now,
             )
             pending.append(row)
@@ -239,7 +243,7 @@ class CoordinatorStore:
             db.execute(
                 "INSERT INTO claims "
                 "(id,group_id,sender,instance,label,request_id,file_id,media_type,tmdb_id,season,episodes,specs,"
-                "title,media_title,state,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "title,media_title,site_name,state,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 tuple(row.values()),
             )
         return {"ok": True, "approved": approved, "rejected": rejected,
@@ -359,11 +363,12 @@ class CoordinatorStore:
                     db.execute(
                         "INSERT INTO claims "
                         "(id,group_id,sender,instance,label,request_id,file_id,media_type,tmdb_id,season,episodes,specs,"
-                        "title,media_title,state,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "title,media_title,site_name,state,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (claim, self.group, sender, instance, str(body.get("label") or instance[:8])[:80],
                          source.get("original_request") or request_id, source.get("original_file") or item["id"],
                          item["media_type"], item["tmdb_id"], item["season"], canonical(item["episodes"]),
-                         canonical(item["specs"]), item["title"], item["media_title"], "completed",
+                         canonical(item["specs"]), item["title"], item["media_title"],
+                         self._site_label(source.get("site_name")), "completed",
                          completed_at, time.time()))
             db.execute("INSERT OR REPLACE INTO completion_imports VALUES (?,?,?,?,?)",
                        (self.group, instance, item["id"], self.policy["revision"], claim))
@@ -444,6 +449,12 @@ class CoordinatorStore:
                 "episodes": episodes, "specs": specs, "title": str(row.get("title", ""))[:160],
                 "media_title": media_title[:120]}
 
+    @staticmethod
+    def _site_label(value):
+        if isinstance(value, str) and not any(mark in value for mark in (":", "/", "\\", "@")):
+            return " ".join(value.split())[:80]
+        return ""
+
     def _update(self, db, sender, instance, body):
         updates = body.get("updates")
         if not isinstance(updates, list) or not 1 <= len(updates) <= 500:
@@ -476,7 +487,7 @@ class CoordinatorStore:
 
     def recent(self, limit=100):
         with self.connect() as db:
-            rows = db.execute("SELECT id,label,title,media_title,media_type,tmdb_id,season,episodes,specs,state,created,updated "
+            rows = db.execute("SELECT id,label,title,media_title,site_name,media_type,tmdb_id,season,episodes,specs,state,created,updated "
                               "FROM claims WHERE group_id=? ORDER BY updated DESC LIMIT ?",
                               (self.group, min(int(limit), 100))).fetchall()
         result = []
