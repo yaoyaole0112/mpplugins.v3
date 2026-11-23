@@ -13,6 +13,11 @@ SPEC.loader.exec_module(release)
 
 
 class EmeToolsReleaseTests(unittest.TestCase):
+    def test_plugin_does_not_redeclare_moviepilot_oss_dependencies(self):
+        requirements = (Path(__file__).resolve().parents[2] /
+                        "plugins.v3/emetools/requirements.txt").read_text(encoding="utf-8")
+        self.assertNotRegex(requirements, r"(?im)^\s*(?:oss2|crcmod(?:[-_.]+plus)?)\b")
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
