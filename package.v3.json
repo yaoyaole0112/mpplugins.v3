@@ -67,7 +67,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流，使用 Tailscale 私网 HTTPS 共享下载审批，跨实例同规格下载前占位。",
     "labels": "刷流,资源去重,Tailscale",
-    "version": "1.0.55",
+    "version": "1.0.56",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -75,6 +75,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.56": "修复私网共享审批间歇超时导致多站点一起退避：审批入口支持有限并发，账本繁忙只暂缓当前请求；细分本机超时与远程 DNS、TLS 错误，保留原子查重和占位。",
       "v1.0.55": "优化全局设置布局：动态删种置于限额输入上方，缺失日期设置居中对齐；重排共享下载审批配置并为审批连接测试增加成功与失败提示。",
       "v1.0.54": "下载筛选对齐 MoviePilot 整理分类；种子黑名单集中管理并自动纳入共享审批任务的站点；全局设置分区，审批仅保留 Tailscale 私网 HTTPS，沿用原账本。",
       "v1.0.53": "共享审批与状态回报同步实际站点显示名；原下载端可从已核对的本机历史补报空白站点。",

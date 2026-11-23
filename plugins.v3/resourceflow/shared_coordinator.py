@@ -51,6 +51,8 @@ class CoordinatorStore:
                     state TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS claims_identity
                     ON claims(group_id, media_type, tmdb_id, season, state);
+                CREATE INDEX IF NOT EXISTS claims_unbound_owner
+                    ON claims(group_id, instance) WHERE sender=0;
                 CREATE TABLE IF NOT EXISTS fragments (
                     sender INTEGER NOT NULL, request_id TEXT NOT NULL, part INTEGER NOT NULL,
                     total INTEGER NOT NULL, body TEXT NOT NULL, created REAL NOT NULL,
@@ -95,8 +97,8 @@ class CoordinatorStore:
         self.path.chmod(0o600)
 
     @contextmanager
-    def connect(self):
-        db = sqlite3.connect(self.path, timeout=30)
+    def connect(self, *, timeout=30):
+        db = sqlite3.connect(self.path, timeout=timeout)
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA journal_mode=WAL")
@@ -137,9 +139,9 @@ class CoordinatorStore:
         response = self.handle(sender, request_id, value)
         return encode(response, request_id, response=True)
 
-    def handle(self, sender, request_id, body):
+    def handle(self, sender, request_id, body, *, timeout=30):
         fingerprint = digest(body)
-        with self.connect() as db:
+        with self.connect(timeout=timeout) as db:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute("SELECT * FROM rpc WHERE sender=? AND request_id=?",
                              (sender, request_id)).fetchone()
@@ -173,11 +175,11 @@ class CoordinatorStore:
                    (sender, self.group, instance))
         op = body.get("op")
         if op == "policy":
-            return {"ok": True, "policy": self.policy, "user_id": sender, **self.authority()}
+            return {"ok": True, "policy": self.policy, "user_id": sender, **self.authority(db=db)}
         if op == "sync_records":
             return self._sync_records(db, request_id, body)
         if op == "records":
-            return {"ok": True, **self.authority(), "records": self.search_records(
+            return {"ok": True, **self.authority(db=db), "records": self.search_records(
                 str(body.get("query", ""))[:200], str(body.get("status", "")),
                 body.get("page", 1), min(int(body.get("page_size", 20)), 20),
                 str(body.get("media_type", "")), str(body.get("owner", ""))[:80])}
@@ -235,10 +237,10 @@ class CoordinatorStore:
             # A partial add would prevent a later retry of the same torrent hash.
             rejected.extend({"id": item["id"], "reason": HIGH_RESOLUTION_PACK_WAIT} for item in approved)
             return {"ok": True, "approved": [], "rejected": rejected,
-                    "pack_rejected": False, "policy": self.policy, **self.authority()}
+                    "pack_rejected": False, "policy": self.policy, **self.authority(db=db)}
         if rejected and body["pack_policy"] == "exclude":
             return {"ok": True, "approved": [], "rejected": rejected,
-                    "pack_rejected": True, "policy": self.policy, **self.authority()}
+                    "pack_rejected": True, "policy": self.policy, **self.authority(db=db)}
         for row in pending:
             db.execute(
                 "INSERT INTO claims "
@@ -247,7 +249,7 @@ class CoordinatorStore:
                 tuple(row.values()),
             )
         return {"ok": True, "approved": approved, "rejected": rejected,
-                "pack_rejected": False, "policy": self.policy, **self.authority()}
+                "pack_rejected": False, "policy": self.policy, **self.authority(db=db)}
 
     def verify_peer_owners(self, peers):
         with self.connect() as db:
@@ -256,15 +258,19 @@ class CoordinatorStore:
                 if row and row["sender"] != peer.sender:
                     raise SharedError(f"实例 {peer.instance_id} 的个人账号 ID 与原审批账本不一致")
 
-    def authority(self):
-        return {"authority_version": AUTHORITY_VERSION, "authority_id": self.meta("authority_id"),
+    def authority(self, *, db=None, timeout=30):
+        if db is None:
+            with self.connect(timeout=timeout) as connection:
+                return self.authority(db=connection)
+        row = db.execute("SELECT value FROM meta WHERE key='authority_id'").fetchone()
+        return {"authority_version": AUTHORITY_VERSION, "authority_id": json.loads(row["value"]) if row else None,
                 "record_sync_version": SYNC_VERSION, "site_metadata_version": SITE_METADATA_VERSION}
 
     def _sync_records(self, db, request_id, body):
         cursor = body.get("cursor")
         if type(cursor) is not int or not 0 <= cursor < 2**63:
             raise SharedError("共享记录同步游标无效")
-        authority = self.authority()
+        authority = self.authority(db=db)
         head = db.execute("SELECT COALESCE(MAX(seq),0) FROM claim_changes WHERE group_id=?",
                           (self.group,)).fetchone()[0]
         reset = (body.get("authority_id") != authority["authority_id"]
@@ -380,7 +386,7 @@ class CoordinatorStore:
             db.execute("INSERT OR REPLACE INTO completion_imports VALUES (?,?,?,?,?)",
                        (self.group, instance, item["id"], self.policy["revision"], claim))
             imported.append({"id": item["id"], "claim": claim})
-        return {"ok": True, "imported": imported, **self.authority()}
+        return {"ok": True, "imported": imported, **self.authority(db=db)}
 
     def _same_identity_file(self, item, row, overlap=False):
         return same_resource(item, {**dict(row), "episodes": json.loads(row["episodes"]),
@@ -410,7 +416,7 @@ class CoordinatorStore:
                 (item.get("claim"), self.group, sender, instance,
                  item.get("request_id"), item.get("file_id"))).fetchone()
             results.append({"claim": item.get("claim"), "state": row["state"] if row else "missing"})
-        return {"ok": True, "claims": results, **self.authority()}
+        return {"ok": True, "claims": results, **self.authority(db=db)}
 
     def _file(self, row):
         if not isinstance(row, dict) or not re.fullmatch(r"[a-f0-9]{24}", str(row.get("id", ""))):
@@ -486,7 +492,7 @@ class CoordinatorStore:
             changes.append((target, time.time(), name, row["id"]))
         db.executemany("UPDATE claims SET state=?, updated=?, "
                        "site_name=CASE WHEN site_name='' THEN ? ELSE site_name END WHERE id=?", changes)
-        return {"ok": True, "updated": len(changes), **self.authority()}
+        return {"ok": True, "updated": len(changes), **self.authority(db=db)}
 
     def recent(self, limit=100):
         with self.connect() as db:

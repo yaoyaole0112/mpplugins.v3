@@ -1,12 +1,14 @@
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 from unittest import TestCase
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from resourceflow.shared_coordinator import CoordinatorStore
-from resourceflow.shared_http import ApprovalServer, HTTPSApprovalRPC, RPC_PATH, _UnixHTTPConnection
+from resourceflow.shared_http import ApprovalBusy, ApprovalServer, HTTPSApprovalRPC, RPC_PATH, _UnixHTTPConnection
 from resourceflow.shared_models import ApprovalPeer, SharedSettingsPayload
 from resourceflow.shared_protocol import MAX_BYTES, RULE_DEFAULTS, SharedError
 import test_shared_arbitration as arbitration
@@ -91,6 +93,82 @@ class PrivateApprovalTest(TestCase):
         with self.assertRaisesRegex(SharedError, "个人账号 ID"):
             self.store.verify_peer_owners([self.peers[0].model_copy(update={"sender": 22})])
 
+    def test_slow_approval_does_not_block_another_approval(self):
+        entered, resume = Event(), Event()
+        handle = self.store.handle
+
+        def gated(sender, request_id, body, **kwargs):
+            if sender == 11:
+                entered.set()
+                if not resume.wait(5):
+                    raise RuntimeError("timed out waiting for test")
+            return handle(sender, request_id, body, **kwargs)
+
+        with patch.object(self.store, "handle", side_effect=gated), ThreadPoolExecutor(2) as pool:
+            slow = pool.submit(self.call, 0, "policy")
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertEqual(pool.submit(self.call, 1, "policy").result(timeout=2)["user_id"], 22)
+            finally:
+                resume.set()
+            self.assertTrue(slow.result(timeout=2)["ok"])
+
+    def test_locked_ledger_returns_busy_without_committing_then_same_request_can_retry(self):
+        rid = uuid4().hex
+        reserve = {"revision": self.store.policy["revision"], "files": [file_row()], "pack_policy": "partial"}
+        with self.store.connect() as db, patch("resourceflow.shared_http.LEDGER_WAIT", 0.05):
+            db.execute("BEGIN IMMEDIATE")
+            with self.assertRaisesRegex(ApprovalBusy, "审批繁忙（reserve）") as failed:
+                self.call(0, "reserve", rid, **reserve)
+            self.assertFalse(getattr(failed.exception, "definitive", False))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM claims").fetchone()[0], 0)
+        approved = self.call(0, "reserve", rid, **reserve)
+        self.assertEqual(len(approved["approved"]), 1)
+        self.assertEqual(self.call(0, "reserve", rid, **reserve), approved)
+
+    def test_parallel_reservations_still_create_only_one_claim(self):
+        reserve = {"revision": self.store.policy["revision"], "files": [file_row()], "pack_policy": "partial"}
+        with ThreadPoolExecutor(2) as pool:
+            calls = [pool.submit(self.call, index, "reserve", **reserve) for index in range(2)]
+            outcomes = [result.result(timeout=5) for result in calls]
+        self.assertEqual(sorted(len(outcome["approved"]) for outcome in outcomes), [0, 1])
+        self.assertEqual(len(self.store.recent()), 1)
+
+    def test_saturated_listener_returns_busy_without_starting_extra_worker(self):
+        socket = self.socket.with_name("limited.sock")
+        with patch("resourceflow.shared_http.MAX_HANDLERS", 1):
+            limited = ApprovalServer(socket, self.store, self.peers)
+        self.addCleanup(limited.stop)
+        entered, resume = Event(), Event()
+        handle = self.store.handle
+
+        def gated(*args, **kwargs):
+            entered.set()
+            if not resume.wait(5):
+                raise RuntimeError("timed out waiting for test")
+            return handle(*args, **kwargs)
+
+        def policy(i):
+            return HTTPSApprovalRPC("", self.tokens[i], self.authority, local_socket=socket).exchange(
+                uuid4().hex, self.body(i, "policy"))
+
+        with patch.object(self.store, "handle", side_effect=gated) as dispatch, ThreadPoolExecutor(1) as pool:
+            first = pool.submit(policy, 0)
+            try:
+                self.assertTrue(entered.wait(2))
+                with self.assertRaises(ApprovalBusy):
+                    policy(1)
+                dispatch.assert_called_once()
+            finally:
+                resume.set()
+            self.assertTrue(first.result(timeout=2)["ok"])
+
+    def test_local_response_timeout_does_not_point_to_dns_or_certificates(self):
+        with patch("resourceflow.shared_http._UnixHTTPConnection") as connection:
+            connection.return_value.getresponse.side_effect = TimeoutError
+            with self.assertRaisesRegex(SharedError, "本机私网审批等待响应超时（policy）"):
+                self.call(0, "policy")
+
     def test_https_client_does_not_follow_redirects(self):
         with patch("resourceflow.shared_http.HTTPSConnection") as connection:
             connection.return_value.getresponse.return_value.status = 302
@@ -123,6 +201,16 @@ class PluginHTTPSMigrationTest(TestCase):
         self.assertFalse(getattr(failed.exception, "definitive", False))
         exchange.assert_called_once()
         self.assertIn("shared_retry_at_https", [call.args[0] for call in self.plugin.save_data.call_args_list])
+
+    def test_coordinator_busy_does_not_back_off_other_requests(self):
+        with patch.object(self.plugin, "_https_shared_exchange", side_effect=[
+            ApprovalBusy("协调端审批繁忙"), {"ok": True},
+        ]) as exchange:
+            with self.assertRaises(ApprovalBusy):
+                self.plugin._shared_exchange(uuid4().hex, {"op": "policy"})
+            self.assertEqual(self.plugin._shared_retry_at, 0)
+            self.assertTrue(self.plugin._shared_exchange(uuid4().hex, {"op": "policy"})["ok"])
+        self.assertEqual(exchange.call_count, 2)
 
     def test_migrating_does_not_use_telegram_backoff_and_keeps_instance(self):
         p = self.plugin

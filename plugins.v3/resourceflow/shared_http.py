@@ -9,8 +9,13 @@ import os
 from pathlib import Path
 import re
 import socket
-from socketserver import UnixStreamServer
+from socketserver import ThreadingMixIn, UnixStreamServer
+import sqlite3
+import ssl
 import threading
+import time
+
+from app.sdk.logging import logger
 
 from .shared_protocol import ID_PATTERN, MAX_BYTES, SharedError, canonical, decode_json
 
@@ -21,6 +26,14 @@ HOST_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9](?:[a-
 OPS = frozenset({"policy", "reserve", "records", "sync_records", "inspect", "update", "import_completed"})
 SOCKET_SUBDIRECTORY = "approval-private"
 SOCKET_NAME = "rpc.sock"
+CLIENT_TIMEOUT = 10
+LEDGER_WAIT = 3
+MAX_HANDLERS = 8
+BUSY_RESPONSE = b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+
+class ApprovalBusy(SharedError):
+    """The coordinator answered, but could not process this request yet."""
 
 
 def approval_socket(data_path):
@@ -87,23 +100,69 @@ class ApprovalHandler(BaseHTTPRequestHandler):
                 return self.reply(400)
             if body.get("instance") != owner.instance_id:
                 return self.reply(403)
-            store = self.server.store
-            if envelope.get("authority_id") != store.authority()["authority_id"]:
-                return self.reply(409)
-            return self.reply(200, store.handle(owner.sender, request_id, body))
+            return self.dispatch(owner, request_id, body, envelope.get("authority_id"))
         except (BrokenPipeError, ConnectionResetError):
             return
         except SharedError:
             return self.reply(400)
-        except Exception:
-            return self.reply(503)
 
 
-class _PrivateServer(UnixStreamServer):
+    def dispatch(self, owner, request_id, body, authority_id):
+        started = time.monotonic()
+        op = body["op"]
+        store = self.server.store
+        try:
+            if authority_id != store.authority(timeout=LEDGER_WAIT)["authority_id"]:
+                return self.reply(409)
+            return self.reply(200, store.handle(owner.sender, request_id, body, timeout=LEDGER_WAIT))
+        except sqlite3.OperationalError as error:
+            if (getattr(error, "sqlite_errorcode", 0) & 0xff) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                return self.reply(503)
+            logger.warning(f"私网审批账本操作异常：{op} · {type(error).__name__}")
+            return self.reply(500)
+        except (OSError, SharedError):
+            raise
+        except Exception as error:
+            logger.warning(f"私网审批请求处理异常：{op} · {type(error).__name__}")
+            return self.reply(500)
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed >= 2:
+                logger.warning(f"私网审批请求耗时：{op} · {request_id} · {elapsed:.2f} 秒")
+
+
+class _PrivateServer(ThreadingMixIn, UnixStreamServer):
     request_queue_size = 16
     # Use HTTP parsing without exposing an IP listener.
     server_name = "resourceflow"
     server_port = 0
+
+    def __init__(self, *args):
+        self._slots = threading.BoundedSemaphore(MAX_HANDLERS)
+        super().__init__(*args)
+
+    def process_request(self, request, client_address):
+        # Do not grow the worker pool or block the accept loop under load.
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.setblocking(False)
+                request.sendall(BUSY_RESPONSE)
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
     def handle_error(self, request, client_address):
         pass
@@ -164,20 +223,33 @@ class HTTPSApprovalRPC:
         payload = canonical({"request_id": request_id, "authority_id": self.authority_id, "body": body}).encode()
         if len(payload) > MAX_BYTES:
             raise SharedError("私网审批申请批次过大")
-        conn = (_UnixHTTPConnection(self.local_socket, timeout=10) if self.local_socket else
-                HTTPSConnection(self.host, port=443, timeout=10))
+        conn = (_UnixHTTPConnection(self.local_socket, timeout=CLIENT_TIMEOUT) if self.local_socket else
+                HTTPSConnection(self.host, port=443, timeout=CLIENT_TIMEOUT))
+        op = body.get("op")
+        operation = f"（{op}）" if isinstance(op, str) and op in OPS else ""
+        endpoint = "本机私网审批" if self.local_socket else "Tailscale 私网审批"
+        phase = "连接或发送"
         try:
             conn.request("POST", RPC_PATH, payload, {
                 "Authorization": f"Bearer {self.token}", "Content-Type": "application/json",
             })
+            phase = "等待响应"
             response = conn.getresponse()
+            if response.status == 503:
+                raise ApprovalBusy(f"协调端审批繁忙{operation}，本次暂缓")
             if response.status != 200:
                 message = {401: "设备密钥未获授权", 403: "设备密钥与实例 ID 不匹配",
                            409: "协调端账本 ID 不匹配", 404: "未部署私网审批路径"}.get(response.status)
                 raise SharedError(f"私网审批未确认：{message or f'HTTP {response.status}'}")
             result = decode_json(response.read(MAX_BYTES + 1))
+        except TimeoutError:
+            raise SharedError(f"{endpoint}{phase}超时{operation}，本次暂缓") from None
+        except socket.gaierror:
+            raise SharedError(f"{endpoint}域名解析失败{operation}") from None
+        except ssl.SSLError:
+            raise SharedError(f"{endpoint} TLS 握手或证书校验失败{operation}") from None
         except (OSError, HTTPException):
-            raise SharedError("私网审批连接未确认，请检查 Tailscale HTTPS、域名和证书") from None
+            raise SharedError(f"{endpoint}{phase}失败{operation}，暂未收到审批确认") from None
         finally:
             conn.close()
         if result.get("ok") is False:

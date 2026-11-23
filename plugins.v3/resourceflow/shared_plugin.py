@@ -28,7 +28,7 @@ from .shared_cache import (
 )
 from .shared_coordinator import CoordinatorStore
 from .shared_history import AUTHORITY_VERSION, SITE_METADATA_VERSION, completion_rows, site_label
-from .shared_http import ApprovalServer, HTTPSApprovalRPC, approval_socket
+from .shared_http import ApprovalBusy, ApprovalServer, HTTPSApprovalRPC, approval_socket
 from .shared_models import SharedSettingsPayload
 from .shared_protocol import RULE_DEFAULTS, SharedError, digest, policy
 
@@ -818,7 +818,8 @@ class SharedResourceMixin:
                 self._shared_error = str(error)
                 if getattr(error, "definitive", False):
                     self._shared_policy_checked_at = 0
-                elif value.get("op") != "sync_records" or getattr(error, "retry_after", 0):
+                elif (not isinstance(error, ApprovalBusy)
+                      and (value.get("op") != "sync_records" or getattr(error, "retry_after", 0))):
                     self._save_shared_backoff(time.time() + max(15, getattr(error, "retry_after", 15)),
                                               self._shared_error)
                 raise
