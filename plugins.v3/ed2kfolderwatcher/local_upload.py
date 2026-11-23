@@ -101,7 +101,12 @@ class LocalUploadMixin:
     def _mp_upload_receipt(self, path, stat):
         with self._upload_receipt_lock:
             receipt = self._upload_receipts().get(str(path.resolve()))
-        if not receipt or receipt.get("identity") != local_identity(stat):
+        identity = receipt.get("identity") if receipt else None
+        current_identity = local_identity(stat)
+        if (
+            not isinstance(identity, list) or len(identity) != len(current_identity)
+            or identity[:4] != current_identity[:4]
+        ):
             return None
         item = receipt.get("item")
         if not isinstance(item, dict) or item.get("storage") != "115网盘Plus" or item.get("type") != "file":

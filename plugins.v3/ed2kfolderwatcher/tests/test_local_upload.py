@@ -801,6 +801,33 @@ class LocalUploadTests(unittest.TestCase):
         self.assertTrue(self.records()[str(path)]["upload_verified"])
         self.storage.oper.upload.assert_not_called()
 
+    def test_mp_receipt_matches_when_only_ctime_changed(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        receipt_path = self.root / "data" / "local_upload_receipts.json"
+        receipts = json.loads(receipt_path.read_text())
+        receipts[str(path)]["identity"][4] += 1
+        receipt_path.write_text(json.dumps(receipts))
+
+        self.assertIsNotNone(self.plugin._mp_upload_receipt(path, path.stat()))
+
+    def test_mp_receipt_rejects_changes_to_stable_file_identity(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        receipt_path = self.root / "data" / "local_upload_receipts.json"
+        original = json.loads(receipt_path.read_text())[str(path)]["identity"]
+
+        for index in range(4):
+            receipts = json.loads(receipt_path.read_text())
+            receipts[str(path)]["identity"] = list(original)
+            receipts[str(path)]["identity"][index] += 1
+            receipt_path.write_text(json.dumps(receipts))
+            self.assertIsNone(self.plugin._mp_upload_receipt(path, path.stat()))
+
     def test_mp_computed_record_waits_for_verification_not_another_upload(self):
         self.configure(mode="mp")
         path = self.sample()
