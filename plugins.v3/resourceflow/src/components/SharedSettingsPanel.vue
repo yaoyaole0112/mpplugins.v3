@@ -10,7 +10,7 @@ const props = defineProps({
   mode: { type: String, default: 'records' },
   recordTab: { type: String, default: 'requests' },
 })
-const emit = defineEmits(['host-change', 'policy-synced', 'loading-change', 'test-result'])
+const emit = defineEmits(['host-change', 'role-change', 'policy-synced', 'loading-change', 'test-result'])
 const state = ref({ requests: [], records: [] })
 const draft = ref({
   enabled: false, host_coordinator: false, group: 'resources',
@@ -124,6 +124,9 @@ async function load(reset = false) {
   const data = unwrapResponse(await props.api.get(`${props.pluginBase}/shared/status`))
   state.value = data
   ready.value = true
+  if (props.mode === 'settings') {
+    emit('role-change', { enabled: Boolean(data.enabled), host_coordinator: Boolean(data.host_coordinator) })
+  }
   if (props.mode === 'records') emit('host-change', Boolean(data.host_coordinator || data.enabled))
   if (reset) draft.value = {
     enabled: Boolean(data.enabled), host_coordinator: Boolean(data.host_coordinator),
@@ -187,6 +190,9 @@ async function test() {
 onMounted(() => perform(() => load(true)))
 watch(() => draft.value.host_coordinator, value => {
   if (props.mode === 'settings') emit('host-change', value)
+}, { immediate: true })
+watch(() => [draft.value.enabled, draft.value.host_coordinator], ([enabled, host_coordinator]) => {
+  if (props.mode === 'settings') emit('role-change', { enabled, host_coordinator })
 }, { immediate: true })
 watch(recordsLoading, value => emit('loading-change', value), { immediate: true })
 watch(() => [props.recordTab, activeFilter.value?.query, activeFilter.value?.owner,

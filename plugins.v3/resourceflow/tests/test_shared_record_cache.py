@@ -147,6 +147,59 @@ class SharedRecordCacheTests(unittest.TestCase):
         self.assertEqual(first["media_title"], "剧集中文名")
         self.assertEqual(self.cache.media_titles("other-scope"), {})
 
+    def test_policy_mapping_syncs_and_matches_existing_mirror_and_coordinator_history(self):
+        original = {
+            **file_row(), "tmdb_id": 336181, "media_title": "This Is 炫茂路",
+            "title": "This Is Hyun Moo Road S01E01 1080p",
+            "specs": {"resolution": "1080p", "effects": "SDR"},
+        }
+        claim = self.reserve(original)["approved"][0]["claim"]
+        self.assertTrue(self.send("update", updates=[{"claim": claim, "state": "queued"}])["ok"])
+        self.assertTrue(self.send("update", updates=[{"claim": claim, "state": "completed"}])["ok"])
+
+        self.store = CoordinatorStore(
+            self.store.path, "resources", ["resolution"], 5, RULE_DEFAULTS,
+            {"TMDB 336181": 336292}, {},
+        )
+        self.sync()
+        duplicate = {
+            **file_row(2, 1), "tmdb_id": 336292, "media_title": "This Is 炫茂路",
+            "title": "This Is Hyun Moo Road S01E01 1080p",
+            "specs": {"resolution": "1080p", "effects": "SDR"},
+        }
+        available, blocked = self.match(duplicate)
+        self.assertEqual(available, [])
+        self.assertEqual(blocked[0][1]["id"], claim)
+        self.assertEqual(self.reserve(duplicate)["rejected"][0]["claim"], claim)
+
+    def test_mapping_chains_apply_to_series_but_not_movies(self):
+        aliases = {"TMDB 336181": 336292, "TMDB 336292": 336293}
+        self.store = CoordinatorStore(
+            self.store.path, "resources", ["resolution"], 5, RULE_DEFAULTS, aliases, {},
+        )
+        original = {**file_row(), "tmdb_id": 336181}
+        claim = self.reserve(original)["approved"][0]["claim"]
+        canonical_series = {**file_row(2), "tmdb_id": 336293}
+        result = self.reserve(canonical_series, instance="b" * 32, sender=22)
+        self.assertEqual(result["rejected"][0]["claim"], claim)
+
+        original_movie = {
+            **file_row(3), "media_type": "movie", "tmdb_id": 336181,
+            "season": None, "episodes": [],
+        }
+        canonical_movie = {
+            **original_movie, "id": f"{4:024x}", "tmdb_id": 336293,
+        }
+        self.assertEqual(len(self.reserve(original_movie)["approved"]), 1)
+        self.sync()
+        available, blocked = self.match(canonical_series, canonical_movie)
+        self.assertEqual([row["id"] for row in available], [canonical_movie["id"]])
+        self.assertEqual([row[0]["id"] for row in blocked], [canonical_series["id"]])
+
+        self.assertEqual(len(self.reserve(
+            canonical_movie, instance="c" * 32, sender=33,
+        )["approved"]), 1)
+
     def test_mirror_displays_chinese_name_from_original_title_without_changing_dedup(self):
         candidate = dict(file_row(), tmdb_id=338938, media_title="Miss You",
                          title="后会友期.I.Miss.You.S01E01.2026.2160p.MGTV.WEB-DL.H265.AAC-ADWeb.mkv")

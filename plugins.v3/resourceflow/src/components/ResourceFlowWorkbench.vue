@@ -55,6 +55,7 @@ const channelDedupError = ref('')
 const sharedSettingsPanel = ref(null)
 const sharedRecordsPanel = ref(null)
 const sharedHost = ref(false)
+const sharedRole = ref({ enabled: false, host_coordinator: false })
 const sharedRecordsHost = ref(false)
 const sharedRecordsLoading = ref(false)
 const approvalTab = ref('requests')
@@ -424,8 +425,10 @@ async function saveChannelDedup(shared) {
       unknown_policy: channelDedupDraft.value.unknown_policy,
     } : {}),
     channels: '',
-    identity_aliases: channelDedupDraft.value.identity_aliases,
-    movie_identity_aliases: channelDedupDraft.value.movie_identity_aliases,
+    ...((shared.host_coordinator || !shared.enabled) ? {
+      identity_aliases: channelDedupDraft.value.identity_aliases,
+      movie_identity_aliases: channelDedupDraft.value.movie_identity_aliases,
+    } : {}),
   }))
   channelDedup.value = data || channelDedup.value
 }
@@ -1269,15 +1272,22 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             <SharedSettingsPanel v-if="settingsDialog" ref="sharedSettingsPanel" mode="settings"
               :api="api" :plugin-base="pluginBase"
               @host-change="sharedHost = $event" @policy-synced="loadChannelDedup()"
+              @role-change="sharedRole = $event"
               @test-result="settingsTestFeedback = $event" />
           </section>
           <section class="global-settings__section">
-            <h3><VIcon icon="mdi-tag-multiple-outline" />别名绑定</h3>
+            <h3><VIcon icon="mdi-tag-multiple-outline" />规范媒体身份绑定</h3>
             <div class="global-settings__grid global-settings__aliases">
-              <VTextarea v-model="channelDedupDraft.identity_aliases" label="剧名别名绑定（可选）"
-                placeholder="剧名别名 = TMDB剧集ID" rows="2" density="comfortable" auto-grow hide-details />
-              <VTextarea v-model="channelDedupDraft.movie_identity_aliases" label="电影别名绑定（可选）"
-                placeholder="电影别名 = TMDB电影ID" rows="2" density="comfortable" auto-grow hide-details />
+              <VTextarea v-model="channelDedupDraft.identity_aliases" label="剧集身份绑定"
+                placeholder="剧名或别名 = 规范 TMDB ID&#10;TMDB 336181 = 336292" rows="2"
+                hint="可混合填写名称绑定和旧 TMDB ID 映射；共享审批启用后由协调端统一维护并下发"
+                persistent-hint :disabled="!settingsReady || (sharedRole.enabled && !sharedRole.host_coordinator)"
+                density="comfortable" auto-grow hide-details="auto" />
+              <VTextarea v-model="channelDedupDraft.movie_identity_aliases" label="电影身份绑定"
+                placeholder="电影名或别名 = 规范 TMDB ID&#10;TMDB 123456 = 234567" rows="2"
+                hint="名称绑定和旧 TMDB ID 映射共用此处配置"
+                persistent-hint :disabled="!settingsReady || (sharedRole.enabled && !sharedRole.host_coordinator)"
+                density="comfortable" auto-grow hide-details="auto" />
             </div>
           </section>
         </VCardText>

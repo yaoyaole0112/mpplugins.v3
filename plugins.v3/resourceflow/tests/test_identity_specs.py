@@ -242,14 +242,20 @@ class IdentitySettingsTests(unittest.TestCase):
         config = ChannelDedupSettingsPayload()
         self.assertEqual(config.unknown_policy, "exclude")
         self.assertEqual(config.identity_aliases, {})
-        config = ChannelDedupSettingsPayload(identity_aliases="Short Roman Title = 313346\n十六夜膳房＝334351")
-        self.assertEqual(config.identity_aliases, {"Short Roman Title": 313346, "十六夜膳房": 334351})
+        config = ChannelDedupSettingsPayload(
+            identity_aliases="Short Roman Title = 313346\n十六夜膳房＝334351\nTMDB 336181 = 336292"
+        )
+        self.assertEqual(config.identity_aliases, {
+            "Short Roman Title": 313346, "十六夜膳房": 334351, "TMDB 336181": 336292,
+        })
 
     def test_invalid_policy_and_conflicting_or_malformed_bindings_are_rejected(self):
         for value in (
             {"unknown_policy": "guess_sdr"}, {"identity_aliases": "Show: 123"},
             {"identity_aliases": "Show = 0"}, {"identity_aliases": {"Show": True}},
             {"identity_aliases": "Show = 123\nS.h.o.w = 456"},
+            {"identity_aliases": "TMDB 336181 = 336292\nTMDB 336292 = 336181"},
+            {"identity_aliases": "TMDB 336181 = 9007199254740992"},
             {"identity_aliases": {f"Show {n}": n + 1 for n in range(201)}},
         ):
             with self.subTest(value=str(value)[:80]), self.assertRaises(ValueError):

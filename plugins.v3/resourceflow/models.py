@@ -326,25 +326,45 @@ class ChannelDedupSettingsPayload(BaseModel):
                     continue
                 match = re.fullmatch(r"\s*(.+?)\s*[=＝]\s*(\d+)\s*", line)
                 if not match:
-                    raise ValueError("别名绑定格式为：剧名别名 = TMDB剧集ID，每行一项")
+                    raise ValueError("身份绑定格式为：名称或 TMDB 旧 ID = 规范 TMDB ID，每行一项")
                 pairs.append((match.group(1), match.group(2)))
         elif isinstance(value, dict):
             pairs = list(value.items())
         else:
-            raise ValueError("别名绑定必须是文本或名称到TMDB剧集ID的字典")
+            raise ValueError("身份绑定必须是文本或名称到 TMDB ID 的字典")
         if len(pairs) > 200:
-            raise ValueError("最多可配置200个剧名别名")
+            raise ValueError("最多可配置200条媒体身份绑定")
         result, normalized = {}, {}
+        id_aliases = {}
         for raw_name, raw_id in pairs:
+            if not isinstance(raw_name, str):
+                raise ValueError("身份绑定名称必须是文本")
             name = str(raw_name).strip()
             key = normalize_title(name)
-            if not key or len(name) > 200 or isinstance(raw_id, bool) or not re.fullmatch(r"[1-9]\d*", str(raw_id)):
-                raise ValueError("别名不能为空且最多200字，TMDB剧集ID必须是正整数")
+            if (not key or len(name) > 200 or isinstance(raw_id, bool)
+                    or not re.fullmatch(r"[1-9]\d*", str(raw_id))):
+                raise ValueError("身份绑定格式无效：名称或 TMDB ID 无效")
             tmdb_id = int(raw_id)
+            if tmdb_id >= 2**53:
+                raise ValueError("TMDB ID 超出有效范围")
             if key in normalized and normalized[key] != tmdb_id:
-                raise ValueError("同一个规范化剧名别名不能绑定到不同TMDB剧集ID")
+                raise ValueError("同一个身份绑定不能指向不同 TMDB ID")
             normalized[key] = tmdb_id
             result[name] = tmdb_id
+            id_match = re.fullmatch(r"(?i)TMDB\s*[:#]?\s*([1-9]\d*)", name)
+            if id_match:
+                source_id = int(id_match.group(1))
+                if source_id >= 2**53 or source_id == tmdb_id:
+                    raise ValueError("TMDB 身份映射的来源或目标 ID 无效")
+                id_aliases[source_id] = tmdb_id
+        for source_id in id_aliases:
+            visited = set()
+            current = source_id
+            while current in id_aliases:
+                if current in visited:
+                    raise ValueError("TMDB 身份映射不能形成循环")
+                visited.add(current)
+                current = id_aliases[current]
         return result
 
     @field_validator("channels", mode="before")

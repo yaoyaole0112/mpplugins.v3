@@ -29,11 +29,12 @@ from .shared_protocol import (
 
 
 class CoordinatorStore:
-    def __init__(self, path, group, attributes, tolerance, rules=None):
+    def __init__(self, path, group, attributes, tolerance, rules=None,
+                 identity_aliases=None, movie_identity_aliases=None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.group = group
-        self.policy = policy(attributes, tolerance, rules)
+        self.policy = policy(attributes, tolerance, rules, identity_aliases, movie_identity_aliases)
         with self.connect() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS rpc (
@@ -51,6 +52,8 @@ class CoordinatorStore:
                     state TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS claims_identity
                     ON claims(group_id, media_type, tmdb_id, season, state);
+                CREATE INDEX IF NOT EXISTS claims_scope
+                    ON claims(group_id, media_type, season, state);
                 CREATE INDEX IF NOT EXISTS claims_unbound_owner
                     ON claims(group_id, instance) WHERE sender=0;
                 CREATE TABLE IF NOT EXISTS fragments (
@@ -206,13 +209,16 @@ class CoordinatorStore:
         approved, rejected, pending = [], [], []
         now = time.time()
         wait_for_2160p = False
+        rows_by_scope = {}
         for item in validated:
-            rows = db.execute(
-                "SELECT * FROM claims WHERE group_id=? AND media_type=? AND tmdb_id=? "
-                "AND season IS ? AND state != 'released'",
-                (self.group, item["media_type"], item["tmdb_id"], item["season"]),
-            ).fetchall()
-            conflict = find_resource_conflict(item, map(display_record, rows), self.policy)
+            scope = (item["media_type"], item["season"])
+            if scope not in rows_by_scope:
+                rows_by_scope[scope] = db.execute(
+                    "SELECT * FROM claims WHERE group_id=? AND media_type=? "
+                    "AND season IS ? AND state != 'released'",
+                    (self.group, *scope),
+                ).fetchall()
+            conflict = find_resource_conflict(item, map(display_record, rows_by_scope[scope]), self.policy)
             if not conflict:
                 conflict = next((row for row in pending if self._same_identity_file(item, row, overlap=True)), None)
             if conflict:
@@ -357,9 +363,9 @@ class CoordinatorStore:
                 claim = old["claim_id"]
             else:
                 matches = db.execute(
-                    "SELECT * FROM claims WHERE group_id=? AND media_type=? AND tmdb_id=? "
+                    "SELECT * FROM claims WHERE group_id=? AND media_type=? "
                     "AND season IS ? AND state='completed'",
-                    (self.group, item["media_type"], item["tmdb_id"], item["season"])).fetchall()
+                    (self.group, item["media_type"], item["season"])).fetchall()
                 match = next((row for row in matches if self._same_completed_evidence(item, row)), None)
                 # An original request must retain its original claim link, even after DB recovery.
                 claim = original or (match["id"] if match else uuid.uuid4().hex)
@@ -391,7 +397,7 @@ class CoordinatorStore:
     def _same_identity_file(self, item, row, overlap=False):
         return same_resource(item, {**dict(row), "episodes": json.loads(row["episodes"]),
                                    "specs": json.loads(row["specs"])}, self.policy["attributes"],
-                             self.policy["size_tolerance_pct"], overlap=overlap)
+                             self.policy["size_tolerance_pct"], overlap=overlap, identity_rules=self.policy)
 
     def _same_completed_evidence(self, item, row):
         if not self._same_identity_file(item, row):
@@ -483,9 +489,9 @@ class CoordinatorStore:
                 raise SharedError("不能回退已完成或已释放的占位")
             if target == "queued":
                 completed = db.execute(
-                    "SELECT * FROM claims WHERE group_id=? AND media_type=? AND tmdb_id=? "
+                    "SELECT * FROM claims WHERE group_id=? AND media_type=? "
                     "AND season IS ? AND state='completed' AND id!=?",
-                    (self.group, row["media_type"], row["tmdb_id"], row["season"], row["id"])).fetchall()
+                    (self.group, row["media_type"], row["season"], row["id"])).fetchall()
                 candidate = {**dict(row), "episodes": json.loads(row["episodes"]), "specs": json.loads(row["specs"])}
                 if any(self._same_identity_file(candidate, other, overlap=True) for other in completed):
                     raise SharedError("启动前核验发现同规格资源已完成，保持暂停，不重复下载")

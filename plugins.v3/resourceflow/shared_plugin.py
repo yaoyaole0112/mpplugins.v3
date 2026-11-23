@@ -52,14 +52,21 @@ class SharedResourceMixin:
         return rules
 
     def _local_shared_policy(self):
-        return policy(self._channel_dedup_attributes, self._channel_dedup_size_tolerance_pct, self._shared_rules())
+        return policy(
+            self._channel_dedup_attributes, self._channel_dedup_size_tolerance_pct, self._shared_rules(),
+            getattr(self, "_channel_dedup_identity_aliases", {}),
+            getattr(self, "_channel_dedup_movie_identity_aliases", {}),
+        )
 
     def _apply_shared_policy(self, value):
         if not isinstance(value, dict) or "rules" not in value:
             raise SharedError("协调端尚不支持统一资源规则，请将协调端更新至 1.0.3 或以上")
-        expected = policy(value.get("attributes", []), value.get("size_tolerance_pct", 5), value["rules"])
+        expected = policy(
+            value.get("attributes", []), value.get("size_tolerance_pct", 5), value["rules"],
+            value.get("identity_aliases", {}), value.get("movie_identity_aliases", {}),
+        )
         if expected != value:
-            raise SharedError("协调端规则版本或内容无效")
+            raise SharedError("协调端规则版本或内容无效，请更新双方插件")
         if any(expected["rules"].get(key) != value for key, value in RULE_DEFAULTS.items()
                if key != "unknown_policy"):
             raise SharedError("协调端仍使用可配置资源规则，请先更新协调端")
@@ -73,6 +80,8 @@ class SharedResourceMixin:
         with self._channel_state_lock:
             self._channel_dedup_attributes = list(expected["attributes"])
             self._channel_dedup_size_tolerance_pct = expected["size_tolerance_pct"]
+            self._channel_dedup_identity_aliases = expected["identity_aliases"]
+            self._channel_dedup_movie_identity_aliases = expected["movie_identity_aliases"]
             for key, setting in expected["rules"].items():
                 setattr(self, f"_channel_dedup_{key}", setting)
             self._channel_identity_cache.clear()
@@ -319,14 +328,29 @@ class SharedResourceMixin:
                 "inflight_enabled": True, "pack_dedup_enabled": True, "prefer_2160p": True,
                 "pack_policy": "partial", "identity_policy": "defer",
             })
-            fields = {"attributes": list(self._channel_dedup_attributes),
-                      "size_tolerance_pct": self._channel_dedup_size_tolerance_pct, **self._shared_rules()}
+            fields = {
+                "attributes": list(self._channel_dedup_attributes),
+                "size_tolerance_pct": self._channel_dedup_size_tolerance_pct,
+                "identity_aliases": dict(getattr(self, "_channel_dedup_identity_aliases", {})),
+                "movie_identity_aliases": dict(getattr(self, "_channel_dedup_movie_identity_aliases", {})),
+                **self._shared_rules(),
+            }
             changed = any(getattr(payload, key) != value for key, value in fields.items()
                           if key in payload.model_fields_set)
             config = getattr(self, "_shared_settings", None)
             if config and not config.host_coordinator:
-                if changed:
-                    return schemas.Response(success=False, message="全局去重字段和资源规则仅可在协调端设置")
+                coordinator_fields = set(fields) - {"identity_aliases", "movie_identity_aliases"}
+                coordinator_change = any(
+                    getattr(payload, key) != fields[key]
+                    for key in coordinator_fields if key in payload.model_fields_set
+                )
+                binding_change = config.enabled and any(
+                    getattr(payload, key) != fields[key]
+                    for key in ("identity_aliases", "movie_identity_aliases")
+                    if key in payload.model_fields_set
+                )
+                if coordinator_change or binding_change:
+                    return schemas.Response(success=False, message="共享身份绑定、去重字段和资源规则仅可在协调端设置")
             payload = payload.model_copy(update={
                 key: getattr(payload, key) if key in payload.model_fields_set else value
                 for key, value in fields.items()
@@ -450,7 +474,8 @@ class SharedResourceMixin:
             self._shared_store = CoordinatorStore(
                 Path(self.get_data_path()) / f"coordinator-{route}.sqlite3", config.group,
                 self._channel_dedup_attributes, self._channel_dedup_size_tolerance_pct,
-                self._shared_rules(),
+                self._shared_rules(), getattr(self, "_channel_dedup_identity_aliases", {}),
+                getattr(self, "_channel_dedup_movie_identity_aliases", {}),
             )
             self._sync_shared_history(store=self._shared_store)
         except Exception as error:
@@ -1019,15 +1044,16 @@ class SharedResourceMixin:
         It is only a local optimization; every non-hit still goes through the
         coordinator for the cross-device atomic decision.
         """
-        attributes = getattr(self, "_channel_dedup_attributes", []) or []
-        tolerance = getattr(self, "_channel_dedup_size_tolerance_pct", 5)
+        identity_rules = self._local_shared_policy()
+        attributes = identity_rules["attributes"]
+        tolerance = identity_rules["size_tolerance_pct"]
         for entry in getattr(self, "_shared_claims", {}).values():
             if entry.get("phase") not in self._shared_active_phases():
                 continue
             for row in entry.get("files", []) or []:
                 if (self._shared_local_file_is_blocking(entry, row.get("id"))
-                        and not is_2160p_downgrade(candidate, row)
-                        and same_resource(candidate, row, attributes, tolerance)):
+                        and not is_2160p_downgrade(candidate, row, identity_rules)
+                        and same_resource(candidate, row, attributes, tolerance, identity_rules=identity_rules)):
                     return entry, row
         return None
 
@@ -1586,10 +1612,10 @@ class SharedResourceMixin:
                 # Existing queued claims get a fresh, durable observation baseline after upgrade.
                 entry["download_started_at"] = time.time()
                 self._save_shared()
-            if entry.get("download_started_at") and time.time() - entry["download_started_at"] >= 2 * 60 * 60:
+            if entry.get("download_started_at") and time.time() - entry["download_started_at"] >= 30 * 60:
                 entry["timeout_cancel_pending"] = True
                 entry["timeout_at"] = time.time()
-                entry["timeout_reason"] = "下载超过 2 小时，按获批文件判断后取消未完成部分"
+                entry["timeout_reason"] = "下载超过 30 分钟，按获批文件判断后取消未完成部分"
                 self._shared_phase(entry, "timeout_cancel_pending",
                                    error="超时取消进行中；确认下载器任务停止前不会释放占位")
                 self._cancel_timed_out_download(entry, downloader)
@@ -1604,9 +1630,9 @@ class SharedResourceMixin:
     def _cancel_timed_out_download(self, entry, downloader):
         """Stop and remove the owned torrent without data before releasing unfinished claims."""
         if not downloader.stop_torrents(entry["hash"]):
-            raise SharedError("下载超过 2 小时，但下载器未确认停止；继续保留占位")
+            raise SharedError("下载超过 30 分钟，但下载器未确认停止；继续保留占位")
         if not downloader.delete_torrents(ids=entry["hash"], delete_file=False):
-            raise SharedError("下载超过 2 小时，但下载器未确认移除任务；继续保留占位")
+            raise SharedError("下载超过 30 分钟，但下载器未确认移除任务；继续保留占位")
         torrents, error = downloader.get_torrents(ids=[entry["hash"]])
         if error or torrents:
             raise SharedError("超时任务移除状态无法确认；继续保留占位")
@@ -1619,4 +1645,4 @@ class SharedResourceMixin:
             self._shared_update(entry, [{"claim": claim, "state": "released"} for claim in remaining],
                                 absent=True)
         self._shared_phase(entry, "released",
-                           error="超过 2 小时仍有获批集未完成；下载任务已移除但数据保留，未完成集占位已释放")
+                           error="超过 30 分钟仍有获批集未完成；下载任务已移除但数据保留，未完成集占位已释放")

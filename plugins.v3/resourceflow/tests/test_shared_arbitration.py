@@ -804,7 +804,7 @@ class AdmissionTests(unittest.TestCase):
         self.add()
         second_id = file_row(2, 2)["id"]
         self.entry()["approved"][second_id] = "c" * 32
-        self.entry()["download_started_at"] = time.time() - 7201
+        self.entry()["download_started_at"] = time.time() - 1801
         snapshot = [
             {"index": 0, "name": "Show.S01E01.mkv", "size": 10, "progress": 1, "priority": 1},
             {"index": 1, "name": "Show.S01E02.mkv", "size": 10, "progress": 0.4, "priority": 1},
@@ -828,9 +828,20 @@ class AdmissionTests(unittest.TestCase):
         self.assertIn("数据保留", self.entry()["error"])
         self.downloader.delete_torrents.assert_called_once_with(ids="a" * 40, delete_file=False)
 
+    def test_timeout_does_not_cancel_before_30_minutes(self):
+        self.add()
+        self.entry()["download_started_at"] = time.time() - 1799
+        owned = [{"tags": self.plugin._shared_tag(self.entry())}]
+        snapshot = [{"index": 0, "name": "Show.S01E01.mkv", "size": 10,
+                     "progress": 0.4, "priority": 1}]
+        self.reconcile(torrents=owned, files=snapshot)
+        self.downloader.stop_torrents.assert_not_called()
+        self.downloader.delete_torrents.assert_not_called()
+        self.assertEqual(self.entry()["phase"], "queued")
+
     def test_timeout_keeps_claims_when_task_removal_is_not_confirmed(self):
         self.add()
-        self.entry()["download_started_at"] = time.time() - 7201
+        self.entry()["download_started_at"] = time.time() - 1801
         owned = [{"tags": self.plugin._shared_tag(self.entry())}]
         snapshot = [{"index": 0, "name": "Show.S01E01.mkv", "size": 10,
                      "progress": 0.4, "priority": 1}]
@@ -1057,7 +1068,7 @@ class PluginSetupTests(unittest.TestCase):
         self.assertIsNone(response["task_name"])
         self.assertEqual(response["files"], [])
 
-    def test_shared_dedup_rules_are_fixed_but_client_can_save_local_aliases(self):
+    def test_shared_dedup_rules_are_fixed_and_standalone_identity_bindings_are_saved(self):
         from resourceflow.models import ChannelDedupSettingsPayload
         p = self.plugin
         p._refresh_scheduler = Mock()
@@ -1076,16 +1087,18 @@ class PluginSetupTests(unittest.TestCase):
         response = p.update_channel_dedup_settings(ChannelDedupSettingsPayload(identity_aliases="Show = 123"))
         self.assertTrue(response.success)
         self.assertEqual(p._channel_dedup_identity_aliases, {"Show": 123})
-        self.assertEqual(p._local_shared_policy(), before)
+        self.assertNotEqual(p._local_shared_policy(), before)
 
     def test_client_syncs_fixed_coordinator_rules_before_local_filters_and_persists(self):
         p = self.plugin
-        expected = policy(["resolution"], 3, RULE_DEFAULTS)
+        expected = policy(["resolution"], 3, RULE_DEFAULTS, {"TMDB 336181": 336292})
         p._shared_exchange = Mock(return_value={"ok": True, "policy": expected, "user_id": 11,
                                               "authority_version": 2, "authority_id": "f" * 32})
         p._sync_shared_policy()
         self.assertEqual(p._local_shared_policy(), expected)
         self.assertEqual(p.update_config.call_args.args[0]["channel_dedup_pack_policy"], "partial")
+        self.assertEqual(p.update_config.call_args.args[0]["channel_dedup_identity_aliases"],
+                         {"TMDB 336181": 336292})
         p._shared_exchange.return_value = {"ok": True, "policy": policy(["resolution"], 3)}
         p._shared_policy_checked_at = 0
         with self.assertRaisesRegex(SharedError, "更新"):
@@ -1153,7 +1166,7 @@ class PluginSetupTests(unittest.TestCase):
             p._apply_shared_policy({**expected, "rules": {**RULE_DEFAULTS, "pack_policy": "exclude"}})
         self.assertEqual(p._local_shared_policy(), expected)
 
-    def test_unchanged_host_rules_or_alias_save_does_not_restart_worker(self):
+    def test_unchanged_host_rules_or_identity_bindings_do_not_restart_worker(self):
         from resourceflow.models import ChannelDedupSettingsPayload
         p = self.plugin
         p._shared_settings = SharedSettingsPayload(host_coordinator=True, bot_username="@testbot",
@@ -1162,14 +1175,43 @@ class PluginSetupTests(unittest.TestCase):
         p._shared_policy_changed = Mock()
         response = p.update_channel_dedup_settings(ChannelDedupSettingsPayload(
             **p._local_shared_policy()["rules"], attributes=p._channel_dedup_attributes,
-            size_tolerance_pct=p._channel_dedup_size_tolerance_pct, identity_aliases="Show = 123"))
+            size_tolerance_pct=p._channel_dedup_size_tolerance_pct,
+            identity_aliases=p._channel_dedup_identity_aliases))
         self.assertTrue(response.success)
         p._shared_policy_changed.assert_not_called()
+
+    def test_host_identity_binding_change_is_versioned_and_restarts_coordinator(self):
+        from resourceflow.models import ChannelDedupSettingsPayload
+        p = self.plugin
+        p._shared_settings = SharedSettingsPayload(host_coordinator=True, bot_username="@testbot",
+                                                   allowed_users=[11])
+        p._refresh_scheduler = Mock()
+        p._shared_policy_changed = Mock()
+        old_revision = p._local_shared_policy()["revision"]
+        response = p.update_channel_dedup_settings(ChannelDedupSettingsPayload(
+            identity_aliases="TMDB 336181 = 336292"))
+        self.assertTrue(response.success)
+        self.assertNotEqual(p._local_shared_policy()["revision"], old_revision)
+        self.assertEqual(p._local_shared_policy()["identity_aliases"], {"TMDB 336181": 336292})
+        p._shared_policy_changed.assert_called_once()
+
+    def test_shared_client_cannot_change_coordinator_identity_bindings(self):
+        from resourceflow.models import ChannelDedupSettingsPayload
+        p = self.plugin
+        p._shared_settings = SharedSettingsPayload(enabled=True, host_coordinator=False)
+        before = p._local_shared_policy()
+        response = p.update_channel_dedup_settings(ChannelDedupSettingsPayload(
+            identity_aliases="TMDB 336181 = 336292"))
+        self.assertFalse(response.success)
+        self.assertIn("协调端", response.message)
+        self.assertEqual(p._local_shared_policy(), before)
 
     def test_rule_revision_covers_pack_and_local_resource_rules(self):
         original = policy(["resolution"], 5, RULE_DEFAULTS)
         changed = policy(["resolution"], 5, {**RULE_DEFAULTS, "pack_policy": "exclude"})
+        identity_changed = policy(["resolution"], 5, RULE_DEFAULTS, {"TMDB 336181": 336292})
         self.assertNotEqual(original["revision"], changed["revision"])
+        self.assertNotEqual(original["revision"], identity_changed["revision"])
         with TemporaryDirectory() as directory:
             store = CoordinatorStore(Path(directory) / "host.sqlite3", "resources", ["resolution"], 5,
                                      {**RULE_DEFAULTS, "pack_policy": "exclude"})

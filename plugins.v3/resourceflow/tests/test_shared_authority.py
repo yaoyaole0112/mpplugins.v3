@@ -42,6 +42,51 @@ class SharedAuthorityTests(unittest.TestCase):
         rows, _ = completion_rows(records or [evidence()], self.store.policy["attributes"])
         return self.send("import_completed", files=rows), rows
 
+    @staticmethod
+    def media_file(tmdb_id, file_id, media_title="This Is 炫茂路"):
+        return {
+            "id": file_id, "title": "This Is Hyun Moo Road S01E10 1080p WEB-DL H264",
+            "media_type": "tv", "tmdb_id": tmdb_id, "season": 1, "episodes": [10],
+            "media_title": media_title, "specs": {"resolution": "1080p", "effects": "SDR"},
+        }
+
+    def test_tmdb_identity_mapping_blocks_duplicate_id_and_matches_existing_history(self):
+        first = self.media_file(336181, "1" * 24)
+        result = self.send("reserve", files=[first])
+        claim = result["approved"][0]["claim"]
+        self.send("update", updates=[{"claim": claim, "state": "queued"}])
+        self.send("update", updates=[{"claim": claim, "state": "completed"}])
+
+        # The mapping is added after the first completed record; no raw history IDs are rewritten.
+        self.store = CoordinatorStore(
+            self.path, "resources", ["resolution", "effects"], 5, RULE_DEFAULTS,
+            {"TMDB 336181": 336292}, {},
+        )
+        second = self.media_file(336292, "2" * 24)
+        duplicate = self.send("reserve", 22, "b" * 32, files=[second])
+        self.assertEqual(duplicate["approved"], [])
+        self.assertEqual(duplicate["rejected"][0]["claim"], claim)
+        self.assertEqual(duplicate["rejected"][0]["state"], "completed")
+        self.assertEqual(next(row for row in self.store.recent() if row["id"] == claim)["tmdb_id"], 336181)
+
+    def test_same_title_different_ids_are_not_merged_without_an_explicit_binding(self):
+        first = self.media_file(336181, "1" * 24)
+        second = self.media_file(336292, "2" * 24)
+        self.assertEqual(len(self.send("reserve", files=[first])["approved"]), 1)
+        self.assertEqual(len(self.send("reserve", 22, "b" * 32, files=[second])["approved"]), 1)
+
+    def test_existing_name_binding_is_applied_to_shared_resource_identity(self):
+        self.store = CoordinatorStore(
+            self.path, "resources", ["resolution", "effects"], 5, RULE_DEFAULTS,
+            {"This Is 炫茂路": 336181}, {},
+        )
+        first = self.media_file(336181, "1" * 24)
+        second = self.media_file(336292, "2" * 24)
+        claim = self.send("reserve", files=[first])["approved"][0]["claim"]
+        duplicate = self.send("reserve", 22, "b" * 32, files=[second])
+        self.assertEqual(duplicate["approved"], [])
+        self.assertEqual(duplicate["rejected"][0]["claim"], claim)
+
     def test_history_is_idempotent_and_blocks_peer_with_original_link(self):
         first, rows = self.import_rows()
         self.assertTrue(first["ok"])

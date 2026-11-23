@@ -372,7 +372,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label("协调 Bot 用户名", exact=True).count() == 0
             assert await dialog.get_by_text("全局去重字段", exact=True).count() == 0
             assert await dialog.get_by_text("资源去重规则", exact=True).count() == 0
-            assert await dialog.get_by_label("剧名别名绑定（可选）", exact=True).count() == 0
+            assert await dialog.get_by_label("剧集身份绑定", exact=True).count() == 0
             assert await dialog.get_by_role("tab", name="长期账本", exact=True).count() == 0
             assert await dialog.get_by_role("tab", name="共享已完成", exact=True).count() == 0
             await dialog.get_by_role("tab", name="下载待核验", exact=True).click()
@@ -443,11 +443,12 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_label("本机名称", exact=True).fill("NAS A 修改后")
             await dialog.get_by_label('全局保种体积（GB）', exact=True).fill('500')
             await dialog.get_by_label('种子黑名单', exact=True).check()
-            await dialog.get_by_label('剧名别名绑定（可选）', exact=True).fill('玫瑰 = 123')
+            series_bindings = dialog.get_by_label('剧集身份绑定', exact=True)
+            assert await series_bindings.is_disabled()
             if width == 1440:
                 await page.wait_for_timeout(31000)
                 assert await dialog.get_by_label('全局保种体积（GB）', exact=True).input_value() == '500'
-                assert await dialog.get_by_label('剧名别名绑定（可选）', exact=True).input_value() == '玫瑰 = 123'
+                assert await series_bindings.is_disabled()
                 assert await dialog.get_by_label("本机名称", exact=True).input_value() == "NAS A 修改后"
             await dialog.get_by_role("button", name="保存设置", exact=True).click()
             await page.wait_for_function("""window.resourceflowRequests.some(item =>
@@ -460,7 +461,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label("本机名称", exact=True).input_value() == "NAS A 修改后"
             assert await dialog.get_by_label('全局保种体积（GB）', exact=True).input_value() == '500'
             assert await dialog.get_by_label('种子黑名单', exact=True).is_checked()
-            assert await dialog.get_by_label('剧名别名绑定（可选）', exact=True).input_value() == '玫瑰 = 123'
+            assert await dialog.get_by_label('剧集身份绑定', exact=True).is_disabled()
             client_saves = await page.evaluate("""window.resourceflowRequests.filter(item =>
                 item.path.endsWith('/channel-dedup/settings'))""")
             assert client_saves and all("attributes" not in row["body"] for row in client_saves)
@@ -475,6 +476,12 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_label("在本机运行协调端", exact=True).check()
             await dialog.get_by_label("提供私网 HTTPS 审批入口", exact=True).check()
             await dialog.get_by_text("共享规格去重字段", exact=True).wait_for()
+            await page.wait_for_function("""() => {
+                const input = [...document.querySelectorAll('textarea')]
+                    .find(item => item.getAttribute('aria-label') === '剧集身份绑定')
+                return input && !input.disabled
+            }""")
+            await dialog.get_by_label("剧集身份绑定", exact=True).fill("玫瑰 = 123\nTMDB 336181 = 336292")
             assert await dialog.get_by_label("分辨率", exact=True).is_checked()
             for label in ("特效", "编码", "来源", "帧率", "大小"):
                 assert not await dialog.get_by_label(label, exact=True).is_checked()
@@ -503,7 +510,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.wait_for_function("""window.resourceflowRequests.some(item =>
                 item.path.endsWith('/channel-dedup/settings') && item.body.attributes?.length === 1
                 && item.body.attributes[0] === 'resolution' && item.body.enabled === false
-                && item.body.channels === '' && item.body.size_tolerance_pct === 3)""")
+                && item.body.channels === '' && item.body.size_tolerance_pct === 3
+                && item.body.identity_aliases.includes('TMDB 336181 = 336292'))""")
             await page.wait_for_function("document.querySelector('input[type=password]').value === ''")
             await page.wait_for_function("!document.querySelector('button.v-btn--loading')")
             assert await users.input_value() == mixed_users
@@ -824,7 +832,7 @@ async def verify_selection_settings(base_url, output, executable_path, host_css=
             await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
             assert await dialog.locator(".global-settings__section > h3").all_text_contents() == [
                 "基础", "运行限额与删种", "缺失播出日期兜底", "选种与去重",
-                "共享下载审批", "别名绑定",
+                "共享下载审批", "规范媒体身份绑定",
             ]
             assert await dialog.get_by_text(re.compile(r"Telegram|协调 Bot")).count() == 0
             assert await dialog.get_by_label("协调端 Tailscale HTTPS 域名").input_value() == "approval.example.ts.net"

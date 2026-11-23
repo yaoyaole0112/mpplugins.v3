@@ -136,7 +136,10 @@ def parse_size(value: Any) -> Optional[int]:
 
 
 def _effect_families(value: str) -> Optional[str]:
-    return "+".join(sorted(label for label, pattern in EFFECT_PATTERNS.items() if pattern.search(value))) or None
+    families = {label for label, pattern in EFFECT_PATTERNS.items() if pattern.search(value)}
+    if {"DV", "HDR"}.issubset(families):
+        families.remove("HDR")
+    return "+".join(sorted(families)) or None
 
 
 def normalize_effects(value: Any) -> Optional[str]:

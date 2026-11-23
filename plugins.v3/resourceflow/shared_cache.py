@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from .channel_dedup import normalize_specs, specs_match
+from .channel_dedup import filename_title_aliases, normalize_specs, normalize_title, specs_match
 from .record_search import (
     localized_record_titles, matches_owner, matches_record, record_display_title, record_page,
 )
@@ -34,9 +34,80 @@ def display_record(row):
     return item
 
 
-def same_resource(candidate, record, attributes, tolerance, *, overlap=True):
-    identity = ("media_type", "tmdb_id", "season")
-    if any(candidate.get(field) != record.get(field) for field in identity):
+def _identity_alias_index(rules, media_type):
+    aliases = (rules or {}).get("movie_identity_aliases" if media_type == "movie" else "identity_aliases") or {}
+    id_aliases, title_aliases = {}, {}
+    for name, target in aliases.items():
+        match = re.fullmatch(r"(?i)TMDB\s*[:#]?\s*([1-9]\d*)", str(name).strip())
+        if match:
+            id_aliases[int(match.group(1))] = int(target)
+        else:
+            title_aliases.setdefault(normalize_title(name), set()).add(int(target))
+    return id_aliases, title_aliases
+
+
+def _canonical_tmdb_id(record, rules, alias_index=None):
+    media_type = record.get("media_type")
+    try:
+        tmdb_id = int(record.get("tmdb_id"))
+    except (TypeError, ValueError):
+        return record.get("tmdb_id")
+
+    id_aliases, title_aliases = alias_index or _identity_alias_index(rules, media_type)
+    names = {normalize_title(record.get("media_title", ""))}
+    names.update(normalize_title(name) for name in filename_title_aliases(record.get("title", "")))
+    names.discard("")
+    matched_titles = {
+        target
+        for name in names
+        for target in title_aliases.get(name, ())
+    }
+    if len(matched_titles) == 1:
+        tmdb_id = matched_titles.pop()
+    visited = set()
+    while tmdb_id in id_aliases and tmdb_id not in visited:
+        visited.add(tmdb_id)
+        tmdb_id = id_aliases[tmdb_id]
+    return tmdb_id
+
+
+def _resolve_tmdb_id(tmdb_id, id_aliases):
+    visited = set()
+    while tmdb_id in id_aliases and tmdb_id not in visited:
+        visited.add(tmdb_id)
+        tmdb_id = id_aliases[tmdb_id]
+    return tmdb_id
+
+
+def _identity_query_ids(candidate, rules):
+    alias_index = _identity_alias_index(rules, candidate.get("media_type"))
+    canonical_id = _canonical_tmdb_id(candidate, rules, alias_index)
+    if type(canonical_id) is not int:
+        return None
+    id_aliases, title_aliases = alias_index
+    try:
+        original_id = int(candidate.get("tmdb_id"))
+    except (TypeError, ValueError):
+        return None
+    possible_ids = {original_id, *id_aliases, *id_aliases.values()}
+    matching_ids = sorted(
+        raw_id for raw_id in possible_ids
+        if _resolve_tmdb_id(raw_id, id_aliases) == canonical_id
+    )
+    if any(_resolve_tmdb_id(target, id_aliases) == canonical_id
+           for targets in title_aliases.values() for target in targets):
+        return None
+    return matching_ids or [original_id]
+
+
+def same_resource(candidate, record, attributes, tolerance, *, overlap=True, identity_rules=None,
+                  identity_index=None, candidate_identity=None):
+    if any(candidate.get(field) != record.get(field) for field in ("media_type", "season")):
+        return False
+    identity_index = identity_index or _identity_alias_index(identity_rules, candidate.get("media_type"))
+    candidate_identity = (candidate_identity if candidate_identity is not None else
+                          _canonical_tmdb_id(candidate, identity_rules, identity_index))
+    if candidate_identity != _canonical_tmdb_id(record, identity_rules, identity_index):
         return False
     if candidate["media_type"] != "movie":
         episodes = set(candidate.get("episodes") or [])
@@ -46,9 +117,13 @@ def same_resource(candidate, record, attributes, tolerance, *, overlap=True):
     return specs_match(candidate, record, attributes, tolerance)
 
 
-def is_2160p_downgrade(candidate, record):
+def is_2160p_downgrade(candidate, record, identity_rules=None, identity_index=None,
+                        candidate_identity=None):
+    identity_index = identity_index or _identity_alias_index(identity_rules, candidate.get("media_type"))
+    candidate_identity = (candidate_identity if candidate_identity is not None else
+                          _canonical_tmdb_id(candidate, identity_rules, identity_index))
     if (candidate.get("media_type") != "tv" or record.get("media_type") != "tv"
-            or candidate.get("tmdb_id") != record.get("tmdb_id")
+            or candidate_identity != _canonical_tmdb_id(record, identity_rules, identity_index)
             or candidate.get("season") != record.get("season")):
         return False
     if not set(candidate.get("episodes") or []).intersection(record.get("episodes") or []):
@@ -62,18 +137,23 @@ def is_2160p_downgrade(candidate, record):
 def find_resource_conflict(candidate, records, rules):
     """Prefer confirmed evidence over a temporary high-resolution hold."""
     prefer_2160p = rules.get("rules", {}).get("prefer_2160p", True)
+    identity_index = _identity_alias_index(rules, candidate.get("media_type"))
+    candidate_identity = _canonical_tmdb_id(candidate, rules, identity_index)
     temporary = ordinary = None
     for row in records:
         state = row["state"]
         if state not in {"reserved", "queued", "completed"}:
             continue
-        if prefer_2160p and is_2160p_downgrade(candidate, row):
+        if (prefer_2160p and is_2160p_downgrade(
+                candidate, row, rules, identity_index, candidate_identity)):
             if state == "completed":
                 return {**row, "_match_reason": HIGH_RESOLUTION_DONE}
             if temporary is None:
                 temporary = {**row, "_match_reason": HIGH_RESOLUTION_WAIT}
             continue
-        if same_resource(candidate, row, rules["attributes"], rules["size_tolerance_pct"]):
+        if same_resource(candidate, row, rules["attributes"], rules["size_tolerance_pct"],
+                         identity_rules=rules, identity_index=identity_index,
+                         candidate_identity=candidate_identity):
             if state == "completed":
                 return row
             if ordinary is None:
@@ -90,6 +170,7 @@ class SharedRecordCache:
                 CREATE TABLE IF NOT EXISTS mirror (
                     id TEXT PRIMARY KEY, media_type TEXT NOT NULL, tmdb_id INTEGER NOT NULL,
                     season INTEGER, state TEXT NOT NULL, updated REAL NOT NULL, data TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS mirror_scope ON mirror(media_type, season, state);
                 CREATE INDEX IF NOT EXISTS mirror_identity ON mirror(media_type, tmdb_id, season, state);
                 CREATE TABLE IF NOT EXISTS progress (
                     singleton INTEGER PRIMARY KEY CHECK (singleton=1), scope TEXT NOT NULL,
@@ -198,18 +279,29 @@ class SharedRecordCache:
 def filter_records(db, candidates, rules, *, mirror=False, group=None, completed_only=False):
     available, blocked, identities = [], [], {}
     for candidate in candidates:
-        identity = tuple(candidate[field] for field in ("media_type", "tmdb_id", "season"))
-        if identity not in identities:
+        scope = (candidate["media_type"], candidate.get("season"))
+        query_ids = _identity_query_ids(candidate, rules)
+        query_scope = (*scope, tuple(query_ids) if query_ids is not None else None)
+        if query_scope not in identities:
             state = "state='completed'" if completed_only else "state!='released'"
-            match = f"media_type=? AND tmdb_id=? AND season IS ? AND {state}"
+            identity_filter = ""
+            if query_ids is not None:
+                identity_filter = f" AND tmdb_id IN ({','.join('?' for _ in query_ids)})"
             if mirror:
-                rows = db.execute(f"SELECT data FROM mirror WHERE {match}", identity)
-                identities[identity] = [json.loads(row["data"]) for row in rows]
+                rows = db.execute(
+                    f"SELECT data FROM mirror WHERE media_type=?{identity_filter} "
+                    f"AND season IS ? AND {state}",
+                    (scope[0], *(query_ids or ()), scope[1]),
+                )
+                identities[query_scope] = [json.loads(row["data"]) for row in rows]
             else:
-                rows = db.execute(f"SELECT {','.join(RECORD_COLUMNS)} FROM claims WHERE group_id=? AND {match}",
-                                  (group, *identity))
-                identities[identity] = [display_record(row) for row in rows]
-        hit = find_resource_conflict(candidate, identities[identity], rules)
+                rows = db.execute(
+                    f"SELECT {','.join(RECORD_COLUMNS)} FROM claims "
+                    f"WHERE group_id=? AND media_type=?{identity_filter} AND season IS ? AND {state}",
+                    (group, scope[0], *(query_ids or ()), scope[1]),
+                )
+                identities[query_scope] = [display_record(row) for row in rows]
+        hit = find_resource_conflict(candidate, identities[query_scope], rules)
         if hit:
             blocked.append((candidate, hit))
         else:

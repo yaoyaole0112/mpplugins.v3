@@ -81,7 +81,12 @@ ed2k://|file|PSYREN -决战游戏-(2026)(tmdbid=297903).S01E05.WEB-DL.1080p.SDR.
                     self.assertFalse(specs_match({"specs": candidate}, {"specs": {"effects": other}}, ["effects"]))
 
     def test_explicit_hybrid_and_unknown_effects_are_preserved(self):
-        self.assertEqual(parse_specs("Show.S01E19.DV.P8.HDR10+.mkv")["effects"], "DV+HDR")
+        dv_hdr = parse_specs("Show.S01E19.DV.P8.HDR10+.mkv")
+        dv_only = parse_specs("Show.S01E19.DV.P8.mkv")
+        hdr_only = parse_specs("Show.S01E19.HDR10+.mkv")
+        self.assertEqual(dv_hdr["effects"], "DV")
+        self.assertTrue(specs_match({"specs": dv_hdr}, {"specs": dv_only}, ["effects"]))
+        self.assertFalse(specs_match({"specs": dv_hdr}, {"specs": hdr_only}, ["effects"]))
         for quality in ("DVD", "DVDRip", "DVB-S2", "XHDR"):
             with self.subTest(quality=quality):
                 self.assertIsNone(parse_specs(f"Show.{quality}.mkv")["effects"])
