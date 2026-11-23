@@ -286,7 +286,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，通过 Tailscale 私网 HTTPS 进行共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.56"
+    plugin_version = "1.0.57"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -3369,6 +3369,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         self, torrent: TorrentInfo, candidate_overrides: Optional[dict] = None,
         prevalidated_recent_paths: Optional[List[str]] = None,
         manual_path: Optional[str] = None,
+        manual_recent_screened: bool = False,
         torrent_content_override: Optional[Union[str, bytes]] = None,
         transfer_patterns: Optional[tuple[re.Pattern, ...]] = None,
     ) -> Optional[str]:
@@ -3462,8 +3463,11 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     logger.info(f"刷流任务 [{task.name}] 排除种子 {torrent.title}："
                                 f"包内路径 {path} 命中 MoviePilot 文件整理屏蔽词 {matched.pattern!r}")
                     return None
-        if manual_path and not any(item["path"].replace("\\", "/") == manual_path for item in files):
-            raise ValueError("文件不属于暂存种子")
+        if manual_path and not any(
+            item["path"].replace("\\", "/") == manual_path and self._video_file(item["path"])
+            for item in files
+        ):
+            raise ValueError("核验文件不是暂存种子中的视频")
         pending_source = {
             "content": torrent_content, "task_id": task.id, "hash": expected_hash,
             "title": torrent.title, "torrent": self._pending_torrent_snapshot(torrent),
@@ -3474,7 +3478,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             logger.info(f"资源去重待核验 {torrent.title}：无法读取元数据，暂不添加下载")
             return None
         recent_selection = None
-        if task.recent_episodes_only:
+        if task.recent_episodes_only and not (manual_path and manual_recent_screened):
             recent_selection = self._recent_episode_file_selection(
                 torrent_content,
                 torrent.title,
@@ -3482,6 +3486,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 candidate_overrides,
                 task,
                 pending_source,
+                only_path=manual_path,
             )
             if recent_selection and prevalidated_recent_paths is not None:
                 recent_selection = {
@@ -3489,15 +3494,15 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     "accepted": set(recent_selection.get("accepted") or []) & set(prevalidated_recent_paths),
                 }
             if not recent_selection:
+                if manual_path:
+                    raise ValueError("该文件的最近播出日期尚未通过核验，请查看插件日志")
                 return None
+            if self._shared_participates(task):
+                recent_selection = {**recent_selection, "recent_screened": True}
         if manual_path:
-            if recent_selection:
-                if manual_path not in recent_selection.get("accepted", set()):
-                    logger.info(f"人工核验暂缓 {torrent.title}：文件已不符合最近播出规则")
-                    return None
-                recent_selection = {**recent_selection, "accepted": {manual_path}}
-            else:
-                recent_selection = {"accepted": {manual_path}}
+            if recent_selection and manual_path not in recent_selection.get("accepted", set()):
+                raise ValueError("该文件的最近播出日期尚未通过核验，请查看插件日志")
+            recent_selection = {**(recent_selection or {}), "accepted": {manual_path}}
         if self._resource_mode(task) != "off" and not self._shared_participates(task):
             dedup_selection = self._channel_dedup_file_selection(
                 torrent_content,
@@ -3746,7 +3751,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         return schemas.Response(success=True, data=data)
 
     def approve_pending_resource(self, payload: ResourcePendingApprovalPayload) -> schemas.Response:
-        """人工补齐候选身份/规格后，异步重新执行筛选和原共享占位流程。"""
+        """人工补齐候选身份/规格后，复用本地种子并继续共享占位。"""
         if not payload.confirmed:
             return schemas.Response(success=False, message="请先确认已核对媒体身份与规格")
         with self._inflight_lock:
@@ -3841,12 +3846,15 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             source = (getattr(self, "_identity_pending_sources", {}) or {}).get(source_id)
             if not row or not source or source.get("expires_at", 0) <= time.time():
                 raise ValueError("种子来源已过期")
+            if (row.get("source_id") != source_id or row.get("task_id") != source.get("task_id")
+                    or str(row.get("path") or "").replace("\\", "/") != file_path):
+                raise ValueError("待核验记录与暂存种子不匹配")
             source_path = self._pending_source_file(source_id)
             if not source_path or not source_path.is_file() or source_path.is_symlink():
                 raise ValueError("种子暂存已过期或不可用")
             if source.get("consumed_hash"):
                 raise ValueError("同一种子已提交下载；同包其他文件不能重复添加")
-            task_id = str(row.get("task_id") or source.get("task_id") or "")
+            task_id = row["task_id"]
             task = self._task_configs.get(task_id)
             if not task or not self.get_state() or not task.enabled or not task.spec_dedup_enabled:
                 raise ValueError("原刷流任务已停用或共享下载审批已关闭")
@@ -3868,19 +3876,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             with self._task_scope(task_id):
                 if not self._shared_download_gate(task):
                     raise ValueError("共享审批未就绪，未下载")
-                if not self._is_current_time_in_range(task):
-                    raise ValueError("当前不在任务开启时间段")
                 ratio_passed, ratio_reason, _ = self._evaluate_site_ratio_control(task, site=site)
                 if not ratio_passed:
                     raise ValueError(ratio_reason or "站点分享率规则未通过")
                 torrent_tasks = self._get_task_data(task_id, "torrents") or {}
-                passed, reason = self.__evaluate_conditions_for_brush(torrent, torrent_tasks)
-                if not passed:
-                    raise ValueError(reason or "候选已不符合任务规则")
-                if task.except_subscribe and self.__filter_torrents_contains_subscribe(
-                    [torrent], self.__get_subscribe_titles(),
-                ) == []:
-                    raise ValueError("候选已命中订阅排除规则")
                 seeding_size = self.__calculate_seeding_torrents_size(torrent_tasks)
                 global_size = self._calculate_global_seeding_size(task_id, torrent_tasks)
                 passed, reason = self.__evaluate_size_condition_for_brush(
@@ -3891,29 +3890,24 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 passed, reason = self.__evaluate_pre_conditions_for_brush()
                 if not passed:
                     raise ValueError(reason or "当前并发或带宽限制不允许下载")
-                other_sites = self._blacklist_other_site_names(task)
-                if other_sites is None:
-                    raise ValueError("种子黑名单站点不可用，按排除处理")
-                if other_sites:
-                    blocked, reason = self._is_blacklist_duplicate(
-                        torrent.title, other_sites, {},
-                    )
-                    if blocked:
-                        raise ValueError(reason)
                 transfer_patterns = self._mp_transfer_exclude_patterns()
                 if transfer_patterns is None:
                     raise ValueError("MoviePilot 文件整理屏蔽词不可用")
                 if matched := self._match_mp_transfer_exclude(torrent.title, transfer_patterns):
                     raise ValueError(f"标题命中 MoviePilot 文件整理屏蔽词 {matched.pattern!r}")
-                category_ok, category_reason = self._download_category_filter(task, torrent, {})
-                if not category_ok:
-                    raise ValueError(category_reason)
+                # A date check belongs to the verified identity of this exact file.
+                recent_screened = (
+                    row.get("recent_screened") is True
+                    and all(row.get(field) == override.get(field) for field in ("media_type", "tmdb_id", "season"))
+                    and set(row.get("episodes") or []) == set(override.get("episodes") or [])
+                )
                 result = self.__download(
                     torrent, candidate_overrides={file_path: override}, manual_path=file_path,
-                    torrent_content_override=content, transfer_patterns=transfer_patterns,
+                    manual_recent_screened=recent_screened, torrent_content_override=content,
+                    transfer_patterns=transfer_patterns,
                 )
                 if not result:
-                    raise ValueError("原筛选或协调端审批未通过，或下载器未确认添加；请查看插件日志")
+                    raise ValueError("未获共享审批或下载器未确认添加，请查看插件日志")
                 torrent_task = self._torrent_to_task_record(torrent, site, task)
                 torrent_tasks[result] = torrent_task
                 self._save_task_data(task.id, "torrents", torrent_tasks)
@@ -4022,7 +4016,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         return False
 
     def _pending_identity(self, candidate: dict, title: str, task, reason: str,
-                          source: Optional[dict] = None) -> None:
+                          source: Optional[dict] = None, *, recent_screened: bool = False) -> None:
         if not hasattr(self, "_identity_pending") or not self._resource_identity_deferred(task):
             return
         row = {**candidate, "task_id": getattr(task, "id", None),
@@ -4041,6 +4035,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             if key in pending and (
                 pending[key].get("manual_state") in {"queued", "processing"}
                 or (pending[key].get("reason") == reason
+                    and bool(pending[key].get("recent_screened")) == recent_screened
                     and time.time() - pending[key].get("last_seen", 0) < 300)
             ):
                 return
@@ -4049,6 +4044,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 source_id = self._persist_pending_source(source)
                 if source_id:
                     row["source_id"] = source_id
+                    if recent_screened:
+                        row["recent_screened"] = True
             pending[key] = {**row, "last_seen": time.time()}
             pending = dict(list(pending.items())[-5000:])
             self.save_data("resource_identity_pending", pending)
@@ -4056,7 +4053,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
 
     @staticmethod
     def _pending_torrent_snapshot(torrent: TorrentInfo) -> dict:
-        """仅保留重新校验选种规则需要的公开元数据，不保存链接或站点凭据。"""
+        """保留用于恢复待核验下载的公开元数据，不保存链接或站点凭据。"""
         fields = (
             "title", "size", "pubdate", "description", "seeders", "downloadvolumefactor",
             "uploadvolumefactor", "hit_and_run", "volume_factor", "freedate",
@@ -5349,6 +5346,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         candidate_overrides: Optional[dict] = None,
         task: Optional[BrushTaskConfig] = None,
         pending_source: Optional[dict] = None,
+        *,
+        only_path: Optional[str] = None,
     ) -> Optional[dict]:
         """预检种子内视频，返回符合近期播出规则的文件路径及其名称。"""
         if not isinstance(torrent_content, bytes):
@@ -5360,7 +5359,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         else:
             _, paths = TorrentHelper().get_fileinfo_from_torrent_content(torrent_content)
             sizes = {}
-        video_paths = [path for path in paths if self._video_file(path)]
+        video_paths = [path for path in paths if self._video_file(path)
+                       and (only_path is None or path.replace("\\", "/") == only_path)]
         if not video_paths:
             logger.info(f"最近播出剧集规则排除 {title}：种子内没有可识别的视频文件")
             return None

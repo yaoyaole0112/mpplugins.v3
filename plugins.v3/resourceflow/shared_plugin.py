@@ -978,7 +978,10 @@ class SharedResourceMixin:
                     reason = f"缺少勾选规格：{', '.join(missing_specs)}"
             if reason:
                 rejected.append(item["path"])
-                self._pending_identity(candidate, title, task, reason, pending_source)
+                self._pending_identity(
+                    candidate, title, task, reason, pending_source,
+                    recent_screened=bool(paths is not None and (selection or {}).get("recent_screened")),
+                )
                 logger.info(f"资源刷流共享审批候选暂缓 {item['path']}：{reason}")
                 continue
             candidate["id"] = hashlib.sha256(item["path"].encode()).hexdigest()[:24]
