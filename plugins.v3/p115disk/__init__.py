@@ -28,7 +28,7 @@ class P115Disk(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "3.0.5"
+    plugin_version = "3.0.6"
     # 插件作者
     plugin_author = "DDSRem"
     # 作者主页
@@ -527,12 +527,18 @@ class P115Disk(_PluginBase):
         :return List: 文件项列表，如果存储不匹配则返回 None
         """
 
-        if fileitem.storage != self._disk_name or not self._p115_api:
+        if fileitem.storage != self._disk_name:
             return None
+        if not self._enabled or not self._p115_api:
+            raise StorageQueryError("【115网盘Plus】存储未启用或未登录，请检查插件配置")
 
-        if recursion:
-            return self._p115_api.iter_files(fileitem)
-        return self._p115_api.list(fileitem)
+        items = (
+            self._p115_api.iter_files(fileitem) if recursion
+            else self._p115_api.list(fileitem)
+        )
+        if items is None:
+            raise StorageQueryError("【115网盘Plus】目录读取失败，请稍后重试")
+        return items
 
     def any_files(self, fileitem: FileItem, extensions: list = None) -> Optional[bool]:
         """

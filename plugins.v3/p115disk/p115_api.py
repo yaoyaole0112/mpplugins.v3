@@ -197,7 +197,7 @@ class P115Api:
             return None
         return items
 
-    def list(self, fileitem: FileItem) -> Optional[List[FileItem]]:
+    def list(self, fileitem: FileItem) -> List[FileItem]:
         """
         浏览文件或目录
 
@@ -205,30 +205,41 @@ class P115Api:
 
         :return List: 文件项列表，如果是文件则返回包含该文件的列表，如果是目录则返回目录下的所有文件和子目录
         """
-        self._list_rate_limiter.acquire()
-        if fileitem.type == "file":
-            item = self.detail(fileitem)
-            if item:
-                return [item]
-            return []
-        if fileitem.path == "/":
-            file_id = "0"
-        else:
-            file_id = fileitem.fileid
-            if not file_id:
-                file_id = self.get_pid_by_path(Path(fileitem.path))
-            if file_id == -1:
-                return None
-
-        items = []
+        if not fileitem.path:
+            raise StorageQueryError("【115网盘Plus】缺少目录路径")
+        directory = Path(fileitem.path)
+        file_id = None
         try:
+            if fileitem.type == "file":
+                try:
+                    return [self._query_item(directory)]
+                except FileNotFoundError:
+                    return []
+            if directory == Path("/"):
+                file_id = 0
+            elif fileitem.fileid and str(fileitem.fileid) != "0":
+                file_id = int(fileitem.fileid)
+            else:
+                # get_pid_by_path() can create a missing directory.
+                self._get_item_rate_limiter.acquire()
+                file_id = int(get_id_to_path(
+                    self.client, directory.as_posix(), ensure_file=False, refresh=True,
+                    **get_ios_ua_app(app=False),
+                ))
+                if file_id <= 0:
+                    raise StorageQueryError("【115网盘Plus】找不到要浏览的目录")
+            self._list_rate_limiter.acquire()
+            items = []
             for data in fs_files_iter(
-                self.client, file_id, cooldown=1.5, **get_ios_ua_app(app=False)
+                self.client, file_id, cooldown=1.5, raise_for_changed_count=True,
+                **get_ios_ua_app(app=False),
             ):
-                logger.debug(f"【P115Disk】浏览目录 {data}")
-                for item in data.get("data", []):
+                entries = data.get("data")
+                if not isinstance(entries, list):
+                    raise StorageQueryError("【115网盘Plus】目录列表响应无效")
+                for item in entries:
                     item = normalize_attr(item)
-                    path = f"{fileitem.path}{item['name']}"
+                    path = (directory / item["name"]).as_posix()
                     file_path = path + ("/" if item["is_dir"] else "")
                     self._id_cache.add_cache(id=item["id"], directory=path)
                     self._id_item_cache.add_cache(
@@ -259,53 +270,16 @@ class P115Api:
                             pickcode=item["pickcode"],
                         )
                     )
-        except Exception as e:
-            logger.warn(f"【P115Disk】获取信息失败: {str(e)}")
-            if isinstance(e, P115NotADirectoryError) and file_id and file_id != "0":
-                try:
-                    self._id_cache.remove(id=int(file_id))
-                    self._id_item_cache.remove(id=int(file_id))
-                except Exception:
-                    pass
-            try:
-                storage_chain = StorageChain()
-                fallback_dict = fileitem.model_dump(exclude={"storage"})
-                if isinstance(e, P115NotADirectoryError):
-                    fallback_dict["fileid"] = None
-                fileitem = FileItem(
-                    storage="u115",
-                    **fallback_dict,
-                )
-                fallback_items = storage_chain.list_files(
-                    fileitem=fileitem, recursion=False
-                )
-                if fallback_items:
-                    result_items = []
-                    for item in fallback_items:
-                        if item.fileid:
-                            self._id_cache.add_cache(
-                                id=int(item.fileid), directory=item.path.rstrip("/")
-                            )
-                            self._id_item_cache.add_cache(
-                                id=int(item.fileid),
-                                item={
-                                    "path": item.path,
-                                    "id": int(item.fileid),
-                                    "size": item.size,
-                                    "modify_time": item.modify_time,
-                                    "pickcode": item.pickcode,
-                                    "is_dir": bool(item.type == "dir"),
-                                },
-                            )
-                        result_item = FileItem(
-                            storage=self._disk_name,
-                            **item.model_dump(exclude={"storage"}),
-                        )
-                        result_items.append(result_item)
-                    return result_items
-            except Exception as e:
-                logger.error(f"【P115Disk】获取信息失败（原版）: {str(e)}")
-            return None
+        except P115NotADirectoryError as error:
+            if file_id:
+                self._id_cache.remove(id=file_id)
+                self._id_item_cache.remove(id=file_id)
+            raise StorageQueryError("【115网盘Plus】目录已变更，请返回上一级刷新") from error
+        except StorageQueryError:
+            raise
+        except Exception as error:
+            logger.warning("【P115Disk】目录读取失败：%s", type(error).__name__)
+            raise StorageQueryError("【115网盘Plus】无法读取目录，请检查登录状态或稍后重试") from error
         return items
 
     def create_folder(self, fileitem: FileItem, name: str) -> Optional[FileItem]:
