@@ -103,9 +103,11 @@ class LocalUploadMixin:
             receipt = self._upload_receipts().get(str(path.resolve()))
         identity = receipt.get("identity") if receipt else None
         current_identity = local_identity(stat)
-        if (
-            not isinstance(identity, list) or len(identity) != len(current_identity)
-            or identity[:4] != current_identity[:4]
+        if not isinstance(identity, list) or len(identity) != len(current_identity):
+            return None
+        if identity != current_identity and not (
+            receipt.get("ctime_tolerant_identity") is True
+            and identity[:4] == current_identity[:4]
         ):
             return None
         item = receipt.get("item")
@@ -212,6 +214,8 @@ class LocalUploadMixin:
                 restored[key] = item
                 continue
             if key != str(path.resolve()) or local_identity(stat) != item["identity"] or not self._eligible(path):
+                continue
+            if self._local_upload_mode == "mp" and self._mp_upload_receipt(path, stat) is None:
                 continue
             record = records.get(key)
             if self._local_upload_recovery_complete(path, stat, record, recovery):
@@ -411,6 +415,7 @@ class LocalUploadMixin:
             receipt = {
                 "item": target,
                 "identity": identity,
+                "ctime_tolerant_identity": True,
                 "upload_kind": upload_kind if upload_kind in {"instant", "ordinary"} else "unknown",
                 "received_at": time.time(),
             }

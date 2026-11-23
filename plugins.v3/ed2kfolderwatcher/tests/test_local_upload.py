@@ -813,6 +813,41 @@ class LocalUploadTests(unittest.TestCase):
 
         self.assertIsNotNone(self.plugin._mp_upload_receipt(path, path.stat()))
 
+    def test_legacy_mp_receipt_does_not_match_when_ctime_changed(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        receipt_path = self.root / "data" / "local_upload_receipts.json"
+        receipts = json.loads(receipt_path.read_text())
+        receipts[str(path)].pop("ctime_tolerant_identity")
+        receipts[str(path)]["identity"][4] += 1
+        receipt_path.write_text(json.dumps(receipts))
+
+        self.assertIsNone(self.plugin._mp_upload_receipt(path, path.stat()))
+
+    def test_mp_queue_restore_discards_legacy_ctime_mismatch(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        receipt_path = self.root / "data" / "local_upload_receipts.json"
+        receipts = json.loads(receipt_path.read_text())
+        receipts[str(path)].pop("ctime_tolerant_identity")
+        receipts[str(path)]["identity"][4] += 1
+        receipt_path.write_text(json.dumps(receipts))
+        self.plugin._local_upload_queue = {
+            str(path): {
+                "path": str(path), "identity": self.upload_module.local_identity(path.stat()),
+                "queued_at": time.time(), "retry_at": 0, "attempts": 0,
+            }
+        }
+        self.plugin._save_local_upload_queue()
+
+        self.plugin._load_local_upload_queue()
+
+        self.assertEqual(self.plugin._local_upload_queue, {})
+
     def test_mp_receipt_rejects_changes_to_stable_file_identity(self):
         self.configure(mode="mp")
         path = self.sample()
