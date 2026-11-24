@@ -67,7 +67,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流，使用 Tailscale 私网 HTTPS 共享下载审批，跨实例同规格下载前占位。",
     "labels": "刷流,资源去重,Tailscale",
-    "version": "1.0.58",
+    "version": "1.0.59",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -75,6 +75,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.59": "共享下载超时支持全局自定义分钟数，默认30分钟；超时释放提示改为浅色信息样式。",
       "v1.0.58": "共享下载未完成超时由 2 小时缩短为 30 分钟；DV 与 HDR 同时标注时按 DV 归一，与纯 DV 同规格并区别于纯 HDR。",
       "v1.0.57": "人工核验下载复用本地暂存种子，跳过已通过的选种规则；仅补查尚未通过的播出日期，仍须共享占位获批才加入下载器。",
       "v1.0.56": "修复私网共享审批间歇超时导致多站点一起退避：审批入口支持有限并发，账本繁忙只暂缓当前请求；细分本机超时与远程 DNS、TLS 错误，保留原子查重和占位。",

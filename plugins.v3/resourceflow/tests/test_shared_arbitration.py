@@ -839,6 +839,20 @@ class AdmissionTests(unittest.TestCase):
         self.downloader.delete_torrents.assert_not_called()
         self.assertEqual(self.entry()["phase"], "queued")
 
+    def test_timeout_uses_configured_minutes(self):
+        self.plugin._shared_download_timeout_minutes = 1
+        self.add()
+        self.entry()["download_started_at"] = time.time() - 61
+        owned = [{"tags": self.plugin._shared_tag(self.entry())}]
+        snapshot = [{"index": 0, "name": "Show.S01E01.mkv", "size": 10,
+                     "progress": 0.4, "priority": 1}]
+        self.downloader.get_torrents.side_effect = [(owned, None), ([], None)]
+        self.downloader.stop_torrents.return_value = True
+        self.downloader.delete_torrents.return_value = True
+        self.reconcile(torrents=owned, files=snapshot)
+        self.assertEqual(self.entry()["phase"], "released")
+        self.assertIn("超过 1 分钟", self.entry()["error"])
+
     def test_timeout_keeps_claims_when_task_removal_is_not_confirmed(self):
         self.add()
         self.entry()["download_started_at"] = time.time() - 1801

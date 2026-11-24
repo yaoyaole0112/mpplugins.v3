@@ -300,7 +300,10 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
           <span v-if="row.timeout_at">超时处理：{{ timestamp(row.timeout_at) }}</span>
           <span>站点：{{ row.site_name || '-' }}</span>
         </div>
-        <p v-if="row.error && row.phase !== 'rejected'" class="shared-settings__error text-body-2">{{ row.error }}</p>
+        <p v-if="row.error && row.phase !== 'rejected'"
+          :class="row.timeout_reason ? 'shared-settings__timeout-note text-body-2' : 'shared-settings__error text-body-2'">
+          {{ row.error }}
+        </p>
         <p v-if="row.integrity_error" class="shared-settings__error text-body-2">{{ row.integrity_error }}</p>
         <p v-for="(reason, index) in row.rejectionSummaries" :key="index" class="shared-settings__reason text-body-2">
           {{ reason }}
@@ -413,6 +416,14 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 .shared-settings__claim-owner { color: rgba(var(--v-theme-on-surface), 0.78); }
 .shared-settings__meta, .shared-settings__id { color: rgba(var(--v-theme-on-surface), 0.72); }
 .shared-settings__error { margin: 0; color: rgb(var(--v-theme-error)); }
+.shared-settings__timeout-note {
+  margin: 0;
+  color: rgba(var(--v-theme-on-surface), 0.68);
+  background: rgba(var(--v-theme-on-surface), 0.045);
+  border-inline-start: 3px solid rgba(var(--v-theme-on-surface), 0.24);
+  border-radius: 4px;
+  padding: 6px 10px;
+}
 .shared-settings__reason { margin: 0; }
 .shared-settings__id { font-family: monospace; }
 .shared-settings__ids { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 18px; min-inline-size: 0; }

@@ -40,6 +40,14 @@ QB_FILE_WAIT_MESSAGE = "QB 文件清单暂不可用，选集核验后自动启�
 
 
 class SharedResourceMixin:
+    def _shared_download_timeout_seconds(self):
+        """返回共享下载未完成超时秒数，兼容未迁移的旧配置。"""
+        try:
+            minutes = int(getattr(self, "_shared_download_timeout_minutes", 30) or 30)
+        except (TypeError, ValueError):
+            minutes = 30
+        return max(1, min(minutes, 1440)) * 60
+
     _shared_legacy_namespace = ""
     _shared_cache = None
     _shared_cache_activity = 0
@@ -1612,10 +1620,12 @@ class SharedResourceMixin:
                 # Existing queued claims get a fresh, durable observation baseline after upgrade.
                 entry["download_started_at"] = time.time()
                 self._save_shared()
-            if entry.get("download_started_at") and time.time() - entry["download_started_at"] >= 30 * 60:
+            if (entry.get("download_started_at")
+                    and time.time() - entry["download_started_at"] >= self._shared_download_timeout_seconds()):
                 entry["timeout_cancel_pending"] = True
                 entry["timeout_at"] = time.time()
-                entry["timeout_reason"] = "下载超过 30 分钟，按获批文件判断后取消未完成部分"
+                timeout_minutes = self._shared_download_timeout_seconds() // 60
+                entry["timeout_reason"] = f"下载超过 {timeout_minutes} 分钟，按获批文件判断后取消未完成部分"
                 self._shared_phase(entry, "timeout_cancel_pending",
                                    error="超时取消进行中；确认下载器任务停止前不会释放占位")
                 self._cancel_timed_out_download(entry, downloader)
@@ -1629,10 +1639,11 @@ class SharedResourceMixin:
 
     def _cancel_timed_out_download(self, entry, downloader):
         """Stop and remove the owned torrent without data before releasing unfinished claims."""
+        timeout_minutes = self._shared_download_timeout_seconds() // 60
         if not downloader.stop_torrents(entry["hash"]):
-            raise SharedError("下载超过 30 分钟，但下载器未确认停止；继续保留占位")
+            raise SharedError(f"下载超过 {timeout_minutes} 分钟，但下载器未确认停止；继续保留占位")
         if not downloader.delete_torrents(ids=entry["hash"], delete_file=False):
-            raise SharedError("下载超过 30 分钟，但下载器未确认移除任务；继续保留占位")
+            raise SharedError(f"下载超过 {timeout_minutes} 分钟，但下载器未确认移除任务；继续保留占位")
         torrents, error = downloader.get_torrents(ids=[entry["hash"]])
         if error or torrents:
             raise SharedError("超时任务移除状态无法确认；继续保留占位")
@@ -1644,5 +1655,10 @@ class SharedResourceMixin:
         if remaining:
             self._shared_update(entry, [{"claim": claim, "state": "released"} for claim in remaining],
                                 absent=True)
-        self._shared_phase(entry, "released",
-                           error="超过 30 分钟仍有获批集未完成；下载任务已移除但数据保留，未完成集占位已释放")
+        self._shared_phase(
+            entry, "released",
+            error=(
+                f"超过 {self._shared_download_timeout_seconds() // 60} 分钟仍有获批集未完成；"
+                "下载任务已移除但数据保留，未完成集占位已释放"
+            ),
+        )

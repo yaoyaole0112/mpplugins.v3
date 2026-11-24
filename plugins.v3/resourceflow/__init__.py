@@ -172,6 +172,10 @@ RECENT_DATE_FALLBACK_FIELDS = (
     "recent_missing_date_ai_enabled",
 )
 
+SHARED_DOWNLOAD_TIMEOUT_FIELDS = (
+    "shared_download_timeout_minutes",
+)
+
 
 class BrushTaskConfig:
     """
@@ -286,7 +290,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，通过 Tailscale 私网 HTTPS 进行共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.58"
+    plugin_version = "1.0.59"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -294,7 +298,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     auth_level = 2
 
     DATA_SCHEMA_VERSION = 2
-    CONFIG_SCHEMA_VERSION = 8
+    CONFIG_SCHEMA_VERSION = 9
     MAX_RUN_HISTORY = 50
     GLOBAL_BRUSH_TAG = "资源刷流"
     TASK_DATA_NAMES = ("torrents", "archived", "unmanaged", "statistic", "runs")
@@ -425,6 +429,15 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         )
         self._recent_missing_date_ai_enabled = bool(
             raw_config.get("recent_missing_date_ai_enabled", False)
+        )
+        self._shared_download_timeout_minutes = max(
+            1,
+            min(
+                int(BrushTaskConfig._parse_number(
+                    raw_config.get("shared_download_timeout_minutes", 30)
+                ) or 30),
+                1440,
+            ),
         )
 
         task_rows = raw_config.get("tasks") if isinstance(raw_config.get("tasks"), list) else None
@@ -1015,6 +1028,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             setattr(self, f"_{field}", getattr(payload, field))
         for field in RECENT_DATE_FALLBACK_FIELDS:
             setattr(self, f"_{field}", getattr(payload, field))
+        for field in SHARED_DOWNLOAD_TIMEOUT_FIELDS:
+            setattr(self, f"_{field}", getattr(payload, field))
         if global_dynamic_delete_was_enabled and not self._global_dynamic_delete_enabled():
             for task in self._task_configs.values():
                 if task.proxy_delete and not task.delete_size_range:
@@ -1174,6 +1189,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         config.update({field: getattr(self, f"_{field}", None) for field in GLOBAL_LIMIT_FIELDS})
         config.update({field: getattr(self, f"_{field}", None) for field in GLOBAL_DYNAMIC_DELETE_FIELDS})
         config.update({field: getattr(self, f"_{field}", None) for field in RECENT_DATE_FALLBACK_FIELDS})
+        config.update({field: getattr(self, f"_{field}", 30) for field in SHARED_DOWNLOAD_TIMEOUT_FIELDS})
         config["shared"] = self._shared_config()
         return config
 
@@ -1675,6 +1691,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             **{field: getattr(self, f"_{field}", None) for field in GLOBAL_LIMIT_FIELDS},
             **{field: getattr(self, f"_{field}", None) for field in GLOBAL_DYNAMIC_DELETE_FIELDS},
             **{field: getattr(self, f"_{field}", None) for field in RECENT_DATE_FALLBACK_FIELDS},
+            **{field: getattr(self, f"_{field}", 30) for field in SHARED_DOWNLOAD_TIMEOUT_FIELDS},
             "summary": aggregate,
             "tasks": task_rows,
             "options": {
