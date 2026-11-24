@@ -1,6 +1,7 @@
 """MoviePilot search adapter and evidence checks for episode air dates."""
 
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeoutError
 import json
 import re
 from datetime import date
@@ -15,6 +16,36 @@ OFFICIAL_SCHEDULE_HOSTS = {
     "v.youku.com", "tv.cctv.com", "www.cctv.com", "www.yangshipin.cn",
     "www.netflix.com", "www.disneyplus.com", "www.crunchyroll.com",
 }
+
+
+def run_on_moviepilot_loop(coroutine):
+    """Run host tools on MoviePilot's loop so their loop-bound resources stay valid."""
+    try:
+        from app.runtime.loop import main_loop_registry
+
+        loop = main_loop_registry.current
+    except (ImportError, AttributeError):
+        loop = None
+
+    if loop is None:
+        return asyncio.run(coroutine)
+    if loop.is_closed() or not loop.is_running():
+        coroutine.close()
+        raise RuntimeError("MoviePilot 主事件循环不可用")
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    if current_loop is loop:
+        coroutine.close()
+        raise RuntimeError("不能在 MoviePilot 主事件循环线程内同步等待 AI 核验")
+
+    future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+    try:
+        return future.result(timeout=180)
+    except FutureTimeoutError:
+        future.cancel()
+        raise
 
 
 def _source_key(url):

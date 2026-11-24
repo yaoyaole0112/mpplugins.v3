@@ -1,5 +1,6 @@
 import json
 import asyncio
+import threading
 import unittest
 from datetime import date, datetime
 from types import SimpleNamespace
@@ -57,6 +58,39 @@ class RecentEpisodeRuleTest(unittest.TestCase):
     def test_video_filter_ignores_non_video_files(self):
         self.assertTrue(ResourceFlow._video_file("Season 2/E02.mkv"))
         self.assertFalse(ResourceFlow._video_file("Season 2/E02.srt"))
+
+    def test_ai_bridge_runs_host_tools_on_moviepilot_main_loop(self):
+        from resourceflow.recent_air_search import run_on_moviepilot_loop
+
+        loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def serve_loop():
+            asyncio.set_event_loop(loop)
+            ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(target=serve_loop, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(timeout=2))
+        try:
+            with patch("app.runtime.loop.main_loop_registry", SimpleNamespace(current=loop)):
+                async def use_host_loop_resource():
+                    semaphore = asyncio.Semaphore(0)
+
+                    async def release():
+                        await asyncio.sleep(0.01)
+                        semaphore.release()
+
+                    asyncio.create_task(release())
+                    await semaphore.acquire()
+                    return asyncio.get_running_loop()
+
+                self.assertIs(run_on_moviepilot_loop(use_host_loop_resource()), loop)
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=2)
+            loop.close()
 
     def test_movie_year_uses_tmdb_release_date_then_recognized_or_filename_year(self):
         self.assertEqual(

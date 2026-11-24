@@ -66,7 +66,8 @@ from .models import (
 from .resource_dedup import evidence_key, index_records, resource_slot
 from .record_search import matches_record, record_page
 from .recent_air_search import (
-    cited_source_keys, has_retrieved_source, release_date, search_episode_evidence, supports_official_date,
+    cited_source_keys, has_retrieved_source, release_date, run_on_moviepilot_loop,
+    search_episode_evidence, supports_official_date,
 )
 from .active_dedup import download_complete, download_files, download_state, paths_agree
 from .channel_dedup import (
@@ -291,7 +292,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，通过 Tailscale 私网 HTTPS 进行共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.64"
+    plugin_version = "1.0.65"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -5402,7 +5403,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                             except Exception as err:
                                 logger.debug(f"最近播出日期 AI 连接关闭失败：{type(err).__name__}")
 
-            results, evidence, citations = asyncio.run(request())
+            results, evidence, citations = run_on_moviepilot_loop(request())
             if diagnostics is not None:
                 diagnostics.update(
                     search_rows=len(evidence),
