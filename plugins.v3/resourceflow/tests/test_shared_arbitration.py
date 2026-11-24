@@ -1436,6 +1436,58 @@ class PluginSetupTests(unittest.TestCase):
         self.assertIn("识别为电影", reason)
         p._mp_recognize_media.assert_called_once()
 
+    def test_file_identity_fallback_uses_release_description_but_keeps_file_episodes(self):
+        p = ResourceFlow.__new__(ResourceFlow)
+        expected = SimpleNamespace(type="电视剧", tmdb_id=341693, title="你为谁诉讼")
+        calls = []
+
+        def recognize(meta):
+            calls.append(meta)
+            return expected if getattr(meta, "subtitle", None) else None
+
+        p._mp_recognize_media = Mock(side_effect=recognize)
+        title = "Ni Wei Shui Su Song S01E01 2160p iQIYI WEB-DL H265"
+        description = "你为谁诉讼 | 2026 | 第1季第1集"
+        meta, media, season, episodes, reason = p._mp_file_recognition(
+            "Ni.Wei.Shui.Su.Song.S01E01.2160p.iQIYI.WEB-DL.H265.mkv",
+            standard_only=True,
+            title_hint=title,
+            title_hint_description=description,
+            title_cache={},
+        )
+
+        self.assertFalse(reason)
+        self.assertIs(media, expected)
+        self.assertEqual((season, episodes), (1, [1]))
+        self.assertEqual(calls[1].subtitle, description)
+
+    def test_release_identity_replaces_conflicting_file_tv_match(self):
+        p = ResourceFlow.__new__(ResourceFlow)
+        wrong_file_match = SimpleNamespace(type="电视剧", tmdb_id=106434, title="碰撞搜查线")
+        release_match = SimpleNamespace(type="电视剧", tmdb_id=341693, title="你为谁诉讼")
+        calls = []
+
+        def recognize(meta):
+            calls.append(meta)
+            return release_match if getattr(meta, "subtitle", None) else wrong_file_match
+
+        p._mp_recognize_media = Mock(side_effect=recognize)
+        title = "Ni Wei Shui Su Song S01E01 2160p iQIYI WEB-DL H265"
+        description = "你为谁诉讼 | 2026 | 第1季第1集"
+        _, media, season, episodes, reason = p._mp_file_recognition(
+            "Ni.Wei.Shui.Su.Song.S01E01.2160p.iQIYI.WEB-DL.H265.mkv",
+            standard_only=True,
+            title_hint=title,
+            title_hint_description=description,
+            title_cache={},
+        )
+
+        self.assertFalse(reason)
+        self.assertIs(media, release_match)
+        self.assertEqual((season, episodes), (1, [1]))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1].subtitle, description)
+
     def test_mp_recognition_words_drive_recent_dates_and_shared_admission(self):
         p = self.plugin
         p._shared_settings = SharedSettingsPayload(enabled=True, bot_username="@testbot")

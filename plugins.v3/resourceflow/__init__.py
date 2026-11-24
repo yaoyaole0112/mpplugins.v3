@@ -3512,6 +3512,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 task,
                 pending_source,
                 only_path=manual_path,
+                title_description=torrent.description or "",
             )
             if recent_selection and prevalidated_recent_paths is not None:
                 recent_selection = {
@@ -4018,7 +4019,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             self._resource_ledger, self._resource_forgotten = ledger, forgotten
         return schemas.Response(success=True, message="已移除长期证据；当前频道和在队任务仍参与去重")
 
-    def _verify_resource_identity(self, candidate: dict, title: str, task=None) -> bool:
+    def _verify_resource_identity(
+        self, candidate: dict, title: str, task=None, description_hint: str = "",
+    ) -> bool:
         if (candidate.get("tmdb_id")
                 or str(candidate.get("media_source") or "").lower().endswith("douban")
                 and str(candidate.get("media_id") or "").isdecimal()):
@@ -4030,6 +4033,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         if movie:
             names.update(normalize_title(name) for name in filename_title_aliases(candidate.get("path", "")))
             names.update(normalize_title(name) for name in filename_title_aliases(title))
+            release_meta = MetaInfo(title, description_hint)
+            names.update(
+                normalize_title(getattr(release_meta, field, ""))
+                for field in ("cn_name", "en_name", "name")
+                if getattr(release_meta, field, None)
+            )
             for filename in (candidate.get("path", ""), title):
                 if not filename:
                     continue
@@ -4043,16 +4052,18 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         ids = {int(value) for name, value in bindings.items() if normalize_title(name) in names}
         identity = next(iter(ids)) if len(ids) == 1 else None
         if not ids and not movie:
-            identity = self._channel_candidate_tmdb_identity(candidate["path"], title)
+            identity = self._channel_candidate_tmdb_identity(
+                candidate["path"], title, description_hint=description_hint,
+            )
         elif not ids and movie:
-            meta = MetaInfo(candidate["path"].rsplit("/", 1)[-1])
             key = ("movie", tuple(sorted(names)), candidate.get("year"))
             cached_identity = self._channel_identity_cache.get(key)
             if cached_identity and cached_identity[0] > time.monotonic():
                 identity = cached_identity[1]
             else:
                 try:
-                    media = self.chain.recognize_media(meta=meta)
+                    lookup_meta = MetaInfo(title or candidate["path"].rsplit("/", 1)[-1], description_hint)
+                    media = self._mp_recognize_media(lookup_meta)
                     aliases = {normalize_title(getattr(media, field, "")) for field in
                                ("title", "en_title", "original_title", "original_name")}
                     aliases.update(normalize_title(name) for name in getattr(media, "names", []) or [])
@@ -4277,7 +4288,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     candidate = parse_candidate_file(item["path"], item["size"], row.get("title", ""),
                                                      row.get("description", ""), allow_movie=True)
                     if candidate and not getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None):
-                        if self._verify_resource_identity(candidate, row.get("title", ""), task):
+                        if self._verify_resource_identity(
+                            candidate, row.get("title", ""), task, row.get("description") or "",
+                        ):
                             records.append(candidate)
                             self._resolve_pending_identity(candidate, task)
                         else:
@@ -4457,10 +4470,13 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 if len(bound_ids) != 1:
                     continue
                 candidate["tmdb_id"] = bound_ids.pop()
-            if self._resource_identity_deferred(task) and not self._verify_resource_identity(candidate, row.get("title") or "", task):
+            if self._resource_identity_deferred(task) and not self._verify_resource_identity(
+                candidate, row.get("title") or "", task, row.get("description") or "",
+            ):
                 continue
             found = self._match_channel_candidate(candidate, episodes, attributes, tolerance, row.get("title") or "",
-                                                   mode=self._resource_mode(task), task=task)
+                                                   mode=self._resource_mode(task), task=task,
+                                                   description_hint=row.get("description") or "")
             if found and all(found):
                 matches[item["path"]] = found
         return matches
@@ -4630,17 +4646,19 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         self._recalculate_statistics(task.id)
         logger.info(f"下载中频道去重 [{task.name}] {torrent_hash}：{'已移除未完成任务' if removed else '已取消重复分集'} {len(paths)} 个文件，本地文件保留")
 
-    def _cache_inflight_file_identity(self, candidate: dict, title: str) -> None:
+    def _cache_inflight_file_identity(self, candidate: dict, title: str, description_hint: str = "") -> None:
         """Persist only explicit bindings or identities already verified in the local cache."""
         if candidate.get("tmdb_id"):
             return
         if candidate.get("media_type") == "movie":
-            self._verify_resource_identity(candidate, title)
+            self._verify_resource_identity(candidate, title, description_hint=description_hint)
             return
-        identity = self._channel_candidate_tmdb_identity(candidate["path"], title, cached_only=True)
+        identity = self._channel_candidate_tmdb_identity(
+            candidate["path"], title, cached_only=True, description_hint=description_hint,
+        )
         if not identity:
             return
-        _, raw_names = self._channel_identity_names(candidate["path"], title)
+        _, raw_names = self._channel_identity_names(candidate["path"], title, description_hint)
         names = {normalize_title(name) for name in raw_names}
         with self._channel_state_lock:
             bound = any(
@@ -4764,7 +4782,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                         tasks.append((
                             task.downloader, torrent_hash.lower(), row, self._inflight_title_keys(title),
                             (header.get("tmdb_id") if header else None)
-                            or self._channel_candidate_tmdb_identity(title + ".mkv", title, cached_only=True),
+                            or self._channel_candidate_tmdb_identity(
+                                title + ".mkv", title, cached_only=True,
+                                description_hint=row.get("description") or "",
+                            ),
                         ))
             self._inflight_task_snapshot = (now, tasks)
         candidate_names = set().union(*(self._inflight_title_keys(row["path"]) for row in candidates))
@@ -4800,7 +4821,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                         continue
                     candidate = parse_candidate_file(path, size, title, spec_hint=row.get("description") or "", allow_movie=True)
                     if candidate and not getattr(MetaInfo(path.rsplit("/", 1)[-1]), "episode_group", None):
-                        self._cache_inflight_file_identity(candidate, title)
+                        self._cache_inflight_file_identity(candidate, title, row.get("description") or "")
                         records.append(candidate)
                 if records:
                     self._inflight_entries[key] = {
@@ -4846,9 +4867,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 or candidate.get("manual_identity")
             )):
                 if self._resource_identity_deferred(task):
-                    self._verify_resource_identity(candidate, torrent.title, task)
+                    self._verify_resource_identity(candidate, torrent.title, task, spec_hint)
                 else:
-                    self._cache_inflight_file_identity(candidate, torrent.title)
+                    self._cache_inflight_file_identity(candidate, torrent.title, spec_hint)
                 candidates.append(candidate)
         if not candidates:
             yield outcome
@@ -4990,23 +5011,27 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             return "douban", douban_id, None
         return None, None, None
 
-    def _mp_release_recognition(self, title, cache):
+    def _mp_release_recognition(self, title, cache, description=""):
         """Reuse the MoviePilot release lookup across all files in this pack."""
-        if title not in cache:
+        key = (title, description or "")
+        if key not in cache:
             try:
-                meta = MetaInfo(title)
+                meta = MetaInfo(title, description)
                 source_season, _ = parse_episode(getattr(meta, "org_string", "") or title)
                 if is_year_season(source_season) and not getattr(meta, "episode_group", None):
                     meta.begin_season = None
                     meta.year = None
-                cache[title] = self._mp_recognize_media(meta)
+                cache[key] = self._mp_recognize_media(meta)
             except Exception as err:
                 logger.debug(f"MoviePilot 发布标题补充识别失败（{type(err).__name__}）")
-                cache[title] = None
-        return cache[title]
+                cache[key] = None
+        return cache[key]
 
-    def _mp_file_recognition(self, path: str, *, standard_only: bool, title_hint: str = "", title_cache=None):
-        """Use the file for season/episode and the release title only as an identity fallback."""
+    def _mp_file_recognition(
+        self, path: str, *, standard_only: bool, title_hint: str = "",
+        title_hint_description: str = "", title_cache=None,
+    ):
+        """Use MoviePilot release metadata for identity and the file path for episode numbering."""
         relative = Path(path.replace("\\", "/"))
         meta = None
         try:
@@ -5036,11 +5061,27 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             media = None
             error = f"MoviePilot 识别失败（{type(err).__name__}）"
         kind = self._mp_media_type(media)
-        if title_hint and (not kind or not self._mp_media_identity(media)[0]):
-            hint_media = self._mp_release_recognition(title_hint, title_cache if title_cache is not None else {})
+        media_identity = self._mp_media_identity(media) if media else (None, None, None)
+        should_check_release = bool(title_hint) and (
+            not kind or not media_identity[0] or kind == "tv"
+        )
+        if should_check_release:
+            hint_media = self._mp_release_recognition(
+                title_hint, title_cache if title_cache is not None else {}, title_hint_description
+            )
             hint_kind = self._mp_media_type(hint_media)
-            if (hint_kind and self._mp_media_identity(hint_media)[0]
-                    and (not kind or kind == hint_kind)
+            hint_identity = self._mp_media_identity(hint_media) if hint_media else (None, None, None)
+            identity_conflict = (
+                kind == hint_kind == "tv"
+                and media_identity[0] and hint_identity[0]
+                and media_identity[:2] != hint_identity[:2]
+            )
+            can_use_release_identity = (
+                (not kind or kind == hint_kind)
+                and (not media_identity[0] or identity_conflict)
+            )
+            if (hint_kind and hint_identity[0]
+                    and can_use_release_identity
                     and (not file_has_episode_marker or hint_kind == "tv")):
                 media, kind = hint_media, hint_kind
         if kind == "movie":
@@ -5074,7 +5115,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             approved["media_title"] = overrides[path.replace("\\", "/")]["media_title"]
             return approved, None, ""
         meta, media, season, episodes, reason = recognition or self._mp_file_recognition(
-            path, standard_only=True, title_hint=title, title_cache=title_cache,
+            path, standard_only=True, title_hint=title, title_hint_description=spec_hint,
+            title_cache=title_cache,
         )
         display_title = str(getattr(media, "title", None) or getattr(meta, "name", "") or "").strip()[:120]
         title_key = normalize_title(display_title)
@@ -5428,6 +5470,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         pending_source: Optional[dict] = None,
         *,
         only_path: Optional[str] = None,
+        title_description: str = "",
     ) -> Optional[dict]:
         """预检种子内视频，返回符合近期播出规则的文件路径及其名称。"""
         if not isinstance(torrent_content, bytes):
@@ -5470,7 +5513,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     episode_group = None
                 else:
                     recognition = self._mp_file_recognition(
-                        path, standard_only=shared, title_hint=title, title_cache=title_cache,
+                        path, standard_only=shared, title_hint=title,
+                        title_hint_description=title_description, title_cache=title_cache,
                     )
                     meta, media, season, episodes, reason = recognition
                     if shared:
@@ -5816,7 +5860,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 candidate.update({"tmdb_id": bound_ids.pop(), "identity_source": "alias",
                                   "identity_evidence_names": candidate.get("title_keys") or []})
             if defer_identity:
-                if not self._verify_resource_identity(candidate, title, task):
+                if not self._verify_resource_identity(candidate, title, task, spec_hint):
                     excluded.add(item["path"])
                     identity_count += 1
                     self._pending_identity(candidate, title, task, "身份未确认，等待别名绑定或识别重试",
@@ -5830,9 +5874,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     "按 SDR 命名约定比较，非媒体实测"
                 )
             matched_records = self._match_channel_candidate(candidate, episode_records, attributes, tolerance, title,
-                                                            mode=mode, task=task)
+                                                            mode=mode, task=task, description_hint=spec_hint)
             pack_match = self._match_channel_candidate(candidate, pack_records, attributes, tolerance, title,
-                                                       mode=mode, task=task) if pack_dedup else []
+                                                       mode=mode, task=task,
+                                                       description_hint=spec_hint) if pack_dedup else []
             if pack_match:
                 matched_records = [external or packed for external, packed in zip(matched_records, pack_match)]
             if matched_records and all(matched_records):
@@ -5870,7 +5915,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
 
     def _match_channel_candidate(self, candidate: dict, episode_records: dict,
                                  attributes: List[str], tolerance: float, title: str, mode: str = "specs",
-                                 task: Optional[BrushTaskConfig] = None) -> List[Optional[dict]]:
+                                 task: Optional[BrushTaskConfig] = None,
+                                 description_hint: str = "") -> List[Optional[dict]]:
         """One identity/spec contract for pre-add filtering and unfinished-file cancellation."""
         matches = []
         numbers = candidate["episodes"] or ([None] if candidate.get("media_type") == "movie" else [])
@@ -5885,9 +5931,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             ]
             match = next((row for row in plausible if same_release(one_episode, row, attributes, tolerance, mode)), None)
             if not match and any(row.get("tmdb_id") for row in plausible) and not candidate.get("tmdb_id"):
-                identity = (self._verify_resource_identity(candidate, title, task) and candidate.get("tmdb_id")
+                identity = (self._verify_resource_identity(candidate, title, task, description_hint)
+                            and candidate.get("tmdb_id")
                             if candidate.get("media_type") == "movie"
-                            else self._channel_candidate_tmdb_identity(candidate["path"], title))
+                            else self._channel_candidate_tmdb_identity(
+                                candidate["path"], title, description_hint=description_hint,
+                            ))
                 if identity:
                     candidate["tmdb_id"] = one_episode["tmdb_id"] = identity
                     match = next((row for row in plausible if same_release(one_episode, row, attributes, tolerance, mode)), None)
@@ -5904,18 +5953,21 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         )
 
     @staticmethod
-    def _channel_identity_names(path: str, title: str) -> Tuple[Any, Set[str]]:
+    def _channel_identity_names(
+        path: str, title: str, description_hint: str = "",
+    ) -> Tuple[Any, Set[str]]:
         meta = MetaInfo(path.rsplit("/", 1)[-1])
         raw_names = {
             str(getattr(meta, field, "") or "").strip() for field in ("cn_name", "en_name", "name")
         } | filename_title_aliases(path)
+        if title or description_hint:
+            release_meta = MetaInfo(title or path.rsplit("/", 1)[-1], description_hint)
+            raw_names.update(
+                str(getattr(release_meta, field, "") or "").strip()
+                for field in ("cn_name", "en_name", "name")
+            )
+            raw_names.update(filename_title_aliases(title))
         raw_names.discard("")
-        if not raw_names:
-            meta = MetaInfo(title)
-            raw_names = {
-                str(getattr(meta, field, "") or "").strip() for field in ("cn_name", "en_name", "name")
-            } | filename_title_aliases(title)
-            raw_names.discard("")
         return meta, raw_names
 
     @staticmethod
@@ -5925,9 +5977,11 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             for field in ("title", "en_title", "original_title", "original_name", "hk_title", "tw_title", "sg_title")
         } | {str(name) for name in getattr(media, "names", []) or []}
 
-    def _channel_candidate_tmdb_identity(self, path: str, title: str, cached_only: bool = False) -> Optional[int]:
+    def _channel_candidate_tmdb_identity(
+        self, path: str, title: str, cached_only: bool = False, description_hint: str = "",
+    ) -> Optional[int]:
         """只对已有同季集/规格候选查询身份，并拒绝模糊剧名误识别。"""
-        meta, raw_names = self._channel_identity_names(path, title)
+        meta, raw_names = self._channel_identity_names(path, title, description_hint)
         if getattr(meta, "episode_group", None):
             return None
         names = {normalize_title(name) for name in raw_names} - {""}
@@ -5956,11 +6010,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             return None
         identity, reason = None, ""
         try:
+            lookup_meta = MetaInfo(title or path.rsplit("/", 1)[-1], description_hint)
             if year_season:
                 # The release year labels the season, not the series premiere.
-                meta.begin_season = None
-                meta.year = None
-            media = self.chain.recognize_media(meta=meta)
+                lookup_meta.begin_season = None
+                lookup_meta.year = None
+            media = self._mp_recognize_media(lookup_meta)
             evidence_names = set(raw_names)
             # A bracketed season label is not part of the series title, but its season must agree.
             for name in raw_names:
