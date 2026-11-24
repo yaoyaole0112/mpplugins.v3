@@ -291,7 +291,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，通过 Tailscale 私网 HTTPS 进行共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.63"
+    plugin_version = "1.0.64"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -3521,13 +3521,14 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 }
             if not recent_selection:
                 if manual_path:
-                    raise ValueError("该文件的最近播出日期尚未通过核验，请查看插件日志")
+                    raise ValueError("近期播出日期核验未能生成结果；请查看该文件对应的逐集核验日志")
                 return None
             if self._shared_participates(task):
                 recent_selection = {**recent_selection, "recent_screened": True}
         if manual_path:
             if recent_selection and manual_path not in recent_selection.get("accepted", set()):
-                raise ValueError("该文件的最近播出日期尚未通过核验，请查看插件日志")
+                reason = (recent_selection.get("rejections") or {}).get(manual_path)
+                raise ValueError(reason or "该文件未通过近期播出日期规则；详情见对应集号的核验日志")
             recent_selection = {**(recent_selection or {}), "accepted": {manual_path}}
         if self._resource_mode(task) != "off" and not self._shared_participates(task):
             dedup_selection = self._channel_dedup_file_selection(
@@ -5280,9 +5281,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         season: int,
         episodes: list,
         aliases: Optional[list] = None,
+        diagnostics: Optional[dict] = None,
     ) -> Dict[int, dict]:
         """沿用 MP 联网设置，且只对能从实际搜索证据复核的日期自动放行。"""
         if not getattr(self, "_recent_missing_date_ai_enabled", False):
+            if diagnostics is not None:
+                diagnostics.update(status="disabled", message="AI 日期核验未启用")
             return {}
         try:
             from app.agent.llm.helper import LLMHelper
@@ -5372,6 +5376,14 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                         f"联网模型候选 {len(native_results)} 条，MP 搜索证据 {len(rows)} 条"
                     )
                     if not rows:
+                        if diagnostics is not None:
+                            diagnostics.update(
+                                status="no_search_evidence",
+                                message=("AI返回候选但没有可核验的搜索证据" if native_results
+                                         else "MP本地搜索未返回可用结果"),
+                                search_rows=0,
+                                candidates=len(native_results),
+                            )
                         return native_results, rows, citations
                     try:
                         if native_model is not None:
@@ -5391,7 +5403,16 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                                 logger.debug(f"最近播出日期 AI 连接关闭失败：{type(err).__name__}")
 
             results, evidence, citations = asyncio.run(request())
+            if diagnostics is not None:
+                diagnostics.update(
+                    search_rows=len(evidence),
+                    candidates=len(results),
+                )
         except Exception as err:
+            if diagnostics is not None:
+                diagnostics.update(
+                    status="error", message=f"AI核验调用失败（{type(err).__name__}）"
+                )
             logger.info(f"最近播出日期 AI 核验失败 {title}：{type(err).__name__}")
             return {}
         dates = {}
@@ -5452,6 +5473,22 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             logger.info(
                 f"最近播出日期 AI 核验 {title} S{season:02d}E{number:02d}："
                 f"{value}（{confidence}，{source}）"
+            )
+        if diagnostics is not None:
+            diagnostics.update(
+                status="found" if dates else "not_found",
+                message=(
+                    "AI核验得到日期：" + ", ".join(
+                        f"E{number:02d}={value['date']}（{value['confidence']}）"
+                        for number, value in sorted(dates.items())
+                    ) if dates else
+                    f"AI返回{len(results)}条候选但没有通过身份、集号、日期及来源校验"
+                    if results else
+                    f"AI未返回可用日期候选（MP检索到{len(evidence)}条网页证据）"
+                ),
+                candidates=len(results),
+                accepted=len(dates),
+                rejected=dict(rejected),
             )
         if results and not dates:
             logger.info(
@@ -5533,6 +5570,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             return None
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
         accepted = []
+        rejected_paths = {}
         cutoff = today - timedelta(days=days)
         season_candidates: Dict[tuple, list] = {}
         douban_date_cache: Dict[Tuple[str, int], Dict[int, Optional[str]]] = {}
@@ -5599,6 +5637,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     path, episodes, media, name, year, douban_id,
                 ))
             except Exception as err:
+                rejected_paths[path] = str(err)
                 logger.info(f"最近播出剧集规则排除文件 {path}：{err}")
         for (identity, season, episode_group), files in season_candidates.items():
             _, _, media, name, year, _ = files[0]
@@ -5654,15 +5693,38 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                             if not dates.get(number) and release_date(value):
                                 dates[number], sources[number] = value, "豆瓣"
                 inferred, ai_dates = set(), {}
+                ai_diagnostics = {}
+                inference_reason = "未满足日期推断条件"
                 if not episode_group and eligible_missing:
                     inferred = self._infer_missing_episode_dates(
                         title, "", media, season, sorted(eligible_missing), dates, sources, today
                     )
+                    known_anchors = {
+                        number: value for number, value in dates.items() if release_date(value)
+                    }
+                    if not known_anchors:
+                        inference_reason = "同季没有已知播出日期可作为推断锚点"
+                    else:
+                        latest_number = max(known_anchors)
+                        latest_date = known_anchors[latest_number]
+                        tolerance = getattr(self, "_recent_missing_date_tolerance_days", 7)
+                        if not self._air_date_is_recent(latest_date, today, tolerance):
+                            inference_reason = (
+                                f"最新明确播出日期 E{latest_number:02d}={latest_date} "
+                                f"已超出日期推断容差 {tolerance} 天"
+                            )
+                        elif not any(number > latest_number for number in eligible_missing):
+                            inference_reason = (
+                                f"候选集号不在最新明确集号 E{latest_number:02d} 之后"
+                            )
+                        elif inferred:
+                            inference_reason = "已按最新明确日期和容差完成推断"
                     still_missing = sorted(number for number in eligible_missing if not dates.get(number))
                     if still_missing:
                         search_aliases = [name, *(Path(row[0].replace("\\", "/")).stem for row in files)]
                         ai_dates = self._recent_episode_ai_dates(
-                            title, media, season, still_missing, aliases=search_aliases
+                            title, media, season, still_missing, aliases=search_aliases,
+                            diagnostics=ai_diagnostics,
                         )
                         for number, result in ai_dates.items():
                             if result["confidence"] == "high":
@@ -5720,8 +5782,39 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                         not uses_fallback and (number in inferred or number in ai_dates)
                     ) for number in numbers):
                         if episode_group:
-                            raise ValueError("剧集组日期缺失，不能用默认季集号或豆瓣季集号代替")
-                        raise ValueError("TMDB/豆瓣未提供逐集日期，日期推断及 AI 核验均未通过")
+                            raise ValueError(
+                                f"集号 S{season:02d} 缺少对应剧集组的逐集播出日期；"
+                                "不能用默认季集号或豆瓣季集号代替"
+                            )
+                        missing_reasons = []
+                        for number in numbers:
+                            if dates.get(number) and (
+                                not uses_fallback and (number in inferred or number in ai_dates)
+                            ):
+                                missing_reasons.append(
+                                    f"E{number:02d}的日期来源不符合自动放行条件"
+                                )
+                            elif not dates.get(number):
+                                ai_result = ai_dates.get(number)
+                                if ai_result:
+                                    missing_reasons.append(
+                                        f"E{number:02d}查到{ai_result['date']}，但仅为"
+                                        f"{ai_result['confidence']}置信度"
+                                        f"（{ai_result['source'][:120]}），需人工核验"
+                                    )
+                                else:
+                                    if not uses_fallback:
+                                        missing_reasons.append(
+                                            f"E{number:02d}无 TMDB/豆瓣逐集日期；"
+                                            "该文件命中推断屏蔽规则，未使用日期推断或 AI 兜底"
+                                        )
+                                    else:
+                                        missing_reasons.append(
+                                            f"E{number:02d}无 TMDB/豆瓣逐集日期；"
+                                            f"日期推断未通过（{inference_reason}）；"
+                                            f"{ai_diagnostics.get('message', 'AI日期核验未执行')}"
+                                        )
+                        raise ValueError("；".join(missing_reasons))
                     detail = ", ".join(
                         f"S{season:02d}E{number:02d}：{sources[number]}" if number in inferred
                         else f"S{season:02d}E{number:02d}={dates[number]}({sources[number]})"
@@ -5732,13 +5825,29 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                         accepted.append(path)
                         logger.info(f"最近播出剧集规则通过文件 {path}：{detail}，明确日期下限 {cutoff}")
                     else:
-                        logger.info(f"最近播出剧集规则排除文件 {path}：{detail}，早于日期下限 {cutoff}")
+                        expired = [
+                            f"S{season:02d}E{number:02d}={dates[number]}"
+                            for number in numbers
+                            if number not in inferred and not self._air_date_is_recent(dates[number], today, days)
+                        ]
+                        message = f"播出日期不在范围内：{'、'.join(expired)}；规则下限 {cutoff}"
+                        rejected_paths[path] = message
+                        logger.info(f"最近播出剧集规则排除文件 {path}：{detail}，{message}")
                 except Exception as err:
+                    rejected_paths[path] = str(err)
                     logger.info(f"最近播出剧集规则排除文件 {path}：{err}")
         if not accepted:
-            logger.info(f"最近播出剧集规则排除 {title}：没有视频文件通过播出日期核验")
+            summary = "；".join(
+                f"{Path(str(path).replace(chr(92), '/')).name}：{reason}"
+                for path, reason in list(rejected_paths.items())[:5]
+            ) or "没有可核验的视频文件"
+            logger.info(f"最近播出剧集规则排除 {title}：没有文件通过；具体原因：{summary}")
+            if only_path:
+                return {
+                    "accepted": set(), "videos": set(video_paths), "rejections": rejected_paths,
+                }
             return None
-        selection = {"accepted": set(accepted), "videos": set(video_paths)}
+        selection = {"accepted": set(accepted), "videos": set(video_paths), "rejections": rejected_paths}
         if shared:
             selection["mp_files"] = {path: recognized_files[path] for path in accepted if path in recognized_files}
         return selection
