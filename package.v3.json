@@ -67,7 +67,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流，使用 Tailscale 私网 HTTPS 共享下载审批，跨实例同规格下载前占位。",
     "labels": "刷流,资源去重,Tailscale",
-    "version": "1.0.62",
+    "version": "1.0.64",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -75,6 +75,8 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.64": "细化近期播出日期核验结果：区分日期推断未满足条件、AI 未查到候选、搜索证据不足、身份/集号不匹配及日期规则未通过，并在人工核验失败时展示对应文件的具体原因。",
+      "v1.0.63": "改进 AI 近期播出日期检索：扩展剧名别名和文件名搜索线索，记录模型候选与 MP 本地搜索证据数量，并区分候选未采纳原因。",
       "v1.0.62": "修复资源刷流身份识别与 MoviePilot 整理识别不一致：优先使用种子标题及描述确认媒体身份，文件路径用于季集号；避免文件名识别失败或误匹配时进入下载待核验。",
       "v1.0.61": "支持豆瓣独有媒体身份：人工核验可保留豆瓣原生 ID，协调端占位、增量记录、完成证据及跨设备去重均识别来源化身份；旧 TMDB 记录自动迁移兼容，并可用 DOUBAN:豆瓣ID = TMDB ID 显式合并身份。",
       "v1.0.60": "下载待核验弹窗增加豆瓣搜索；选中后由 MoviePilot 映射 TMDB 身份再进入原共享审批，避免豆瓣 ID 与 TMDB ID 混用。",
