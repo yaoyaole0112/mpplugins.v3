@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, PropertyMock, patch
 
 from resourceflow import ResourceFlow, BrushTaskConfig, TorrentHelper, TorrentInfo
-from resourceflow.models import ResourcePendingApprovalPayload
+from resourceflow.models import DoubanIdentityResolvePayload, ResourcePendingApprovalPayload
 from resourceflow.shared_plugin import SharedSettingsPayload
 from test_channel_dedup import bencode
 
@@ -57,6 +57,45 @@ class DownloadDedupTest(unittest.TestCase):
 
     def download(self):
         return self.plugin._ResourceFlow__download(self.torrent)
+
+    def test_douban_search_prefers_tmdb_mapping_when_available(self):
+        with patch("resourceflow.MediaChain") as media_chain:
+            media_chain.return_value.convert_media_identity.return_value = {
+                "id": 456, "title": "豆瓣剧名",
+            }
+            result = self.plugin.resolve_pending_douban_identity(
+                DoubanIdentityResolvePayload(douban_id="12345", media_type="tv", media_title="豆瓣剧名")
+            )
+        self.assertTrue(result.success)
+        self.assertEqual(result.data, {
+            "tmdb_id": 456, "media_source": "themoviedb", "media_id": "456",
+            "media_type": "tv", "media_title": "豆瓣剧名",
+        })
+        media_chain.return_value.convert_media_identity.assert_called_once()
+
+    def test_douban_search_keeps_native_identity_when_tmdb_mapping_is_missing(self):
+        with patch("resourceflow.MediaChain") as media_chain:
+            media_chain.return_value.convert_media_identity.return_value = None
+            result = self.plugin.resolve_pending_douban_identity(
+                DoubanIdentityResolvePayload(douban_id="12345", media_type="tv", media_title="豆瓣独有剧")
+            )
+        self.assertTrue(result.success)
+        self.assertEqual(result.data, {
+            "tmdb_id": None, "media_source": "douban", "media_id": "12345",
+            "media_type": "tv", "media_title": "豆瓣独有剧",
+        })
+
+    def test_manual_candidate_override_accepts_native_douban_identity(self):
+        path = "Show.S01E09.mkv"
+        candidate = ResourceFlow._apply_pending_candidate_override(None, path, 1000, {
+            path: {
+                "media_type": "tv", "tmdb_id": None, "media_source": "douban", "media_id": "12345",
+                "media_title": "豆瓣独有剧", "season": 1, "episodes": [9],
+                "specs": {"resolution": "1080p"},
+            },
+        })
+        self.assertEqual((candidate["media_source"], candidate["media_id"], candidate["tmdb_id"]),
+                         ("douban", "12345", None))
 
     def assert_existing_task_untouched(self):
         for method in ("add_torrent", "delete_torrents", "remove_torrents_tag", "get_torrent_id_by_tag",

@@ -13,7 +13,7 @@ from .record_search import (
 from .shared_protocol import ID_PATTERN, SharedError, canonical
 
 
-SYNC_VERSION = 1
+SYNC_VERSION = 2
 SYNC_BATCH = 100
 SYNC_MAX_PARTS = 4
 ACTIVE_MAX_AGE = 120
@@ -21,8 +21,11 @@ COMPLETED_MAX_AGE = 600
 HIGH_RESOLUTION_WAIT = "同集2160p/4K已占位或正在下载，低分辨率暂缓"
 HIGH_RESOLUTION_DONE = "已有2160p/4K高分辨率资源"
 HIGH_RESOLUTION_PACK_WAIT = "整包暂缓：等待包内其他文件的2160p/4K占位结果"
-RECORD_COLUMNS = ("id", "label", "title", "media_title", "site_name", "media_type", "tmdb_id", "season", "episodes", "specs",
-                  "state", "created", "updated", "request_id", "file_id")
+RECORD_COLUMNS = (
+    "id", "label", "title", "media_title", "site_name", "media_type", "tmdb_id",
+    "media_source", "media_id", "season", "episodes", "specs", "state", "created",
+    "updated", "request_id", "file_id",
+)
 
 
 def display_record(row):
@@ -31,29 +34,52 @@ def display_record(row):
         if not re.fullmatch(rf"[a-f0-9]{{{length}}}", str(item.get(field, ""))):
             item.pop(field, None)
     item["episodes"], item["specs"] = json.loads(item["episodes"]), normalize_specs(json.loads(item["specs"]))
+    if item.get("media_source") not in {"themoviedb", "douban"}:
+        item["media_source"] = "themoviedb"
+    if item.get("media_id") in (None, ""):
+        item["media_id"] = str(item.get("tmdb_id") or "")
+    if item["media_source"] == "douban" and item.get("tmdb_id") == 0:
+        item["tmdb_id"] = None
     return item
 
 
 def _identity_alias_index(rules, media_type):
     aliases = (rules or {}).get("movie_identity_aliases" if media_type == "movie" else "identity_aliases") or {}
-    id_aliases, title_aliases = {}, {}
+    tmdb_aliases, douban_aliases, title_aliases = {}, {}, {}
     for name, target in aliases.items():
-        match = re.fullmatch(r"(?i)TMDB\s*[:#]?\s*([1-9]\d*)", str(name).strip())
+        match = re.fullmatch(r"(?i)(TMDB|THEMOVIEDB|DOUBAN)\s*[:#]?\s*([1-9]\d*)", str(name).strip())
         if match:
-            id_aliases[int(match.group(1))] = int(target)
+            source, raw_id = match.groups()
+            if source == "DOUBAN":
+                douban_aliases[raw_id] = int(target)
+            else:
+                tmdb_aliases[int(raw_id)] = int(target)
         else:
             title_aliases.setdefault(normalize_title(name), set()).add(int(target))
-    return id_aliases, title_aliases
+    return tmdb_aliases, douban_aliases, title_aliases
 
 
-def _canonical_tmdb_id(record, rules, alias_index=None):
+def _raw_media_identity(record):
+    source = str(record.get("media_source") or "").strip().lower()
+    if source.endswith("douban"):
+        identity = record.get("media_id") or record.get("douban_id")
+        return ("douban", str(identity)) if str(identity or "").isdecimal() and int(identity) > 0 else None
+    if source.endswith(("tmdb", "themoviedb")) or not source:
+        identity = record.get("media_id") or record.get("tmdb_id")
+        try:
+            value = int(identity)
+        except (TypeError, ValueError):
+            return None
+        return ("themoviedb", str(value)) if 0 < value < 2**53 else None
+    return None
+
+
+def _canonical_media_identity(record, rules, alias_index=None):
+    raw = _raw_media_identity(record)
+    if not raw:
+        return None
     media_type = record.get("media_type")
-    try:
-        tmdb_id = int(record.get("tmdb_id"))
-    except (TypeError, ValueError):
-        return record.get("tmdb_id")
-
-    id_aliases, title_aliases = alias_index or _identity_alias_index(rules, media_type)
+    tmdb_aliases, douban_aliases, title_aliases = alias_index or _identity_alias_index(rules, media_type)
     names = {normalize_title(record.get("media_title", ""))}
     names.update(normalize_title(name) for name in filename_title_aliases(record.get("title", "")))
     names.discard("")
@@ -63,12 +89,40 @@ def _canonical_tmdb_id(record, rules, alias_index=None):
         for target in title_aliases.get(name, ())
     }
     if len(matched_titles) == 1:
-        tmdb_id = matched_titles.pop()
-    visited = set()
-    while tmdb_id in id_aliases and tmdb_id not in visited:
-        visited.add(tmdb_id)
-        tmdb_id = id_aliases[tmdb_id]
-    return tmdb_id
+        raw = ("themoviedb", str(matched_titles.pop()))
+    elif raw[0] == "douban" and raw[1] in douban_aliases:
+        raw = ("themoviedb", str(douban_aliases[raw[1]]))
+    if raw[0] == "themoviedb":
+        tmdb_id = int(raw[1])
+        visited = set()
+        while tmdb_id in tmdb_aliases and tmdb_id not in visited:
+            visited.add(tmdb_id)
+            tmdb_id = tmdb_aliases[tmdb_id]
+        raw = ("themoviedb", str(tmdb_id))
+    return raw
+
+
+def _identity_query_keys(candidate, rules, alias_index=None):
+    alias_index = alias_index or _identity_alias_index(rules, candidate.get("media_type"))
+    tmdb_aliases, douban_aliases, title_aliases = alias_index
+    canonical_identity = _canonical_media_identity(candidate, rules, alias_index)
+    if not canonical_identity:
+        return None
+    if canonical_identity[0] == "douban":
+        return [canonical_identity]
+    canonical_id = int(canonical_identity[1])
+    if any(target == canonical_id for targets in title_aliases.values() for target in targets):
+        return None
+    possible_tmdb_ids = {canonical_id, *tmdb_aliases, *tmdb_aliases.values()}
+    keys = [
+        ("themoviedb", str(raw_id)) for raw_id in possible_tmdb_ids
+        if _resolve_tmdb_id(raw_id, tmdb_aliases) == canonical_id
+    ]
+    keys.extend(
+        ("douban", raw_id) for raw_id, target in douban_aliases.items()
+        if _resolve_tmdb_id(target, tmdb_aliases) == canonical_id
+    )
+    return sorted(set(keys))
 
 
 def _resolve_tmdb_id(tmdb_id, id_aliases):
@@ -79,35 +133,14 @@ def _resolve_tmdb_id(tmdb_id, id_aliases):
     return tmdb_id
 
 
-def _identity_query_ids(candidate, rules):
-    alias_index = _identity_alias_index(rules, candidate.get("media_type"))
-    canonical_id = _canonical_tmdb_id(candidate, rules, alias_index)
-    if type(canonical_id) is not int:
-        return None
-    id_aliases, title_aliases = alias_index
-    try:
-        original_id = int(candidate.get("tmdb_id"))
-    except (TypeError, ValueError):
-        return None
-    possible_ids = {original_id, *id_aliases, *id_aliases.values()}
-    matching_ids = sorted(
-        raw_id for raw_id in possible_ids
-        if _resolve_tmdb_id(raw_id, id_aliases) == canonical_id
-    )
-    if any(_resolve_tmdb_id(target, id_aliases) == canonical_id
-           for targets in title_aliases.values() for target in targets):
-        return None
-    return matching_ids or [original_id]
-
-
 def same_resource(candidate, record, attributes, tolerance, *, overlap=True, identity_rules=None,
                   identity_index=None, candidate_identity=None):
     if any(candidate.get(field) != record.get(field) for field in ("media_type", "season")):
         return False
     identity_index = identity_index or _identity_alias_index(identity_rules, candidate.get("media_type"))
     candidate_identity = (candidate_identity if candidate_identity is not None else
-                          _canonical_tmdb_id(candidate, identity_rules, identity_index))
-    if candidate_identity != _canonical_tmdb_id(record, identity_rules, identity_index):
+                          _canonical_media_identity(candidate, identity_rules, identity_index))
+    if not candidate_identity or candidate_identity != _canonical_media_identity(record, identity_rules, identity_index):
         return False
     if candidate["media_type"] != "movie":
         episodes = set(candidate.get("episodes") or [])
@@ -121,9 +154,10 @@ def is_2160p_downgrade(candidate, record, identity_rules=None, identity_index=No
                         candidate_identity=None):
     identity_index = identity_index or _identity_alias_index(identity_rules, candidate.get("media_type"))
     candidate_identity = (candidate_identity if candidate_identity is not None else
-                          _canonical_tmdb_id(candidate, identity_rules, identity_index))
+                          _canonical_media_identity(candidate, identity_rules, identity_index))
     if (candidate.get("media_type") != "tv" or record.get("media_type") != "tv"
-            or candidate_identity != _canonical_tmdb_id(record, identity_rules, identity_index)
+            or not candidate_identity
+            or candidate_identity != _canonical_media_identity(record, identity_rules, identity_index)
             or candidate.get("season") != record.get("season")):
         return False
     if not set(candidate.get("episodes") or []).intersection(record.get("episodes") or []):
@@ -138,7 +172,7 @@ def find_resource_conflict(candidate, records, rules):
     """Prefer confirmed evidence over a temporary high-resolution hold."""
     prefer_2160p = rules.get("rules", {}).get("prefer_2160p", True)
     identity_index = _identity_alias_index(rules, candidate.get("media_type"))
-    candidate_identity = _canonical_tmdb_id(candidate, rules, identity_index)
+    candidate_identity = _canonical_media_identity(candidate, rules, identity_index)
     temporary = ordinary = None
     for row in records:
         state = row["state"]
@@ -169,13 +203,22 @@ class SharedRecordCache:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS mirror (
                     id TEXT PRIMARY KEY, media_type TEXT NOT NULL, tmdb_id INTEGER NOT NULL,
+                    media_source TEXT NOT NULL DEFAULT 'themoviedb',
+                    media_id TEXT NOT NULL DEFAULT '',
                     season INTEGER, state TEXT NOT NULL, updated REAL NOT NULL, data TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS mirror_scope ON mirror(media_type, season, state);
-                CREATE INDEX IF NOT EXISTS mirror_identity ON mirror(media_type, tmdb_id, season, state);
                 CREATE TABLE IF NOT EXISTS progress (
                     singleton INTEGER PRIMARY KEY CHECK (singleton=1), scope TEXT NOT NULL,
                     cursor INTEGER NOT NULL, more INTEGER NOT NULL, checked_at REAL NOT NULL);
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(mirror)")}
+            if "media_source" not in columns:
+                db.execute("ALTER TABLE mirror ADD COLUMN media_source TEXT NOT NULL DEFAULT 'themoviedb'")
+            if "media_id" not in columns:
+                db.execute("ALTER TABLE mirror ADD COLUMN media_id TEXT NOT NULL DEFAULT ''")
+            db.execute("UPDATE mirror SET media_id=CAST(tmdb_id AS TEXT) WHERE media_id=''")
+            db.execute("DROP INDEX IF EXISTS mirror_identity")
+            db.execute("CREATE INDEX mirror_identity ON mirror(media_type,media_source,media_id,season,state)")
         self.path.chmod(0o600)
 
     @contextmanager
@@ -218,17 +261,35 @@ class SharedRecordCache:
                 if row is None:
                     db.execute("DELETE FROM mirror WHERE id=?", (claim,))
                 else:
+                    if not isinstance(row, dict):
+                        raise SharedError("共享记录数据无效")
+                    media_source = str(row.get("media_source") or "themoviedb").lower()
+                    if media_source in {"tmdb", "themoviedb"}:
+                        media_source = "themoviedb"
+                    tmdb_id = row.get("tmdb_id")
+                    media_id = str(row.get("media_id") or (tmdb_id if tmdb_id else "")).strip()
                     if (not isinstance(row, dict) or row.get("id") != claim
                             or row.get("state") not in {"reserved", "queued", "completed", "released"}
                             or row.get("media_type") not in {"tv", "movie"}
-                            or type(row.get("tmdb_id")) is not int or not isinstance(row.get("episodes"), list)
+                            or media_source not in {"themoviedb", "douban"}
+                            or not media_id.isdecimal() or int(media_id) <= 0 or len(media_id) > 32
+                            or media_source == "themoviedb" and (
+                                type(tmdb_id) is not int or not 0 < tmdb_id < 2**53
+                                or str(tmdb_id) != media_id)
+                            or media_source == "douban" and tmdb_id not in (None, 0)
+                            or not isinstance(row.get("episodes"), list)
                             or not isinstance(row.get("specs"), dict) or "season" not in row
                             or "site_name" in row and (not isinstance(row.get("site_name"), str)
                                                        or len(row["site_name"]) > 80)):
                         raise SharedError("共享记录数据无效")
-                    db.execute("INSERT OR REPLACE INTO mirror VALUES (?,?,?,?,?,?,?)", (
-                        claim, row["media_type"], row["tmdb_id"], row["season"], row["state"], row["updated"],
-                        canonical(row)))
+                    stored = {**row, "media_source": media_source, "media_id": media_id,
+                              "tmdb_id": tmdb_id if media_source == "themoviedb" else None}
+                    db.execute("INSERT OR REPLACE INTO mirror "
+                               "(id,media_type,tmdb_id,media_source,media_id,season,state,updated,data) "
+                               "VALUES (?,?,?,?,?,?,?,?,?)", (
+                        claim, row["media_type"], tmdb_id if media_source == "themoviedb" else 0,
+                        media_source, media_id, row["season"], row["state"], row["updated"],
+                        canonical(stored)))
                 previous = seq
             if previous != next_cursor:
                 raise SharedError("共享记录增量游标无效")
@@ -271,7 +332,8 @@ class SharedRecordCache:
 
     @staticmethod
     def _media_titles(db):
-        rows = db.execute("SELECT media_type, tmdb_id, json_extract(data, '$.media_title') AS media_title "
+        rows = db.execute("SELECT media_type, tmdb_id, media_source, media_id, "
+                          "json_extract(data, '$.media_title') AS media_title "
                           "FROM mirror WHERE media_title <> '' ORDER BY updated, id")
         return localized_record_titles(map(dict, rows))
 
@@ -280,25 +342,28 @@ def filter_records(db, candidates, rules, *, mirror=False, group=None, completed
     available, blocked, identities = [], [], {}
     for candidate in candidates:
         scope = (candidate["media_type"], candidate.get("season"))
-        query_ids = _identity_query_ids(candidate, rules)
-        query_scope = (*scope, tuple(query_ids) if query_ids is not None else None)
+        query_keys = _identity_query_keys(candidate, rules)
+        query_scope = (*scope, tuple(query_keys) if query_keys is not None else None)
         if query_scope not in identities:
             state = "state='completed'" if completed_only else "state!='released'"
             identity_filter = ""
-            if query_ids is not None:
-                identity_filter = f" AND tmdb_id IN ({','.join('?' for _ in query_ids)})"
+            params = []
+            if query_keys is not None:
+                identity_filter = " AND (" + " OR ".join(
+                    "(media_source=? AND media_id=?)" for _ in query_keys) + ")"
+                params = [value for key in query_keys for value in key]
             if mirror:
                 rows = db.execute(
                     f"SELECT data FROM mirror WHERE media_type=?{identity_filter} "
                     f"AND season IS ? AND {state}",
-                    (scope[0], *(query_ids or ()), scope[1]),
+                    (scope[0], *params, scope[1]),
                 )
                 identities[query_scope] = [json.loads(row["data"]) for row in rows]
             else:
                 rows = db.execute(
                     f"SELECT {','.join(RECORD_COLUMNS)} FROM claims "
                     f"WHERE group_id=? AND media_type=?{identity_filter} AND season IS ? AND {state}",
-                    (group, scope[0], *(query_ids or ()), scope[1]),
+                    (group, scope[0], *params, scope[1]),
                 )
                 identities[query_scope] = [display_record(row) for row in rows]
         hit = find_resource_conflict(candidate, identities[query_scope], rules)

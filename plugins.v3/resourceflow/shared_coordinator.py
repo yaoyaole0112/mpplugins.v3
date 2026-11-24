@@ -47,6 +47,7 @@ class CoordinatorStore:
                     id TEXT PRIMARY KEY, group_id TEXT NOT NULL, sender INTEGER NOT NULL,
                     instance TEXT NOT NULL, label TEXT NOT NULL, request_id TEXT NOT NULL,
                     file_id TEXT NOT NULL, media_type TEXT NOT NULL, tmdb_id INTEGER NOT NULL,
+                    media_source TEXT NOT NULL DEFAULT 'themoviedb', media_id TEXT NOT NULL DEFAULT '',
                     season INTEGER, episodes TEXT NOT NULL, specs TEXT NOT NULL,
                     title TEXT NOT NULL, media_title TEXT NOT NULL DEFAULT '', site_name TEXT NOT NULL DEFAULT '',
                     state TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
@@ -71,6 +72,13 @@ class CoordinatorStore:
                 db.execute("ALTER TABLE claims ADD COLUMN media_title TEXT NOT NULL DEFAULT ''")
             if "site_name" not in columns:
                 db.execute("ALTER TABLE claims ADD COLUMN site_name TEXT NOT NULL DEFAULT ''")
+            if "media_source" not in columns:
+                db.execute("ALTER TABLE claims ADD COLUMN media_source TEXT NOT NULL DEFAULT 'themoviedb'")
+            if "media_id" not in columns:
+                db.execute("ALTER TABLE claims ADD COLUMN media_id TEXT NOT NULL DEFAULT ''")
+            db.execute("UPDATE claims SET media_id=CAST(tmdb_id AS TEXT) WHERE media_id=''")
+            db.execute("CREATE INDEX IF NOT EXISTS claims_media_identity "
+                       "ON claims(group_id,media_type,media_source,media_id,season,state)")
             db.execute("INSERT OR IGNORE INTO meta VALUES ('authority_id', ?)", (canonical(uuid.uuid4().hex),))
             db.executescript("""
                 BEGIN IMMEDIATE;
@@ -83,7 +91,8 @@ class CoordinatorStore:
                 END;
                 DROP TRIGGER IF EXISTS claim_changes_update;
                 CREATE TRIGGER claim_changes_update AFTER UPDATE OF
-                    id,group_id,label,title,media_title,site_name,media_type,tmdb_id,season,episodes,specs,
+                    id,group_id,label,title,media_title,site_name,media_type,tmdb_id,media_source,media_id,
+                    season,episodes,specs,
                     state,created,updated,request_id,file_id ON claims BEGIN
                     INSERT OR REPLACE INTO claim_changes(group_id,claim_id)
                         SELECT OLD.group_id,OLD.id WHERE OLD.group_id!=NEW.group_id OR OLD.id!=NEW.id;
@@ -232,7 +241,8 @@ class CoordinatorStore:
             row = dict(
                 id=claim, group_id=self.group, sender=sender, instance=instance,
                 label=str(body.get("label") or instance[:8])[:80], request_id=request_id,
-                file_id=item["id"], media_type=item["media_type"], tmdb_id=item["tmdb_id"],
+                file_id=item["id"], media_type=item["media_type"], tmdb_id=item["tmdb_id"] or 0,
+                media_source=item["media_source"], media_id=item["media_id"],
                 season=item["season"], episodes=canonical(item["episodes"]), specs=canonical(item["specs"]),
                 title=item["title"], media_title=item["media_title"], site_name=site_name,
                 state="reserved", created=now, updated=now,
@@ -250,9 +260,14 @@ class CoordinatorStore:
         for row in pending:
             db.execute(
                 "INSERT INTO claims "
-                "(id,group_id,sender,instance,label,request_id,file_id,media_type,tmdb_id,season,episodes,specs,"
-                "title,media_title,site_name,state,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                tuple(row.values()),
+                "(id,group_id,sender,instance,label,request_id,file_id,media_type,tmdb_id,media_source,media_id,"
+                "season,episodes,specs,title,media_title,site_name,state,created,updated) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                tuple(row[key] for key in (
+                    "id", "group_id", "sender", "instance", "label", "request_id", "file_id", "media_type",
+                    "tmdb_id", "media_source", "media_id", "season", "episodes", "specs", "title",
+                    "media_title", "site_name", "state", "created", "updated",
+                )),
             )
         return {"ok": True, "approved": approved, "rejected": rejected,
                 "pack_rejected": False, "policy": self.policy, **self.authority(db=db)}
@@ -376,11 +391,13 @@ class CoordinatorStore:
                         raise SharedError("原占位关联字段无效")
                     db.execute(
                         "INSERT INTO claims "
-                        "(id,group_id,sender,instance,label,request_id,file_id,media_type,tmdb_id,season,episodes,specs,"
-                        "title,media_title,site_name,state,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "(id,group_id,sender,instance,label,request_id,file_id,media_type,tmdb_id,media_source,media_id,"
+                        "season,episodes,specs,title,media_title,site_name,state,created,updated) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (claim, self.group, sender, instance, str(body.get("label") or instance[:8])[:80],
                          source.get("original_request") or request_id, source.get("original_file") or item["id"],
-                         item["media_type"], item["tmdb_id"], item["season"], canonical(item["episodes"]),
+                         item["media_type"], item["tmdb_id"] or 0, item["media_source"], item["media_id"],
+                         item["season"], canonical(item["episodes"]),
                          canonical(item["specs"]), item["title"], item["media_title"],
                          site_label(source.get("site_name")), "completed",
                          completed_at, time.time()))
@@ -429,8 +446,19 @@ class CoordinatorStore:
             raise SharedError("文件编号无效")
         media_type = row.get("media_type")
         tmdb_id = row.get("tmdb_id")
-        if media_type not in {"tv", "movie"} or type(tmdb_id) is not int or not 0 < tmdb_id < 2**53:
+        media_source = str(row.get("media_source") or ("themoviedb" if tmdb_id else "")).lower()
+        if media_source in {"tmdb", "themoviedb"}:
+            media_source = "themoviedb"
+        media_id = str(row.get("media_id") or (tmdb_id if tmdb_id else "")).strip()
+        if media_type not in {"tv", "movie"} or media_source not in {"themoviedb", "douban"}:
             raise SharedError("未核验的媒体身份不能申请")
+        if (not media_id.isdecimal() or len(media_id) > 32 or int(media_id) <= 0
+                or media_source == "themoviedb" and (
+                    type(tmdb_id) is not int or not 0 < tmdb_id < 2**53 or str(tmdb_id) != media_id)
+                or media_source == "douban" and tmdb_id not in (None, 0)):
+            raise SharedError("媒体来源与编号无效")
+        if media_source == "douban":
+            tmdb_id = None
         season, episodes = row.get("season"), row.get("episodes")
         if media_type == "tv":
             if (type(season) is not int or not 0 <= season <= 1000 or not isinstance(episodes, list)
@@ -464,7 +492,8 @@ class CoordinatorStore:
         media_title = row.get("media_title", "")
         if not isinstance(media_title, str):
             raise SharedError("媒体显示名称无效")
-        return {"id": row["id"], "media_type": media_type, "tmdb_id": tmdb_id, "season": season,
+        return {"id": row["id"], "media_type": media_type, "tmdb_id": tmdb_id,
+                "media_source": media_source, "media_id": media_id, "season": season,
                 "episodes": episodes, "specs": specs, "title": str(row.get("title", ""))[:160],
                 "media_title": media_title[:120]}
 
@@ -502,13 +531,16 @@ class CoordinatorStore:
 
     def recent(self, limit=100):
         with self.connect() as db:
-            rows = db.execute("SELECT id,label,title,media_title,site_name,media_type,tmdb_id,season,episodes,specs,state,created,updated "
+            rows = db.execute("SELECT id,label,title,media_title,site_name,media_type,tmdb_id,media_source,media_id,"
+                              "season,episodes,specs,state,created,updated "
                               "FROM claims WHERE group_id=? ORDER BY updated DESC LIMIT ?",
                               (self.group, min(int(limit), 100))).fetchall()
         result = []
         for row in rows:
             item = dict(row)
             item["episodes"], item["specs"] = json.loads(row["episodes"]), normalize_specs(json.loads(row["specs"]))
+            if item["media_source"] == "douban" and item["tmdb_id"] == 0:
+                item["tmdb_id"] = None
             result.append(item)
         return result
 
@@ -543,7 +575,7 @@ class CoordinatorStore:
 
     def _media_titles(self, db):
         rows = db.execute(
-            "SELECT media_type,tmdb_id,media_title FROM claims "
+            "SELECT media_type,tmdb_id,media_source,media_id,media_title FROM claims "
             "WHERE group_id=? AND media_title<>'' ORDER BY updated, id", (self.group,))
         return localized_record_titles(map(dict, rows))
 

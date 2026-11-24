@@ -52,14 +52,15 @@ from app.plugins import _PluginBase
 from app.scheduler import Scheduler
 from app.schemas import MediaType, NotificationType, ServiceInfo, TorrentInfo
 from app.schemas.query import DownloadHistoryFilter, QueryPageRequest
-from app.schemas.types import EventType, SystemConfigKey
+from app.schemas.types import EventType, MediaSource, SystemConfigKey
 from app.sdk.network import RequestUtils
 from app.sdk.utilities import StringUtils
 
 from .models import ResourceFlowSettingsPayload, BrushTaskPayload, BrushTaskStatePayload
 from .shared_plugin import QB_FILE_RETRY_INTERVAL, SharedResourceMixin
 from .models import (
-    ChannelDedupSettingsPayload, ResourceLedgerDeletePayload, ResourcePendingApprovalPayload,
+    ChannelDedupSettingsPayload, DoubanIdentityResolvePayload, ResourceLedgerDeletePayload,
+    ResourcePendingApprovalPayload,
     migrated_identity_policy, task_spec_dedup_enabled,
 )
 from .resource_dedup import evidence_key, index_records, resource_slot
@@ -290,7 +291,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，通过 Tailscale 私网 HTTPS 进行共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.59"
+    plugin_version = "1.0.61"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -570,6 +571,13 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "资源长期账本及待核验身份",
+            },
+            {
+                "path": "/resource-ledger/pending/resolve-douban",
+                "endpoint": self.resolve_pending_douban_identity,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "将豆瓣条目映射为共享审批使用的 TMDB 身份",
             },
             {
                 "path": "/resource-ledger/pending/approve",
@@ -3689,7 +3697,13 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         with self._inflight_lock:
             self._refresh_inflight_identity_bindings()
             forgotten = getattr(self, "_resource_forgotten", {})
-            additions = {evidence_key(row): row for row in records if row and (row.get("tmdb_id") or row.get("title_key"))}
+            additions = {
+                evidence_key(row): row for row in records
+                if row and (row.get("tmdb_id") or (
+                    str(row.get("media_source") or "").lower().endswith("douban")
+                    and str(row.get("media_id") or "").isdecimal()
+                ) or row.get("title_key"))
+            }
             additions = {key: row for key, row in additions.items()
                          if key not in self._resource_ledger and key not in forgotten}
             if not additions:
@@ -3727,7 +3741,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             rejected_keys = getattr(self, "_identity_pending_rejected", {}) or {}
             items = [row for row in items if row["key"] not in rejected_keys]
             for row in items:
-                if row.get("media_type") == "movie" and row.get("tmdb_id"):
+                if (row.get("media_type") == "movie"
+                        and (row.get("tmdb_id") or str(row.get("media_source") or "").lower().endswith("douban"))):
                     continue
                 season, episodes = parse_episode(str(row.get("path") or "").replace("\\", "/").rsplit("/", 1)[-1])
                 if is_year_season(season) and episodes:
@@ -3815,6 +3830,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 return schemas.Response(success=False, message="待核验记录缺少文件路径，无法安全选择文件")
             override = {
                 "media_type": payload.media_type, "tmdb_id": payload.tmdb_id,
+                "media_source": payload.media_source, "media_id": payload.media_id,
                 "media_title": payload.media_title, "season": payload.season,
                 "episodes": list(payload.episodes), "specs": specs,
             }
@@ -3833,6 +3849,30 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             logger.error(f"提交人工核验下载任务失败：{type(err).__name__}")
             return schemas.Response(success=False, message="提交人工核验下载失败")
         return schemas.Response(success=True, message="已提交人工核验，完成后记录会自动刷新")
+
+    def resolve_pending_douban_identity(self, payload: DoubanIdentityResolvePayload) -> schemas.Response:
+        """Prefer a mapped TMDB identity, but keep the native Douban identity when unmapped."""
+        media_type = MediaType.TV if payload.media_type == "tv" else MediaType.MOVIE
+        try:
+            result = MediaChain().convert_media_identity(
+                target_source=MediaSource.TMDB,
+                media_source=MediaSource.Douban,
+                media_id=payload.douban_id,
+                mtype=media_type,
+            )
+            tmdb_id = (result.get("id") or result.get("tmdb_id")) if isinstance(result, dict) else None
+            if tmdb_id and 0 < int(tmdb_id) < 2**53:
+                return schemas.Response(success=True, data={
+                    "tmdb_id": int(tmdb_id), "media_source": "themoviedb",
+                    "media_id": str(int(tmdb_id)), "media_type": payload.media_type,
+                    "media_title": str(result.get("title") or payload.media_title or ""),
+                })
+        except Exception as err:
+            logger.info(f"豆瓣媒体身份映射未命中 Douban {payload.douban_id}：{type(err).__name__}")
+        return schemas.Response(success=True, data={
+            "tmdb_id": None, "media_source": "douban", "media_id": payload.douban_id,
+            "media_type": payload.media_type, "media_title": payload.media_title,
+        })
 
     def reject_pending_resource(self, payload: ResourceLedgerDeletePayload) -> schemas.Response:
         """Hide a rejected candidate and suppress the same key on future torrent scans."""
@@ -3913,9 +3953,14 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 if matched := self._match_mp_transfer_exclude(torrent.title, transfer_patterns):
                     raise ValueError(f"标题命中 MoviePilot 文件整理屏蔽词 {matched.pattern!r}")
                 # A date check belongs to the verified identity of this exact file.
+                row_source = row.get("media_source") or ("themoviedb" if row.get("tmdb_id") else "")
+                row_media_id = str(row.get("media_id") or row.get("tmdb_id") or "")
                 recent_screened = (
                     row.get("recent_screened") is True
-                    and all(row.get(field) == override.get(field) for field in ("media_type", "tmdb_id", "season"))
+                    and row.get("media_type") == override.get("media_type")
+                    and row_source == override.get("media_source")
+                    and row_media_id == str(override.get("media_id") or "")
+                    and row.get("season") == override.get("season")
                     and set(row.get("episodes") or []) == set(override.get("episodes") or [])
                 )
                 result = self.__download(
@@ -3974,7 +4019,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         return schemas.Response(success=True, message="已移除长期证据；当前频道和在队任务仍参与去重")
 
     def _verify_resource_identity(self, candidate: dict, title: str, task=None) -> bool:
-        if candidate.get("tmdb_id"):
+        if (candidate.get("tmdb_id")
+                or str(candidate.get("media_source") or "").lower().endswith("douban")
+                and str(candidate.get("media_id") or "").isdecimal()):
             return True
         movie = candidate.get("media_type") == "movie"
         bindings = getattr(self, "_channel_dedup_movie_identity_aliases" if movie
@@ -4929,6 +4976,20 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         value = str(getattr(media, "tmdb_id", None) or "")
         return int(value) if value.isascii() and value.isdecimal() and 0 < len(value) <= 12 and int(value) else None
 
+    @classmethod
+    def _mp_media_identity(cls, media):
+        tmdb_id = cls._mp_tmdb_id(media)
+        if tmdb_id:
+            return "themoviedb", str(tmdb_id), tmdb_id
+        source = getattr(media, "media_source", None)
+        source = str(getattr(source, "value", source) or "").lower()
+        douban_id = str(getattr(media, "douban_id", None) or "").strip()
+        if not douban_id and source.endswith("douban"):
+            douban_id = str(getattr(media, "media_id", None) or "").strip()
+        if douban_id.isdecimal() and 0 < int(douban_id) and len(douban_id) <= 32:
+            return "douban", douban_id, None
+        return None, None, None
+
     def _mp_release_recognition(self, title, cache):
         """Reuse the MoviePilot release lookup across all files in this pack."""
         if title not in cache:
@@ -4975,10 +5036,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             media = None
             error = f"MoviePilot 识别失败（{type(err).__name__}）"
         kind = self._mp_media_type(media)
-        if title_hint and (not kind or not self._mp_tmdb_id(media)):
+        if title_hint and (not kind or not self._mp_media_identity(media)[0]):
             hint_media = self._mp_release_recognition(title_hint, title_cache if title_cache is not None else {})
             hint_kind = self._mp_media_type(hint_media)
-            if (hint_kind and self._mp_tmdb_id(hint_media)
+            if (hint_kind and self._mp_media_identity(hint_media)[0]
                     and (not kind or kind == hint_kind)
                     and (not file_has_episode_marker or hint_kind == "tv")):
                 media, kind = hint_media, hint_kind
@@ -5017,14 +5078,16 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         )
         display_title = str(getattr(media, "title", None) or getattr(meta, "name", "") or "").strip()[:120]
         title_key = normalize_title(display_title)
-        tmdb_id = self._mp_tmdb_id(media)
+        media_source, media_id, tmdb_id = self._mp_media_identity(media)
         candidate.update(
             media_type=self._mp_media_type(media) or self._mp_media_type(meta),
-            tmdb_id=tmdb_id if not reason else None, season=season, episodes=episodes,
+            tmdb_id=tmdb_id if not reason else None,
+            media_source=media_source, media_id=media_id,
+            season=season, episodes=episodes,
             title_key=title_key, title_keys=[title_key] if title_key else [], media_title=display_title,
         )
-        if not reason and not tmdb_id:
-            reason = "MoviePilot 已识别媒体，但未返回 TMDB ID"
+        if not reason and not media_source:
+            reason = "MoviePilot 已识别媒体，但未返回 TMDB 或豆瓣身份"
         return candidate, media, reason
 
     @staticmethod
@@ -5598,13 +5661,24 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             return candidate
         media_type = override.get("media_type")
         tmdb_id = override.get("tmdb_id")
+        media_source = str(override.get("media_source") or ("themoviedb" if tmdb_id else "")).lower()
+        if media_source.endswith("tmdb"):
+            media_source = "themoviedb"
+        media_id = str(override.get("media_id") or (tmdb_id if tmdb_id else "")).strip()
         title = str(override.get("media_title") or "").strip()
-        if media_type not in {"movie", "tv"} or not isinstance(tmdb_id, int) or not title:
+        if (media_type not in {"movie", "tv"} or media_source not in {"themoviedb", "douban"}
+                or not media_id.isdecimal() or int(media_id) <= 0 or not title):
+            return candidate
+        if media_source == "themoviedb" and (
+                type(tmdb_id) is not int or not 0 < tmdb_id < 2**53 or str(tmdb_id) != media_id):
+            return candidate
+        if media_source == "douban" and tmdb_id is not None:
             return candidate
         candidate = dict(candidate or {})
         title_key = normalize_title(title)
         candidate.update({
             "path": path, "media_type": media_type, "tmdb_id": tmdb_id,
+            "media_source": media_source, "media_id": media_id,
             "title_key": title_key, "title_keys": sorted(set(candidate.get("title_keys") or []) | {title_key}),
         })
         if media_type == "movie":

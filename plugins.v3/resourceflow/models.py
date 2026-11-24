@@ -327,7 +327,7 @@ class ChannelDedupSettingsPayload(BaseModel):
                     continue
                 match = re.fullmatch(r"\s*(.+?)\s*[=＝]\s*(\d+)\s*", line)
                 if not match:
-                    raise ValueError("身份绑定格式为：名称或 TMDB 旧 ID = 规范 TMDB ID，每行一项")
+                    raise ValueError("身份绑定格式为：名称、TMDB 旧 ID 或 DOUBAN:豆瓣ID = 规范 TMDB ID，每行一项")
                 pairs.append((match.group(1), match.group(2)))
         elif isinstance(value, dict):
             pairs = list(value.items())
@@ -352,12 +352,15 @@ class ChannelDedupSettingsPayload(BaseModel):
                 raise ValueError("同一个身份绑定不能指向不同 TMDB ID")
             normalized[key] = tmdb_id
             result[name] = tmdb_id
-            id_match = re.fullmatch(r"(?i)TMDB\s*[:#]?\s*([1-9]\d*)", name)
+            id_match = re.fullmatch(r"(?i)(TMDB|DOUBAN)\s*[:#]?\s*([1-9]\d*)", name)
             if id_match:
-                source_id = int(id_match.group(1))
-                if source_id >= 2**53 or source_id == tmdb_id:
-                    raise ValueError("TMDB 身份映射的来源或目标 ID 无效")
-                id_aliases[source_id] = tmdb_id
+                source, raw_source_id = id_match.groups()
+                source_id = int(raw_source_id)
+                if (len(raw_source_id) > 32 or source == "TMDB"
+                        and (source_id >= 2**53 or source_id == tmdb_id)):
+                    raise ValueError("媒体身份映射的来源或目标 ID 无效")
+                if source == "TMDB":
+                    id_aliases[source_id] = tmdb_id
         for source_id in id_aliases:
             visited = set()
             current = source_id
@@ -412,17 +415,39 @@ class ResourceLedgerDeletePayload(BaseModel):
     key: str = Field(..., min_length=64, max_length=64, pattern=r"^[0-9a-f]+$")
 
 
+class DoubanIdentityResolvePayload(BaseModel):
+    douban_id: str = Field(..., min_length=1, max_length=32, pattern=r"^\d+$")
+    media_type: Literal["movie", "tv"] = "tv"
+    media_title: str = Field("", max_length=120)
+
+
 class ResourcePendingApprovalPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     key: str = Field(..., min_length=64, max_length=64, pattern=r"^[0-9a-f]+$")
-    tmdb_id: int = Field(..., gt=0)
+    tmdb_id: Optional[int] = Field(None, gt=0, lt=2**53)
+    media_source: Literal["themoviedb", "douban"] = "themoviedb"
+    media_id: Optional[str] = Field(None, min_length=1, max_length=32, pattern=r"^\d+$")
     media_title: str = Field(..., min_length=1, max_length=120)
     media_type: Literal["movie", "tv"] = "tv"
     season: Optional[int] = Field(None, ge=0, le=999)
     episodes: list[int] = Field(default_factory=list, max_length=500)
     specs: dict[str, Any] = Field(default_factory=dict)
     confirmed: bool = False
+
+    @model_validator(mode="after")
+    def validate_media_identity(self):
+        if self.media_id is None and self.tmdb_id is None:
+            raise ValueError("请提供 TMDB 或豆瓣媒体 ID")
+        if self.media_source == "themoviedb":
+            value = self.media_id or str(self.tmdb_id or "")
+            if not value.isdecimal() or not 0 < int(value) < 2**53:
+                raise ValueError("TMDB ID 无效")
+            self.media_id = value
+            self.tmdb_id = int(value)
+        elif not self.media_id:
+            raise ValueError("豆瓣 ID 无效")
+        return self
 
     @field_validator("media_title")
     @classmethod

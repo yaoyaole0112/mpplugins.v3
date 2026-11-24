@@ -220,7 +220,7 @@ class PluginHTTPSMigrationTest(TestCase):
         self.assertEqual(p._shared_retry_at, 0)
         p._shared_claims = {"r": {"request_id": "r", "phase": "queued", "approved": {"f": "claim"}}}
         with patch.object(p, "_https_shared_exchange", side_effect=[
-            {"authority_id": self.authority, "authority_version": 2},
+            {"authority_id": self.authority, "authority_version": 3},
             {"claims": [{"claim": "claim", "state": "queued"}]},
         ]):
             # Status rendering is covered by ordinary plugin tests.

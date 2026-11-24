@@ -208,10 +208,17 @@
         }
         return { success: true, data }
       }
-      if (yearSeason && path.startsWith('media/search?')) return [
-        { tmdb_id: 154770, title: '你好，星期六', type: '电视剧', year: '2022' },
-        { tmdb_id: 123, title: '同名电影', type: '电影', year: '2026' },
-      ]
+      if (yearSeason && path.startsWith('media/search?')) {
+        const params = new URLSearchParams(path.split('?')[1])
+        if (params.get('media_source') === 'douban') return [
+          { douban_id: '12345', media_source: 'douban', media_id: '12345',
+            title: '豆瓣剧集', type: '电视剧', year: '2022' },
+        ]
+        return [
+          { tmdb_id: 154770, title: '你好，星期六', type: '电视剧', year: '2022' },
+          { tmdb_id: 123, title: '同名电影', type: '电影', year: '2026' },
+        ]
+      }
       if (yearSeason && path.startsWith('media/seasons?')) return [
         { name: '2025', season_number: 4 }, { name: '2026', season_number: 5 },
       ]
@@ -247,6 +254,15 @@
       }
       if (path.endsWith('/resource-ledger/pending/approve')) {
         return { success: true, message: '已提交人工核验，完成后记录会自动刷新' }
+      }
+      if (path.endsWith('/resource-ledger/pending/resolve-douban')) {
+        if (body.douban_id !== '12345' || body.media_type !== 'tv' || body.media_title !== '你好，星期六') {
+          return { success: false, message: '无效的豆瓣身份' }
+        }
+        return { success: true, data: {
+          tmdb_id: null, media_source: 'douban', media_id: '12345',
+          media_type: 'tv', media_title: '你好，星期六',
+        } }
       }
       if (path.endsWith('/resource-ledger/pending/reject')) {
         window.resourceflowPendingRejected = true

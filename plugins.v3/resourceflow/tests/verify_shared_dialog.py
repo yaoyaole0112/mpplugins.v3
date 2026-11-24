@@ -798,7 +798,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             await manual.get_by_role("button", name="重新核验并提交", exact=True).click()
             await page.wait_for_function("""() => window.resourceflowRequests.some(item =>
                 item.method === 'POST' && item.path.endsWith('/resource-ledger/pending/approve')
-                && item.body.tmdb_id === 154770 && item.body.media_type === 'tv' && item.body.season === 5
+                && item.body.tmdb_id === 154770 && item.body.media_source === 'themoviedb'
+                && item.body.media_id === '154770' && item.body.media_type === 'tv' && item.body.season === 5
                 && item.body.episodes.length === 1 && item.body.episodes[0] === 45)""")
             await page.close()
         await browser.close()
@@ -869,6 +870,45 @@ async def verify_selection_settings(base_url, output, executable_path, host_css=
     print("Verified HTTPS-only settings and MoviePilot classification at 1440, 768, 390 and 320px")
 
 
+async def verify_pending_douban(base_url, executable_path):
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            headless=True, executable_path=executable_path, args=["--no-sandbox"],
+        )
+        page = await browser.new_page(viewport={"width": 390, "height": 900}, locale="zh-CN")
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(f"{base_url}/tests/channel-dedup-smoke.html?yearSeason=1")
+        await page.wait_for_function("window.resourceflowReady === true")
+        await page.get_by_role("button", name="共享下载审批", exact=True).click()
+        await page.get_by_role("tab", name="下载待核验", exact=True).click()
+        await page.get_by_role("button", name="核验下载", exact=True).click()
+        dialog = page.get_by_role("dialog").filter(has=page.get_by_text("人工核验并继续下载", exact=True))
+        await dialog.get_by_role("button", name="按名称查询媒体编号", exact=True).click()
+        await dialog.get_by_role("button", name="豆瓣", exact=True).click()
+        await dialog.get_by_text("剧集 · 2022 · 豆瓣 12345", exact=True).click()
+        await page.wait_for_timeout(500)
+        if await dialog.get_by_label("豆瓣 ID").input_value() != "12345":
+            raise AssertionError({
+                "dialog": await dialog.inner_text(),
+                "requests": await page.evaluate("window.resourceflowRequests"),
+                "errors": errors,
+            })
+        assert await dialog.get_by_label("中文媒体名").input_value() == "豆瓣剧集"
+        requests = await page.evaluate("window.resourceflowRequests")
+        assert any(item["method"] == "GET" and "media_source=douban" in item["path"]
+                   for item in requests), requests
+        assert any(item["method"] == "POST"
+                   and item["path"].endswith("/resource-ledger/pending/resolve-douban")
+                   and item["body"] == {
+                       "douban_id": "12345", "media_type": "tv", "media_title": "你好，星期六",
+                   }
+                   for item in requests), requests
+        assert not errors, errors
+        await browser.close()
+    print("Verified Douban-only search selection preserves its native ID in the manual confirmation form")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
@@ -876,6 +916,10 @@ if __name__ == "__main__":
     parser.add_argument("--executable-path", default="/opt/google/chrome/chrome")
     parser.add_argument("--host-css", type=Path)
     parser.add_argument("--settings-only", action="store_true")
+    parser.add_argument("--pending-douban-only", action="store_true")
     args = parser.parse_args()
-    check = verify_selection_settings if args.settings_only else verify
-    asyncio.run(check(args.base_url, args.output, args.executable_path, args.host_css))
+    if args.pending_douban_only:
+        asyncio.run(verify_pending_douban(args.base_url, args.executable_path))
+    else:
+        check = verify_selection_settings if args.settings_only else verify
+        asyncio.run(check(args.base_url, args.output, args.executable_path, args.host_css))

@@ -7,7 +7,7 @@ from .channel_dedup import normalize_specs
 from .shared_protocol import digest
 
 
-AUTHORITY_VERSION = 2
+AUTHORITY_VERSION = 3
 SITE_METADATA_VERSION = 1
 
 
@@ -23,10 +23,21 @@ def completion_rows(records, attributes):
         if not isinstance(record, dict) or record.get("evidence_source") != "completed":
             continue
         kind, identity = record.get("media_type", "tv"), record.get("tmdb_id")
+        media_source = str(record.get("media_source") or "").strip().lower()
+        if media_source.endswith("douban"):
+            media_source = "douban"
+            media_id = str(record.get("media_id") or record.get("douban_id") or "").strip()
+            valid_identity = media_id.isdecimal() and int(media_id) > 0 and len(media_id) <= 32
+            identity = int(media_id) if valid_identity else None
+        else:
+            media_source = "themoviedb"
+            media_id = str(record.get("media_id") or identity or "").strip()
+            valid_identity = (media_id.isdecimal() and int(media_id) == identity
+                              and type(identity) is int and 0 < identity < 2**53)
         season, episodes = record.get("season"), record.get("episodes")
         specs = record.get("specs") or {}
         if (record.get("identity_invalidated") or kind not in {"tv", "movie"}
-                or type(identity) is not int or not 0 < identity < 2**53
+                or not valid_identity
                 or not isinstance(specs, dict)
                 or any(specs.get(key) is None or specs.get(key) == "" for key in attributes)
                 or any(key in {"size", "fps"} and (
@@ -58,7 +69,10 @@ def completion_rows(records, attributes):
             if isinstance(resolution, str) and 0 < len(resolution) <= 80:
                 stored_specs["resolution"] = normalize_specs({"resolution": resolution})["resolution"]
             row = {
-                "media_type": kind, "tmdb_id": identity, "season": season if kind == "tv" else None,
+                "media_type": kind,
+                "tmdb_id": identity if media_source == "themoviedb" else None,
+                "media_source": media_source, "media_id": media_id,
+                "season": season if kind == "tv" else None,
                 "episodes": group,
                 "specs": stored_specs,
                 "title": str(record.get("title") or record.get("path") or record.get("file_key") or "")[-160:],

@@ -72,9 +72,11 @@ const pendingSearchQuery = ref('')
 const pendingSearchResults = ref([])
 const pendingSearchLoading = ref(false)
 const pendingSearchMessage = ref('')
+const pendingSearchSource = ref('themoviedb')
 let pendingSearchVersion = 0
 const pendingApprovalForm = ref({
-  tmdb_id: '', media_title: '', media_type: 'tv', season: 1, episodes: '', specs: {}, confirmed: false,
+  media_source: 'themoviedb', media_id: '', tmdb_id: null, media_title: '', media_type: 'tv',
+  season: 1, episodes: '', specs: {}, confirmed: false,
 })
 const resourceTypes = [
   { value: '', title: '全部类型' }, { value: 'tv', title: '剧集' }, { value: 'movie', title: '电影' },
@@ -443,8 +445,11 @@ function formatChannelTimestamp(value) {
 function openPendingApproval(row) {
   pendingApprovalRow.value = row
   pendingApprovalError.value = ''
+  pendingSearchSource.value = 'themoviedb'
   pendingApprovalForm.value = {
-    tmdb_id: row.tmdb_id || '',
+    media_source: row.media_source || 'themoviedb',
+    media_id: row.media_id || row.tmdb_id || '',
+    tmdb_id: row.tmdb_id || null,
     media_title: row.media_title || '',
     media_type: row.media_type === 'movie' ? 'movie' : 'tv',
     season: row.source_season && row.source_season === row.season ? '' : (row.season ?? 1),
@@ -462,6 +467,7 @@ watch(pendingApprovalDialog, (open) => {
     pendingSearchLoading.value = false
     pendingSearchResults.value = []
     pendingSearchMessage.value = ''
+    pendingSearchSource.value = 'themoviedb'
   }
 })
 
@@ -476,6 +482,12 @@ function togglePendingSearch() {
   searchPendingMedia()
 }
 
+function setPendingSearchSource(source) {
+  if (pendingSearchSource.value === source) return
+  pendingSearchSource.value = source
+  searchPendingMedia()
+}
+
 async function searchPendingMedia() {
   const version = ++pendingSearchVersion
   const title = (pendingSearchQuery.value || '').trim()
@@ -484,18 +496,23 @@ async function searchPendingMedia() {
   pendingSearchLoading.value = Boolean(title)
   if (!title) return
   try {
-    const params = new URLSearchParams({ title, type: 'media', media_source: 'themoviedb', count: '20' })
+    const params = new URLSearchParams({
+      title, type: 'media', media_source: pendingSearchSource.value, count: '20',
+    })
     const rows = unwrapResponse(await props.api.get(`media/search?${params}`))
     if (version !== pendingSearchVersion) return
     const unique = new Map()
     for (const row of Array.isArray(rows) ? rows : []) {
       const type = { 电视剧: 'tv', 剧集: 'tv', tv: 'tv', 电影: 'movie', movie: 'movie' }[row?.type]
-      const id = Number(row?.tmdb_id)
-      if (!type || !Number.isSafeInteger(id) || id <= 0 || !row.title) continue
+      const sourceId = pendingSearchSource.value === 'douban'
+        ? row?.douban_id ?? (String(row?.media_source || '').toLowerCase() === 'douban' ? row?.media_id : '')
+        : row?.tmdb_id ?? (String(row?.media_source || '').toLowerCase() === 'themoviedb' ? row?.media_id : '')
+      const id = String(sourceId ?? '').trim()
+      if (!type || !/^\d+$/.test(id) || id === '0' || !row.title) continue
       unique.set(`${type}:${id}`, { id, type, title: row.title, year: row.year })
     }
     pendingSearchResults.value = [...unique.values()]
-    if (!unique.size) pendingSearchMessage.value = '未找到匹配的 TMDB 媒体'
+    if (!unique.size) pendingSearchMessage.value = `未找到匹配的${pendingSearchSource.value === 'douban' ? '豆瓣' : 'TMDB'}媒体`
   } catch (err) {
     if (version === pendingSearchVersion) pendingSearchMessage.value = err?.message || '媒体搜索失败'
   } finally {
@@ -504,15 +521,53 @@ async function searchPendingMedia() {
 }
 
 async function selectPendingMedia(row) {
+  if (pendingSearchSource.value === 'douban') {
+    const version = ++pendingSearchVersion
+    pendingSearchLoading.value = true
+    pendingSearchMessage.value = ''
+    try {
+      const result = unwrapResponse(await props.api.post(
+        `${pluginBase.value}/resource-ledger/pending/resolve-douban`,
+        { douban_id: row.id, media_type: row.type, media_title: row.title },
+      ))
+      if (version !== pendingSearchVersion) return
+      await applyPendingMedia({
+        ...row,
+        id: result?.media_id || row.id,
+        media_source: result?.media_source || 'douban',
+        tmdb_id: result?.tmdb_id ?? null,
+        title: row.title || result?.media_title,
+      })
+    } catch (err) {
+      if (version === pendingSearchVersion) pendingSearchMessage.value = err?.message || '豆瓣身份映射失败'
+    } finally {
+      if (version === pendingSearchVersion) pendingSearchLoading.value = false
+    }
+    return
+  }
+  await applyPendingMedia({
+    ...row, media_source: 'themoviedb', tmdb_id: Number(row.id),
+  })
+}
+
+async function applyPendingMedia(row) {
   const form = pendingApprovalForm.value
-  Object.assign(form, { tmdb_id: row.id, media_title: row.title, media_type: row.type, confirmed: false })
+  Object.assign(form, {
+    media_source: row.media_source,
+    media_id: String(row.id),
+    tmdb_id: row.media_source === 'themoviedb' ? Number(row.id) : null,
+    media_title: row.title,
+    media_type: row.type,
+    confirmed: false,
+  })
   pendingSearchOpen.value = false
   const version = ++pendingSearchVersion
   pendingSearchLoading.value = false
   const pending = pendingApprovalRow.value
   const year = pending?.source_season
-  if (row.type !== 'tv' || !year) return
-  if (Number(pending.tmdb_id) === row.id && Number.isInteger(pending.season) && pending.season !== year) {
+  if (row.type !== 'tv' || !year || row.media_source !== 'themoviedb') return
+  if (String(pending.media_id || pending.tmdb_id || '') === String(row.id)
+      && Number.isInteger(pending.season) && pending.season !== year) {
     form.season = pending.season
     return
   }
@@ -521,7 +576,7 @@ async function selectPendingMedia(row) {
   try {
     const params = new URLSearchParams({ media_source: 'themoviedb', media_id: String(row.id) })
     const seasons = unwrapResponse(await props.api.get(`media/seasons?${params}`))
-    if (version !== pendingSearchVersion || form.season !== '' || Number(form.tmdb_id) !== row.id
+    if (version !== pendingSearchVersion || form.season !== '' || String(form.media_id) !== String(row.id)
         || form.media_type !== 'tv') return
     const candidates = new Set((Array.isArray(seasons) ? seasons : [])
       .filter(item => [`${year}`, `${year}年`].includes(String(item?.name || '').trim())
@@ -557,12 +612,15 @@ async function submitPendingApproval() {
   if (!row || pendingApprovalSaving.value) return
   const form = pendingApprovalForm.value
   const episodes = parseManualEpisodes(form.episodes)
-  const id = Number(form.tmdb_id)
+  const id = String(form.media_id ?? '').trim()
+  const tmdbId = form.media_source === 'themoviedb' ? Number(id) : null
   const season = Number(form.season)
-  if (!Number.isSafeInteger(id) || id <= 0 || !form.media_title.trim() || !form.confirmed
+  if (!/^\d{1,32}$/.test(id) || id === '0'
+    || form.media_source === 'themoviedb' && (!Number.isSafeInteger(tmdbId) || tmdbId <= 0)
+    || !form.media_title.trim() || !form.confirmed
     || (form.media_type === 'tv' && (String(form.season ?? '').trim() === ''
       || !Number.isInteger(season) || season < 0 || season > 999 || !episodes?.length))) {
-    pendingApprovalError.value = '请填写 TMDB ID、媒体名称及有效的季集号。'
+    pendingApprovalError.value = '请填写有效的媒体 ID、媒体名称及季集号。'
     return
   }
   pendingApprovalSaving.value = true
@@ -570,7 +628,9 @@ async function submitPendingApproval() {
   try {
     unwrapResponse(await props.api.post(`${pluginBase.value}/resource-ledger/pending/approve`, {
       key: row.key,
-      tmdb_id: id,
+      tmdb_id: tmdbId,
+      media_source: form.media_source,
+      media_id: id,
       media_title: form.media_title.trim(),
       media_type: form.media_type,
       season: form.media_type === 'tv' ? season : null,
@@ -629,7 +689,9 @@ function channelRecordEpisodes(record) {
 function resourceRecordIdentity(record) {
   const name = record.media_title || '中文名待识别'
   const episode = record.media_type === 'movie' ? '电影' : channelRecordEpisodes(record)
-  return [name, episode, record.tmdb_id ? `TMDB ${record.tmdb_id}` : '身份待确认'].join(' · ')
+  const source = record.media_source === 'douban' ? '豆瓣' : 'TMDB'
+  const id = record.media_id || record.tmdb_id
+  return [name, episode, id ? `${source} ${id}` : '身份待确认'].join(' · ')
 }
 
 function channelRecordSpecs(record) {
@@ -1285,13 +1347,13 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
             <h3><VIcon icon="mdi-tag-multiple-outline" />规范媒体身份绑定</h3>
             <div class="global-settings__grid global-settings__aliases">
               <VTextarea v-model="channelDedupDraft.identity_aliases" label="剧集身份绑定"
-                placeholder="剧名或别名 = 规范 TMDB ID&#10;TMDB 336181 = 336292" rows="2"
-                hint="可混合填写名称绑定和旧 TMDB ID 映射；共享审批启用后由协调端统一维护并下发"
+                placeholder="剧名或别名 = 规范 TMDB ID&#10;TMDB 336181 = 336292&#10;DOUBAN:12345 = 336292" rows="2"
+                hint="可填写名称、TMDB 旧 ID 或 DOUBAN:豆瓣ID 映射；共享审批启用后由协调端统一维护并下发"
                 persistent-hint :disabled="!settingsReady || (sharedRole.enabled && !sharedRole.host_coordinator)"
                 density="comfortable" auto-grow hide-details="auto" />
               <VTextarea v-model="channelDedupDraft.movie_identity_aliases" label="电影身份绑定"
-                placeholder="电影名或别名 = 规范 TMDB ID&#10;TMDB 123456 = 234567" rows="2"
-                hint="名称绑定和旧 TMDB ID 映射共用此处配置"
+                placeholder="电影名或别名 = 规范 TMDB ID&#10;TMDB 123456 = 234567&#10;DOUBAN:12345 = 234567" rows="2"
+                hint="名称、TMDB 旧 ID 和豆瓣 ID 映射共用此处配置"
                 persistent-hint :disabled="!settingsReady || (sharedRole.enabled && !sharedRole.host_coordinator)"
                 density="comfortable" auto-grow hide-details="auto" />
             </div>
@@ -1455,7 +1517,12 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <div class="pending-approval__grid">
             <VSelect v-model="pendingApprovalForm.media_type" label="媒体类型"
               :items="[{ title: '剧集', value: 'tv' }, { title: '电影', value: 'movie' }]" hide-details />
-            <VTextField v-model="pendingApprovalForm.tmdb_id" label="TMDB ID" inputmode="numeric" hide-details>
+            <VSelect v-model="pendingApprovalForm.media_source" label="身份来源"
+              :items="[{ title: 'TMDB', value: 'themoviedb' }, { title: '豆瓣', value: 'douban' }]"
+              hide-details />
+            <VTextField v-model="pendingApprovalForm.media_id"
+              :label="pendingApprovalForm.media_source === 'douban' ? '豆瓣 ID' : 'TMDB ID'"
+              inputmode="numeric" hide-details>
               <template #append-inner>
                 <VBtn icon="mdi-magnify" variant="text" size="small" type="button"
                   aria-label="按名称查询媒体编号" title="按名称查询媒体编号"
@@ -1463,6 +1530,14 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               </template>
             </VTextField>
             <div v-if="pendingSearchOpen" class="pending-approval__lookup">
+              <VBtnToggle :model-value="pendingSearchSource" mandatory density="comfortable" color="primary"
+                @update:model-value="setPendingSearchSource">
+                <VBtn value="themoviedb" size="small">TMDB</VBtn>
+                <VBtn value="douban" size="small">豆瓣</VBtn>
+              </VBtnToggle>
+              <p v-if="pendingSearchSource === 'douban'" class="text-caption text-medium-emphasis">
+                有 TMDB 映射时优先采用 TMDB；豆瓣独有条目会保留豆瓣 ID 进入共享审批。
+              </p>
               <form class="pending-approval__query" @submit.prevent="searchPendingMedia">
                 <VTextField v-model="pendingSearchQuery" label="搜索媒体名称" density="comfortable" clearable hide-details />
                 <VBtn type="submit" variant="tonal" color="primary" prepend-icon="mdi-magnify"
@@ -1473,7 +1548,8 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               </div>
               <VList v-if="pendingSearchResults.length" class="pending-approval__results" density="compact">
                 <VListItem v-for="row in pendingSearchResults" :key="`${row.type}:${row.id}`"
-                  :title="row.title" :subtitle="[row.type === 'tv' ? '剧集' : '电影', row.year, `TMDB ${row.id}`].filter(Boolean).join(' · ')"
+                  :title="row.title" :subtitle="[row.type === 'tv' ? '剧集' : '电影', row.year,
+                    `${pendingSearchSource === 'douban' ? '豆瓣' : 'TMDB'} ${row.id}`].filter(Boolean).join(' · ')"
                   @click="selectPendingMedia(row)" />
               </VList>
             </div>
@@ -1481,7 +1557,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               class="pending-approval__name" />
             <template v-if="pendingApprovalForm.media_type === 'tv'">
               <VTextField v-model="pendingApprovalForm.season" label="季号" type="number" min="0" max="999" hide-details
-                :placeholder="pendingApprovalRow?.source_season ? 'TMDB 标准季号' : undefined"
+                :placeholder="pendingApprovalRow?.source_season ? '标准季号' : undefined"
                 :loading="pendingSearchLoading && !pendingSearchOpen" />
               <VTextField v-model="pendingApprovalForm.episodes" label="集号" placeholder="1, 2-4" hide-details />
             </template>

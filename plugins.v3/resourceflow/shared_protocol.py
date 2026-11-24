@@ -10,7 +10,7 @@ import zlib
 
 
 VERSION = 1
-POLICY_VERSION = 2
+POLICY_VERSION = 3
 MAX_BYTES = 192 * 1024
 MAX_PARTS = 96
 PART_SIZE = 2700
@@ -132,12 +132,15 @@ def _identity_bindings(value):
 
     id_aliases = {}
     for name, tmdb_id in result.items():
-        match = re.fullmatch(r"(?i)TMDB\s*[:#]?\s*([1-9]\d*)", name)
+        match = re.fullmatch(r"(?i)(TMDB|DOUBAN)\s*[:#]?\s*([1-9]\d*)", name)
         if match:
-            source_id = int(match.group(1))
-            if source_id >= 2**53 or source_id == tmdb_id:
-                raise SharedError("TMDB 身份映射的来源或目标 ID 无效")
-            id_aliases[source_id] = tmdb_id
+            source, raw_source_id = match.groups()
+            source_id = int(raw_source_id)
+            if (len(raw_source_id) > 32 or source == "TMDB"
+                    and (source_id >= 2**53 or source_id == tmdb_id)):
+                raise SharedError("媒体身份映射的来源或目标 ID 无效")
+            if source == "TMDB":
+                id_aliases[source_id] = tmdb_id
     for source_id in id_aliases:
         visited = set()
         current = source_id

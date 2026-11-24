@@ -438,9 +438,19 @@ def same_release(candidate: dict, record: dict, attributes: Iterable[str], size_
     record_episodes = set(record.get("episodes") or [])
     if candidate_type == "tv" and (not candidate_episodes or not candidate_episodes.issubset(record_episodes)):
         return False
-    candidate_id, record_id = candidate.get("tmdb_id"), record.get("tmdb_id")
+    def identity(row):
+        source = str(row.get("media_source") or "").lower()
+        media_id = row.get("media_id")
+        if source.endswith("douban") and media_id and str(media_id).isdecimal():
+            return "douban", str(media_id)
+        value = row.get("tmdb_id")
+        if value:
+            return "themoviedb", str(value)
+        return None
+
+    candidate_id, record_id = identity(candidate), identity(record)
     if candidate_id and record_id:
-        if int(candidate_id) != int(record_id):
+        if candidate_id != record_id:
             return False
     else:
         candidate_names = set(candidate.get("title_keys") or []) | {candidate.get("title_key")}

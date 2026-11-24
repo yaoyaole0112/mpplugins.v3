@@ -87,6 +87,36 @@ class SharedRecordCacheTests(unittest.TestCase):
         self.assertEqual([item[0]["episodes"] for item in blocked], [[1]])
         self.assertEqual(self.sync()["changes"], [])
 
+    def test_douban_native_identity_reserves_syncs_and_deduplicates(self):
+        douban = {
+            **file_row(), "id": "1" * 24, "tmdb_id": None,
+            "media_source": "douban", "media_id": "9876543", "media_title": "豆瓣独有剧",
+        }
+        claim = self.reserve(douban)["approved"][0]["claim"]
+        self.sync()
+        cached, = self.cache.search(self.scope, "豆瓣 9876543", "", 1, 20, "tv")["items"]
+        self.assertEqual((cached["media_source"], cached["media_id"], cached["tmdb_id"]),
+                         ("douban", "9876543", None))
+        duplicate = {**douban, "id": "2" * 24}
+        available, blocked = self.match(duplicate)
+        self.assertEqual(available, [])
+        self.assertEqual(blocked[0][1]["id"], claim)
+        self.assertEqual(self.reserve(duplicate, instance="b" * 32, sender=22)["rejected"][0]["claim"], claim)
+
+    def test_douban_identity_can_be_bound_to_existing_tmdb_canonical_identity(self):
+        self.store = CoordinatorStore(
+            self.store.path, "resources", ["resolution"], 5, RULE_DEFAULTS,
+            {"DOUBAN:9876543": 123}, {},
+        )
+        douban = {**file_row(), "tmdb_id": None, "media_source": "douban", "media_id": "9876543"}
+        claim = self.reserve(douban)["approved"][0]["claim"]
+        self.sync()
+        tmdb = {**file_row(2), "tmdb_id": 123, "media_source": "themoviedb", "media_id": "123"}
+        available, blocked = self.match(tmdb)
+        self.assertEqual(available, [])
+        self.assertEqual(blocked[0][1]["id"], claim)
+        self.assertFalse(self.reserve(tmdb, instance="b" * 32, sender=22)["approved"])
+
     def test_release_and_delete_remove_cached_block(self):
         claim = self.reserve(file_row())["approved"][0]["claim"]
         self.sync()

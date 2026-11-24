@@ -1107,7 +1107,7 @@ class PluginSetupTests(unittest.TestCase):
         p = self.plugin
         expected = policy(["resolution"], 3, RULE_DEFAULTS, {"TMDB 336181": 336292})
         p._shared_exchange = Mock(return_value={"ok": True, "policy": expected, "user_id": 11,
-                                              "authority_version": 2, "authority_id": "f" * 32})
+                                              "authority_version": 3, "authority_id": "f" * 32})
         p._sync_shared_policy()
         self.assertEqual(p._local_shared_policy(), expected)
         self.assertEqual(p.update_config.call_args.args[0]["channel_dedup_pack_policy"], "partial")
@@ -1131,7 +1131,7 @@ class PluginSetupTests(unittest.TestCase):
         p._sync_shared_history = Mock()
         p._audit_shared_links = Mock()
         reply = {"ok": True, "policy": p._local_shared_policy(),
-                 "authority_version": 2, "authority_id": "f" * 32}
+                 "authority_version": 3, "authority_id": "f" * 32}
         p._shared_exchange = Mock(return_value=reply)
         with patch("resourceflow.shared_plugin.time.time", return_value=1000):
             p._sync_shared_policy()
@@ -1390,7 +1390,7 @@ class PluginSetupTests(unittest.TestCase):
         task = SimpleNamespace(id="task", spec_dedup_enabled=True, name="test")
         for path, media, reason in (
             ("Sunshine.(tmdbid=123).S01E05.1080p.mkv", None, "未确认电影或电视剧身份"),
-            ("Sunshine.S01E05.1080p.mkv", SimpleNamespace(type="电视剧"), "未返回 TMDB ID"),
+            ("Sunshine.S01E05.1080p.mkv", SimpleNamespace(type="电视剧"), "未返回 TMDB 或豆瓣身份"),
             ("Sunshine.S01E05.1080p.mkv", SimpleNamespace(type="电影", tmdb_id=123), "识别为电影"),
             ("Sunshine.S01E05-E07/Broadcast.1080p.mkv",
              SimpleNamespace(type="电视剧", tmdb_id=123), "单一季号和集号"),

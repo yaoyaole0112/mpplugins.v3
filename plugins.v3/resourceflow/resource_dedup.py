@@ -12,10 +12,14 @@ def resource_slot(record: dict, episode=None) -> tuple:
 
 
 def evidence_key(record: dict) -> str:
-    identity = (
-        ["tmdb", int(record["tmdb_id"])] if record.get("tmdb_id")
-        else ["title", normalize_title(record.get("title_key") or record.get("title")), record.get("year")]
-    )
+    source = str(record.get("media_source") or "").lower()
+    media_id = record.get("media_id")
+    if source.endswith("douban") and media_id and str(media_id).isdecimal():
+        identity = ["douban", str(media_id)]
+    elif record.get("tmdb_id"):
+        identity = ["tmdb", int(record["tmdb_id"])]
+    else:
+        identity = ["title", normalize_title(record.get("title_key") or record.get("title")), record.get("year")]
     payload = [
         record.get("media_type", "tv"), identity, record.get("season"), record.get("episodes"),
         record.get("specs") or {},

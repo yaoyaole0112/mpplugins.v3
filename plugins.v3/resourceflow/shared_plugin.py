@@ -122,7 +122,7 @@ class SharedResourceMixin:
     def _require_shared_authority(response):
         if (response.get("authority_version", 0) < AUTHORITY_VERSION
                 or not re.fullmatch(r"[a-f0-9]{32}", str(response.get("authority_id", "")))):
-            raise SharedError("请先将协调端更新至 1.0.17 或以上，再启用统一共享资源记录")
+            raise SharedError("请先将协调端更新至 1.0.61 或以上，再启用统一共享资源记录")
 
     def _shared_cache_scope(self, response):
         return digest([self._shared_legacy_namespace.lower(), self._shared_settings.group,
@@ -186,7 +186,9 @@ class SharedResourceMixin:
             episodes = ",".join(f"{episode:02d}" for episode in candidate["episodes"])
             scope = f"S{candidate['season']:02d}E{episodes}" if candidate["media_type"] == "tv" else "电影"
             reason = row.get("_match_reason", "同规格已占位或已完成")
-            logger.info(f"共享下载记录本地命中 {title}：TMDB {candidate['tmdb_id']} · {scope}；"
+            id_source = "豆瓣" if candidate.get("media_source") == "douban" else "TMDB"
+            media_id = candidate.get("media_id") or candidate.get("tmdb_id") or "?"
+            logger.info(f"共享下载记录本地命中 {title}：{id_source} {media_id} · {scope}；"
                         f"原因：{reason}；下载方：{row['label']}；状态 {row['state']}；"
                         f"占位 {row['id']}，不发送占位申请")
         return available, blocked
@@ -577,7 +579,8 @@ class SharedResourceMixin:
             "integrity_error": row.get("integrity_error", ""),
             "file_count": len(files), "completed": len(row.get("done") or []),
             "files": [{**{key: item.get(key) for key in
-                         ("id", "path", "media_type", "tmdb_id", "season", "episodes")},
+                         ("id", "path", "media_type", "tmdb_id", "media_source", "media_id",
+                          "season", "episodes")},
                        "media_title": record_display_title(item, titles or {}, row["title"]),
                        "specs": normalize_specs(item.get("specs") or {}),
                        "decision": "approved" if item.get("id") in approved else
@@ -918,8 +921,10 @@ class SharedResourceMixin:
                       f"；占位状态 {conflict.get('state', '')}" if conflict else "")
             if decision == "排除" and not conflict:
                 reason = "；原因 整包审批未获准，不添加该文件"
+            source = "豆瓣" if row.get("media_source") == "douban" else "TMDB"
+            media_id = row.get("media_id") or row.get("tmdb_id") or "?"
             logger.info(
-                f"共享审批文件{decision} {entry['title']}：TMDB {row['tmdb_id']} · {identity}；"
+                f"共享审批文件{decision} {entry['title']}：{source} {media_id} · {identity}；"
                 f"匹配规格 {specs}；任务 {entry['task_id']}；下载器 {entry['downloader']}；"
                 f"申请 {entry['request_id']}；Hash {entry['hash']}{reason}"
             )
@@ -1077,12 +1082,14 @@ class SharedResourceMixin:
         for candidate, (entry, _previous) in blocked:
             if candidate.get("media_type") == "tv":
                 identity = (
-                    f"TMDB {candidate.get('tmdb_id')} · "
+                    f"{'TMDB' if candidate.get('tmdb_id') else '豆瓣'} "
+                    f"{candidate.get('tmdb_id') or candidate.get('media_id')} · "
                     f"S{candidate.get('season'):02d}E"
                     + ",".join(f"{episode:02d}" for episode in candidate.get("episodes") or [])
                 )
             else:
-                identity = f"TMDB {candidate.get('tmdb_id')} · 电影"
+                identity = (f"{'TMDB' if candidate.get('tmdb_id') else '豆瓣'} "
+                            f"{candidate.get('tmdb_id') or candidate.get('media_id')} · 电影")
             specs = ", ".join(
                 f"{key}={candidate.get('specs', {}).get(key)}"
                 for key in getattr(self, "_channel_dedup_attributes", [])
@@ -1095,17 +1102,21 @@ class SharedResourceMixin:
 
     def _shared_media_title(self, candidate, cache, *, media=None):
         tmdb_id = candidate.get("tmdb_id")
-        if not tmdb_id:
-            return ""
-        cache_key = (candidate.get("media_type"), int(tmdb_id))
+        media_source = candidate.get("media_source") or "themoviedb"
+        media_id = candidate.get("media_id") or tmdb_id
+        if not media_id:
+            return candidate.get("media_title") or ""
+        cache_key = (candidate.get("media_type"), media_source, str(media_id))
         if cache_key in cache:
             return cache[cache_key]
         path = candidate.get("path") or ""
         meta = MetaInfo(path.rsplit("/", 1)[-1])
         media_title = ""
         try:
-            recognized_id = getattr(media, "tmdb_id", None)
-            if recognized_id and int(recognized_id) != int(tmdb_id):
+            recognized_source, recognized_media_id, recognized_tmdb_id = self._mp_media_identity(media)
+            if (recognized_source and (recognized_source != media_source
+                                       or str(recognized_media_id) != str(media_id))
+                    and not (media_source == "themoviedb" and recognized_tmdb_id == int(media_id))):
                 return ""
             names = [
                 getattr(media, field, "")
@@ -1119,7 +1130,7 @@ class SharedResourceMixin:
             )
         except Exception:
             pass
-        if not media_title:
+        if not media_title and tmdb_id:
             try:
                 media_type = {
                     "tv": schemas.MediaType.TV,
@@ -1252,7 +1263,7 @@ class SharedResourceMixin:
                 body = {"op": "reserve", "revision": current_policy["revision"],
                         "pack_policy": self._channel_dedup_pack_policy,
                         "files": [{**{key: row.get(key) for key in
-                                   ("id", "title", "media_type", "tmdb_id", "media_title",
+                                   ("id", "title", "media_type", "tmdb_id", "media_source", "media_id", "media_title",
                                     "season", "episodes")},
                                    "specs": {
                                        **{key: row["specs"].get(key) for key in current_policy["attributes"]},

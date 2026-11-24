@@ -16,6 +16,7 @@ TEXT_FIELDS = (
     "key", "id", "request_id", "title", "media_title", "path", "file_key", "title_key",
     "task_id", "task_name", "site_name", "downloader", "label", "owner", "download_owners", "reason", "error",
     "channel", "evidence_source",
+    "media_source", "media_id", "douban_id",
 )
 SPEC_FIELDS = ("resolution", "effects", "codec", "source", "fps", "size")
 CHINESE_TITLE = re.compile(r"[\u3400-\u9fff]")
@@ -25,8 +26,12 @@ CHINESE_TITLE_PREFIX = re.compile(r"^[\u3400-\u9fff][\u3400-\u9fff0-9 、，！�
 def record_title_key(row):
     if row.get("media_type") not in {"tv", "movie"}:
         return None
+    source = str(row.get("media_source") or "").lower()
+    if source.endswith("douban"):
+        identity = str(row.get("media_id") or row.get("douban_id") or "").strip()
+        return (row["media_type"], "douban", identity) if identity.isdecimal() and int(identity) > 0 else None
     try:
-        tmdb_id = int(row.get("tmdb_id"))
+        tmdb_id = int(row.get("media_id") or row.get("tmdb_id"))
     except (TypeError, ValueError):
         return None
     return (row["media_type"], tmdb_id) if tmdb_id > 0 else None
@@ -84,6 +89,8 @@ def _terms(row):
         values.append("资源已完成/已下载")
     if row.get("tmdb_id"):
         values.append(f"TMDB {row['tmdb_id']}")
+    elif str(row.get("media_source") or "").lower().endswith("douban") and row.get("media_id"):
+        values.append(f"豆瓣 {row['media_id']}")
     season = row.get("season")
     if season is not None:
         try:

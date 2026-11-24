@@ -99,6 +99,24 @@ class SharedAuthorityTests(unittest.TestCase):
         self.assertEqual(peer["rejected"][0]["state"], "completed")
         self.assertEqual(peer["rejected"][0]["owner"], "设备A")
 
+    def test_douban_only_completion_evidence_imports_and_blocks_peer(self):
+        douban_evidence = evidence(
+            tmdb_id=None, media_source="douban", media_id="9876543", media_title="豆瓣独有剧",
+        )
+        response, rows = self.import_rows([douban_evidence])
+        self.assertTrue(response["ok"], response)
+        self.assertEqual((rows[0]["media_source"], rows[0]["media_id"], rows[0]["tmdb_id"]),
+                         ("douban", "9876543", None))
+        duplicate = {
+            "id": "e" * 24, "title": "豆瓣独有剧 S01E21", "media_type": "tv",
+            "media_source": "douban", "media_id": "9876543", "tmdb_id": None,
+            "season": 1, "episodes": [21],
+            "specs": {"resolution": "2160p", "effects": "HDR"},
+        }
+        peer = self.send("reserve", 22, "b" * 32, files=[duplicate])
+        self.assertEqual(peer["approved"], [])
+        self.assertEqual(peer["rejected"][0]["claim"], response["imported"][0]["claim"])
+
     def test_normalizer_does_not_promote_channel_unverified_or_missing_selected_specs(self):
         rows, skipped = completion_rows([
             evidence(evidence_source="channel"), evidence(tmdb_id=None),
@@ -413,7 +431,7 @@ class SharedAuthorityTests(unittest.TestCase):
         p = self.make_plugin()
         with patch.object(p, "_https_shared_exchange") as rpc:
             rpc.return_value = {
-                "ok": True, "authority_version": 2, "authority_id": "f" * 32,
+                "ok": True, "authority_version": 3, "authority_id": "f" * 32,
                 "approved": [], "rejected": [],
             }
             with self.assertRaisesRegex(SharedError, "资源库已变更"):
