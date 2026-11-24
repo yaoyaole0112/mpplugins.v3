@@ -1,4 +1,5 @@
 import json
+import asyncio
 import unittest
 from datetime import date, datetime
 from types import SimpleNamespace
@@ -209,6 +210,27 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         self.assertFalse(ResourceFlow._recent_episode_title_matches(
             "完全不同的剧", "Still a Family", media
         ))
+
+    def test_air_date_search_tries_chinese_alias_and_episode_period_variants(self):
+        from app.agent.tools.impl.search_web import SearchWebTool
+        from resourceflow.recent_air_search import search_episode_evidence
+
+        row = {"url": "https://example.com/schedule", "title": "鲜味中国播出安排",
+               "snippet": "第4集于2026年11月20日播出"}
+        search_payload = {"total_results": 1, "results": [row]}
+        with patch.object(
+            SearchWebTool, "run", new=AsyncMock(return_value=json.dumps(search_payload))
+        ) as search:
+            results = asyncio.run(search_episode_evidence({
+                "title": "Xian Wei Zhong Guo", "aliases": ["鲜味中国"], "year": "2026",
+                "season": 1, "episodes": [4],
+            }))
+
+        queries = [call.kwargs["query"] for call in search.await_args_list]
+        self.assertTrue(any("鲜味中国" in query for query in queries))
+        self.assertTrue(any("第4期" in query for query in queries))
+        self.assertTrue(any("S01E04" in query for query in queries))
+        self.assertEqual(len(results), 1)
 
     def test_ai_calls_mp_local_search_when_builtin_is_unavailable_and_requires_real_evidence(self):
         from app.agent.llm.helper import LLMHelper

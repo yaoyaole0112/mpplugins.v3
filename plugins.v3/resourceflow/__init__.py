@@ -291,7 +291,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，通过 Tailscale 私网 HTTPS 进行共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.62"
+    plugin_version = "1.0.63"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -5219,12 +5219,14 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             self.save_data("recent_episode_evidence", cleaned)
 
     @staticmethod
-    def _recent_episode_title_matches(item_title: str, prompt_title: str, media: Any) -> bool:
+    def _recent_episode_title_matches(
+        item_title: str, prompt_title: str, media: Any, aliases: Optional[list] = None,
+    ) -> bool:
         """允许 AI 使用 TMDB 官方中文名/别名返回，避免中英文标题差异误丢结果。"""
         candidate = normalize_title(item_title)
         if not candidate:
             return True
-        aliases = {
+        known_aliases = {
             str(prompt_title or ""),
             str(getattr(media, "title", "") or ""),
             str(getattr(media, "en_title", "") or ""),
@@ -5234,8 +5236,11 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             str(getattr(media, "tw_title", "") or ""),
             str(getattr(media, "sg_title", "") or ""),
         }
-        aliases.update(str(name) for name in (getattr(media, "names", None) or []))
-        normalized_aliases = {normalize_title(value) for value in aliases if normalize_title(value)}
+        known_aliases.update(str(name) for name in (getattr(media, "names", None) or []))
+        known_aliases.update(str(name) for name in (aliases or []))
+        normalized_aliases = {
+            normalize_title(value) for value in known_aliases if normalize_title(value)
+        }
         if candidate in normalized_aliases:
             return True
         # A title may be returned with a season suffix; strip it only after
@@ -5274,6 +5279,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         media: Any,
         season: int,
         episodes: list,
+        aliases: Optional[list] = None,
     ) -> Dict[int, dict]:
         """沿用 MP 联网设置，且只对能从实际搜索证据复核的日期自动放行。"""
         if not getattr(self, "_recent_missing_date_ai_enabled", False):
@@ -5286,9 +5292,22 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             tmdb_id = getattr(media, "tmdb_id", None)
             prompt = {
                 "title": str(getattr(media, "title", "") or title)[:160],
+                "aliases": list(dict.fromkeys(
+                    str(value).strip()[:160]
+                    for value in (
+                        *(aliases or ()),
+                        getattr(media, "en_title", ""),
+                        getattr(media, "original_title", ""),
+                        getattr(media, "original_name", ""),
+                        title,
+                        *(getattr(media, "names", None) or ()),
+                    )
+                    if isinstance(value, str) and value.strip()
+                ))[:6],
                 "tmdb_id": int(tmdb_id) if tmdb_id else None,
                 "season": int(season),
                 "episodes": [int(number) for number in episodes],
+                "year": str(getattr(media, "year", "") or "")[:4],
                 "today": datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat(),
             }
 
@@ -5328,6 +5347,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                             response = await invoke(model.bind_tools(tools))
                             citations = cited_source_keys(response)
                             native_results = self._parse_recent_ai_response(response.content)
+                            logger.info(
+                                f"最近播出日期 AI 搜索 {title} S{season:02d}："
+                                f"模型返回 {len(native_results)} 条候选，引用 {len(citations)} 个来源"
+                            )
                         except Exception as err:
                             logger.info(
                                 f"最近播出日期 AI 核验 {title}：服务端搜索失败，改用 MP 本地搜索（{type(err).__name__}）"
@@ -5344,6 +5367,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     except Exception as err:
                         logger.info(f"最近播出日期 MP 本地搜索失败 {title}：{type(err).__name__}")
                         rows = []
+                    logger.info(
+                        f"最近播出日期证据汇总 {title} S{season:02d}："
+                        f"联网模型候选 {len(native_results)} 条，MP 搜索证据 {len(rows)} 条"
+                    )
                     if not rows:
                         return native_results, rows, citations
                     try:
@@ -5371,27 +5398,37 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         wanted = set(int(number) for number in episodes)
         names = {normalize_title(name) for name in (
             prompt["title"], getattr(media, "en_title", "") or "",
-            getattr(media, "original_title", "") or "", *(getattr(media, "names", None) or ()),
+            getattr(media, "original_title", "") or "", *prompt["aliases"],
+            *(getattr(media, "names", None) or ()),
         ) if isinstance(name, str) and len(normalize_title(name)) >= 2}
         conflicts = set()
+        rejected = {"title": 0, "identity": 0, "episode_or_date": 0, "source": 0}
         for item in results:
             if not isinstance(item, dict):
                 continue
             item_title = str(item.get("title") or "").strip()
-            if not item_title or not self._recent_episode_title_matches(item_title, prompt["title"], media):
+            if not item_title or not self._recent_episode_title_matches(
+                item_title, prompt["title"], media, prompt["aliases"]
+            ):
+                rejected["title"] += 1
                 continue
             try:
                 if int(item["season"]) != season or (tmdb_id and int(item["tmdb_id"]) != int(tmdb_id)):
+                    rejected["identity"] += 1
                     continue
                 number = int(item.get("episode"))
             except (KeyError, TypeError, ValueError):
+                rejected["identity"] += 1
                 continue
             value = str(item.get("date") or "")
             parsed = release_date(value)
             confidence = str(item.get("confidence") or "low").lower()
             source = str(item.get("source") or "").strip()
-            if (number not in wanted or not parsed or confidence not in {"high", "medium", "low"}
-                    or not has_retrieved_source(source, evidence, citations)):
+            if number not in wanted or not parsed or confidence not in {"high", "medium", "low"}:
+                rejected["episode_or_date"] += 1
+                continue
+            if not has_retrieved_source(source, evidence, citations):
+                rejected["source"] += 1
                 continue
             if confidence == "high" and not supports_official_date(
                 item, evidence, parsed, number, season,
@@ -5415,6 +5452,13 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             logger.info(
                 f"最近播出日期 AI 核验 {title} S{season:02d}E{number:02d}："
                 f"{value}（{confidence}，{source}）"
+            )
+        if results and not dates:
+            logger.info(
+                f"最近播出日期 AI 候选未采纳 {title} S{season:02d}："
+                f"总候选 {len(results)} 条，剧名不匹配 {rejected['title']} 条，"
+                f"身份不匹配 {rejected['identity']} 条，集号/日期无效 {rejected['episode_or_date']} 条，"
+                f"无实际来源引用 {rejected['source']} 条"
             )
         return dates
 
@@ -5616,7 +5660,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     )
                     still_missing = sorted(number for number in eligible_missing if not dates.get(number))
                     if still_missing:
-                        ai_dates = self._recent_episode_ai_dates(title, media, season, still_missing)
+                        search_aliases = [name, *(Path(row[0].replace("\\", "/")).stem for row in files)]
+                        ai_dates = self._recent_episode_ai_dates(
+                            title, media, season, still_missing, aliases=search_aliases
+                        )
                         for number, result in ai_dates.items():
                             if result["confidence"] == "high":
                                 dates[number] = result["date"]

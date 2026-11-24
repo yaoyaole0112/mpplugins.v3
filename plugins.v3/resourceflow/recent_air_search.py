@@ -76,25 +76,68 @@ def supports_official_date(item, rows, value, episode, season, title_matches):
 
 
 async def search_episode_evidence(prompt):
-    """Run the same bounded, proxy-aware local search tool as the MoviePilot agent."""
+    """Run a few bounded query variants through MoviePilot's configured web search."""
     from app.agent.tools.impl.search_web import SearchWebTool
+    from app.runtime.log import logger
 
     tool = SearchWebTool(session_id="resourceflow-air-dates", user_id="resourceflow")
-    episodes = " ".join(f"第{number}集" for number in prompt["episodes"][:4])
-    query = f'{prompt["title"]} 第{prompt["season"]}季 官方 追剧日历 播出时间'
-    raw = await asyncio.wait_for(tool.run(
-        query=f"{query} {episodes}", max_results=10,
-    ), timeout=25)
-    try:
-        results = json.loads(raw)
-    except (TypeError, ValueError):
+    title = str(prompt.get("title") or "").strip()
+    aliases = [
+        str(value).strip() for value in prompt.get("aliases", [])
+        if str(value).strip() and str(value).strip().casefold() != title.casefold()
+    ]
+    if len(aliases) > 1:
+        aliases = aliases[:5]
+    episodes = [int(number) for number in prompt.get("episodes", [])[:4]]
+    if not title or not episodes:
         return []
-    if not isinstance(results, list):
-        return []
-    return [{
-        key: str(row.get(key) or "")[:limit]
-        for key, limit in (("url", 800), ("title", 250), ("snippet", 850))
-    } for row in results[:10] if isinstance(row, dict) and _source_key(row.get("url"))]
+
+    tags = " ".join(f"第{number}集" for number in episodes)
+    periods = " ".join(f"第{number}期" for number in episodes)
+    season_tags = " ".join(f"S{int(prompt['season']):02d}E{number:02d}" for number in episodes)
+    year = str(prompt.get("year") or "").strip()
+    year_part = f" {year}" if year else ""
+    queries = [
+        f"{title} {tags} 播出日期{year_part}",
+        f"{title} {periods} 更新 播出时间{year_part}",
+    ]
+    for alias in aliases[:2]:
+        queries.append(f"{alias} {tags} 播出日期{year_part}")
+    queries.append(f"{title} {season_tags} 播出日期{year_part}")
+
+    async def search(query):
+        try:
+            raw = await asyncio.wait_for(tool.run(query=query, max_results=8), timeout=20)
+        except Exception as err:
+            logger.info(f"最近播出日期搜索失败，查询“{query}”：{type(err).__name__}")
+            return []
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            status = str(raw or "").replace("\n", " ")[:120]
+            logger.info(f"最近播出日期搜索无结构化结果，查询“{query}”：{status or '空响应'}")
+            return []
+        results = payload.get("results") if isinstance(payload, dict) else payload
+        if not isinstance(results, list):
+            logger.info(f"最近播出日期搜索返回格式异常，查询“{query}”：{type(payload).__name__}")
+            return []
+        rows = [{
+            key: str(row.get(key) or "")[:limit]
+            for key, limit in (("url", 800), ("title", 250), ("snippet", 850))
+        } for row in results[:8] if isinstance(row, dict) and _source_key(row.get("url"))]
+        logger.info(f"最近播出日期搜索查询“{query}”：返回 {len(rows)} 条")
+        return rows
+
+    batches = await asyncio.gather(*(search(query) for query in queries))
+    merged, seen = [], set()
+    for rows in batches:
+        for row in rows:
+            key = (_source_key(row.get("url")), _evidence_text(row.get("title")), _evidence_text(row.get("snippet")))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(row)
+    return merged[:20]
 
 
 def cited_source_keys(response):
