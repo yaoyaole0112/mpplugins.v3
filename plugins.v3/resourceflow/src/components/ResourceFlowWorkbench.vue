@@ -115,7 +115,8 @@ const settingsDraft = ref({
   global_proxy_delete: false,
   global_torrent_blacklist_enabled: false,
   global_delete_size_range: null,
-  shared_download_timeout_minutes: 30,
+  shared_slow_download_minutes: 15,
+  shared_min_download_kib_s: 100,
   recent_missing_date_tolerance_days: 7,
   recent_missing_date_ai_enabled: false,
 })
@@ -194,7 +195,8 @@ async function loadStatus({ preserveSelection = true, loadDetail = true, resetDr
       global_proxy_delete: Boolean(status.value.global_proxy_delete),
       global_torrent_blacklist_enabled: Boolean(status.value.global_torrent_blacklist_enabled),
       global_delete_size_range: status.value.global_delete_size_range ?? null,
-      shared_download_timeout_minutes: Number(status.value.shared_download_timeout_minutes || 30),
+      shared_slow_download_minutes: Number(status.value.shared_slow_download_minutes ?? 15),
+      shared_min_download_kib_s: Number(status.value.shared_min_download_kib_s ?? 100),
       recent_missing_date_tolerance_days: Number(status.value.recent_missing_date_tolerance_days || 7),
       recent_missing_date_ai_enabled: Boolean(status.value.recent_missing_date_ai_enabled),
     }
@@ -1294,10 +1296,12 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 label="全局总上传带宽（KB/s）" density="comfortable" clearable hide-details />
               <VTextField v-model.number="settingsDraft.global_maxdlspeed" type="number" min="0"
                 label="全局总下载带宽（KB/s）" density="comfortable" clearable hide-details />
-              <VTextField v-model.number="settingsDraft.shared_download_timeout_minutes" type="number"
-                min="1" max="1440" step="1" suffix="分钟" label="共享下载超时"
-                hint="获批下载开始后仍有文件未完成时，停止并移除 QB 任务；已下载数据保留"
-                persistent-hint density="comfortable" hide-details="auto" />
+              <VTextField v-model.number="settingsDraft.shared_slow_download_minutes" type="number"
+                min="1" max="1440" step="1" suffix="分钟" label="共享下载低速观察时长"
+                density="comfortable" hide-details="auto" />
+              <VTextField v-model.number="settingsDraft.shared_min_download_kib_s" type="number"
+                min="0" max="1048576" step="1" suffix="KiB/s" label="共享下载最低平均速度"
+                density="comfortable" hide-details="auto" />
             </div>
           </section>
           <section class="global-settings__section">

@@ -800,20 +800,28 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(self.events, ["update", "start"])
         self.assertEqual(self.entry()["phase"], "queued")
 
-    def test_timeout_releases_only_unfinished_approved_files_and_keeps_completed_claim(self):
+    def observe_speed(self, seconds, downloaded=0, state="stalledDL", files=None):
+        owned = [{"tags": self.plugin._shared_tag(self.entry()), "state": state, "downloaded": downloaded}]
+        if files is None:
+            files = [{"index": 0, "name": "Show.S01E01.mkv", "size": 10, "progress": 0.4, "priority": 1}]
+        with patch("resourceflow.shared_plugin.time.monotonic", return_value=seconds):
+            self.reconcile(torrents=owned, files=files)
+
+    def test_slow_download_releases_only_unfinished_files_and_keeps_completed_claim(self):
+        self.plugin._shared_slow_download_minutes = 1
         self.add()
         second_id = file_row(2, 2)["id"]
         self.entry()["approved"][second_id] = "c" * 32
-        self.entry()["download_started_at"] = time.time() - 1801
         snapshot = [
             {"index": 0, "name": "Show.S01E01.mkv", "size": 10, "progress": 1, "priority": 1},
             {"index": 1, "name": "Show.S01E02.mkv", "size": 10, "progress": 0.4, "priority": 1},
         ]
-        owned = [{"tags": self.plugin._shared_tag(self.entry())}]
+        self.observe_speed(100, files=snapshot)
+        owned = [{"tags": self.plugin._shared_tag(self.entry()), "state": "stalledDL", "downloaded": 0}]
         self.downloader.get_torrents.side_effect = [(owned, None), ([], None)]
         self.downloader.stop_torrents.return_value = True
         self.downloader.delete_torrents.return_value = True
-        self.reconcile(torrents=owned, files=snapshot)
+        self.observe_speed(160, files=snapshot)
 
         updates = [call.args[1] for call in self.plugin._shared_exchange.call_args_list
                    if call.args[1]["op"] == "update"]
@@ -826,45 +834,67 @@ class AdmissionTests(unittest.TestCase):
         self.assertTrue(release_body["confirmed_absent"])
         self.assertEqual(self.entry()["phase"], "released")
         self.assertIn("数据保留", self.entry()["error"])
+        self.assertIn("平均下载速度 0.0 KiB/s", self.entry()["error"])
         self.downloader.delete_torrents.assert_called_once_with(ids="a" * 40, delete_file=False)
 
-    def test_timeout_does_not_cancel_before_30_minutes(self):
+    def test_long_running_download_is_kept_until_window_is_complete_and_when_average_meets_threshold(self):
+        self.plugin._shared_slow_download_minutes = 1
         self.add()
-        self.entry()["download_started_at"] = time.time() - 1799
-        owned = [{"tags": self.plugin._shared_tag(self.entry())}]
-        snapshot = [{"index": 0, "name": "Show.S01E01.mkv", "size": 10,
-                     "progress": 0.4, "priority": 1}]
-        self.reconcile(torrents=owned, files=snapshot)
+        self.entry()["download_started_at"] = time.time() - 3600
+        self.observe_speed(100, downloaded=200)
+        self.observe_speed(159, downloaded=200)
+        self.observe_speed(160, downloaded=200 + 60 * 100 * 1024)
+        self.observe_speed(220, downloaded=200 + 2 * 60 * 110 * 1024)
         self.downloader.stop_torrents.assert_not_called()
         self.downloader.delete_torrents.assert_not_called()
         self.assertEqual(self.entry()["phase"], "queued")
 
-    def test_timeout_uses_configured_minutes(self):
-        self.plugin._shared_download_timeout_minutes = 1
+    def test_pause_queue_counter_reset_and_observation_gap_restart_window(self):
+        self.plugin._shared_slow_download_minutes = 1
         self.add()
-        self.entry()["download_started_at"] = time.time() - 61
-        owned = [{"tags": self.plugin._shared_tag(self.entry())}]
-        snapshot = [{"index": 0, "name": "Show.S01E01.mkv", "size": 10,
-                     "progress": 0.4, "priority": 1}]
-        self.downloader.get_torrents.side_effect = [(owned, None), ([], None)]
+        self.observe_speed(100, downloaded=1000)
+        self.observe_speed(120, downloaded=1000, state="queuedDL")
+        self.observe_speed(150, downloaded=1000)
+        self.observe_speed(170, downloaded=1000, state="stoppedDL")
+        self.observe_speed(210, downloaded=1000)
+        self.observe_speed(280, downloaded=0)
+        self.observe_speed(500, downloaded=0)
+        self.observe_speed(530, downloaded=0)
+        self.downloader.stop_torrents.assert_not_called()
+        self.assertEqual(self.entry()["phase"], "queued")
+
+    def test_zero_threshold_disables_cleanup_and_old_pending_timeout_is_not_replayed(self):
+        self.plugin._shared_slow_download_minutes = 1
+        self.plugin._shared_min_download_kib_s = 0
+        self.add()
+        self.entry().update(phase="timeout_cancel_pending", timeout_cancel_pending=True,
+                            timeout_at=50, timeout_reason="旧版超时")
+        self.observe_speed(100)
+        self.observe_speed(160)
+        self.downloader.stop_torrents.assert_not_called()
+        self.assertEqual(self.entry()["phase"], "queued")
+        self.assertNotIn("timeout_cancel_pending", self.entry())
+
+    def test_slow_download_checks_for_completion_after_stop_before_delete(self):
+        self.plugin._shared_slow_download_minutes = 1
+        self.add()
+        self.observe_speed(100)
+        partial = {"index": 0, "name": "Show.S01E01.mkv", "size": 10, "progress": 0.4, "priority": 1}
+        self.downloader.get_files.side_effect = [[partial], [{**partial, "progress": 1}]]
+        self.downloader.stop_torrents.return_value = True
+        self.observe_speed(160)
+        self.downloader.delete_torrents.assert_not_called()
+        self.assertEqual(self.entry()["phase"], "completed")
+
+    def test_slow_download_keeps_claims_when_task_removal_is_not_confirmed(self):
+        self.plugin._shared_slow_download_minutes = 1
+        self.add()
+        self.observe_speed(100)
         self.downloader.stop_torrents.return_value = True
         self.downloader.delete_torrents.return_value = True
-        self.reconcile(torrents=owned, files=snapshot)
-        self.assertEqual(self.entry()["phase"], "released")
-        self.assertIn("超过 1 分钟", self.entry()["error"])
-
-    def test_timeout_keeps_claims_when_task_removal_is_not_confirmed(self):
-        self.add()
-        self.entry()["download_started_at"] = time.time() - 1801
-        owned = [{"tags": self.plugin._shared_tag(self.entry())}]
-        snapshot = [{"index": 0, "name": "Show.S01E01.mkv", "size": 10,
-                     "progress": 0.4, "priority": 1}]
-        self.downloader.get_torrents.return_value = (owned, None)
-        self.downloader.stop_torrents.return_value = True
-        self.downloader.delete_torrents.return_value = False
         with self.assertRaisesRegex(SharedError, "继续保留占位"):
-            self.reconcile(torrents=owned, files=snapshot)
-        self.assertEqual(self.entry()["phase"], "timeout_cancel_pending")
+            self.observe_speed(160)
+        self.assertEqual(self.entry()["phase"], "slow_cancel_pending")
         self.assertFalse(any(
             row["state"] == "released"
             for call in self.plugin._shared_exchange.call_args_list

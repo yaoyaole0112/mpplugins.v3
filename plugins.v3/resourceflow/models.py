@@ -224,6 +224,12 @@ class BrushTaskStatePayload(BaseModel):
     enabled: bool
 
 
+SHARED_SLOW_DOWNLOAD_DEFAULTS = {
+    "shared_slow_download_minutes": 15,
+    "shared_min_download_kib_s": 100,
+}
+
+
 class ResourceFlowSettingsPayload(BaseModel):
     """
     刷流插件全局设置请求模型
@@ -238,7 +244,8 @@ class ResourceFlowSettingsPayload(BaseModel):
     global_proxy_delete: bool = False
     global_torrent_blacklist_enabled: bool = False
     global_delete_size_range: Optional[str] = None
-    shared_download_timeout_minutes: int = Field(30, ge=1, le=1440)
+    shared_slow_download_minutes: int = Field(SHARED_SLOW_DOWNLOAD_DEFAULTS["shared_slow_download_minutes"], ge=1, le=1440)
+    shared_min_download_kib_s: int = Field(SHARED_SLOW_DOWNLOAD_DEFAULTS["shared_min_download_kib_s"], ge=0, le=1048576)
     recent_missing_date_tolerance_days: int = Field(7, ge=1, le=30)
     recent_missing_date_ai_enabled: bool = False
 

@@ -52,16 +52,18 @@ let searchTimer
 let recordsGeneration = 0
 const phaseNames = {
   requesting: '等待审批', reserved: '已获准', adding: '暂停添加中', awaiting_start: '等待入队确认',
-  awaiting_qb_files: '等待 QB 文件清单', timeout_cancel_pending: '超时取消中',
+  awaiting_qb_files: '等待 QB 文件清单', timeout_cancel_pending: '超时取消中', slow_cancel_pending: '低速处理中',
   queued: '已入队', completed: '已完成', released: '已释放', rejected: '已过滤', uncertain: '待核验',
 }
 const phaseColors = {
   requesting: 'info', reserved: 'success', adding: 'info', awaiting_start: 'warning', awaiting_qb_files: 'warning',
-  queued: 'info', timeout_cancel_pending: 'warning', completed: 'success', released: 'secondary', rejected: 'error', uncertain: 'warning',
+  queued: 'info', timeout_cancel_pending: 'warning', slow_cancel_pending: 'warning',
+  completed: 'success', released: 'secondary', rejected: 'error', uncertain: 'warning',
 }
 const phaseIcons = {
   requesting: 'mdi-clock-outline', reserved: 'mdi-check-circle-outline', adding: 'mdi-clock-outline',
   awaiting_start: 'mdi-clock-outline', awaiting_qb_files: 'mdi-clock-outline', timeout_cancel_pending: 'mdi-clock-alert-outline',
+  slow_cancel_pending: 'mdi-speedometer-slow',
   queued: 'mdi-check-circle-outline', completed: 'mdi-check-circle-outline',
   released: 'mdi-minus-circle-outline', rejected: 'mdi-close-circle-outline', uncertain: 'mdi-help-circle-outline',
 }
@@ -297,11 +299,12 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
         <div class="shared-settings__meta text-caption">
           <span>申请时间：{{ timestamp(row.created) }}</span><span>最近更新：{{ timestamp(row.updated) }}</span>
           <span v-if="row.download_started_at">下载开始：{{ timestamp(row.download_started_at) }}</span>
+          <span v-if="row.slow_cancel_at">低速处理：{{ timestamp(row.slow_cancel_at) }}</span>
           <span v-if="row.timeout_at">超时处理：{{ timestamp(row.timeout_at) }}</span>
           <span>站点：{{ row.site_name || '-' }}</span>
         </div>
         <p v-if="row.error && row.phase !== 'rejected'"
-          :class="row.timeout_reason ? 'shared-settings__timeout-note text-body-2' : 'shared-settings__error text-body-2'">
+          :class="row.timeout_reason || row.slow_cancel_reason ? 'shared-settings__cleanup-note text-body-2' : 'shared-settings__error text-body-2'">
           {{ row.error }}
         </p>
         <p v-if="row.integrity_error" class="shared-settings__error text-body-2">{{ row.integrity_error }}</p>
@@ -416,13 +419,9 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 .shared-settings__claim-owner { color: rgba(var(--v-theme-on-surface), 0.78); }
 .shared-settings__meta, .shared-settings__id { color: rgba(var(--v-theme-on-surface), 0.72); }
 .shared-settings__error { margin: 0; color: rgb(var(--v-theme-error)); }
-.shared-settings__timeout-note {
+.shared-settings__cleanup-note {
   margin: 0;
   color: rgba(var(--v-theme-on-surface), 0.68);
-  background: rgba(var(--v-theme-on-surface), 0.045);
-  border-inline-start: 3px solid rgba(var(--v-theme-on-surface), 0.24);
-  border-radius: 4px;
-  padding: 6px 10px;
 }
 .shared-settings__reason { margin: 0; }
 .shared-settings__id { font-family: monospace; }

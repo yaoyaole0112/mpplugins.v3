@@ -17,7 +17,7 @@ from app.modules.themoviedb.tmdbapi import TmdbApi
 
 from .active_dedup import download_files, paths_agree
 from .channel_dedup import normalize_specs, parse_torrent_files
-from .models import ChannelDedupSettingsPayload
+from .models import SHARED_SLOW_DOWNLOAD_DEFAULTS, ChannelDedupSettingsPayload
 from .record_search import (
     filename_display_title, matches_media_type, matches_owner, matches_record, record_display_title,
     record_owners, record_page, record_title_key,
@@ -37,16 +37,46 @@ QB_FILE_RETRY_INTERVAL = 3
 QB_FILE_RETRY_ATTEMPTS = 3
 QB_FILE_RETRY_WINDOW = 18
 QB_FILE_WAIT_MESSAGE = "QB 文件清单暂不可用，选集核验后自动启动"
+QB_SPEED_OBSERVATION_MAX_GAP = 180
+QB_SPEED_OBSERVATION_STATES = {"downloading", "stalleddl", "forceddl"}
 
 
 class SharedResourceMixin:
-    def _shared_download_timeout_seconds(self):
-        """返回共享下载未完成超时秒数，兼容未迁移的旧配置。"""
-        try:
-            minutes = int(getattr(self, "_shared_download_timeout_minutes", 30) or 30)
-        except (TypeError, ValueError):
-            minutes = 30
-        return max(1, min(minutes, 1440)) * 60
+    def _shared_slow_download_reason(self, entry, torrent):
+        """Measure actual bytes transferred over a complete, regularly observed window."""
+        minutes = getattr(self, "_shared_slow_download_minutes",
+                          SHARED_SLOW_DOWNLOAD_DEFAULTS["shared_slow_download_minutes"])
+        minimum = getattr(self, "_shared_min_download_kib_s",
+                          SHARED_SLOW_DOWNLOAD_DEFAULTS["shared_min_download_kib_s"])
+        observed = getattr(self, "_shared_speed_observations", None)
+        if observed is None:
+            observed = self._shared_speed_observations = {}
+        request_id = entry["request_id"]
+        downloaded = torrent.get("downloaded") if isinstance(torrent, dict) else None
+        state = str(torrent.get("state") or "").casefold() if isinstance(torrent, dict) else ""
+        if not minimum or state not in QB_SPEED_OBSERVATION_STATES or type(downloaded) is not int or downloaded < 0:
+            observed.pop(request_id, None)
+            return None
+        now = time.monotonic()
+        policy = (minutes, minimum)
+        previous = observed.get(request_id)
+        old_policy, started, initial_bytes, last_seen, last_bytes = previous or (None, now, downloaded, now, downloaded)
+        if (policy != old_policy or downloaded < last_bytes
+                or not 0 <= now - last_seen <= QB_SPEED_OBSERVATION_MAX_GAP):
+            observed[request_id] = (policy, now, downloaded, now, downloaded)
+            return None
+        elapsed = now - started
+        if elapsed < minutes * 60:
+            observed[request_id] = (policy, started, initial_bytes, now, downloaded)
+            return None
+        observed[request_id] = (policy, now, downloaded, now, downloaded)
+        average = (downloaded - initial_bytes) / elapsed / 1024
+        if average < minimum:
+            return f"观察 {elapsed / 60:.1f} 分钟，平均下载速度 {average:.1f} KiB/s，低于阈值 {minimum} KiB/s"
+        return None
+
+    def _forget_shared_speed_observation(self, entry):
+        getattr(self, "_shared_speed_observations", {}).pop(entry.get("request_id"), None)
 
     _shared_legacy_namespace = ""
     _shared_cache = None
@@ -421,6 +451,7 @@ class SharedResourceMixin:
         self._shared_instance_id = instance_id if isinstance(instance_id, str) and len(instance_id) == 32 else uuid.uuid4().hex
         self._shared_settings = SharedSettingsPayload.model_validate(raw)
         self._shared_claims = self.get_data("shared_claims") or {}
+        self._shared_speed_observations = {}
         self._shared_history = self.get_data("shared_history") or {}
         self._shared_completed_outbox = self.get_data("shared_completed_outbox") or {}
         self._shared_integrity_error = ""
@@ -573,6 +604,7 @@ class SharedResourceMixin:
             "downloader": row.get("downloader"), "created": row.get("created"), "updated": row.get("updated"),
             "download_started_at": row.get("download_started_at"),
             "timeout_at": row.get("timeout_at"), "timeout_reason": row.get("timeout_reason", ""),
+            "slow_cancel_at": row.get("slow_cancel_at"), "slow_cancel_reason": row.get("slow_cancel_reason", ""),
             "error": "" if row["phase"] == "rejected" and any(item.get("reason") for item in decisions.values())
             else row.get("error", ""),
             "approved": len(approved), "rejected": rejected,
@@ -866,6 +898,8 @@ class SharedResourceMixin:
     def _shared_phase(self, entry, phase, **changes):
         if phase == "completed":
             entry.setdefault("completed_at", time.time())
+        if phase != "queued":
+            self._forget_shared_speed_observation(entry)
         entry.update(phase=phase, updated=time.time(), **changes)
         self._save_shared()
 
@@ -1038,7 +1072,7 @@ class SharedResourceMixin:
         """Local claims that still represent an active or unresolved download."""
         return {
             "requesting", "reserved", "adding", "awaiting_start", "queued",
-            "uncertain", "starting",
+            "uncertain", "starting", "slow_cancel_pending", "timeout_cancel_pending",
         }
 
     def _shared_local_file_is_blocking(self, entry, file_id):
@@ -1502,11 +1536,13 @@ class SharedResourceMixin:
         try:
             self._reconcile_shared_entry(entry)
         except SharedError as error:
+            self._forget_shared_speed_observation(entry)
             if getattr(error, "definitive", False) and entry["phase"] == "requesting":
                 entry["phase"] = "rejected"
             if str(error) != QB_FILE_WAIT_MESSAGE or entry.get("error") != QB_FILE_WAIT_MESSAGE:
                 self._shared_phase(entry, entry["phase"], error=str(error))
         except Exception:
+            self._forget_shared_speed_observation(entry)
             self._shared_phase(entry, entry["phase"], error="下载器或共享状态待核验")
 
     def reconcile_shared_claims(self):
@@ -1565,8 +1601,9 @@ class SharedResourceMixin:
         if error:
             raise SharedError("下载器查询失败，保留共享占位")
         if not torrents:
-            if entry.get("timeout_cancel_pending"):
-                self._release_timed_out_claims(entry)
+            self._forget_shared_speed_observation(entry)
+            if entry["phase"] == "slow_cancel_pending" or entry.get("timeout_cancel_pending"):
+                self._release_cancelled_download(entry)
                 return
             if entry.get("attempted_add") and time.time() - entry["created"] < 300:
                 return
@@ -1589,8 +1626,11 @@ class SharedResourceMixin:
         self._remove_legacy_shared_tag(entry, task, downloader, kind, torrents[0])
         approved = [row for row in entry["files"] if row["id"] in entry["approved"]]
         if entry.get("timeout_cancel_pending"):
-            self._cancel_timed_out_download(entry, downloader)
-            return
+            # Do not finish an old elapsed-time deletion if the task is still present.
+            entry.pop("timeout_cancel_pending", None)
+            entry.pop("timeout_at", None)
+            entry.pop("timeout_reason", None)
+            self._shared_phase(entry, "queued", error="")
         if entry["phase"] in {"adding", "uncertain", "reserved", "requesting"} or entry.get("selection_pending"):
             if not task or not self._shared_task_ready(task, entry["hash"]):
                 raise SharedError("原任务不可运行，保留暂停任务等待核验")
@@ -1605,6 +1645,28 @@ class SharedResourceMixin:
                 raise SharedError(message)
             entry["selection_pending"] = False
             self._shared_phase(entry, "awaiting_start", qb_file_list_pending=False, error="")
+        if self._shared_check_approved_files(entry, downloader, kind, approved):
+            return
+        if entry["phase"] == "awaiting_start":
+            if not task:
+                raise SharedError("原任务已不存在，保持暂停等待核验")
+            self._start_shared_download(entry, task, downloader)
+            return
+        if entry["phase"] == "slow_cancel_pending":
+            if kind != "qbittorrent":
+                raise SharedError("低速任务下载器类型已变更；继续保留占位")
+            self._cancel_slow_download(entry, downloader, approved)
+            return
+        if kind == "qbittorrent" and entry["phase"] == "queued":
+            reason = self._shared_slow_download_reason(entry, torrents[0])
+            if reason:
+                self._shared_phase(entry, "slow_cancel_pending", slow_cancel_at=time.time(),
+                                   slow_cancel_reason=reason, error=f"{reason}；等待确认任务移除")
+                self._cancel_slow_download(entry, downloader, approved)
+                return
+        self._shared_phase(entry, "queued", error="")
+
+    def _shared_check_approved_files(self, entry, downloader, kind, approved):
         snapshot = download_files(downloader.get_files(entry["hash"]), kind)
         if not snapshot:
             raise SharedError("无法核验实际文件选择，保留共享占位")
@@ -1622,54 +1684,30 @@ class SharedResourceMixin:
         if completed:
             self._shared_update(entry, [{"claim": entry["approved"][file_id], "state": "completed"}
                                         for file_id in completed])
-            entry["done"] = list(set(entry.get("done", [])) | set(completed))
-            self._save_shared()
         if len(entry.get("done", [])) == len(approved):
             self._shared_phase(entry, "completed", error="")
-        else:
-            if entry["phase"] == "queued" and not entry.get("download_started_at"):
-                # Existing queued claims get a fresh, durable observation baseline after upgrade.
-                entry["download_started_at"] = time.time()
-                self._save_shared()
-            if (entry.get("download_started_at")
-                    and time.time() - entry["download_started_at"] >= self._shared_download_timeout_seconds()):
-                entry["timeout_cancel_pending"] = True
-                entry["timeout_at"] = time.time()
-                timeout_minutes = self._shared_download_timeout_seconds() // 60
-                entry["timeout_reason"] = f"下载超过 {timeout_minutes} 分钟，按获批文件判断后取消未完成部分"
-                self._shared_phase(entry, "timeout_cancel_pending",
-                                   error="超时取消进行中；确认下载器任务停止前不会释放占位")
-                self._cancel_timed_out_download(entry, downloader)
-            elif entry["phase"] == "awaiting_start":
-                task = self._task_configs.get(entry["task_id"])
-                if not task:
-                    raise SharedError("原任务已不存在，保持暂停等待核验")
-                self._start_shared_download(entry, task, downloader)
-            else:
-                self._shared_phase(entry, "queued", error="")
+            return True
+        return False
 
-    def _cancel_timed_out_download(self, entry, downloader):
-        """Stop and remove the owned torrent without data before releasing unfinished claims."""
-        timeout_minutes = self._shared_download_timeout_seconds() // 60
+    def _cancel_slow_download(self, entry, downloader, approved):
+        """Stop the owned task, then check for files that finished before removing it."""
         if not downloader.stop_torrents(entry["hash"]):
-            raise SharedError(f"下载超过 {timeout_minutes} 分钟，但下载器未确认停止；继续保留占位")
+            raise SharedError("低速任务未确认停止；继续保留占位")
+        if self._shared_check_approved_files(entry, downloader, "qbittorrent", approved):
+            return
         if not downloader.delete_torrents(ids=entry["hash"], delete_file=False):
-            raise SharedError(f"下载超过 {timeout_minutes} 分钟，但下载器未确认移除任务；继续保留占位")
+            raise SharedError("低速任务未确认移除；继续保留占位")
         torrents, error = downloader.get_torrents(ids=[entry["hash"]])
         if error or torrents:
-            raise SharedError("超时任务移除状态无法确认；继续保留占位")
-        self._release_timed_out_claims(entry)
+            raise SharedError("低速任务移除状态无法确认；继续保留占位")
+        self._release_cancelled_download(entry)
 
-    def _release_timed_out_claims(self, entry):
+    def _release_cancelled_download(self, entry):
         remaining = [claim for file_id, claim in entry.get("approved", {}).items()
                      if file_id not in entry.get("done", [])]
         if remaining:
             self._shared_update(entry, [{"claim": claim, "state": "released"} for claim in remaining],
                                 absent=True)
-        self._shared_phase(
-            entry, "released",
-            error=(
-                f"超过 {self._shared_download_timeout_seconds() // 60} 分钟仍有获批集未完成；"
-                "下载任务已移除但数据保留，未完成集占位已释放"
-            ),
-        )
+        reason = entry.get("slow_cancel_reason") or entry.get("timeout_reason") or "旧版超时处理"
+        entry.pop("timeout_cancel_pending", None)
+        self._shared_phase(entry, "released", error=f"{reason}；下载任务已移除但数据保留，未完成文件占位已释放")
