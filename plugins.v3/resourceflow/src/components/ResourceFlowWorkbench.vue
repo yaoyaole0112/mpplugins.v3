@@ -92,6 +92,7 @@ const settingsDraft = ref({
   global_maxdlspeed: null,
   global_proxy_delete: false,
   global_torrent_blacklist_enabled: false,
+  domestic_drama_4k_only: false,
   global_delete_size_range: null,
   shared_slow_download_minutes: 15,
   shared_min_download_kib_s: 100,
@@ -173,6 +174,7 @@ async function loadStatus({ preserveSelection = true, loadDetail = true, resetDr
       global_maxdlspeed: status.value.global_maxdlspeed ?? null,
       global_proxy_delete: Boolean(status.value.global_proxy_delete),
       global_torrent_blacklist_enabled: Boolean(status.value.global_torrent_blacklist_enabled),
+      domestic_drama_4k_only: Boolean(status.value.domestic_drama_4k_only),
       global_delete_size_range: status.value.global_delete_size_range ?? null,
       shared_slow_download_minutes: Number(status.value.shared_slow_download_minutes ?? 15),
       shared_min_download_kib_s: Number(status.value.shared_min_download_kib_s ?? 100),
@@ -989,9 +991,13 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           </section>
           <section class="global-settings__section">
             <h3><VIcon icon="mdi-filter-check-outline" />选种与去重</h3>
-            <VSwitch v-model="settingsDraft.global_torrent_blacklist_enabled" label="种子黑名单"
-              hint="开启共享下载审批的任务站点之间，按完整种子名称排重"
-              persistent-hint color="primary" density="compact" inset />
+            <div class="global-settings__grid">
+              <VSwitch v-model="settingsDraft.global_torrent_blacklist_enabled" label="种子黑名单"
+                hint="开启共享下载审批的任务站点之间，按完整种子名称排重"
+                persistent-hint color="primary" density="compact" inset />
+              <VSwitch v-model="settingsDraft.domestic_drama_4k_only" label="国产剧仅下载 4K 及以上"
+                color="primary" density="compact" hide-details inset />
+            </div>
             <template v-if="sharedHost">
               <h4 class="text-subtitle-2">共享规格去重字段</h4>
               <div class="global-settings__spec-row">

@@ -723,10 +723,11 @@ async def verify_selection_settings(base_url, output, executable_path, host_css=
             await page.get_by_role("option", name="排除过滤", exact=True).wait_for()
             await page.get_by_role("option", name="执行下载", exact=True).click()
             await dialog.get_by_label("种子黑名单", exact=True).check()
+            await dialog.get_by_label("国产剧仅下载 4K 及以上", exact=True).check()
             await dialog.get_by_role("button", name="保存设置", exact=True).click()
             await page.wait_for_function("""window.resourceflowRequests.some(item =>
                 item.path === 'plugin/ResourceFlow/settings' && item.body.global_torrent_blacklist_enabled
-                && item.body.douban_only_action === 'download')""")
+                && item.body.douban_only_action === 'download' && item.body.domestic_drama_4k_only === true)""")
             assert await page.evaluate("""window.resourceflowRequests.filter(item =>
                 item.path.endsWith('/shared/settings')).every(item =>
                 !['bot_username', 'bot_token', 'allowed_users', 'transport'].some(key => key in item.body))""")

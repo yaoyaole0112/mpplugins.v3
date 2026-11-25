@@ -8,7 +8,7 @@ from app.application.classification.reference import ClassificationCategoryResol
 from app.schemas import MediaType
 
 from resourceflow import ResourceFlow, BrushTaskConfig
-from resourceflow.models import BrushTaskPayload
+from resourceflow.models import BrushTaskPayload, ResourceFlowSettingsPayload
 
 
 class DownloadTypeTest(unittest.TestCase):
@@ -117,6 +117,34 @@ class DownloadTypeTest(unittest.TestCase):
         self.assertEqual(self.plugin._download_category_filter(
             BrushTaskConfig({"download_categories": [], "download_types": ["movie"]}), torrent, {}),
             (True, ""))
+
+    def test_domestic_drama_requires_moviepilot_tv_category_and_reuses_recognition(self):
+        torrent = SimpleNamespace(title="Example S01E01", category="国产剧", description="")
+        task = BrushTaskConfig({"download_categories": ["tv:剧集/国产剧/古装"]})
+        self.assertFalse(ResourceFlowSettingsPayload().domestic_drama_4k_only)
+        for kind, path, expected in [
+            (MediaType.TV, ["剧集", "国产剧", "古装"], True),
+            (MediaType.TV, ["国产动画"], False),
+            (MediaType.TV, ["国产剧场"], False),
+            (MediaType.MOVIE, ["国产剧"], False),
+            (MediaType.TV, [], False),
+        ]:
+            with self.subTest(kind=kind, path=path):
+                self.plugin._mp_recognize_media.reset_mock()
+                media = SimpleNamespace(type=kind)
+                self.plugin._mp_recognize_media.return_value = media
+                resolver = Mock()
+                resolver.resolve_media.return_value = SimpleNamespace(path=path, state="resolved")
+                with patch("resourceflow.classify_media", return_value=media), patch(
+                    "resourceflow.classification_category_resolver_snapshot", return_value=resolver,
+                ):
+                    cache = {}
+                    self.assertEqual(self.plugin._download_category_filter(task, torrent, cache)[0], expected)
+                    self.assertEqual(self.plugin._is_domestic_drama(
+                        self.plugin._mp_download_category(torrent, cache),
+                    ), expected)
+                self.plugin._mp_recognize_media.assert_called_once()
+                resolver.resolve_media.assert_called_once_with(media)
 
     def test_filter_stops_unselected_type_before_downloader(self):
         task = BrushTaskConfig({"name": "test", "download_types": ["anime"], "except_subscribe": False})

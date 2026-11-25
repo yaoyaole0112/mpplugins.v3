@@ -243,6 +243,7 @@ class ResourceFlowSettingsPayload(BaseModel):
     global_maxdlspeed: Optional[float] = Field(None, gt=0)
     global_proxy_delete: bool = False
     global_torrent_blacklist_enabled: bool = False
+    domestic_drama_4k_only: bool = False
     global_delete_size_range: Optional[str] = None
     shared_slow_download_minutes: int = Field(SHARED_SLOW_DOWNLOAD_DEFAULTS["shared_slow_download_minutes"], ge=1, le=1440)
     shared_min_download_kib_s: int = Field(SHARED_SLOW_DOWNLOAD_DEFAULTS["shared_min_download_kib_s"], ge=0, le=1048576)

@@ -386,6 +386,114 @@ class DownloadDedupTest(unittest.TestCase):
         self.plugin._mp_recognize_media.assert_not_called()
         self.assertFalse(self.downloader.add_torrent.call_args.kwargs["is_paused"])
 
+    def test_domestic_4k_only_filters_before_recent_rule_or_shared_approval(self):
+        self.plugin._domestic_drama_4k_only = True
+        self.plugin._mp_download_category = Mock(return_value="tv:国产剧")
+        self.plugin._add_prechecked_torrent = Mock()
+        self.task.recent_episodes_only = True
+        for resolution in ("1080p", "720p", "1440p", ""):
+            with self.subTest(resolution=resolution):
+                content = make_torrent([(f"Show.S01E01.{resolution}.mkv", 1000)])
+                self.download_chain.return_value.download_torrent.return_value = (content, None, None)
+                self.assertIsNone(self.download())
+        self.plugin._recent_episode_file_selection.assert_not_called()
+        self.plugin._add_prechecked_torrent.assert_not_called()
+        self.assert_existing_task_untouched()
+
+    def test_domestic_4k_mixed_pack_passes_only_high_resolution_to_recent_and_approval(self):
+        self.plugin._domestic_drama_4k_only = True
+        self.plugin._mp_download_category = Mock(return_value="tv:国产剧")
+        self.plugin._shared_settings = SharedSettingsPayload(enabled=True)
+        self.task.spec_dedup_enabled = True
+        self.task.recent_episodes_only = True
+        self.torrent.title = "Show S01 4K"
+        low, high, higher, unknown = (f"Show.S01E0{i}.{spec}mkv" for i, spec in enumerate(
+            ("1080p.", "2160p.", "8K.", ""), start=1))
+        content = make_torrent([(path, 1000) for path in (low, high, higher, unknown)])
+        self.download_chain.return_value.download_torrent.return_value = (content, None, None)
+        self.plugin._recent_episode_file_selection.return_value = {"accepted": {low, high, higher, unknown}}
+        self.plugin._add_prechecked_torrent = Mock(return_value="approved")
+        self.assertEqual(self.download(), "approved")
+        self.assertEqual(self.plugin._recent_episode_file_selection.call_args.kwargs["eligible_paths"],
+                         {high, higher})
+        self.assertEqual(self.plugin._add_prechecked_torrent.call_args.args[6]["accepted"],
+                         {high, higher})
+        self.downloader.add_torrent.assert_not_called()
+
+    def test_domestic_4k_limit_is_preserved_for_shared_approval_without_recent_rule(self):
+        self.plugin._domestic_drama_4k_only = True
+        self.plugin._mp_download_category = Mock(return_value="tv:国产剧")
+        self.plugin._shared_settings = SharedSettingsPayload(enabled=True)
+        self.task.spec_dedup_enabled = True
+        high, low = "Show.S01E01.2160p.mkv", "Show.S01E02.1080p.mkv"
+        content = make_torrent([(high, 1000), (low, 1000)])
+        self.download_chain.return_value.download_torrent.return_value = (content, None, None)
+        self.plugin._add_prechecked_torrent = Mock(return_value="approved")
+
+        self.assertEqual(self.download(), "approved")
+        self.assertEqual(self.plugin._add_prechecked_torrent.call_args.args[6]["accepted"], {high})
+        self.plugin._recent_episode_file_selection.assert_not_called()
+        self.downloader.add_torrent.assert_not_called()
+
+    def test_recent_screen_does_not_recognize_low_resolution_files(self):
+        high, low = "Show.S01E01.2160p.mkv", "Show.S01E02.1080p.mkv"
+        content = make_torrent([(high, 1000), (low, 1000)])
+        self.plugin._mp_file_recognition = Mock(return_value=(
+            SimpleNamespace(year=2026), SimpleNamespace(type="tv", tmdb_id=123), 1, [1], "",
+        ))
+        self.plugin._infer_missing_episode_dates = Mock(return_value=set())
+        with patch("resourceflow.TmdbChain") as tmdb:
+            tmdb.return_value.tmdb_episodes.return_value = [
+                SimpleNamespace(episode_number=1, air_date=(date.today() - timedelta(days=1)).isoformat()),
+            ]
+            result = ResourceFlow._recent_episode_file_selection(
+                self.plugin, content, "Show", task=self.task, eligible_paths={high},
+            )
+
+        self.assertEqual(result["accepted"], {high})
+        self.plugin._mp_file_recognition.assert_called_once()
+        self.assertEqual(self.plugin._mp_file_recognition.call_args.args[0], high)
+        self.assertEqual(self.plugin._infer_missing_episode_dates.call_args.args[4], [1])
+
+    def test_domestic_4k_only_does_not_change_other_categories_or_disabled_setting(self):
+        self.plugin._mp_download_category = Mock(return_value="tv:欧美剧")
+        self.assertEqual(self.download(), self.expected_hash)
+        self.plugin._mp_download_category.assert_not_called()
+        self.plugin._domestic_drama_4k_only = True
+        self.assertEqual(self.download(), self.expected_hash)
+        self.plugin._mp_download_category.assert_called_once()
+
+    def test_domestic_4k_local_mixed_pack_selects_only_4k_files(self):
+        self.plugin._domestic_drama_4k_only = True
+        self.plugin._mp_download_category = Mock(return_value="tv:国产剧")
+        high, low = "Show.S01E01.4K.mkv", "Show.S01E01.1080p.mkv"
+        content = make_torrent([(high, 1000), (low, 1000)])
+        self.expected_hash = TorrentHelper.get_torrent_hash(content)
+        self.downloader.add_torrent.return_value = (True, [self.expected_hash])
+        self.download_chain.return_value.download_torrent.return_value = (content, None, None)
+        self.plugin._mp_file_recognition = Mock(return_value=(
+            None, SimpleNamespace(type="tv", tmdb_id=123), 1, [1], "",
+        ))
+        self.assertEqual(self.download(), self.expected_hash)
+        self.assertEqual(self.plugin._mp_file_recognition.call_args.args[0], high)
+        self.assertEqual(self.plugin._select_recent_episode_files.call_args.args[2]["accepted"], {high})
+        self.assertTrue(self.downloader.add_torrent.call_args.kwargs["is_paused"])
+
+    def test_domestic_4k_only_uses_file_classification_if_torrent_title_is_unresolved(self):
+        self.plugin._domestic_drama_4k_only = True
+        self.plugin._mp_download_category = Mock(return_value=None)
+        self.plugin._mp_file_recognition = Mock(return_value=(
+            None, SimpleNamespace(type="tv", tmdb_id=123), 1, [1], "",
+        ))
+        self.plugin._mp_media_category = Mock(return_value="tv:国产剧")
+        self.task.recent_episodes_only = True
+        content = make_torrent([("Show.S01E01.1080p.mkv", 1000)])
+        self.download_chain.return_value.download_torrent.return_value = (content, None, None)
+        self.assertIsNone(self.download())
+        self.plugin._mp_file_recognition.assert_called_once()
+        self.plugin._recent_episode_file_selection.assert_not_called()
+        self.assert_existing_task_untouched()
+
     def test_magnet_is_held_if_transfer_screen_cannot_check_paths(self):
         self.torrent.enclosure = f"magnet:?xt=urn:btih:{self.expected_hash}"
         self.plugin._mp_transfer_exclude_patterns.return_value = (re.compile("preview", re.I),)

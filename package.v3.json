@@ -67,7 +67,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流，使用 Tailscale 私网 HTTPS 共享下载审批，跨实例同规格下载前占位。",
     "labels": "刷流,资源去重,Tailscale",
-    "version": "1.0.68",
+    "version": "1.0.69",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -75,6 +75,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.69": "新增全局“国产剧仅下载 4K 及以上”开关，默认关闭。按 MoviePilot 整理分类识别国产剧，在近期播出、去重和共享审批之前，仅保留可确认达到 2160p 的视频文件。",
       "v1.0.68": "移除下载待核验入口，媒体身份或播出证据不足时本轮过滤，后续刷流重新识别。新增“当仅豆瓣可识别时”全局策略：默认排除过滤，选执行下载时跳过播出日期检查，仍遵守其他选种、去重和共享审批。候选缺少勾选规格时按“排除过滤 / 执行下载”处理。",
       "v1.0.67": "共享 QB 下载改为按可配置的观察时长和实际平均下载速度清理，不再按下载总耗时移除；保留已下载数据及已完成文件记录，并将本机下载申请的清理说明改为无背景的浅色文字。",
       "v1.0.66": "修复近期播出 AI 核验：TMDB ID 缺失时改用剧名/别名、季号和集号核验；本地搜索无结果时尝试 MP 自动模式下模型服务端联网搜索，并区分本地无证据与 AI 无候选。",

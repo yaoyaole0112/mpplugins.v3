@@ -73,7 +73,7 @@ from .active_dedup import download_complete, download_files, download_state, pat
 from .channel_dedup import (
     candidate_file_specs, filename_title_aliases, is_year_season, long_title_prefix_matches, normalize_title,
     normalize_specs, parse_candidate_file, parse_channel_messages, parse_episode, parse_specs, parse_torrent_files,
-    repair_record_frame_rates, same_release, specs_match,
+    repair_record_frame_rates, resolution_labels, same_release, specs_match,
 )
 
 
@@ -288,7 +288,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，通过 Tailscale 私网 HTTPS 进行共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.68"
+    plugin_version = "1.0.69"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -296,7 +296,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     auth_level = 2
 
     DATA_SCHEMA_VERSION = 2
-    CONFIG_SCHEMA_VERSION = 10
+    CONFIG_SCHEMA_VERSION = 11
     MAX_RUN_HISTORY = 50
     GLOBAL_BRUSH_TAG = "资源刷流"
     TASK_DATA_NAMES = ("torrents", "archived", "unmanaged", "statistic", "runs")
@@ -434,6 +434,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             ).douban_only_action
         except ValueError:
             self._douban_only_action = "exclude"
+        try:
+            self._domestic_drama_4k_only = ResourceFlowSettingsPayload.model_validate(
+                {"domestic_drama_4k_only": raw_config.get("domestic_drama_4k_only", False)}
+            ).domestic_drama_4k_only
+        except ValueError:
+            self._domestic_drama_4k_only = False
         for field, default in SHARED_SLOW_DOWNLOAD_DEFAULTS.items():
             try:
                 value = ResourceFlowSettingsPayload.model_validate(
@@ -1011,6 +1017,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         self._show_sidebar_nav = payload.show_sidebar_nav
         if "global_torrent_blacklist_enabled" in payload.model_fields_set:
             self._global_torrent_blacklist_enabled = payload.global_torrent_blacklist_enabled
+        if "domestic_drama_4k_only" in payload.model_fields_set:
+            self._domestic_drama_4k_only = payload.domestic_drama_4k_only
         for field in GLOBAL_LIMIT_FIELDS:
             setattr(self, f"_{field}", getattr(payload, field))
         for field in GLOBAL_DYNAMIC_DELETE_FIELDS:
@@ -1162,6 +1170,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             "enabled": bool(getattr(self, "_enabled", False)),
             "show_sidebar_nav": bool(getattr(self, "_show_sidebar_nav", True)),
             "global_torrent_blacklist_enabled": bool(getattr(self, "_global_torrent_blacklist_enabled", False)),
+            "domestic_drama_4k_only": bool(getattr(self, "_domestic_drama_4k_only", False)),
             "channel_dedup_enabled": bool(getattr(self, "_channel_dedup_enabled", False)),
             "channel_dedup_cancel_downloading": bool(getattr(self, "_channel_dedup_cancel_downloading", False)),
             "channel_dedup_inflight_enabled": True,
@@ -1679,6 +1688,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             "enabled": self.get_state(),
             "show_sidebar_nav": self._show_sidebar_nav,
             "global_torrent_blacklist_enabled": bool(getattr(self, "_global_torrent_blacklist_enabled", False)),
+            "domestic_drama_4k_only": bool(getattr(self, "_domestic_drama_4k_only", False)),
             "channel_dedup": self._channel_dedup_payload(include_records=False),
             **{field: getattr(self, f"_{field}", None) for field in GLOBAL_LIMIT_FIELDS},
             **{field: getattr(self, f"_{field}", None) for field in GLOBAL_DYNAMIC_DELETE_FIELDS},
@@ -2067,7 +2077,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 continue
             if category_reason:
                 logger.info(f"刷流任务 [{task.name}] {category_reason}：{torrent.title}")
-            hash_string = self.__download(torrent, transfer_patterns=transfer_patterns)
+            download_options = {"transfer_patterns": transfer_patterns}
+            if getattr(self, "_domestic_drama_4k_only", False):
+                download_options["category_cache"] = type_cache
+            hash_string = self.__download(torrent, **download_options)
             if not hash_string:
                 report["reason_counts"]["下载预检未通过或下载器添加失败"] += 1
                 continue
@@ -2138,27 +2151,47 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             return False, f"旧下载类型未通过：{kind or '无法识别'}（{source}）"
         if not categories:
             return True, ""
-        key = (torrent.title or "", torrent.description or "", torrent.category or "")
-        if key not in cache:
-            try:
-                media = self._mp_recognize_media(MetaInfo(torrent.title or "", torrent.description))
-                if media:
-                    media = classify_media(media)
-                    kind = next((kind for kind, item in self.MP_CATEGORY_TYPES.items()
-                                 if media.type in (item, item.value, kind)), "")
-                    result = classification_category_resolver_snapshot().resolve_media(media)
-                    if kind and result.path and result.state in {"resolved", "legacy"}:
-                        cache[key] = f"{kind}:{'/'.join(result.path)}"
-            except Exception as err:
-                logger.warning(f"MoviePilot 整理分类识别失败 {torrent.title}：{type(err).__name__}")
-            cache.setdefault(key, None)
-        category = cache[key]
+        category = self._mp_download_category(torrent, cache)
         if not category:
             return False, "无法确认 MoviePilot 整理分类"
         path = category.partition(":")[2]
         if category not in categories:
             return False, f"MoviePilot 整理分类未选择：{path}"
         return True, f"MoviePilot 整理分类通过（{path}）"
+
+    def _mp_browse_media(self, torrent: TorrentInfo, cache: dict):
+        key = (torrent.title or "", torrent.description or "", torrent.category or "")
+        if key not in cache:
+            try:
+                cache[key] = self._mp_recognize_media(MetaInfo(torrent.title or "", torrent.description))
+            except Exception as err:
+                logger.warning(f"下载类型媒体识别失败 {torrent.title}：{type(err).__name__}")
+                cache[key] = None
+        return cache[key]
+
+    def _mp_download_category(self, torrent: TorrentInfo, cache: dict) -> Optional[str]:
+        key = ("category", torrent.title or "", torrent.description or "", torrent.category or "")
+        if key not in cache:
+            cache[key] = self._mp_media_category(self._mp_browse_media(torrent, cache), torrent.title)
+        return cache[key]
+
+    def _mp_media_category(self, media, title: str) -> Optional[str]:
+        if media:
+            try:
+                media = classify_media(media)
+                kind = next((kind for kind, item in self.MP_CATEGORY_TYPES.items()
+                             if media.type in (item, item.value, kind)), "")
+                result = classification_category_resolver_snapshot().resolve_media(media)
+                if kind and result.path and result.state in {"resolved", "legacy"}:
+                    return f"{kind}:{'/'.join(result.path)}"
+            except Exception as err:
+                logger.warning(f"MoviePilot 整理分类识别失败 {title}：{type(err).__name__}")
+        return None
+
+    @staticmethod
+    def _is_domestic_drama(category: Optional[str]) -> bool:
+        kind, _, path = (category or "").partition(":")
+        return kind == "tv" and "国产剧" in path.split("/")
 
     @staticmethod
     def _explicit_download_type(values: list) -> Optional[str]:
@@ -2198,14 +2231,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         for match in re.finditer(r"(?:类型|分类|类别)\s*[:：]\s*([^\r\n<|｜;；]+)", description, re.IGNORECASE):
             type_values.extend(re.split(r"[,，、/／]+", match.group(1)))
         site_type = self._explicit_download_type(type_values)
-        key = (torrent.title or "", torrent.description or "", torrent.category or "")
-        if key not in cache:
-            try:
-                cache[key] = self._mp_recognize_media(MetaInfo(torrent.title or "", torrent.description))
-            except Exception as err:
-                logger.warning(f"下载类型媒体识别失败 {torrent.title}：{type(err).__name__}")
-                cache[key] = None
-        media = cache[key]
+        media = self._mp_browse_media(torrent, cache)
         if media:
             path = getattr(media, "library_category", "") or getattr(media, "category", "")
             for segment in reversed(re.split(r"[/\\]+", path if isinstance(path, str) else "")):
@@ -3382,6 +3408,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         manual_recent_screened: bool = False,
         torrent_content_override: Optional[Union[str, bytes]] = None,
         transfer_patterns: Optional[tuple[re.Pattern, ...]] = None,
+        category_cache: Optional[dict] = None,
     ) -> Optional[str]:
         """按当前任务配置向 qBittorrent 或 Transmission 添加种子"""
         task = self._get_task_config()
@@ -3477,6 +3504,20 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             for item in files
         ):
             raise ValueError("核验文件不是暂存种子中的视频")
+        quality_selection = None
+        if getattr(self, "_domestic_drama_4k_only", False):
+            category = self._mp_download_category(torrent, category_cache if category_cache is not None else {})
+            if self._is_domestic_drama(category) or (not category and files):
+                quality_selection = self._domestic_drama_file_selection(
+                    files, torrent.title, task, description=torrent.description or "",
+                    classify_files=not category,
+                )
+                if not quality_selection:
+                    return None
+                if manual_path and manual_path not in quality_selection["accepted"]:
+                    return None
+                if quality_selection["accepted"] == quality_selection["videos"]:
+                    quality_selection = None
         identity_preselection = None
         if not task.recent_episodes_only and not manual_path and not deferred:
             audio_extensions = set(getattr(settings, "RMT_AUDIOEXT", ()) or ())
@@ -3484,10 +3525,14 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                           and any(Path(item["path"]).suffix.lower() in audio_extensions for item in files))
             if not audio_only:
                 identity_preselection = self._mp_identity_file_selection(
-                    files, torrent.title, task, torrent.description or "",
+                    files if quality_selection is None else [
+                        item for item in files if item["path"] in quality_selection["accepted"]
+                    ], torrent.title, task, torrent.description or "",
                 )
                 if not identity_preselection:
                     return None
+                if quality_selection:
+                    identity_preselection["videos"] = quality_selection["videos"]
                 if identity_preselection["accepted"] == identity_preselection["videos"]:
                     identity_preselection = None
         pending_source = {
@@ -3498,6 +3543,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             logger.info(f"刷流任务 [{task.name}] 排除种子 {torrent.title}：无法读取共享审批所需的种子文件清单")
             return None
         recent_selection = identity_preselection
+        if (deferred and quality_selection
+                and quality_selection["accepted"] != quality_selection["videos"]):
+            recent_selection = quality_selection
         if task.recent_episodes_only and not (manual_path and manual_recent_screened):
             recent_selection = self._recent_episode_file_selection(
                 torrent_content,
@@ -3508,7 +3556,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 pending_source,
                 only_path=manual_path,
                 title_description=torrent.description or "",
+                eligible_paths=quality_selection["accepted"] if quality_selection else None,
             )
+            if recent_selection and quality_selection:
+                recent_selection["accepted"] = set(recent_selection["accepted"]) & quality_selection["accepted"]
+                if not recent_selection["accepted"]:
+                    return None
             if recent_selection and prevalidated_recent_paths is not None:
                 recent_selection = {
                     **recent_selection,
@@ -5592,6 +5645,40 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             return None
         return {"accepted": accepted, "videos": videos}
 
+    def _domestic_drama_file_selection(
+        self, files: list, title: str, task, *, description: str = "", classify_files: bool = False,
+    ) -> Optional[dict]:
+        """Filter by file resolution first; a mixed pack cannot establish unknown file quality."""
+        per_file = {
+            path: set(resolution_labels(path.replace("\\", "/").rsplit("/", 1)[-1]))
+            for item in files if self._video_file(path := item["path"])
+        }
+        title_labels = set(resolution_labels(title))
+        conflicting_pack = any(int(label[:-1]) < 2160 for labels in per_file.values() for label in labels)
+        accepted = set()
+        title_cache = {}
+        for path, labels in per_file.items():
+            specs = labels or (title_labels if not conflicting_pack else set())
+            if specs and all(int(label[:-1]) >= 2160 for label in specs):
+                accepted.add(path)
+                continue
+            if classify_files:
+                _, media, _, _, _ = self._mp_file_recognition(
+                    path, standard_only=False, title_hint=title,
+                    title_hint_description=description, title_cache=title_cache,
+                )
+                if not self._is_domestic_drama(self._mp_media_category(media, path)):
+                    accepted.add(path)
+                    continue
+            detail = " / ".join(sorted(specs)) or "分辨率未确认"
+            logger.info(f"刷流任务 [{task.name}] 国产剧清晰度过滤 {path}：{detail}，仅下载 2160p 及以上")
+        if classify_files and not per_file:
+            return {"accepted": set(), "videos": set()}
+        if not accepted:
+            logger.info(f"刷流任务 [{task.name}] 排除种子 {title}：没有确认达到 2160p 的视频文件")
+            return None
+        return {"accepted": accepted, "videos": set(per_file)}
+
     def _recent_episode_file_selection(
         self, torrent_content: Union[str, bytes], title: str, days: int = 3,
         candidate_overrides: Optional[dict] = None,
@@ -5600,19 +5687,21 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         *,
         only_path: Optional[str] = None,
         title_description: str = "",
+        eligible_paths: Optional[Set[str]] = None,
     ) -> Optional[dict]:
         """预检种子内视频，返回符合近期播出规则的文件路径及其名称。"""
         if not isinstance(torrent_content, bytes):
             return None
         shared = bool(task and self._shared_participates(task))
-        if shared:
+        if shared or eligible_paths is not None:
             sizes = {item["path"]: item["size"] for item in parse_torrent_files(torrent_content)}
             paths = sizes
         else:
             _, paths = TorrentHelper().get_fileinfo_from_torrent_content(torrent_content)
             sizes = {}
         video_paths = [path for path in paths if self._video_file(path)
-                       and (only_path is None or path.replace("\\", "/") == only_path)]
+                       and (only_path is None or path.replace("\\", "/") == only_path)
+                       and (eligible_paths is None or path in eligible_paths)]
         if not video_paths:
             logger.info(f"最近播出剧集规则排除 {title}：种子内没有可识别的视频文件")
             return None

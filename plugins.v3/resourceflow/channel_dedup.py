@@ -18,7 +18,8 @@ EFFECT_PATTERNS = {
     "HLG": re.compile(r"(?<![A-Z0-9])HLG(?![A-Z0-9])"),
 }
 RESOLUTION_PATTERN = re.compile(
-    r"(?<!\d)(2160|1440|1080|720|576|540|480)\s*([PI])|(?<![A-Z0-9])(4K|UHD|FHD)(?![A-Z0-9])"
+    r"(?<!\d)(8640|4320|4096|3840|3600|3200|2880|2160|1440|1080|720|576|540|480)\s*([PI])"
+    r"|(?<![A-Z0-9])(8K|4K|UHD|FHD)(?![A-Z0-9])"
 )
 
 
@@ -147,13 +148,14 @@ def normalize_effects(value: Any) -> Optional[str]:
     return _effect_families(text.upper()) or text or None
 
 
+def resolution_labels(value: Any) -> Iterable[str]:
+    aliases = {"FHD": "1080p", "4K": "2160p", "UHD": "2160p", "8K": "4320p"}
+    for match in RESOLUTION_PATTERN.finditer(normalize("NFKC", str(value or "")).upper()):
+        yield aliases[match.group(3)] if match.group(3) else f"{match.group(1)}{match.group(2).lower()}"
+
+
 def _parse_resolution(value: str) -> Optional[str]:
-    match = RESOLUTION_PATTERN.search(value)
-    if not match:
-        return None
-    if match.group(3):
-        return "1080p" if match.group(3) == "FHD" else "2160p"
-    return f"{match.group(1)}{match.group(2).lower()}"
+    return next(iter(resolution_labels(value)), None)
 
 
 def normalize_resolution(value: Any) -> Optional[str]:
