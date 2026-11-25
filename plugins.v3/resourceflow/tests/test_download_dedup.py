@@ -11,6 +11,7 @@ from resourceflow import ResourceFlow, BrushTaskConfig, TorrentHelper, TorrentIn
 from resourceflow.models import DoubanIdentityResolvePayload, ResourcePendingApprovalPayload
 from resourceflow.shared_plugin import SharedSettingsPayload
 from test_channel_dedup import bencode
+from test_channel_integration import make_torrent
 
 
 TORRENT_CONTENT = (
@@ -29,6 +30,7 @@ class DownloadDedupTest(unittest.TestCase):
         })
         self.plugin._get_task_config = Mock(return_value=self.task)
         self.plugin._recent_episode_file_selection = Mock(return_value={"accepted": {"test.mkv"}})
+        self.plugin._mp_recognize_media = Mock(return_value=SimpleNamespace(type="movie", tmdb_id=123))
         self.plugin._select_recent_episode_files = Mock(return_value=True)
         self.downloader = Mock()
         self.downloader.get_torrents.return_value = ([], False)
@@ -196,13 +198,15 @@ class DownloadDedupTest(unittest.TestCase):
         self.downloader.start_torrents.side_effect = lambda _: self.steps.append("start") or True
         source = {"content": self.content, "task_id": task.id, "hash": self.expected_hash,
                   "title": self.torrent.title, "torrent": p._pending_torrent_snapshot(self.torrent)}
-        p._pending_identity(
-            {"path": self.path, "media_type": "tv", "tmdb_id": 123, "season": 1, "episodes": [9],
-             "specs": {}}, self.torrent.title, task, "缺少勾选规格：resolution", source,
-            recent_screened=recent_screened,
-        )
-        self.key, = p._identity_pending
-        self.source_id = p._identity_pending[self.key]["source_id"]
+        # Seed an archived row from the previous version; current candidates never create these.
+        self.key = "a" * 64
+        self.source_id = p._persist_pending_source(source)
+        self.assertIsNotNone(self.source_id)
+        p._identity_pending[self.key] = {
+            "path": self.path, "title": self.torrent.title, "task_id": task.id,
+            "media_type": "tv", "tmdb_id": 123, "season": 1, "episodes": [9], "specs": {},
+            "source_id": self.source_id, "recent_screened": recent_screened,
+        }
 
     def submit_pending_download(self, *, tmdb_id=123):
         p = self.plugin
@@ -230,7 +234,7 @@ class DownloadDedupTest(unittest.TestCase):
         p._recent_episode_file_selection.assert_not_called()
         self.download_chain.return_value.download_torrent.assert_not_called()
 
-    def test_only_file_that_passed_recent_rule_gets_persisted_proof(self):
+    def test_missing_specs_do_not_refresh_legacy_pending_proof(self):
         self.prepare_pending_download(recent_screened=False)
         p = self.plugin
         self.download_chain.return_value.download_torrent.return_value = (self.content, None, None)
@@ -242,7 +246,7 @@ class DownloadDedupTest(unittest.TestCase):
         self.assertIsNone(self.download())
         self.assertEqual(p._mp_resource_candidate.call_count, 1)
         self.assertEqual(p._mp_resource_candidate.call_args.args[0], self.path)
-        self.assertTrue(p._identity_pending[self.key]["recent_screened"])
+        self.assertFalse(p._identity_pending[self.key]["recent_screened"])
         self.assertEqual(p._identity_pending[self.key]["source_id"], self.source_id)
         self.assertEqual(self.steps, [])
         self.assert_existing_task_untouched()
@@ -271,7 +275,7 @@ class DownloadDedupTest(unittest.TestCase):
             tmdb.return_value.tmdb_episodes.assert_called_once_with(tmdbid=123, season=1, episode_group=None)
         p._mp_file_recognition.assert_not_called()
         self.assertEqual(self.steps, [])
-        self.assertIn("最近播出日期尚未通过", p._identity_pending[self.key]["manual_error"])
+        self.assertIn("播出日期不在范围内", p._identity_pending[self.key]["manual_error"])
         self.assert_existing_task_untouched()
 
     def test_manual_resume_rechecks_recent_date_if_verified_identity_changes(self):
@@ -345,6 +349,42 @@ class DownloadDedupTest(unittest.TestCase):
             self.assertEqual(self.download(), self.expected_hash)
         self.assertIn("入口 自动刷流", str(logger.info.call_args_list))
         self.assertIn(f"Hash {self.expected_hash}；共享审批 未启用", str(logger.info.call_args_list))
+
+    def test_local_download_obeys_douban_policy_and_retries_identity_next_round(self):
+        self.plugin._mp_recognize_media.return_value = SimpleNamespace(
+            type="movie", media_source="douban", media_id="9876543",
+        )
+        self.assertIsNone(self.download())
+        self.downloader.add_torrent.assert_not_called()
+
+        self.plugin._douban_only_action = "download"
+        self.assertEqual(self.download(), self.expected_hash)
+        self.downloader.add_torrent.assert_called_once()
+        self.plugin._recent_episode_file_selection.assert_not_called()
+
+    def test_local_pack_keeps_only_confirmed_files(self):
+        tmdb_path = "Known.S01E01.1080p.mkv"
+        douban_path = "Douban.S01E02.1080p.mkv"
+        content = make_torrent([(tmdb_path, 1000), (douban_path, 1000)])
+        self.expected_hash = TorrentHelper.get_torrent_hash(content)
+        self.downloader.add_torrent.return_value = (True, [self.expected_hash])
+        self.download_chain.return_value.download_torrent.return_value = (content, None, None)
+        self.plugin._mp_file_recognition = Mock(side_effect=[
+            (None, SimpleNamespace(type="tv", media_source="douban", media_id="9876543"), 1, [2], ""),
+            (None, SimpleNamespace(type="tv", tmdb_id=123), 1, [1], ""),
+        ])
+        self.assertEqual(self.download(), self.expected_hash)
+        self.assertEqual(self.plugin._select_recent_episode_files.call_args.args[2]["accepted"], {tmdb_path})
+        self.assertTrue(self.downloader.add_torrent.call_args.kwargs["is_paused"])
+
+    def test_local_audio_pack_keeps_existing_download_path(self):
+        content = make_torrent([("Track.FLAC", 1000), ("Cover.jpg", 1000)])
+        self.expected_hash = TorrentHelper.get_torrent_hash(content)
+        self.downloader.add_torrent.return_value = (True, [self.expected_hash])
+        self.download_chain.return_value.download_torrent.return_value = (content, None, None)
+        self.assertEqual(self.download(), self.expected_hash)
+        self.plugin._mp_recognize_media.assert_not_called()
+        self.assertFalse(self.downloader.add_torrent.call_args.kwargs["is_paused"])
 
     def test_magnet_is_held_if_transfer_screen_cannot_check_paths(self):
         self.torrent.enclosure = f"magnet:?xt=urn:btih:{self.expected_hash}"

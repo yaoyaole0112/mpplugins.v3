@@ -248,6 +248,7 @@ class ResourceFlowSettingsPayload(BaseModel):
     shared_min_download_kib_s: int = Field(SHARED_SLOW_DOWNLOAD_DEFAULTS["shared_min_download_kib_s"], ge=0, le=1048576)
     recent_missing_date_tolerance_days: int = Field(7, ge=1, le=30)
     recent_missing_date_ai_enabled: bool = False
+    douban_only_action: Literal["exclude", "download"] = "exclude"
 
     @model_validator(mode="before")
     @classmethod

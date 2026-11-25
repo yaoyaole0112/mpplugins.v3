@@ -80,7 +80,7 @@ class ResourceDedupTests(unittest.TestCase):
     def test_global_identity_policy_applies_to_all_tasks_not_legacy_task_values(self):
         path = 'Unknown.2026.S01E01.1080p.mkv'
         self.task.identity_policy = 'allow'
-        self.assertEqual(self.select([(path, 1000)])['identity_pending_count'], 1)
+        self.assertEqual(self.select([(path, 1000)])['identity_filtered_count'], 1)
         self.plugin._channel_dedup_identity_policy = 'allow'
         self.task.identity_policy = 'defer'
         self.assertIsNone(self.select([(path, 1000)]))
@@ -347,20 +347,10 @@ class ResourceDedupTests(unittest.TestCase):
         self.plugin._pending_identity(unknown, 'Unknown', self.task, 'unverified')
         self.assertFalse(self.plugin._identity_pending)
 
-    def test_rejected_pending_candidate_is_removed_and_suppressed_on_rescan(self):
+    def test_unresolved_candidate_is_filtered_without_creating_pending_record(self):
         unknown = self.candidate('Unknown.2026.S01E01.1080p.mkv')
-        key = evidence_key({**unknown, "title_key": unknown.get("title_key") or unknown.get("path")})
         self.plugin._pending_identity(unknown, "Unknown", self.task, "unverified")
-        self.assertIn(key, self.plugin._identity_pending)
-
-        response = self.plugin.reject_pending_resource(ResourceLedgerDeletePayload(key=key))
-
-        self.assertTrue(response.success)
-        self.assertNotIn(key, self.plugin._identity_pending)
-        self.assertIn(key, self.plugin._identity_pending_rejected)
-        self.plugin._pending_identity(unknown, "Unknown", self.task, "unverified")
-        self.assertNotIn(key, self.plugin._identity_pending)
-        self.plugin.save_data.assert_any_call("resource_identity_pending_rejected", self.plugin._identity_pending_rejected)
+        self.assertFalse(self.plugin._identity_pending)
 
     def test_task_update_preserves_switch_when_omitted_and_other_selection_rules(self):
         self.task.spec_dedup_enabled = False
@@ -461,9 +451,9 @@ class ResourceDedupTests(unittest.TestCase):
     def test_unknown_identity_deferred_without_channel_match(self):
         path = 'Unknown.2026.S01E01.1080p.mkv'
         result = self.select([(path, 1000)])
-        self.assertEqual(result['identity_pending_count'], 1)
+        self.assertEqual(result['identity_filtered_count'], 1)
         self.assertEqual(result['matched_video_count'], 0)
-        self.assertEqual(len(self.plugin._identity_pending), 1)
+        self.assertEqual(len(self.plugin._identity_pending), 0)
 
     def test_video_missing_selected_fields_is_excluded_without_claiming_duplicate(self):
         result = self.select([('unrecognizable.mkv', 1000)])
@@ -476,7 +466,7 @@ class ResourceDedupTests(unittest.TestCase):
         self.torrent.enclosure = 'magnet:?xt=urn:btih:' + 'a' * 40
         self.assertIsNone(self.plugin._ResourceFlow__download(self.torrent))
         downloader.add_torrent.assert_not_called()
-        self.assertEqual(len(self.plugin._identity_pending), 1)
+        self.assertFalse(self.plugin._identity_pending)
 
     def test_manual_pending_override_supplies_identity_episode_and_selected_specs(self):
         override = {
@@ -577,7 +567,7 @@ class ResourceDedupTests(unittest.TestCase):
     def test_movie_binding_does_not_use_tv_binding(self):
         path = 'Film.2026.1080p.mkv'
         self.plugin._channel_dedup_identity_aliases = {'Film': 123}
-        self.assertEqual(self.select([(path, 1000)])['identity_pending_count'], 1)
+        self.assertEqual(self.select([(path, 1000)])['identity_filtered_count'], 1)
         self.plugin._channel_dedup_movie_identity_aliases = {'Film': 999}
         self.assertIsNone(self.select([(path, 1000)]))
 
@@ -618,7 +608,7 @@ class ResourceDedupTests(unittest.TestCase):
         self.plugin._channel_dedup_attributes = ['effects']
         self.plugin._channel_dedup_unknown_policy = 'allow'
         path = 'Unknown.2026.S01E01.1080p.H265.mkv'
-        self.assertEqual(self.select([(path, 1000)])['identity_pending_count'], 1)
+        self.assertEqual(self.select([(path, 1000)])['identity_filtered_count'], 1)
 
     def test_episodic_file_without_episode_not_misclassified_as_movie(self):
         self.assertIsNone(parse_candidate_file('01.mkv', 1000, 'Show.2026.S01.(tmdbid=123)', allow_movie=True))
@@ -709,7 +699,7 @@ class ResourceDedupTests(unittest.TestCase):
             self.plugin._record_completed_resources(self.task, [torrent], rows)
             self.assertFalse(rows['a' * 40].get('resource_ledger_recorded'))
             self.assertEqual(len(self.plugin._resource_ledger), 1)
-            self.assertEqual(len(self.plugin._identity_pending), 1)
+            self.assertEqual(len(self.plugin._identity_pending), 0)
             self.plugin._channel_dedup_identity_aliases = {'Short': 123}
             self.plugin._record_completed_resources(self.task, [torrent], rows)
         self.assertTrue(rows['a' * 40]['resource_ledger_recorded'])

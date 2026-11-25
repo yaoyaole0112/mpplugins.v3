@@ -148,6 +148,7 @@ export function normalizeSettings(settings = {}) {
     Math.max(Number(result.recent_missing_date_tolerance_days || 7), 1), 30,
   )
   result.recent_missing_date_ai_enabled = Boolean(result.recent_missing_date_ai_enabled)
+  result.douban_only_action = result.douban_only_action === 'download' ? 'download' : 'exclude'
   return result
 }
 

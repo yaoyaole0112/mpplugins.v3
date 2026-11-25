@@ -32,6 +32,73 @@ class RecentEpisodeRuleTest(unittest.TestCase):
             ]
             return plugin._recent_episode_file_selection(b"torrent", "test", days)
 
+    def test_identity_gate_filters_unrecognized_media(self):
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._mp_file_recognition = Mock(return_value=(None, None, None, [], "MoviePilot 未确认电影或电视剧身份"))
+        task = SimpleNamespace(name="test")
+
+        selection = plugin._mp_identity_file_selection(
+            [{"path": "Unknown.S01E01.1080p.mkv"}], "Unknown S01E01", task,
+        )
+
+        self.assertIsNone(selection)
+
+    def test_identity_gate_obeys_douban_only_action(self):
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        media = SimpleNamespace(
+            type="tv", media_source="douban", media_id="9876543", title="豆瓣独有剧",
+        )
+        plugin._mp_file_recognition = Mock(return_value=(None, media, 1, [4], ""))
+        task = SimpleNamespace(name="test")
+        files = [{"path": "Douban.Only.Show.S01E04.2026.1080p.WEB-DL.mkv"}]
+
+        plugin._douban_only_action = "exclude"
+        self.assertIsNone(plugin._mp_identity_file_selection(files, "豆瓣独有剧", task))
+
+        plugin._douban_only_action = "download"
+        selection = plugin._mp_identity_file_selection(files, "豆瓣独有剧", task)
+        self.assertEqual(selection["accepted"], {files[0]["path"]})
+
+    def test_douban_only_download_bypasses_all_episode_date_lookups(self):
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._douban_only_action = "download"
+        media = SimpleNamespace(
+            type="tv", media_source="douban", media_id="9876543", title="豆瓣独有剧",
+        )
+        path = "Douban.Only.Show.S01E04.2026.1080p.WEB-DL.mkv"
+        plugin._mp_recognize_media = Mock(return_value=media)
+        with (
+            patch("resourceflow.TorrentHelper") as torrent_helper,
+            patch("resourceflow.TmdbChain") as tmdb,
+            patch.object(ResourceFlow, "_douban_episode_air_dates") as douban_dates,
+        ):
+            torrent_helper.return_value.get_fileinfo_from_torrent_content.return_value = (None, [path])
+            result = plugin._recent_episode_file_selection(b"torrent", "Douban Only Show S01E04", 3)
+
+        self.assertEqual(result["accepted"], {path})
+        tmdb.return_value.tmdb_episodes.assert_not_called()
+        douban_dates.assert_not_called()
+
+    def test_douban_only_exclude_skips_date_queries_and_filters_candidate(self):
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._douban_only_action = "exclude"
+        media = SimpleNamespace(
+            type="tv", media_source="douban", media_id="9876543", title="豆瓣独有剧",
+        )
+        path = "Douban.Only.Show.S01E04.2026.1080p.WEB-DL.mkv"
+        plugin._mp_recognize_media = Mock(return_value=media)
+        with (
+            patch("resourceflow.TorrentHelper") as torrent_helper,
+            patch("resourceflow.TmdbChain") as tmdb,
+            patch.object(ResourceFlow, "_douban_episode_air_dates") as douban_dates,
+        ):
+            torrent_helper.return_value.get_fileinfo_from_torrent_content.return_value = (None, [path])
+            result = plugin._recent_episode_file_selection(b"torrent", "Douban Only Show S01E04", 3)
+
+        self.assertIsNone(result)
+        tmdb.return_value.tmdb_episodes.assert_not_called()
+        douban_dates.assert_not_called()
+
     def test_includes_cutoff_today_and_future_dates(self):
         today = date(2026, 11, 9)
         self.assertTrue(ResourceFlow._air_date_is_recent("2026-11-06", today))
@@ -103,9 +170,9 @@ class RecentEpisodeRuleTest(unittest.TestCase):
 
     def test_recent_rule_accepts_current_year_movie_and_rejects_old_or_unknown_year(self):
         cases = [
-            ("Current.Movie.2026.mkv", SimpleNamespace(type="电影", release_date="2026-05-01"), True),
-            ("Old.Movie.2025.mkv", SimpleNamespace(type="movie", release_date="2025-12-31"), False),
-            ("Unknown.Movie.mkv", SimpleNamespace(type="movie"), False),
+            ("Current.Movie.2026.mkv", SimpleNamespace(type="电影", tmdb_id=1, year=str(datetime.now(ZoneInfo("Asia/Shanghai")).year)), True),
+            ("Old.Movie.2025.mkv", SimpleNamespace(type="movie", tmdb_id=2, release_date="2000-12-31"), False),
+            ("Unknown.Movie.mkv", SimpleNamespace(type="movie", tmdb_id=3), False),
         ]
         for path, media, expected in cases:
             with self.subTest(path=path):

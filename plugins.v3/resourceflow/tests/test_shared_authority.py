@@ -125,6 +125,36 @@ class SharedAuthorityTests(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(skipped, 3)
 
+    def test_linked_missing_specs_completion_can_be_recovered_without_a_duplicate_match(self):
+        self.store = CoordinatorStore(self.path, "resources", ["resolution", "effects"], 5,
+                                      {**RULE_DEFAULTS, "unknown_policy": "allow"})
+        request_id, file_id = "c" * 32, "d" * 24
+        request = {
+            "v": 1, "group": "resources", "instance": self.instance, "op": "reserve",
+            "revision": self.store.policy["revision"], "pack_policy": "partial",
+            "files": [{**self.media_file(279155, file_id), "episodes": [21],
+                       "specs": {"resolution": "1080p"}}],
+        }
+        claim = self.store.handle(11, request_id, request)["approved"][0]["claim"]
+        incomplete = evidence(specs={"resolution": "1080p"})
+        rows, skipped = completion_rows([
+            incomplete,
+            {**incomplete, "original_claim": claim,
+             "original_request": request_id, "original_file": file_id},
+        ], ["resolution", "effects"], allow_missing_linked=True)
+        self.assertEqual(skipped, 1)
+        self.assertEqual(len(rows), 1)
+        mismatched = self.send("import_completed", files=[{**rows[0], "episodes": [22]}])
+        self.assertFalse(mismatched["ok"], mismatched)
+        recovered = self.send("import_completed", files=rows)
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["imported"][0]["claim"], claim)
+        self.assertEqual(self.store.recent()[0]["state"], "completed")
+        self.assertIsNone(self.store.recent()[0]["specs"]["effects"])
+        peer = self.send("reserve", 22, "b" * 32,
+                         files=[{**self.media_file(279155, "e" * 24), "episodes": [21]}])
+        self.assertEqual(len(peer["approved"]), 1)
+
     def test_unselected_fields_do_not_prevent_import_and_multi_episode_files_split(self):
         rows, skipped = completion_rows([
             evidence(episodes=[21, 22], specs={"resolution": "2160p", "effects": None, "fps": None}),

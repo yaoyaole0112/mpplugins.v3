@@ -119,6 +119,29 @@ class StoreTests(unittest.TestCase):
             self.assertTrue(reply["ok"], reply)
             self.assertEqual(self.store.recent()[0]["site_name"], expected)
 
+    def test_missing_selected_specs_follow_coordinator_policy(self):
+        unknown = file_row(effects=None)
+        self.store = CoordinatorStore(
+            self.path, "resources", ["resolution", "effects"], 5,
+            {**RULE_DEFAULTS, "unknown_policy": "allow"},
+        )
+        allowed = self.send(self.request([unknown]))
+        self.assertTrue(allowed["ok"], allowed)
+        self.assertEqual(len(allowed["approved"]), 1)
+        known = self.send(self.request([file_row(effects="HDR")], instance="b" * 32), sender=12)
+        self.assertTrue(known["ok"], known)
+        self.assertEqual(len(known["approved"]), 1)
+
+        strict_path = Path(self.temp.name) / "strict.sqlite3"
+        strict = CoordinatorStore(strict_path, "resources", ["resolution", "effects"], 5)
+        rejected = strict.handle(
+            11, uuid.uuid4().hex,
+            {"v": 1, "group": "resources", "instance": "b" * 32, "op": "reserve",
+             "revision": strict.policy["revision"], "pack_policy": "partial", "files": [unknown]},
+        )
+        self.assertFalse(rejected["ok"])
+        self.assertIn("缺少共享规则勾选的规格", rejected["error"])
+
     def test_concurrent_clients_only_one_wins_and_reopen_preserves_claim(self):
         barrier = threading.Barrier(2)
 
@@ -1346,6 +1369,48 @@ class PluginSetupTests(unittest.TestCase):
         self.assertFalse(files)
         self.assertEqual(rejected, [path])
 
+    def test_douban_only_candidates_obey_global_action_without_pending(self):
+        p = self.plugin
+        p._channel_dedup_attributes = ["resolution"]
+        p._shared_media_title_cache = {}
+        p._shared_media_title = Mock(return_value="豆瓣独有剧")
+        p._mp_recognize_media.return_value = SimpleNamespace(
+            type="电视剧", media_source="douban", media_id="9876543", title="豆瓣独有剧",
+        )
+        task = SimpleNamespace(id="task", name="test", spec_dedup_enabled=True)
+        path = "豆瓣独有剧.S01E05.2026.1080p.WEB-DL.mkv"
+        content = make_torrent([(path, 123456)])
+
+        p._douban_only_action = "exclude"
+        files, rejected = p._shared_candidates(content, "豆瓣独有剧 S01E05", task, None)
+        self.assertFalse(files)
+        self.assertEqual(rejected, [path])
+        self.assertEqual(p._identity_pending, {})
+
+        p._douban_only_action = "download"
+        files, rejected = p._shared_candidates(content, "豆瓣独有剧 S01E05", task, None)
+        self.assertFalse(rejected)
+        self.assertEqual((files[0]["media_source"], files[0]["media_id"], files[0]["tmdb_id"]),
+                         ("douban", "9876543", None))
+
+    def test_shared_missing_specs_allow_policy_passes_unmatched_candidate(self):
+        p = self.plugin
+        p._channel_dedup_attributes = ["resolution", "fps"]
+        p._channel_dedup_unknown_policy = "allow"
+        p._mp_recognize_media.return_value = SimpleNamespace(
+            type="电视剧", tmdb_id=123, title="Show",
+        )
+        task = SimpleNamespace(id="task", name="test", spec_dedup_enabled=True)
+        path = "Show.2026.S02E05.1080p.mkv"
+
+        files, rejected = p._shared_candidates(
+            make_torrent([(path, 123456)]), "Show S02E05", task, None,
+        )
+
+        self.assertFalse(rejected)
+        self.assertEqual(len(files), 1)
+        self.assertIsNone(files[0]["specs"]["fps"])
+
     def test_movie_candidate_splits_bilingual_names_before_tmdb_identity_check(self):
         p = self.plugin
         p._channel_dedup_attributes = ["resolution", "effects"]
@@ -1427,12 +1492,14 @@ class PluginSetupTests(unittest.TestCase):
         ):
             with self.subTest(reason=reason, path=path):
                 p._mp_recognize_media.return_value = media
-                with patch.object(p, "_pending_identity") as pending:
+                with patch.object(p, "_pending_identity") as pending, \
+                     patch("resourceflow.shared_plugin.logger") as log:
                     files, rejected = p._shared_candidates(
                         make_torrent([(path, 123456)]), "Sunshine 2026 S01E05-E07", task, None)
                     self.assertFalse(files)
                     self.assertEqual(rejected, [path])
-                    self.assertIn(reason, pending.call_args.args[3])
+                    pending.assert_not_called()
+                    self.assertTrue(any(reason in call.args[0] for call in log.info.call_args_list))
 
     def test_shared_identity_falls_back_to_release_title_without_inheriting_pack_episodes(self):
         p = ResourceFlow.__new__(ResourceFlow)

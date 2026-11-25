@@ -133,8 +133,8 @@ def _resolve_tmdb_id(tmdb_id, id_aliases):
     return tmdb_id
 
 
-def same_resource(candidate, record, attributes, tolerance, *, overlap=True, identity_rules=None,
-                  identity_index=None, candidate_identity=None):
+def same_media_file(candidate, record, *, overlap=True, identity_rules=None,
+                    identity_index=None, candidate_identity=None):
     if any(candidate.get(field) != record.get(field) for field in ("media_type", "season")):
         return False
     identity_index = identity_index or _identity_alias_index(identity_rules, candidate.get("media_type"))
@@ -147,7 +147,15 @@ def same_resource(candidate, record, attributes, tolerance, *, overlap=True, ide
         other = record.get("episodes") or []
         if not (episodes.intersection(other) if overlap else episodes.issubset(other)):
             return False
-    return specs_match(candidate, record, attributes, tolerance)
+    return True
+
+
+def same_resource(candidate, record, attributes, tolerance, *, overlap=True, identity_rules=None,
+                  identity_index=None, candidate_identity=None):
+    return same_media_file(
+        candidate, record, overlap=overlap, identity_rules=identity_rules,
+        identity_index=identity_index, candidate_identity=candidate_identity,
+    ) and specs_match(candidate, record, attributes, tolerance)
 
 
 def is_2160p_downgrade(candidate, record, identity_rules=None, identity_index=None,

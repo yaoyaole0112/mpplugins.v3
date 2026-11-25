@@ -276,6 +276,7 @@ class ChannelIntegrationTests(unittest.TestCase):
 
     def prepare_download(self, recent=False, accepted=None):
         # 本组验证共享审批之前的本地筛选，最终审批门禁由共享专项测试覆盖。
+        self.plugin._mp_recognize_media = Mock(return_value=SimpleNamespace(type="tv", tmdb_id=123))
         self.plugin._shared_download_gate = Mock(return_value=True)
         self.plugin._shared_add_authorized = Mock(return_value=True)
         self.plugin._add_prechecked_torrent = Mock(

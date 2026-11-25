@@ -1,7 +1,6 @@
 <script setup>
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import TaskEditorDialog from './TaskEditorDialog.vue'
-import SharedRecordPagination from './SharedRecordPagination.vue'
 import SharedSettingsPanel from './SharedSettingsPanel.vue'
 import {
   cloneTask,
@@ -59,33 +58,8 @@ const sharedRole = ref({ enabled: false, host_coordinator: false })
 const sharedRecordsHost = ref(false)
 const sharedRecordsLoading = ref(false)
 const approvalTab = ref('requests')
-const resourceRows = ref({ total: 0, items: [] })
-const resourcePage = ref(1)
-const activeResourceFilter = ref({ query: '', media_type: '' })
-const pendingApprovalDialog = ref(false)
-const pendingApprovalSaving = ref(false)
-const pendingApprovalRow = ref(null)
-const pendingApprovalError = ref('')
-const pendingRejectingKey = ref('')
-const pendingSearchOpen = ref(false)
-const pendingSearchQuery = ref('')
-const pendingSearchResults = ref([])
-const pendingSearchLoading = ref(false)
-const pendingSearchMessage = ref('')
-const pendingSearchSource = ref('themoviedb')
-let pendingSearchVersion = 0
-const pendingApprovalForm = ref({
-  media_source: 'themoviedb', media_id: '', tmdb_id: null, media_title: '', media_type: 'tv',
-  season: 1, episodes: '', specs: {}, confirmed: false,
-})
-const resourceTypes = [
-  { value: '', title: '全部类型' }, { value: 'tv', title: '剧集' }, { value: 'movie', title: '电影' },
-]
-let resourceSearchTimer
-let resourceGeneration = 0
-const ledgerLoading = ref(false)
 const approvalLoading = computed(() => (
-  channelDedupLoading.value || sharedRecordsLoading.value || ledgerLoading.value
+  channelDedupLoading.value || sharedRecordsLoading.value
 ))
 const channelDedup = ref({ enabled: false, channels: [], attributes: [], records: [] })
 const channelDedupDraft = ref({
@@ -94,8 +68,12 @@ const channelDedupDraft = ref({
   movie_identity_aliases: '',
 })
 const channelUnknownPolicies = [
-  { value: 'exclude', title: '排除不下载' },
-  { value: 'allow', title: '按未命中放行（兼容旧版）' },
+  { value: 'exclude', title: '排除过滤' },
+  { value: 'allow', title: '执行下载' },
+]
+const doubanOnlyActions = [
+  { value: 'exclude', title: '排除过滤' },
+  { value: 'download', title: '执行下载' },
 ]
 const channelDedupAttributes = [
   { value: 'resolution', title: '分辨率' },
@@ -119,6 +97,7 @@ const settingsDraft = ref({
   shared_min_download_kib_s: 100,
   recent_missing_date_tolerance_days: 7,
   recent_missing_date_ai_enabled: false,
+  douban_only_action: 'exclude',
 })
 const hostToast = inject('moviepilot:toast', null)
 let refreshTimer
@@ -199,6 +178,7 @@ async function loadStatus({ preserveSelection = true, loadDetail = true, resetDr
       shared_min_download_kib_s: Number(status.value.shared_min_download_kib_s ?? 100),
       recent_missing_date_tolerance_days: Number(status.value.recent_missing_date_tolerance_days || 7),
       recent_missing_date_ai_enabled: Boolean(status.value.recent_missing_date_ai_enabled),
+      douban_only_action: status.value.douban_only_action === 'download' ? 'download' : 'exclude',
     }
     const selectedStillExists = tasks.value.some(item => item.id === selectedTaskId.value)
     if (!preserveSelection || !selectedStillExists) selectedTaskId.value = tasks.value[0]?.id || ''
@@ -372,52 +352,13 @@ async function openChannelDedup() {
   approvalTab.value = 'requests'
   sharedRecordsHost.value = false
   channelDedupDialog.value = true
-  await Promise.all([
-    loadChannelDedup(),
-    approvalTab.value === 'pending' ? loadResourceRows() : Promise.resolve(),
-  ])
+  await loadChannelDedup()
 }
-
-async function loadResourceRows() {
-  clearTimeout(resourceSearchTimer)
-  const generation = ++resourceGeneration
-  ledgerLoading.value = true
-  const params = new URLSearchParams({
-    state: 'pending', page: String(resourcePage.value), page_size: '20',
-    query: activeResourceFilter.value.query || '', media_type: activeResourceFilter.value.media_type || '',
-  })
-  try {
-    const data = unwrapResponse(await props.api.get(`${pluginBase.value}/resource-ledger?${params}`))
-    if (generation === resourceGeneration) {
-      resourceRows.value = data || { total: 0, items: [] }
-      resourcePage.value = data?.page || 1
-    }
-  } catch (err) {
-    if (generation === resourceGeneration) channelDedupError.value = err?.message || '读取下载待核验记录失败'
-  } finally {
-    if (generation === resourceGeneration) ledgerLoading.value = false
-  }
-}
-
-watch(() => [activeResourceFilter.value.query, activeResourceFilter.value.media_type],
-  (values, previous) => {
-    clearTimeout(resourceSearchTimer)
-    resourceGeneration += 1
-    resourcePage.value = 1
-    // Keep the previous records visible while the filtered result is loading.
-    ledgerLoading.value = true
-    const delay = values[1] === previous[1] ? 300 : 0
-    resourceSearchTimer = setTimeout(loadResourceRows, delay)
-  })
-watch(approvalTab, value => {
-  if (value === 'pending') loadResourceRows()
-})
 
 async function refreshApprovalRecords() {
   await Promise.all([
     sharedRecordsPanel.value?.refresh(),
     loadChannelDedup({ resetDraft: false }),
-    approvalTab.value === 'pending' ? loadResourceRows() : Promise.resolve(),
   ])
 }
 
@@ -437,277 +378,6 @@ async function saveChannelDedup(shared) {
     } : {}),
   }))
   channelDedup.value = data || channelDedup.value
-}
-
-function formatChannelTimestamp(value) {
-  if (!value) return '尚未同步'
-  return new Date(Number(value) * 1000).toLocaleString()
-}
-
-function openPendingApproval(row) {
-  pendingApprovalRow.value = row
-  pendingApprovalError.value = ''
-  pendingSearchSource.value = 'themoviedb'
-  pendingApprovalForm.value = {
-    media_source: row.media_source || 'themoviedb',
-    media_id: row.media_id || row.tmdb_id || '',
-    tmdb_id: row.tmdb_id || null,
-    media_title: row.media_title || '',
-    media_type: row.media_type === 'movie' ? 'movie' : 'tv',
-    season: row.source_season && row.source_season === row.season ? '' : (row.season ?? 1),
-    episodes: (row.episodes || []).join(','),
-    specs: Object.fromEntries(channelDedup.value.attributes.map(key => [key, row.specs?.[key] ?? ''])),
-    confirmed: false,
-  }
-  pendingApprovalDialog.value = true
-}
-
-watch(pendingApprovalDialog, (open) => {
-  if (!open) {
-    pendingSearchVersion += 1
-    pendingSearchOpen.value = false
-    pendingSearchLoading.value = false
-    pendingSearchResults.value = []
-    pendingSearchMessage.value = ''
-    pendingSearchSource.value = 'themoviedb'
-  }
-})
-
-function togglePendingSearch() {
-  pendingSearchOpen.value = !pendingSearchOpen.value
-  if (!pendingSearchOpen.value) {
-    pendingSearchVersion += 1
-    pendingSearchLoading.value = false
-    return
-  }
-  pendingSearchQuery.value = pendingApprovalForm.value.media_title
-  searchPendingMedia()
-}
-
-function setPendingSearchSource(source) {
-  if (pendingSearchSource.value === source) return
-  pendingSearchSource.value = source
-  searchPendingMedia()
-}
-
-async function searchPendingMedia() {
-  const version = ++pendingSearchVersion
-  const title = (pendingSearchQuery.value || '').trim()
-  pendingSearchResults.value = []
-  pendingSearchMessage.value = ''
-  pendingSearchLoading.value = Boolean(title)
-  if (!title) return
-  try {
-    const params = new URLSearchParams({
-      title, type: 'media', media_source: pendingSearchSource.value, count: '20',
-    })
-    const rows = unwrapResponse(await props.api.get(`media/search?${params}`))
-    if (version !== pendingSearchVersion) return
-    const unique = new Map()
-    for (const row of Array.isArray(rows) ? rows : []) {
-      const type = { 电视剧: 'tv', 剧集: 'tv', tv: 'tv', 电影: 'movie', movie: 'movie' }[row?.type]
-      const sourceId = pendingSearchSource.value === 'douban'
-        ? row?.douban_id ?? (String(row?.media_source || '').toLowerCase() === 'douban' ? row?.media_id : '')
-        : row?.tmdb_id ?? (String(row?.media_source || '').toLowerCase() === 'themoviedb' ? row?.media_id : '')
-      const id = String(sourceId ?? '').trim()
-      if (!type || !/^\d+$/.test(id) || id === '0' || !row.title) continue
-      unique.set(`${type}:${id}`, { id, type, title: row.title, year: row.year })
-    }
-    pendingSearchResults.value = [...unique.values()]
-    if (!unique.size) pendingSearchMessage.value = `未找到匹配的${pendingSearchSource.value === 'douban' ? '豆瓣' : 'TMDB'}媒体`
-  } catch (err) {
-    if (version === pendingSearchVersion) pendingSearchMessage.value = err?.message || '媒体搜索失败'
-  } finally {
-    if (version === pendingSearchVersion) pendingSearchLoading.value = false
-  }
-}
-
-async function selectPendingMedia(row) {
-  if (pendingSearchSource.value === 'douban') {
-    const version = ++pendingSearchVersion
-    pendingSearchLoading.value = true
-    pendingSearchMessage.value = ''
-    try {
-      const result = unwrapResponse(await props.api.post(
-        `${pluginBase.value}/resource-ledger/pending/resolve-douban`,
-        { douban_id: row.id, media_type: row.type, media_title: row.title },
-      ))
-      if (version !== pendingSearchVersion) return
-      await applyPendingMedia({
-        ...row,
-        id: result?.media_id || row.id,
-        media_source: result?.media_source || 'douban',
-        tmdb_id: result?.tmdb_id ?? null,
-        title: row.title || result?.media_title,
-      })
-    } catch (err) {
-      if (version === pendingSearchVersion) pendingSearchMessage.value = err?.message || '豆瓣身份映射失败'
-    } finally {
-      if (version === pendingSearchVersion) pendingSearchLoading.value = false
-    }
-    return
-  }
-  await applyPendingMedia({
-    ...row, media_source: 'themoviedb', tmdb_id: Number(row.id),
-  })
-}
-
-async function applyPendingMedia(row) {
-  const form = pendingApprovalForm.value
-  Object.assign(form, {
-    media_source: row.media_source,
-    media_id: String(row.id),
-    tmdb_id: row.media_source === 'themoviedb' ? Number(row.id) : null,
-    media_title: row.title,
-    media_type: row.type,
-    confirmed: false,
-  })
-  pendingSearchOpen.value = false
-  const version = ++pendingSearchVersion
-  pendingSearchLoading.value = false
-  const pending = pendingApprovalRow.value
-  const year = pending?.source_season
-  if (row.type !== 'tv' || !year || row.media_source !== 'themoviedb') return
-  if (String(pending.media_id || pending.tmdb_id || '') === String(row.id)
-      && Number.isInteger(pending.season) && pending.season !== year) {
-    form.season = pending.season
-    return
-  }
-  form.season = ''
-  pendingSearchLoading.value = true
-  try {
-    const params = new URLSearchParams({ media_source: 'themoviedb', media_id: String(row.id) })
-    const seasons = unwrapResponse(await props.api.get(`media/seasons?${params}`))
-    if (version !== pendingSearchVersion || form.season !== '' || String(form.media_id) !== String(row.id)
-        || form.media_type !== 'tv') return
-    const candidates = new Set((Array.isArray(seasons) ? seasons : [])
-      .filter(item => [`${year}`, `${year}年`].includes(String(item?.name || '').trim())
-        && Number.isInteger(item.season_number) && item.season_number > 0 && item.season_number <= 999)
-      .map(item => item.season_number))
-    if (candidates.size === 1) form.season = [...candidates][0]
-  } catch {
-    // Keep the standard season editable if the lookup is unavailable.
-  } finally {
-    if (version === pendingSearchVersion) pendingSearchLoading.value = false
-  }
-}
-
-function parseManualEpisodes(value) {
-  const episodes = new Set()
-  for (const part of String(value || '').split(/[，,\s]+/).filter(Boolean)) {
-    const range = part.match(/^(\d+)\s*[-~至]\s*(\d+)$/)
-    if (range) {
-      const first = Number(range[1])
-      const last = Number(range[2])
-      if (last < first || last - first > 500) return null
-      for (let number = first; number <= last; number += 1) episodes.add(number)
-      continue
-    }
-    if (!/^\d+$/.test(part)) return null
-    episodes.add(Number(part))
-  }
-  return [...episodes].sort((a, b) => a - b)
-}
-
-async function submitPendingApproval() {
-  const row = pendingApprovalRow.value
-  if (!row || pendingApprovalSaving.value) return
-  const form = pendingApprovalForm.value
-  const episodes = parseManualEpisodes(form.episodes)
-  const id = String(form.media_id ?? '').trim()
-  const tmdbId = form.media_source === 'themoviedb' ? Number(id) : null
-  const season = Number(form.season)
-  if (!/^\d{1,32}$/.test(id) || id === '0'
-    || form.media_source === 'themoviedb' && (!Number.isSafeInteger(tmdbId) || tmdbId <= 0)
-    || !form.media_title.trim() || !form.confirmed
-    || (form.media_type === 'tv' && (String(form.season ?? '').trim() === ''
-      || !Number.isInteger(season) || season < 0 || season > 999 || !episodes?.length))) {
-    pendingApprovalError.value = '请填写有效的媒体 ID、媒体名称及季集号。'
-    return
-  }
-  pendingApprovalSaving.value = true
-  pendingApprovalError.value = ''
-  try {
-    unwrapResponse(await props.api.post(`${pluginBase.value}/resource-ledger/pending/approve`, {
-      key: row.key,
-      tmdb_id: tmdbId,
-      media_source: form.media_source,
-      media_id: id,
-      media_title: form.media_title.trim(),
-      media_type: form.media_type,
-      season: form.media_type === 'tv' ? season : null,
-      episodes: form.media_type === 'tv' ? episodes : [],
-      specs: form.specs,
-      confirmed: form.confirmed,
-    }))
-    pendingApprovalDialog.value = false
-    await loadResourceRows()
-    const poll = async remaining => {
-      if (remaining <= 0 || approvalTab.value !== 'pending') return
-      await new Promise(resolve => setTimeout(resolve, 2000))
-      await loadResourceRows()
-      const current = resourceRows.value.items.find(item => item.key === row.key)
-      if (current?.manual_state === 'queued' || current?.manual_state === 'processing') {
-        poll(remaining - 1)
-      }
-    }
-    poll(30)
-  } catch (err) {
-    pendingApprovalError.value = err?.message || '提交人工核验失败'
-  } finally {
-    pendingApprovalSaving.value = false
-  }
-}
-
-async function rejectPendingResource(row) {
-  if (!row?.key || pendingRejectingKey.value) return
-  pendingRejectingKey.value = row.key
-  channelDedupError.value = ''
-  try {
-    unwrapResponse(await props.api.post(`${pluginBase.value}/resource-ledger/pending/reject`, {
-      key: row.key,
-    }))
-    if (resourceRows.value.items.some(item => item.key === row.key)) {
-      resourceRows.value = {
-        ...resourceRows.value,
-        items: resourceRows.value.items.filter(item => item.key !== row.key),
-        total: Math.max(0, resourceRows.value.total - 1),
-      }
-    }
-    await loadResourceRows()
-  } catch (err) {
-    channelDedupError.value = err?.message || '驳回待核验申请失败'
-  } finally {
-    pendingRejectingKey.value = ''
-  }
-}
-
-function channelRecordEpisodes(record) {
-  const season = String(record.season || 0).padStart(2, '0')
-  const episodes = (record.episodes || []).map(number => `E${String(number).padStart(2, '0')}`).join(', ')
-  return `S${season} ${episodes}`
-}
-
-function resourceRecordIdentity(record) {
-  const name = record.media_title || '中文名待识别'
-  const episode = record.media_type === 'movie' ? '电影' : channelRecordEpisodes(record)
-  const source = record.media_source === 'douban' ? '豆瓣' : 'TMDB'
-  const id = record.media_id || record.tmdb_id
-  return [name, episode, id ? `${source} ${id}` : '身份待确认'].join(' · ')
-}
-
-function channelRecordSpecs(record) {
-  const specs = record.specs || {}
-  return channelDedupAttributes
-    .map(({ value, title }) => {
-      const item = specs[value]
-      if (item === null || item === undefined || item === '') return ''
-      if (value === 'size') return `${title} ${formatBytes(item)}`
-      if (value === 'fps') return `${title} ${item} FPS`
-      return `${title} ${item}`
-    })
-    .filter(Boolean)
-    .join(' · ')
 }
 
 // 删除当前没有活跃种子的任务。
@@ -795,8 +465,6 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  clearTimeout(resourceSearchTimer)
-  resourceGeneration += 1
   if (refreshTimer) window.clearInterval(refreshTimer)
   if (channelRefreshTimer) window.clearTimeout(channelRefreshTimer)
 })
@@ -1311,8 +979,12 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 type="number" min="1" max="30" step="1"
                 label="缺失日期容差天数" hint="仅在 TMDB、豆瓣都没有逐集日期时使用"
                 persistent-hint density="comfortable" hide-details="auto" />
-              <VSwitch v-model="settingsDraft.recent_missing_date_ai_enabled"
-                label="启用 AI 官方排播核验" color="primary" density="compact" hide-details inset />
+              <div class="global-settings__recent-ai">
+                <VSwitch v-model="settingsDraft.recent_missing_date_ai_enabled"
+                  label="启用 AI 官方排播核验" color="primary" density="compact" hide-details inset />
+              </div>
+              <VSelect v-model="settingsDraft.douban_only_action" :items="doubanOnlyActions"
+                label="当仅豆瓣可识别时" density="comfortable" hide-details />
             </div>
           </section>
           <section class="global-settings__section">
@@ -1438,158 +1110,14 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
           <VTabs v-model="approvalTab" density="compact">
             <VTab value="requests">本机下载申请</VTab>
             <VTab v-if="sharedRecordsHost" value="records">共享下载记录</VTab>
-            <VTab value="pending">下载待核验</VTab>
           </VTabs>
           <div class="channel-dedup__tab-content">
-          <SharedSettingsPanel v-if="channelDedupDialog" v-show="approvalTab !== 'pending'"
+          <SharedSettingsPanel v-if="channelDedupDialog"
             ref="sharedRecordsPanel" :api="api" :plugin-base="pluginBase" :record-tab="approvalTab"
             @host-change="sharedRecordsHost = $event"
             @loading-change="sharedRecordsLoading = $event" />
-          <div v-if="approvalTab === 'pending'" class="channel-dedup__section">
-            <div class="channel-dedup__search approval-search">
-              <VTextField v-model="activeResourceFilter.query" label="搜索记录" prepend-inner-icon="mdi-magnify"
-                clearable maxlength="200" density="comfortable" hide-details />
-              <VSelect v-model="activeResourceFilter.media_type" label="类型筛选" :items="resourceTypes"
-                density="comfortable" hide-details />
-            </div>
-            <div v-if="!ledgerLoading && !resourceRows.items?.length" class="text-body-2 text-medium-emphasis">
-              {{ activeResourceFilter.query || activeResourceFilter.media_type ? '无匹配记录' : '暂无记录' }}
-            </div>
-            <div class="channel-dedup__records">
-              <article v-for="row in resourceRows.items" :key="row.key" class="channel-dedup__record">
-                <div class="channel-dedup__record-head">
-                  <div class="channel-dedup__record-main">
-                    <div class="channel-dedup__record-identity channel-dedup__record-info">
-                      {{ resourceRecordIdentity(row) }}
-                      <template v-if="channelRecordSpecs(row)"> · {{ channelRecordSpecs(row) }}</template>
-                    </div>
-                  </div>
-                  <div class="channel-dedup__record-actions">
-                    <VBtn size="small" density="compact" variant="tonal"
-                      class="channel-dedup__pending-action"
-                      color="error" prepend-icon="mdi-close-circle-outline"
-                      :loading="pendingRejectingKey === row.key"
-                      :disabled="Boolean(pendingRejectingKey) || row.manual_state === 'queued' || row.manual_state === 'processing'"
-                      @click="rejectPendingResource(row)">
-                      驳回申请
-                    </VBtn>
-                    <VBtn v-if="row.actionable" size="small" density="compact" variant="tonal"
-                      class="channel-dedup__pending-action"
-                      prepend-icon="mdi-check-circle-outline"
-                      :disabled="pendingRejectingKey === row.key"
-                      @click="openPendingApproval(row)">
-                      核验下载
-                    </VBtn>
-                  </div>
-                </div>
-                <strong class="channel-dedup__record-title">
-                  {{ row.title || row.path || row.file_key || row.title_key }}
-                </strong>
-                <div class="channel-dedup__record-meta">
-                  <span>最近更新：{{ formatChannelTimestamp(row.last_seen) }}</span>
-                  <span>站点：{{ row.task_name || '-' }}</span>
-                  <span v-if="row.path">文件：{{ row.path }}</span>
-                </div>
-                <p class="channel-dedup__record-reason">{{ row.reason || '身份或规格待核验' }}</p>
-                <p v-if="row.manual_state === 'queued' || row.manual_state === 'processing'"
-                  class="channel-dedup__record-progress">
-                  <VProgressCircular indeterminate size="14" width="2" class="mr-2" />
-                  正在重新核验并执行下载审批
-                </p>
-                <p v-else-if="row.manual_error" class="channel-dedup__record-error">
-                  上次处理未完成：{{ row.manual_error }}
-                </p>
-                <p v-if="row.source_consumed" class="channel-dedup__record-error">
-                  同一种子中的其他待核验文件不可再次单独添加
-                </p>
-              </article>
-            </div>
-            <SharedRecordPagination v-model="resourcePage" :total="resourceRows.total"
-              @update:model-value="loadResourceRows" />
-          </div>
           </div>
         </VCardText>
-      </VCard>
-    </VDialog>
-
-    <VDialog v-model="pendingApprovalDialog" max-width="48rem">
-      <VCard title="人工核验并继续下载">
-        <VCardText class="pending-approval__body">
-          <VAlert type="warning" variant="tonal" density="compact">
-            你确认的身份和规格将重新进入原选种规则与共享下载审批；重复命中、规则排除或协调端拒绝时不会下载。
-          </VAlert>
-          <div class="pending-approval__grid">
-            <VSelect v-model="pendingApprovalForm.media_type" label="媒体类型"
-              :items="[{ title: '剧集', value: 'tv' }, { title: '电影', value: 'movie' }]" hide-details />
-            <VSelect v-model="pendingApprovalForm.media_source" label="身份来源"
-              :items="[{ title: 'TMDB', value: 'themoviedb' }, { title: '豆瓣', value: 'douban' }]"
-              hide-details />
-            <VTextField v-model="pendingApprovalForm.media_id"
-              :label="pendingApprovalForm.media_source === 'douban' ? '豆瓣 ID' : 'TMDB ID'"
-              inputmode="numeric" hide-details>
-              <template #append-inner>
-                <VBtn icon="mdi-magnify" variant="text" size="small" type="button"
-                  aria-label="按名称查询媒体编号" title="按名称查询媒体编号"
-                  :aria-expanded="pendingSearchOpen" :disabled="pendingApprovalSaving" @click="togglePendingSearch" />
-              </template>
-            </VTextField>
-            <div v-if="pendingSearchOpen" class="pending-approval__lookup">
-              <VBtnToggle :model-value="pendingSearchSource" mandatory density="comfortable" color="primary"
-                @update:model-value="setPendingSearchSource">
-                <VBtn value="themoviedb" size="small">TMDB</VBtn>
-                <VBtn value="douban" size="small">豆瓣</VBtn>
-              </VBtnToggle>
-              <p v-if="pendingSearchSource === 'douban'" class="text-caption text-medium-emphasis">
-                有 TMDB 映射时优先采用 TMDB；豆瓣独有条目会保留豆瓣 ID 进入共享审批。
-              </p>
-              <form class="pending-approval__query" @submit.prevent="searchPendingMedia">
-                <VTextField v-model="pendingSearchQuery" label="搜索媒体名称" density="comfortable" clearable hide-details />
-                <VBtn type="submit" variant="tonal" color="primary" prepend-icon="mdi-magnify"
-                  :loading="pendingSearchLoading" :disabled="!pendingSearchQuery?.trim()">搜索</VBtn>
-              </form>
-              <div v-if="pendingSearchMessage" role="status" class="text-body-2 text-medium-emphasis">
-                {{ pendingSearchMessage }}
-              </div>
-              <VList v-if="pendingSearchResults.length" class="pending-approval__results" density="compact">
-                <VListItem v-for="row in pendingSearchResults" :key="`${row.type}:${row.id}`"
-                  :title="row.title" :subtitle="[row.type === 'tv' ? '剧集' : '电影', row.year,
-                    `${pendingSearchSource === 'douban' ? '豆瓣' : 'TMDB'} ${row.id}`].filter(Boolean).join(' · ')"
-                  @click="selectPendingMedia(row)" />
-              </VList>
-            </div>
-            <VTextField v-model="pendingApprovalForm.media_title" label="中文媒体名" hide-details
-              class="pending-approval__name" />
-            <template v-if="pendingApprovalForm.media_type === 'tv'">
-              <VTextField v-model="pendingApprovalForm.season" label="季号" type="number" min="0" max="999" hide-details
-                :placeholder="pendingApprovalRow?.source_season ? '标准季号' : undefined"
-                :loading="pendingSearchLoading && !pendingSearchOpen" />
-              <VTextField v-model="pendingApprovalForm.episodes" label="集号" placeholder="1, 2-4" hide-details />
-            </template>
-            <template v-for="field in channelDedupAttributes.filter(item =>
-              channelDedup.attributes.includes(item.value))" :key="field.value">
-              <VTextField v-model="pendingApprovalForm.specs[field.value]"
-                :label="field.value === 'size' ? '大小（字节）' : field.title"
-                :type="['size', 'fps'].includes(field.value) ? 'number' : 'text'"
-                :min="['size', 'fps'].includes(field.value) ? 0.001 : undefined" hide-details />
-            </template>
-          </div>
-          <VCheckbox v-model="pendingApprovalForm.confirmed" density="compact" hide-details
-            label="我已核对以上媒体身份、季集号及规格" />
-          <VAlert v-if="pendingApprovalError" type="error" variant="tonal" density="compact">
-            {{ pendingApprovalError }}
-          </VAlert>
-          <div v-if="pendingApprovalRow" class="pending-approval__filename text-caption text-medium-emphasis">
-            文件：{{ pendingApprovalRow.path }}
-          </div>
-        </VCardText>
-        <VCardActions>
-          <VSpacer />
-          <VBtn variant="text" :disabled="pendingApprovalSaving" @click="pendingApprovalDialog = false">取消</VBtn>
-          <VBtn color="primary" variant="flat" :loading="pendingApprovalSaving"
-            :disabled="!pendingApprovalForm.confirmed || (pendingSearchLoading && !pendingSearchOpen)" @click="submitPendingApproval">
-            重新核验并提交
-          </VBtn>
-        </VCardActions>
       </VCard>
     </VDialog>
 
@@ -1722,7 +1250,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 .channel-dedup__tab-content { min-inline-size: 0; padding-block-start: 16px; }
 .channel-dedup__tab-content :deep(.approval-search) { display: grid; gap: 12px; }
 .channel-dedup__tab-content :deep(.approval-search > *) { min-inline-size: 0; }
-.channel-dedup__search { grid-template-columns: minmax(0, 1fr) 160px; }
 
 .global-settings__body {
   gap: 0;
@@ -1774,9 +1301,14 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   min-inline-size: 0;
 }
 
-.global-settings__delete-policy,
-.global-settings__recent-date {
+.global-settings__delete-policy {
   align-items: center;
+}
+
+.global-settings__recent-ai {
+  display: flex;
+  align-items: center;
+  min-block-size: 48px;
 }
 
 .global-settings__toggles {
@@ -1869,11 +1401,11 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
 @media (min-width: 960px) {
   .global-settings__limits { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .global-settings__recent-date { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 599px) {
   .channel-dedup__card { block-size: 100dvh; min-block-size: 100dvh; max-block-size: 100dvh; }
-  .channel-dedup__search { grid-template-columns: minmax(0, 1fr); }
 }
 
 .channel-dedup__body :deep(.v-input) {
@@ -1884,162 +1416,6 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 .channel-dedup__body :deep(.v-select__selection-text) {
   white-space: normal;
   overflow-wrap: anywhere;
-}
-
-.channel-dedup__section {
-  display: grid;
-  gap: 12px;
-  min-inline-size: 0;
-}
-
-.channel-dedup__attributes {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
-  gap: 2px 12px;
-}
-
-.channel-dedup__record-meta {
-  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
-  font-size: 0.8rem;
-}
-
-.channel-dedup__records {
-  display: grid;
-  align-content: start;
-}
-
-.channel-dedup__record {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-inline-size: 0;
-  padding: 20px 0;
-  border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-  overflow-wrap: anywhere;
-}
-
-.channel-dedup__record-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  min-inline-size: 0;
-}
-
-.channel-dedup__record-info {
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: rgba(var(--v-theme-on-surface), 0.055);
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.6;
-}
-
-.channel-dedup__record-title {
-  font-size: 14px;
-  line-height: 1.55;
-}
-
-.channel-dedup__record-reason {
-  margin: 0;
-  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.channel-dedup__record-progress,
-.channel-dedup__record-error {
-  display: flex;
-  align-items: center;
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.channel-dedup__record-progress { color: rgb(var(--v-theme-primary)); }
-.channel-dedup__record-error { color: rgb(var(--v-theme-error)); }
-
-.pending-approval__body { display: grid; gap: 20px; }
-.pending-approval__grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px 20px;
-}
-.pending-approval__grid > * { min-inline-size: 0; }
-.pending-approval__name, .pending-approval__lookup { grid-column: 1 / -1; }
-.pending-approval__lookup { display: grid; gap: 8px; }
-.pending-approval__query { display: grid; align-items: center; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
-.pending-approval__results { max-block-size: 12rem; overflow: auto; }
-.pending-approval__results :deep(.v-list-item-title) { white-space: normal; overflow-wrap: anywhere; }
-.pending-approval__filename { overflow-wrap: anywhere; }
-
-.channel-dedup__badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  flex: 0 0 auto;
-  max-inline-size: 52%;
-  min-block-size: 32px;
-  padding: 6px 10px;
-  border-radius: 7px;
-  color: rgb(219, 163, 75);
-  background: rgba(220, 150, 60, 0.13);
-  font-size: 13px;
-  line-height: 20px;
-}
-
-.channel-dedup__record-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex: 0 0 auto;
-  gap: 8px;
-  min-inline-size: 0;
-}
-
-.channel-dedup__pending-action { min-block-size: 32px; }
-
-.channel-dedup__record-main,
-.channel-dedup__record-meta {
-  display: grid;
-  gap: 4px;
-  min-inline-size: 0;
-}
-
-.channel-dedup__record-main strong,
-.channel-dedup__record-main small,
-.channel-dedup__record-meta span,
-.channel-dedup__record-meta time,
-.channel-dedup__record-title {
-  overflow-wrap: anywhere;
-}
-
-.channel-dedup__record-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 16px;
-  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
-  font-size: 14px;
-  line-height: 1.55;
-}
-
-@media (max-width: 600px) {
-  .pending-approval__grid { grid-template-columns: minmax(0, 1fr); }
-  .channel-dedup__record-head {
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .channel-dedup__record-main { flex: 1 0 100%; }
-  .channel-dedup__record-actions { margin-inline-start: auto; }
-
-  .channel-dedup__badge {
-    max-inline-size: 56%;
-    white-space: normal;
-  }
-
-  .channel-dedup__record-meta { flex-direction: column; align-items: flex-start; gap: 4px; }
 }
 
 .resourceflow-loading,

@@ -13,14 +13,14 @@ import uuid
 
 from app.sdk.logging import logger
 
-from .channel_dedup import normalize_specs
+from .channel_dedup import normalize_specs, specs_match
 from .record_search import (
     localized_record_titles, matches_owner, matches_record, record_display_title, record_page,
 )
 from .shared_cache import (
     HIGH_RESOLUTION_PACK_WAIT, HIGH_RESOLUTION_WAIT,
     RECORD_COLUMNS, SYNC_BATCH, SYNC_MAX_PARTS, SYNC_VERSION, display_record, filter_records,
-    find_resource_conflict, same_resource,
+    find_resource_conflict, same_media_file, same_resource,
 )
 from .shared_history import AUTHORITY_VERSION, SITE_METADATA_VERSION, site_label
 from .shared_protocol import (
@@ -343,7 +343,9 @@ class CoordinatorStore:
             raise SharedError("每批历史完成证据须包含 1 至 100 个文件")
         imported = []
         for source in files:
-            item = self._file(source)
+            original = source.get("original_claim") if isinstance(source, dict) else None
+            allow_missing = bool(original and self.policy.get("rules", {}).get("unknown_policy") == "allow")
+            item = self._file(source, allow_missing=allow_missing)
             completed_at = source.get("completed_at")
             if (type(completed_at) not in {int, float} or not math.isfinite(completed_at)
                     or not 0 < completed_at <= time.time() + 300
@@ -353,23 +355,25 @@ class CoordinatorStore:
             old = db.execute(
                 "SELECT claim_id FROM completion_imports WHERE group_id=? AND instance=? AND evidence_id=? AND revision=?",
                 (self.group, instance, item["id"], self.policy["revision"])).fetchone()
-            original = source.get("original_claim")
             linked = db.execute("SELECT * FROM claims WHERE id=?", (original,)).fetchone() if original else None
-            linked_resolution = (normalize_specs(json.loads(linked["specs"])).get("resolution")
-                                 if linked and isinstance(linked["specs"], str) else None)
+            linked_specs = normalize_specs(json.loads(linked["specs"])) if linked else {}
+            linked_resolution = linked_specs.get("resolution")
             item_resolution = item["specs"].get("resolution")
             if linked and (linked["group_id"] != self.group or linked["instance"] != instance
                            or linked["request_id"] != source.get("original_request")
                            or linked["file_id"] != source.get("original_file")
                            or linked["state"] == "released"
-                           or not self._same_identity_file(item, linked)
+                           or not self._same_linked_evidence(item, linked, linked_specs, allow_missing)
                            or self.policy.get("rules", {}).get("prefer_2160p", True)
                            and linked_resolution and item_resolution and linked_resolution != item_resolution
                            or set(item["episodes"]) != set(json.loads(linked["episodes"]))):
                 raise SharedError("历史完成证据与原占位身份或归属不一致")
             if linked:
                 claim = linked["id"]
-                specs = canonical(item["specs"])
+                specs = canonical({**item["specs"], **{
+                    key: linked_specs[key] for key, value in item["specs"].items()
+                    if value is None and linked_specs.get(key) is not None
+                }})
                 if linked["state"] != "completed" or linked["specs"] != specs:
                     db.execute("UPDATE claims SET state='completed',specs=?,updated=? WHERE id=?",
                                (specs, time.time(), claim))
@@ -416,6 +420,16 @@ class CoordinatorStore:
                                    "specs": json.loads(row["specs"])}, self.policy["attributes"],
                              self.policy["size_tolerance_pct"], overlap=overlap, identity_rules=self.policy)
 
+    def _same_linked_evidence(self, item, row, stored_specs, allow_missing):
+        if not allow_missing:
+            return self._same_identity_file(item, row)
+        stored = {**dict(row), "episodes": json.loads(row["episodes"]), "specs": stored_specs}
+        if not same_media_file(item, stored, overlap=False, identity_rules=self.policy):
+            return False
+        known = [key for key in self.policy["attributes"]
+                 if item["specs"].get(key) is not None and stored_specs.get(key) is not None]
+        return not known or specs_match(item, stored, known, self.policy["size_tolerance_pct"])
+
     def _same_completed_evidence(self, item, row):
         if not self._same_identity_file(item, row):
             return False
@@ -441,7 +455,7 @@ class CoordinatorStore:
             results.append({"claim": item.get("claim"), "state": row["state"] if row else "missing"})
         return {"ok": True, "claims": results, **self.authority(db=db)}
 
-    def _file(self, row):
+    def _file(self, row, *, allow_missing=None):
         if not isinstance(row, dict) or not re.fullmatch(r"[a-f0-9]{24}", str(row.get("id", ""))):
             raise SharedError("文件编号无效")
         media_type = row.get("media_type")
@@ -473,22 +487,24 @@ class CoordinatorStore:
             raise SharedError("规格字段无效")
         # Unknown, unselected parser fields must not block an otherwise valid claim.
         specs = {key: specs.get(key) for key in self.policy["attributes"]}
-        if any(value is None or value == "" for value in specs.values()):
-            raise SharedError("缺少共享规则勾选的规格")
+        if allow_missing is None:
+            allow_missing = self.policy.get("rules", {}).get("unknown_policy") == "allow"
         for key, value in specs.items():
+            if value is None or value == "":
+                continue
             if key in {"fps", "size"}:
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                     raise SharedError("规格数值无效")
             elif not isinstance(value, str) or not 0 < len(value) <= 80:
                 raise SharedError("规格文本无效")
-        specs = normalize_specs(specs)
+        specs = normalize_specs({key: value if value != "" else None for key, value in specs.items()})
+        if not allow_missing and any(value is None for value in specs.values()):
+            raise SharedError("缺少共享规则勾选的规格")
         resolution = row.get("specs", {}).get("resolution")
-        if resolution is not None:
+        if resolution not in (None, ""):
             if not isinstance(resolution, str) or not 0 < len(resolution) <= 80:
                 raise SharedError("分辨率规格无效")
             specs["resolution"] = normalize_specs({"resolution": resolution})["resolution"]
-        if any(value is None for value in specs.values()):
-            raise SharedError("缺少共享规则勾选的规格")
         media_title = row.get("media_title", "")
         if not isinstance(media_title, str):
             raise SharedError("媒体显示名称无效")

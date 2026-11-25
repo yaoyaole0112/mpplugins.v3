@@ -7,6 +7,7 @@ import test_channel_integration as integration
 import test_inflight_dedup as inflight
 from resourceflow.channel_dedup import filename_title_aliases, long_title_prefix_matches, parse_candidate_file, same_release
 from resourceflow.models import ChannelDedupSettingsPayload
+from resourceflow.models import ResourceFlowSettingsPayload
 
 
 class SelectedSpecsTests(unittest.TestCase):
@@ -19,6 +20,15 @@ class SelectedSpecsTests(unittest.TestCase):
             "resolution": "1080p", "effects": "SDR", "codec": "H.264",
             "source": "WEB-DL", "fps": 24, "size": 1000,
         }
+
+    def test_douban_only_action_defaults_to_safe_exclusion_and_validates_options(self):
+        self.assertEqual(ResourceFlowSettingsPayload().douban_only_action, "exclude")
+        self.assertEqual(
+            ResourceFlowSettingsPayload(douban_only_action="download").douban_only_action,
+            "download",
+        )
+        with self.assertRaises(ValueError):
+            ResourceFlowSettingsPayload(douban_only_action="guess")
 
     def select(self, path=None, size=5000000000, accepted=None):
         return self.plugin._channel_dedup_file_selection(

@@ -81,7 +81,7 @@ async def verify_settings_layout(dialog, width):
             return {top: box.top, width: box.width}
         })''')
     rows = len({round(item['top']) for item in limits})
-    assert rows == (1 if width >= 960 else 2 if width >= 600 else 4), (width, limits)
+    assert rows == (2 if width >= 960 else 3 if width >= 600 else 6), (width, limits)
     if width >= 960:
         assert all(item['width'] < 320 for item in limits), limits
     heights = await dialog.locator('.global-settings__limits .v-field').evaluate_all(
@@ -135,93 +135,43 @@ async def verify_settings_layout(dialog, width):
 
 
 async def verify_record_search(page, dialog, tab, initial_height, output, width, host_css=None):
-    ledger = tab == '下载待核验'
-    selector = '.channel-dedup__record' if ledger else '.shared-settings__record'
+    selector = '.shared-settings__record'
     await page.evaluate('window.resourceflowExtraRecords = 125')
     await dialog.get_by_role('button', name='刷新资源记录', exact=True).click()
     await page.wait_for_function("""selector =>
         [...document.querySelectorAll(selector)].filter(item => item.getBoundingClientRect().width > 0).length === 20
     """, arg=selector)
-    expected_total = {'本机下载申请': 130, '共享下载记录': 129, '下载待核验': 126}[tab]
+    expected_total = {'本机下载申请': 130, '共享下载记录': 129}[tab]
     total = dialog.locator('.shared-settings__pagination .shared-settings__total')
     assert await total.inner_text() == f'共 {expected_total} 条'
-    if ledger:
-        assert await dialog.locator('.channel-dedup__records + .shared-settings__pagination .shared-settings__total').count() == 1
-        assert await dialog.get_by_text(f'共 {expected_total} 条', exact=True).count() == 1
-        layout = await dialog.locator('.channel-dedup__records').evaluate('''element => {
-            const body = element.closest('.v-card-text')
-            const style = getComputedStyle(element)
-            return {max: style.maxHeight, overflow: style.overflowY,
-                height: element.getBoundingClientRect().height,
-                ownScroll: element.scrollHeight > element.clientHeight + 1,
-                bodyScroll: body.scrollHeight > body.clientHeight + 1}
-        }''')
-        assert layout['max'] == 'none' and layout['overflow'] == 'visible', (tab, width, layout)
-        assert layout['height'] > 400 and not layout['ownScroll'] and layout['bodyScroll'], (tab, width, layout)
-        assert '测试剧集 · S01' in await dialog.locator('.channel-dedup__record-identity').nth(1).inner_text()
-        await dialog.locator('.channel-dedup__record').last.scroll_into_view_if_needed()
-        last = await dialog.locator('.channel-dedup__record').last.bounding_box()
-        body = await dialog.locator('.v-card-text').bounding_box()
-        assert last['y'] + last['height'] <= body['y'] + body['height'] + 1, (tab, width, last, body)
-        await dialog.locator('.v-card-text').evaluate('element => { element.scrollTop = 0 }')
-        await page.screenshot(path=str(output / f'ledger-many-{tab}-{width}.png'), full_page=True)
-        if host_css:
-            stylesheet = await page.add_style_tag(path=str(host_css))
-            for scheme in ('light', 'dark'):
-                await page.evaluate('scheme => window.resourceflowSetTheme(scheme)', scheme)
-                await page.evaluate('''scheme => {
-                    for (const element of [document.documentElement, document.body]) {
-                        element.dataset.theme = 'glass'
-                        element.dataset.glassColorScheme = scheme
-                    }
-                }''', scheme)
-                assert await dialog.locator('.channel-dedup__records').evaluate('''element =>
-                    getComputedStyle(element).maxHeight === 'none'
-                    && getComputedStyle(element).overflowY === 'visible'
-                    && element.scrollHeight <= element.clientHeight + 1''')
-                await dialog.locator('.channel-dedup__record').last.scroll_into_view_if_needed()
-                last = await dialog.locator('.channel-dedup__record').last.bounding_box()
-                body = await dialog.locator('.v-card-text').bounding_box()
-                assert last['y'] + last['height'] <= body['y'] + body['height'] + 1, (tab, width, scheme)
-                await dialog.locator('.v-card-text').evaluate('element => { element.scrollTop = 0 }')
-                await page.screenshot(path=str(output / f'ledger-many-{tab}-glass-{scheme}-{width}.png'), full_page=True)
-            await page.evaluate('() => window.resourceflowSetTheme("light")')
-            await page.evaluate('''() => {
-                for (const element of [document.documentElement, document.body]) {
-                    delete element.dataset.theme
-                    delete element.dataset.glassColorScheme
-                }
-            }''')
-            await stylesheet.evaluate('element => element.remove()')
     search = dialog.get_by_role('textbox', name='搜索记录')
     await search.scroll_into_view_if_needed()
     await dialog.locator('.v-pagination:visible .v-pagination__item button').nth(1).click()
     await page.wait_for_timeout(400)
-    prefix = 'Search Ledger item-' if ledger else 'Search Record item-'
+    prefix = "Search Record item-"
     await search.fill(f'{prefix}124')
     await dialog.get_by_text(f'{prefix}124', exact=True).wait_for()
     assert await dialog.locator(f'{selector}:visible').count() == 1
     assert await dialog.locator('.v-pagination:visible').count() == 0
     assert await total.inner_text() == '共 1 条'
-    if not ledger:
-        toolbar = dialog.locator('.shared-settings__search:visible')
-        owner_select, type_select = toolbar.locator('.v-select').nth(0), toolbar.locator('.v-select').nth(1)
-        await owner_select.click()
-        await page.get_by_role('option', name='朋友A', exact=True).click()
-        await dialog.get_by_text('无匹配记录', exact=True).wait_for()
-        await owner_select.click()
-        await page.get_by_role('option', name='搜索下载方', exact=True).click()
-        await dialog.get_by_text(f'{prefix}124', exact=True).wait_for()
-        await type_select.click()
-        await page.get_by_role('option', name='电影', exact=True).click()
-        await dialog.get_by_text('无匹配记录', exact=True).wait_for()
-        await type_select.click()
-        await page.get_by_role('option', name='剧集', exact=True).click()
-        await dialog.get_by_text(f'{prefix}124', exact=True).wait_for()
-        await type_select.click()
-        await page.get_by_role('option', name='全部类型', exact=True).click()
-        await owner_select.click()
-        await page.get_by_role('option', name='全部下载方', exact=True).click()
+    toolbar = dialog.locator('.shared-settings__search:visible')
+    owner_select, type_select = toolbar.locator('.v-select').nth(0), toolbar.locator('.v-select').nth(1)
+    await owner_select.click()
+    await page.get_by_role('option', name='朋友A', exact=True).click()
+    await dialog.get_by_text('无匹配记录', exact=True).wait_for()
+    await owner_select.click()
+    await page.get_by_role('option', name='搜索下载方', exact=True).click()
+    await dialog.get_by_text(f'{prefix}124', exact=True).wait_for()
+    await type_select.click()
+    await page.get_by_role('option', name='电影', exact=True).click()
+    await dialog.get_by_text('无匹配记录', exact=True).wait_for()
+    await type_select.click()
+    await page.get_by_role('option', name='剧集', exact=True).click()
+    await dialog.get_by_text(f'{prefix}124', exact=True).wait_for()
+    await type_select.click()
+    await page.get_by_role('option', name='全部类型', exact=True).click()
+    await owner_select.click()
+    await page.get_by_role('option', name='全部下载方', exact=True).click()
     await search.fill('not-a-record-[]_%')
     await dialog.get_by_text('无匹配记录', exact=True).wait_for()
     bounds = await dialog.locator('.channel-dedup__card').bounding_box()
@@ -236,9 +186,9 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
     assert await dialog.get_by_text(f'{prefix}124', exact=True).is_visible()
     await page.evaluate('window.resourceflowSlowSearch = false; window.resourceflowExtraRecords = 0')
     await search.fill('')
-    toolbar = dialog.locator('.channel-dedup__search:visible, .shared-settings__search:visible')
+    toolbar = dialog.locator('.shared-settings__search:visible')
     status_select = toolbar.locator('.v-select').last
-    value = '电影' if ledger else '已过滤' if tab == '本机下载申请' else '已完成'
+    value = '已过滤' if tab == '本机下载申请' else '已完成'
     await status_select.click()
     if tab == '本机下载申请':
         await page.get_by_role('option', name='已过滤', exact=True).wait_for()
@@ -252,7 +202,7 @@ async def verify_record_search(page, dialog, tab, initial_height, output, width,
     await search.fill('not-a-record')
     await dialog.get_by_text('无匹配记录', exact=True).wait_for()
     await status_select.click()
-    await page.get_by_role('option', name='全部类型' if ledger else '全部状态', exact=True).click()
+    await page.get_by_role('option', name="全部状态", exact=True).click()
     await search.fill('')
     await page.wait_for_timeout(600)
     bounds = await dialog.locator('.channel-dedup__card').bounding_box()
@@ -281,7 +231,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label("参与跨实例共享审批", exact=True).count() == 0
             assert await dialog.get_by_role("button", name="保存设置", exact=True).count() == 0
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机下载申请', '共享下载记录', '下载待核验']
+                '本机下载申请', '共享下载记录']
             bounds = await dialog.bounding_box()
             assert bounds["width"] >= (1100 if width >= 1000 else width * 0.9 if width >= 600 else width - 2), bounds
             assert bounds["height"] >= height * 0.88, bounds
@@ -375,49 +325,10 @@ async def verify(base_url, output, executable_path, host_css=None):
             assert await dialog.get_by_label("剧集身份绑定", exact=True).count() == 0
             assert await dialog.get_by_role("tab", name="长期账本", exact=True).count() == 0
             assert await dialog.get_by_role("tab", name="共享已完成", exact=True).count() == 0
-            await dialog.get_by_role("tab", name="下载待核验", exact=True).click()
-            await dialog.get_by_text("Unknown Resource", exact=True).wait_for()
-            await dialog.locator('.v-card-text').evaluate('element => { element.scrollTop = 0 }')
-            pending_first = dialog.locator('.channel-dedup__record').first
-            assert '站点：测试任务' in await pending_first.inner_text()
-            assert '任务：' not in await pending_first.inner_text()
-            pending_position = await search_box.bounding_box()
-            for axis in ('x', 'y'):
-                assert abs(pending_position[axis] - search_position[axis]) <= 1, (search_position, pending_position)
-            assert await dialog.get_by_text('待核验影片 · 电影 · 身份待确认 · 分辨率 2160p', exact=True).count() == 1
-            assert await dialog.locator('.channel-dedup__badge').count() == 0
-            action_layout = await dialog.locator('.channel-dedup__record-actions').first.evaluate("""element => {
-                const button = element.querySelector('button').getBoundingClientRect()
-                const record = element.closest('article').getBoundingClientRect()
-                return {buttonHeight: Math.abs(button.height - 32) < 1,
-                    contained: element.getBoundingClientRect().right <= record.right + 1,
-                    fits: element.scrollWidth <= element.clientWidth + 1}
-            }""")
-            assert all(action_layout.values()), action_layout
-            await dialog.get_by_role("button", name="核验下载", exact=True).click()
-            manual_dialog = page.get_by_role("dialog").filter(has=page.get_by_text("人工核验并继续下载", exact=True))
-            await manual_dialog.get_by_label("TMDB ID").fill("123")
-            await manual_dialog.get_by_label("我已核对以上媒体身份、季集号及规格").check()
-            await manual_dialog.get_by_role("button", name="重新核验并提交", exact=True).click()
-            await page.wait_for_function("""() => window.resourceflowRequests.some(item =>
-                item.method === 'POST' && item.path.endsWith('/resource-ledger/pending/approve')
-                && item.body.tmdb_id === 123 && item.body.confirmed === true)""")
-            await verify_record_search(page, dialog, '下载待核验', card_bounds['height'], output, width, host_css)
-            await page.screenshot(path=str(output / f'pending-{width}.png'), full_page=True)
-            await dialog.get_by_role("button", name="驳回申请", exact=True).click()
-            await page.wait_for_function("""() =>
-                [...document.querySelectorAll('.channel-dedup__record')]
-                  .filter(item => item.getBoundingClientRect().width > 0).length === 0""")
-            assert await dialog.get_by_text('共 0 条', exact=True).count() == 1
-            await dialog.get_by_role('button', name='刷新资源记录', exact=True).click()
-            await dialog.locator('.channel-dedup__loading').wait_for(state='hidden')
-            assert await dialog.get_by_text("Unknown Resource", exact=True).count() == 0
+            assert await dialog.get_by_role("tab", name="下载待核验", exact=True).count() == 0
             assert await close_button.is_visible()
             await close_button.click()
-            assert await page.evaluate("""window.resourceflowRequests.filter(item =>
-                item.method === 'POST').map(item => item.path)""") == [
-                'plugin/ResourceFlow/resource-ledger/pending/approve',
-                'plugin/ResourceFlow/resource-ledger/pending/reject']
+            assert not await page.evaluate("window.resourceflowRequests.some(item => item.path.includes('/resource-ledger'))")
             await page.get_by_role("button", name="全局设置", exact=True).click()
             await dialog.get_by_label("本机名称", exact=True).wait_for()
             await page.wait_for_function("document.querySelector('.shared-settings__instance input')?.value")
@@ -476,11 +387,6 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_label("在本机运行协调端", exact=True).check()
             await dialog.get_by_label("提供私网 HTTPS 审批入口", exact=True).check()
             await dialog.get_by_text("共享规格去重字段", exact=True).wait_for()
-            await page.wait_for_function("""() => {
-                const input = [...document.querySelectorAll('textarea')]
-                    .find(item => item.getAttribute('aria-label') === '剧集身份绑定')
-                return input && !input.disabled
-            }""")
             await dialog.get_by_label("剧集身份绑定", exact=True).fill("玫瑰 = 123\nTMDB 336181 = 336292")
             assert await dialog.get_by_label("分辨率", exact=True).is_checked()
             for label in ("特效", "编码", "来源", "帧率", "大小"):
@@ -564,7 +470,7 @@ async def verify(base_url, output, executable_path, host_css=None):
             await page.get_by_role("button", name="共享下载审批", exact=True).click()
             await dialog.get_by_role("tab", name="共享下载记录", exact=True).wait_for()
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机下载申请', '共享下载记录', '下载待核验']
+                '本机下载申请', '共享下载记录']
             await dialog.get_by_role("tab", name="共享下载记录", exact=True).click()
             await dialog.get_by_text("朋友A", exact=False).wait_for()
             shared_position = await search_box.bounding_box()
@@ -726,15 +632,12 @@ async def verify(base_url, output, executable_path, host_css=None):
             await dialog.get_by_text("Show S01E05", exact=True).wait_for()
             assert await dialog.get_by_text("全部参与设备的共享下载记录", exact=True).count() == 0
             assert await dialog.get_by_role("tab").all_text_contents() == [
-                '本机下载申请', '共享下载记录', '下载待核验']
+                '本机下载申请', '共享下载记录']
             await dialog.get_by_text("共享占位关联异常 1 个，暂缓新增下载", exact=True).wait_for()
             await dialog.get_by_text("历史完成证据待同步：2 条；同步确认前暂缓新增下载。", exact=True).wait_for()
             assert await dialog.get_by_text("历史完成证据不完整", exact=False).count() == 0
             await dialog.get_by_text(f"关联占位：{'9' * 32}", exact=True).wait_for()
             assert "命中占位" not in await dialog.inner_text()
-            await dialog.get_by_role("tab", name="下载待核验", exact=True).click()
-            assert await dialog.get_by_text("历史完成证据不完整", exact=False).count() == 0
-            await dialog.get_by_text("历史完成证据待同步：2 条；同步确认前暂缓新增下载。", exact=True).wait_for()
             await dialog.get_by_role("tab", name="共享下载记录", exact=True).click()
             await dialog.get_by_text(f"关联申请：{'b' * 32}", exact=True).wait_for()
             toolbar = dialog.locator('.shared-settings__search:visible')
@@ -779,31 +682,8 @@ async def verify(base_url, output, executable_path, host_css=None):
             await verify_record_layout(dialog)
             await page.screenshot(path=str(output / f'pack-summary-{width}.png'), full_page=True)
             await page.close()
-        for width in (1440, 390):
-            page = await browser.new_page(viewport={"width": width, "height": 900}, locale="zh-CN")
-            await page.goto(f"{base_url}/tests/channel-dedup-smoke.html?yearSeason=1")
-            await page.wait_for_function("window.resourceflowReady === true")
-            await page.evaluate("document.fonts.ready")
-            await page.get_by_role("button", name="共享下载审批", exact=True).click()
-            await page.get_by_role("tab", name="下载待核验", exact=True).click()
-            await page.get_by_role("button", name="核验下载", exact=True).click()
-            manual = page.get_by_role("dialog").filter(has=page.get_by_text("人工核验并继续下载", exact=True))
-            assert await manual.get_by_label("季号", exact=True).input_value() == ""
-            assert await manual.get_by_label("集号", exact=True).input_value() == "45"
-            await manual.get_by_role("button", name="按名称查询媒体编号", exact=True).click()
-            await manual.get_by_text("剧集 · 2022 · TMDB 154770", exact=True).click()
-            await page.wait_for_function('document.querySelector("input[max=\\"999\\"]")?.value === "5"')
-            assert await manual.get_by_label("TMDB ID").input_value() == "154770"
-            await manual.get_by_label("我已核对以上媒体身份、季集号及规格").check()
-            await manual.get_by_role("button", name="重新核验并提交", exact=True).click()
-            await page.wait_for_function("""() => window.resourceflowRequests.some(item =>
-                item.method === 'POST' && item.path.endsWith('/resource-ledger/pending/approve')
-                && item.body.tmdb_id === 154770 && item.body.media_source === 'themoviedb'
-                && item.body.media_id === '154770' && item.body.media_type === 'tv' && item.body.season === 5
-                && item.body.episodes.length === 1 && item.body.episodes[0] === 45)""")
-            await page.close()
         await browser.close()
-    print("Verified 1440, 768, 390 and 320: three record tabs keep dialog height; completed filter replaces separate ledger tab; pending search, filters, pagination and stale-response guards; global settings and task editor regressions")
+    print("Verified 1440, 768, 390 and 320: two record tabs keep dialog height; completed filter replaces separate ledger tab; search, filters, pagination and stale-response guards; global settings and task editor regressions")
     if host_css:
         print('MoviePilot host stylesheet verified with glass light/dark overrides')
 
@@ -837,16 +717,27 @@ async def verify_selection_settings(base_url, output, executable_path, host_css=
             ]
             assert await dialog.get_by_text(re.compile(r"Telegram|协调 Bot")).count() == 0
             assert await dialog.get_by_label("协调端 Tailscale HTTPS 域名").input_value() == "approval.example.ts.net"
+            douban = dialog.locator(".v-select").filter(has=page.locator("label", has_text="当仅豆瓣可识别时"))
+            assert await douban.get_by_text("排除过滤", exact=True).count() == 1
+            await douban.click()
+            await page.get_by_role("option", name="排除过滤", exact=True).wait_for()
+            await page.get_by_role("option", name="执行下载", exact=True).click()
             await dialog.get_by_label("种子黑名单", exact=True).check()
             await dialog.get_by_role("button", name="保存设置", exact=True).click()
             await page.wait_for_function("""window.resourceflowRequests.some(item =>
-                item.path === 'plugin/ResourceFlow/settings' && item.body.global_torrent_blacklist_enabled)""")
+                item.path === 'plugin/ResourceFlow/settings' && item.body.global_torrent_blacklist_enabled
+                && item.body.douban_only_action === 'download')""")
             assert await page.evaluate("""window.resourceflowRequests.filter(item =>
                 item.path.endsWith('/shared/settings')).every(item =>
                 !['bot_username', 'bot_token', 'allowed_users', 'transport'].some(key => key in item.body))""")
             assert await dialog.locator(".v-card-text").evaluate("el => el.scrollWidth <= el.clientWidth + 1")
             await dialog.get_by_label("在本机运行协调端", exact=True).check()
             await dialog.get_by_label("提供私网 HTTPS 审批入口", exact=True).check()
+            specs = dialog.locator(".v-select").filter(has=page.locator("label", has_text="候选缺少勾选规格时"))
+            await specs.locator(".v-field").click()
+            await page.get_by_role("option", name="排除过滤", exact=True).wait_for()
+            await page.get_by_role("option", name="执行下载", exact=True).wait_for()
+            await page.keyboard.press("Escape")
             await verify_settings_layout(dialog, width)
             await dialog.locator(".v-card-text").evaluate("el => { el.scrollTop = 0 }")
             await page.screenshot(path=str(output / f"global-settings-{width}.png"))
@@ -870,45 +761,6 @@ async def verify_selection_settings(base_url, output, executable_path, host_css=
     print("Verified HTTPS-only settings and MoviePilot classification at 1440, 768, 390 and 320px")
 
 
-async def verify_pending_douban(base_url, executable_path):
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            headless=True, executable_path=executable_path, args=["--no-sandbox"],
-        )
-        page = await browser.new_page(viewport={"width": 390, "height": 900}, locale="zh-CN")
-        errors = []
-        page.on("pageerror", lambda error: errors.append(str(error)))
-        await page.goto(f"{base_url}/tests/channel-dedup-smoke.html?yearSeason=1")
-        await page.wait_for_function("window.resourceflowReady === true")
-        await page.get_by_role("button", name="共享下载审批", exact=True).click()
-        await page.get_by_role("tab", name="下载待核验", exact=True).click()
-        await page.get_by_role("button", name="核验下载", exact=True).click()
-        dialog = page.get_by_role("dialog").filter(has=page.get_by_text("人工核验并继续下载", exact=True))
-        await dialog.get_by_role("button", name="按名称查询媒体编号", exact=True).click()
-        await dialog.get_by_role("button", name="豆瓣", exact=True).click()
-        await dialog.get_by_text("剧集 · 2022 · 豆瓣 12345", exact=True).click()
-        await page.wait_for_timeout(500)
-        if await dialog.get_by_label("豆瓣 ID").input_value() != "12345":
-            raise AssertionError({
-                "dialog": await dialog.inner_text(),
-                "requests": await page.evaluate("window.resourceflowRequests"),
-                "errors": errors,
-            })
-        assert await dialog.get_by_label("中文媒体名").input_value() == "豆瓣剧集"
-        requests = await page.evaluate("window.resourceflowRequests")
-        assert any(item["method"] == "GET" and "media_source=douban" in item["path"]
-                   for item in requests), requests
-        assert any(item["method"] == "POST"
-                   and item["path"].endswith("/resource-ledger/pending/resolve-douban")
-                   and item["body"] == {
-                       "douban_id": "12345", "media_type": "tv", "media_title": "你好，星期六",
-                   }
-                   for item in requests), requests
-        assert not errors, errors
-        await browser.close()
-    print("Verified Douban-only search selection preserves its native ID in the manual confirmation form")
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
@@ -916,10 +768,6 @@ if __name__ == "__main__":
     parser.add_argument("--executable-path", default="/opt/google/chrome/chrome")
     parser.add_argument("--host-css", type=Path)
     parser.add_argument("--settings-only", action="store_true")
-    parser.add_argument("--pending-douban-only", action="store_true")
     args = parser.parse_args()
-    if args.pending_douban_only:
-        asyncio.run(verify_pending_douban(args.base_url, args.executable_path))
-    else:
-        check = verify_selection_settings if args.settings_only else verify
-        asyncio.run(check(args.base_url, args.output, args.executable_path, args.host_css))
+    check = verify_selection_settings if args.settings_only else verify
+    asyncio.run(check(args.base_url, args.output, args.executable_path, args.host_css))

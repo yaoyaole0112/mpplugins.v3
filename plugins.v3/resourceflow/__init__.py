@@ -172,6 +172,7 @@ GLOBAL_DYNAMIC_DELETE_FIELDS = (
 RECENT_DATE_FALLBACK_FIELDS = (
     "recent_missing_date_tolerance_days",
     "recent_missing_date_ai_enabled",
+    "douban_only_action",
 )
 
 class BrushTaskConfig:
@@ -287,7 +288,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，通过 Tailscale 私网 HTTPS 进行共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.67"
+    plugin_version = "1.0.68"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -295,7 +296,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     auth_level = 2
 
     DATA_SCHEMA_VERSION = 2
-    CONFIG_SCHEMA_VERSION = 9
+    CONFIG_SCHEMA_VERSION = 10
     MAX_RUN_HISTORY = 50
     GLOBAL_BRUSH_TAG = "资源刷流"
     TASK_DATA_NAMES = ("torrents", "archived", "unmanaged", "statistic", "runs")
@@ -427,6 +428,12 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         self._recent_missing_date_ai_enabled = bool(
             raw_config.get("recent_missing_date_ai_enabled", False)
         )
+        try:
+            self._douban_only_action = ResourceFlowSettingsPayload.model_validate(
+                {"douban_only_action": raw_config.get("douban_only_action", "exclude")}
+            ).douban_only_action
+        except ValueError:
+            self._douban_only_action = "exclude"
         for field, default in SHARED_SLOW_DOWNLOAD_DEFAULTS.items():
             try:
                 value = ResourceFlowSettingsPayload.model_validate(
@@ -566,27 +573,6 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "资源长期账本及待核验身份",
-            },
-            {
-                "path": "/resource-ledger/pending/resolve-douban",
-                "endpoint": self.resolve_pending_douban_identity,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "将豆瓣条目映射为共享审批使用的 TMDB 身份",
-            },
-            {
-                "path": "/resource-ledger/pending/approve",
-                "endpoint": self.approve_pending_resource,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "人工核验身份并重新走下载审批",
-            },
-            {
-                "path": "/resource-ledger/pending/reject",
-                "endpoint": self.reject_pending_resource,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "驳回并隐藏一条待核验申请",
             },
             {
                 "path": "/resource-ledger/forget",
@@ -1030,6 +1016,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         for field in GLOBAL_DYNAMIC_DELETE_FIELDS:
             setattr(self, f"_{field}", getattr(payload, field))
         for field in RECENT_DATE_FALLBACK_FIELDS:
+            if field == "douban_only_action" and field not in payload.model_fields_set:
+                continue
             setattr(self, f"_{field}", getattr(payload, field))
         for field in SHARED_SLOW_DOWNLOAD_DEFAULTS.keys() & payload.model_fields_set:
             setattr(self, f"_{field}", getattr(payload, field))
@@ -3472,8 +3460,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             )
             return None
         deferred = self._resource_identity_deferred(task)
-        files = (parse_torrent_files(torrent_content, include_full_path=bool(transfer_patterns))
-                 if transfer_patterns or manual_path or deferred else [])
+        files = parse_torrent_files(torrent_content, include_full_path=bool(transfer_patterns))
         if transfer_patterns:
             if not files:
                 logger.info(f"刷流任务 [{task.name}] 暂缓种子 {torrent.title}："
@@ -3490,16 +3477,27 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             for item in files
         ):
             raise ValueError("核验文件不是暂存种子中的视频")
+        identity_preselection = None
+        if not task.recent_episodes_only and not manual_path and not deferred:
+            audio_extensions = set(getattr(settings, "RMT_AUDIOEXT", ()) or ())
+            audio_only = (not any(self._video_file(item["path"]) for item in files)
+                          and any(Path(item["path"]).suffix.lower() in audio_extensions for item in files))
+            if not audio_only:
+                identity_preselection = self._mp_identity_file_selection(
+                    files, torrent.title, task, torrent.description or "",
+                )
+                if not identity_preselection:
+                    return None
+                if identity_preselection["accepted"] == identity_preselection["videos"]:
+                    identity_preselection = None
         pending_source = {
             "content": torrent_content, "task_id": task.id, "hash": expected_hash,
             "title": torrent.title, "torrent": self._pending_torrent_snapshot(torrent),
         }
         if deferred and not files:
-            self._pending_identity({"path": torrent.title, "specs": {}}, torrent.title, task,
-                                   "未取得可核验的种子文件清单，不添加下载", pending_source)
-            logger.info(f"资源去重待核验 {torrent.title}：无法读取元数据，暂不添加下载")
+            logger.info(f"刷流任务 [{task.name}] 排除种子 {torrent.title}：无法读取共享审批所需的种子文件清单")
             return None
-        recent_selection = None
+        recent_selection = identity_preselection
         if task.recent_episodes_only and not (manual_path and manual_recent_screened):
             recent_selection = self._recent_episode_file_selection(
                 torrent_content,
@@ -4090,39 +4088,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
 
     def _pending_identity(self, candidate: dict, title: str, task, reason: str,
                           source: Optional[dict] = None, *, recent_screened: bool = False) -> None:
-        if not hasattr(self, "_identity_pending") or not self._resource_identity_deferred(task):
-            return
-        row = {**candidate, "task_id": getattr(task, "id", None),
-               "task_name": getattr(task, "name", ""), "title": title,
-               "reason": reason}
-        key = evidence_key({**candidate, "title_key": candidate.get("title_key") or candidate.get("path")})
-        source = source or getattr(getattr(self, "_task_context", None), "pending_source", None)
-        if self._shared_participates(task):
-            key = hashlib.sha256(json.dumps([
-                key, row["task_id"], row.get("path"), (source or {}).get("hash"),
-            ], ensure_ascii=False).encode()).hexdigest()
-        with self._inflight_lock:
-            if key in (getattr(self, "_identity_pending_rejected", {}) or {}):
-                return
-            pending = dict(self._identity_pending)
-            if key in pending and (
-                pending[key].get("manual_state") in {"queued", "processing"}
-                or (pending[key].get("reason") == reason
-                    and bool(pending[key].get("recent_screened")) == recent_screened
-                    and time.time() - pending[key].get("last_seen", 0) < 300)
-            ):
-                return
-            pending.pop(key, None)
-            if source:
-                source_id = self._persist_pending_source(source)
-                if source_id:
-                    row["source_id"] = source_id
-                    if recent_screened:
-                        row["recent_screened"] = True
-            pending[key] = {**row, "last_seen": time.time()}
-            pending = dict(list(pending.items())[-5000:])
-            self.save_data("resource_identity_pending", pending)
-            self._identity_pending = pending
+        """Legacy no-op: candidates that cannot be safely decided are filtered, never queued."""
+        return
 
     @staticmethod
     def _pending_torrent_snapshot(torrent: TorrentInfo) -> dict:
@@ -5060,9 +5027,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             error = f"MoviePilot 识别失败（{type(err).__name__}）"
         kind = self._mp_media_type(media)
         media_identity = self._mp_media_identity(media) if media else (None, None, None)
-        should_check_release = bool(title_hint) and (
-            not kind or not media_identity[0] or kind == "tv"
-        )
+        should_check_release = bool(title_hint) and (not kind or not media_identity[2] or kind == "tv")
         if should_check_release:
             hint_media = self._mp_release_recognition(
                 title_hint, title_cache if title_cache is not None else {}, title_hint_description
@@ -5076,7 +5041,10 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             )
             can_use_release_identity = (
                 (not kind or kind == hint_kind)
-                and (not media_identity[0] or identity_conflict)
+                and (not media_identity[0] or (
+                    (identity_conflict or media_identity[0] == "douban") and
+                    (not media_identity[2] or hint_identity[2])
+                ))
             )
             if (hint_kind and hint_identity[0]
                     and can_use_release_identity
@@ -5590,6 +5558,40 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         )
         return inferred
 
+    def _mp_identity_file_selection(
+        self, files: list, title: str, task, description: str = "",
+    ) -> Optional[dict]:
+        """Filter files whose MoviePilot recognition cannot establish a usable media identity."""
+        videos = {item["path"] for item in files if self._video_file(item["path"])}
+        accepted = set()
+        title_cache = {}
+        for path in sorted(videos):
+            _meta, media, _season, _episodes, reason = self._mp_file_recognition(
+                path, standard_only=False, title_hint=title,
+                title_hint_description=description, title_cache=title_cache,
+            )
+            source, media_id, _tmdb_id = self._mp_media_identity(media)
+            if reason or not self._mp_media_type(media) or not source or not media_id:
+                detail = reason or "MoviePilot 未返回可用媒体身份"
+                logger.info(f"刷流任务 [{task.name}] 排除文件 {path}：{detail}，本轮不下载")
+                continue
+            if (source == "douban" and getattr(self, "_douban_only_action", "exclude") != "download"):
+                logger.info(
+                    f"刷流任务 [{task.name}] 排除文件 {path}："
+                    "MoviePilot 仅豆瓣可识别，按全局策略排除过滤"
+                )
+                continue
+            if source == "douban":
+                logger.info(
+                    f"刷流任务 [{task.name}] 放行文件 {path}：MoviePilot 仅豆瓣可识别，"
+                    "按全局策略执行下载，不查询播出日期"
+                )
+            accepted.add(path)
+        if not accepted:
+            logger.info(f"刷流任务 [{task.name}] 排除种子 {title}：没有文件通过 MoviePilot 身份核验")
+            return None
+        return {"accepted": accepted, "videos": videos}
+
     def _recent_episode_file_selection(
         self, torrent_content: Union[str, bytes], title: str, days: int = 3,
         candidate_overrides: Optional[dict] = None,
@@ -5646,14 +5648,23 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     )
                     meta, media, season, episodes, reason = recognition
                     if shared:
-                        if reason or not self._mp_tmdb_id(media):
-                            candidate, _, reason = self._mp_resource_candidate(
-                                path, sizes.get(path), title, "", recognition=recognition,
-                            )
-                            self._pending_identity(candidate, title, task, reason, pending_source)
                         recognized_files[path] = recognition
                     if reason:
                         raise ValueError(reason)
+                    media_source, _media_id, tmdb_id = self._mp_media_identity(media)
+                    if not media_source:
+                        raise ValueError("MoviePilot 未返回可用的 TMDB 或豆瓣身份")
+                    if media_source == "douban" and not tmdb_id:
+                        if getattr(self, "_douban_only_action", "exclude") != "download":
+                            rejected_paths[path] = "仅豆瓣可识别，按全局策略排除过滤"
+                            logger.info(f"最近播出剧集规则排除文件 {path}：仅豆瓣可识别，按全局策略排除过滤")
+                        else:
+                            accepted.append(path)
+                            logger.info(
+                                f"最近播出剧集规则放行文件 {path}：仅豆瓣可识别，按全局策略执行下载；"
+                                "跳过 TMDB/豆瓣播出日期查询"
+                            )
+                        continue
                     episode_group = getattr(meta, "episode_group", None) or getattr(media, "episode_group", None)
                 if self._is_movie(media):
                     movie_year = self._movie_year(media, meta.year)
@@ -5790,35 +5801,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                                 continue
                             if result["confidence"] == "medium":
                                 logger.info(
-                                    f"最近播出日期待核验 {path}：S{season:02d}E{number:02d} "
-                                    f"仅有中置信度来源，暂不自动下载"
+                                    f"最近播出日期排除 {path}：S{season:02d}E{number:02d} "
+                                    f"仅有中置信度来源，按本轮过滤处理"
                                 )
-                                if task is not None and getattr(media, "tmdb_id", None):
-                                    candidate = parse_candidate_file(
-                                        path, None, title, "", allow_movie=True
-                                    ) or {}
-                                    candidate.update({
-                                        "path": path,
-                                        "media_type": "tv",
-                                        "tmdb_id": int(media.tmdb_id),
-                                        "title_key": normalize_title(
-                                            str(getattr(media, "title", "") or title)
-                                        ),
-                                        "title_keys": [normalize_title(
-                                            str(getattr(media, "title", "") or title)
-                                        )],
-                                        "season": int(season),
-                                        "episodes": [int(number)],
-                                        "specs": dict(candidate.get("specs") or parse_specs(path, None)),
-                                    })
-                                    self._pending_identity(
-                                        candidate,
-                                        title,
-                                        task,
-                                        f"近期播出日期待核验：S{season:02d}E{number:02d} "
-                                        f"AI 仅返回中置信度来源",
-                                        pending_source,
-                                    )
                             elif result["confidence"] == "low":
                                 logger.info(
                                     f"最近播出日期排除 {path}：S{season:02d}E{number:02d} "
@@ -5846,7 +5831,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                                     missing_reasons.append(
                                         f"E{number:02d}查到{ai_result['date']}，但仅为"
                                         f"{ai_result['confidence']}置信度"
-                                        f"（{ai_result['source'][:120]}），需人工核验"
+                                        f"（{ai_result['source'][:120]}），按本轮排除过滤"
                                     )
                                 else:
                                     if not uses_fallback:
@@ -6014,15 +5999,14 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 if defer_identity:
                     excluded.add(item["path"])
                     identity_count += 1
-                    self._pending_identity({"path": item["path"], "specs": {}}, title, task,
-                                           "无法解析资源", pending_source)
+                    logger.info(f"{match_source}排除文件 {item['path']}：无法确认媒体身份或季集号")
                 continue
             if (getattr(MetaInfo(item["path"].rsplit("/", 1)[-1]), "episode_group", None)
                     and not candidate.get("manual_identity")):
                 if defer_identity:
                     excluded.add(item["path"])
                     identity_count += 1
-                    self._pending_identity(candidate, title, task, "剧集组需核验标准季集号", pending_source)
+                    logger.info(f"{match_source}排除文件 {item['path']}：剧集组未能确认标准季集号")
                 continue
             missing_attributes = [
                 key for key in attributes if candidate["specs"].get(key) is None
@@ -6031,12 +6015,6 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 if unknown_policy == "exclude":
                     excluded.add(item["path"])
                     missing_count += 1
-                    if defer_identity:
-                        self._pending_identity(
-                            candidate, title, task,
-                            f"候选缺少勾选规格：{', '.join(missing_attributes)}",
-                            pending_source,
-                        )
                     logger.info(
                         f"{match_source}排除文件 {item['path']}：候选缺少勾选规格 "
                         f"{', '.join(missing_attributes)}，按缺规格排除策略处理（不是已发布重复）"
@@ -6057,7 +6035,6 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     if defer_identity:
                         excluded.add(item["path"])
                         identity_count += 1
-                        self._pending_identity(candidate, title, task, "别名绑定冲突", pending_source)
                     continue
                 candidate.update({"tmdb_id": bound_ids.pop(), "identity_source": "alias",
                                   "identity_evidence_names": candidate.get("title_keys") or []})
@@ -6065,9 +6042,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 if not self._verify_resource_identity(candidate, title, task, spec_hint):
                     excluded.add(item["path"])
                     identity_count += 1
-                    self._pending_identity(candidate, title, task, "身份未确认，等待别名绑定或识别重试",
-                                           pending_source)
-                    logger.info(f"资源去重待核验 {item['path']}：不添加下载，非重复命中")
+                    logger.info(f"{match_source}排除文件 {item['path']}：MoviePilot 未能确认媒体身份")
                     continue
                 self._resolve_pending_identity(candidate, task)
             if "effects" in attributes and "effects" in candidate["inferred_attributes"]:
@@ -6111,7 +6086,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             "video_count": len(considered),
             "matched_video_count": matched_count,
             "missing_spec_count": missing_count,
-            "identity_pending_count": identity_count,
+            "identity_filtered_count": identity_count,
             "reject_torrent": pack_policy == "exclude",
         }
 
@@ -6151,7 +6126,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             f"{'整包排除（存在不合格文件）' if selection.get('reject_torrent') else '没有可下载视频'}："
             f"同规格重复 {selection.get('matched_video_count', 0)} 个，"
             f"缺少勾选规格 {selection.get('missing_spec_count', 0)} 个"
-            f"，身份待核验 {selection.get('identity_pending_count', 0)} 个"
+            f"，身份不完整过滤 {selection.get('identity_filtered_count', 0)} 个"
         )
 
     @staticmethod

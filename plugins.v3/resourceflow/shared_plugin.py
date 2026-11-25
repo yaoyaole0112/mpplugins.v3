@@ -249,7 +249,10 @@ class SharedResourceMixin:
                     })
             if changed:
                 self._save_shared()
-        return completion_rows(records, self._channel_dedup_attributes)
+        return completion_rows(
+            records, self._channel_dedup_attributes,
+            allow_missing_linked=getattr(self, "_channel_dedup_unknown_policy", "exclude") == "allow",
+        )
 
     def _sync_shared_history(self, store=None):
         """Acknowledged local history is an archive, never a second admission authority."""
@@ -1042,19 +1045,23 @@ class SharedResourceMixin:
                 item["path"], item.get("size"), title, spec_hint, candidate_overrides,
                 recognition=recognized_files.get(item["path"]), title_cache=title_cache,
             )
+            if (not reason and candidate.get("media_source") == "douban"
+                    and getattr(self, "_douban_only_action", "exclude") != "download"):
+                reason = "仅豆瓣可识别，按全局策略排除过滤"
             if not reason:
                 missing_specs = [
                     field for field in self._channel_dedup_attributes if not candidate["specs"].get(field)
                 ]
-                if missing_specs:
+                if missing_specs and getattr(self, "_channel_dedup_unknown_policy", "exclude") == "exclude":
                     reason = f"缺少勾选规格：{', '.join(missing_specs)}"
+                elif missing_specs:
+                    logger.info(
+                        f"资源刷流共享审批放行 {item['path']}：候选缺少勾选规格 "
+                        f"{', '.join(missing_specs)}，按全局兼容策略执行下载"
+                    )
             if reason:
                 rejected.append(item["path"])
-                self._pending_identity(
-                    candidate, title, task, reason, pending_source,
-                    recent_screened=bool(paths is not None and (selection or {}).get("recent_screened")),
-                )
-                logger.info(f"资源刷流共享审批候选暂缓 {item['path']}：{reason}")
+                logger.info(f"资源刷流共享审批候选排除过滤 {item['path']}：{reason}")
                 continue
             candidate["id"] = hashlib.sha256(item["path"].encode()).hexdigest()[:24]
             candidate["title"] = title[:160]
@@ -1290,7 +1297,9 @@ class SharedResourceMixin:
                     logger.info(f"共享审批本地缓存跳过 {title}：候选均已命中共享下载记录或本机在途申请")
                     return None
                 if not candidates or rejected and self._channel_dedup_pack_policy == "exclude":
-                    raise SharedError("共享审批候选身份或规格不完整，本次不添加下载")
+                    logger.info(f"资源刷流共享审批排除种子 {title}："
+                                "没有通过核验的文件或整包不符合规则，本轮不下载")
+                    return None
                 current_policy = self._local_shared_policy()
                 request_id = uuid.uuid4().hex
                 site_name = self._shared_request_site({"site_name": site_name}, {}, task=task)
