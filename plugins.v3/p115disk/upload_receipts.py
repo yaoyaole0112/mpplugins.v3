@@ -41,7 +41,8 @@ def _read(path):
         raise ValueError("115 upload receipt store is malformed")
     cutoff = time.time() - RECEIPT_TTL
     return [
-        item for item in data
+        item
+        for item in data
         if isinstance(item.get("created_at"), (int, float))
         and item["created_at"] >= cutoff
     ]
@@ -75,14 +76,16 @@ def record_upload_result(source_path, target_item, upload_kind, *, source_sha1=N
     path = _store_path()
     with _LOCK:
         records = _read(path)
-        records.append({
-            "source_path": str(source),
-            "source_identity": identity,
-            "target": target,
-            "upload_kind": upload_kind,
-            "source_sha1": str(source_sha1 or "").lower(),
-            "created_at": time.time(),
-        })
+        records.append(
+            {
+                "source_path": str(source),
+                "source_identity": identity,
+                "target": target,
+                "upload_kind": upload_kind,
+                "source_sha1": str(source_sha1 or "").lower(),
+                "created_at": time.time(),
+            }
+        )
         _write(path, records[-5000:])
     return True
 
@@ -103,16 +106,21 @@ def consume_upload_result(source_path, source_identity, target_item, *, source_s
         records = _read(path)
         match_index = next(
             (
-                index for index in range(len(records) - 1, -1, -1)
+                index
+                for index in range(len(records) - 1, -1, -1)
                 if records[index].get("source_path") == str(source)
                 and (
                     records[index].get("source_identity") == list(source_identity)
-                    or (re.fullmatch(r"[0-9a-f]{40}", checksum)
-                        and records[index].get("source_sha1") == checksum)
+                    or (
+                        re.fullmatch(r"[0-9a-f]{40}", checksum)
+                        and records[index].get("source_sha1") == checksum
+                    )
                 )
-                and records[index].get("target", {}).get("storage") == target.get("storage")
+                and records[index].get("target", {}).get("storage")
+                == target.get("storage")
                 and records[index].get("target", {}).get("type") == target.get("type")
-                and str(records[index].get("target", {}).get("fileid")) == str(target.get("fileid"))
+                and str(records[index].get("target", {}).get("fileid"))
+                == str(target.get("fileid"))
                 and records[index].get("target", {}).get("path") == target.get("path")
                 and records[index].get("target", {}).get("size") == target.get("size")
             ),

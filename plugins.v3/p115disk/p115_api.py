@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from threading import RLock
@@ -26,6 +27,14 @@ from app.sdk.logging import logger
 
 from .cache import IdPathCache, ItemIdCache
 from .tools import RateLimiter, get_ios_ua_app
+
+
+# 本平台的 st_ctime 是否随内容修改而变化。
+# POSIX 上 ctime 是 inode 状态变更时间，原地覆盖必然推进，可作为内容变更信号；
+# Windows 上 st_ctime 是创建时间，覆盖文件不会改变它，据其判断会得出「未变化」
+# 的错误结论，因此在那里不纳入 SHA1 缓存键。
+CTIME_TRACKS_CONTENT_CHANGE = os.name != "nt"
+SHA1_CACHE_ENABLED = os.name != "nt"
 
 
 def _build_download_path(fileitem: FileItem, base_path: Path) -> Optional[Path]:
@@ -66,7 +75,6 @@ class P115Api:
         self._copy_call_counter = 0
         self._move_call_counter = 0
         self._delete_call_counter = 0
-        self._get_pid_by_path_call_counter = 0
 
         self._get_item_rate_limiter = RateLimiter(
             max_calls=2, time_window=2.0, name="get_item"
@@ -87,6 +95,11 @@ class P115Api:
         self._get_item_fail_records: Dict[str, Dict[str, float]] = {}
         self._get_item_blacklist: Dict[str, float] = {}
 
+        # 整文件 SHA1 缓存：POSIX 使用文件状态键，Windows 为保证正确性关闭缓存
+        self._sha1_cache: Dict[str, str] = {}
+        self._sha1_cache_max = 64
+        self._sha1_lock = RLock()
+
     def get_pid_by_path(self, path: Path) -> int:
         """
         通过文件夹路径获取文件夹 ID
@@ -95,33 +108,57 @@ class P115Api:
 
         :return int: 目录 ID
         """
+        path_str = path.as_posix()
         try:
-            if path.as_posix() == "/":
+            if path_str == "/":
                 return 0
-            pid = self._id_cache.get_id_by_dir(directory=path.as_posix())
+            pid = self._id_cache.get_id_by_dir(directory=path_str)
             if pid:
                 return pid
             self._get_pid_by_path_rate_limiter.acquire()
-            self._get_pid_by_path_call_counter = (
-                self._get_pid_by_path_call_counter + 1
-            ) % 2
-            if self._get_pid_by_path_call_counter == 0:
-                resp = self.client.fs_dir_getid(
-                    path.as_posix(), **get_ios_ua_app(app=False)
-                )
-            else:
-                resp = self.client.fs_dir_getid_app(path.as_posix(), **get_ios_ua_app())
-            check_response(resp)
-            pid = resp.get("id", -1)
+            resp: Optional[Dict] = None
+            pid: Optional[int] = None
+            api_errors: List[str] = []
+            # app 接口优先，web 接口偶发 405，仅作为回退
+            for label, getter in (
+                (
+                    "app",
+                    lambda: self.client.fs_dir_getid_app(path_str, **get_ios_ua_app()),
+                ),
+                (
+                    "web",
+                    lambda: self.client.fs_dir_getid(
+                        path_str, **get_ios_ua_app(app=False)
+                    ),
+                ),
+            ):
+                try:
+                    current = getter()
+                    check_response(current)
+                    try:
+                        current_pid = int(current.get("id", -1))
+                    except (TypeError, ValueError):
+                        current_pid = -1
+                    if current_pid < 0:
+                        raise OSError("响应缺少有效目录ID")
+                    resp = current
+                    pid = current_pid
+                    break
+                except Exception as api_error:
+                    api_errors.append(f"{label}: {api_error}")
+            if resp is None:
+                raise OSError("; ".join(api_errors) or "获取文件夹ID失败")
+            if pid is None:
+                raise OSError("获取文件夹ID失败：响应缺少目录ID")
             if pid == 0:
-                resp = self.client.fs_makedirs_app(
-                    path.as_posix(), pid=0, **get_ios_ua_app()
-                )
+                resp = self.client.fs_makedirs_app(path_str, pid=0, **get_ios_ua_app())
                 check_response(resp)
-                pid = resp["cid"]
-                self._id_cache.add_cache(id=int(pid), directory=path.as_posix())
+                pid = int(resp["cid"])
+                self._id_cache.add_cache(id=pid, directory=path_str)
                 return pid
-            if pid != 0:
+            if pid > 0:
+                # 命中后写入路径缓存，避免后续 list 重复请求 115 接口
+                self._id_cache.add_cache(id=pid, directory=path_str)
                 return pid
             return -1
         except Exception as e:
@@ -197,7 +234,7 @@ class P115Api:
             return None
         return items
 
-    def list(self, fileitem: FileItem) -> List[FileItem]:
+    def list(self, fileitem: FileItem) -> Optional[List[FileItem]]:
         """
         浏览文件或目录
 
@@ -205,41 +242,30 @@ class P115Api:
 
         :return List: 文件项列表，如果是文件则返回包含该文件的列表，如果是目录则返回目录下的所有文件和子目录
         """
-        if not fileitem.path:
-            raise StorageQueryError("【115网盘Plus】缺少目录路径")
-        directory = Path(fileitem.path)
-        file_id = None
+        self._list_rate_limiter.acquire()
+        if fileitem.type == "file":
+            item = self.detail(fileitem)
+            if item:
+                return [item]
+            return []
+        if fileitem.path == "/":
+            file_id = "0"
+        else:
+            file_id = fileitem.fileid
+            if not file_id:
+                file_id = self.get_pid_by_path(Path(fileitem.path))
+            if file_id == -1:
+                return None
+
+        items = []
         try:
-            if fileitem.type == "file":
-                try:
-                    return [self._query_item(directory)]
-                except FileNotFoundError:
-                    return []
-            if directory == Path("/"):
-                file_id = 0
-            elif fileitem.fileid and str(fileitem.fileid) != "0":
-                file_id = int(fileitem.fileid)
-            else:
-                # get_pid_by_path() can create a missing directory.
-                self._get_item_rate_limiter.acquire()
-                file_id = int(get_id_to_path(
-                    self.client, directory.as_posix(), ensure_file=False, refresh=True,
-                    **get_ios_ua_app(app=False),
-                ))
-                if file_id <= 0:
-                    raise StorageQueryError("【115网盘Plus】找不到要浏览的目录")
-            self._list_rate_limiter.acquire()
-            items = []
             for data in fs_files_iter(
-                self.client, file_id, cooldown=1.5, raise_for_changed_count=True,
-                **get_ios_ua_app(app=False),
+                self.client, file_id, cooldown=1.5, **get_ios_ua_app(app=False)
             ):
-                entries = data.get("data")
-                if not isinstance(entries, list):
-                    raise StorageQueryError("【115网盘Plus】目录列表响应无效")
-                for item in entries:
+                logger.debug(f"【P115Disk】浏览目录 {data}")
+                for item in data.get("data", []):
                     item = normalize_attr(item)
-                    path = (directory / item["name"]).as_posix()
+                    path = f"{fileitem.path}{item['name']}"
                     file_path = path + ("/" if item["is_dir"] else "")
                     self._id_cache.add_cache(id=item["id"], directory=path)
                     self._id_item_cache.add_cache(
@@ -270,16 +296,53 @@ class P115Api:
                             pickcode=item["pickcode"],
                         )
                     )
-        except P115NotADirectoryError as error:
-            if file_id:
-                self._id_cache.remove(id=file_id)
-                self._id_item_cache.remove(id=file_id)
-            raise StorageQueryError("【115网盘Plus】目录已变更，请返回上一级刷新") from error
-        except StorageQueryError:
-            raise
-        except Exception as error:
-            logger.warning("【P115Disk】目录读取失败：%s", type(error).__name__)
-            raise StorageQueryError("【115网盘Plus】无法读取目录，请检查登录状态或稍后重试") from error
+        except Exception as e:
+            logger.warn(f"【P115Disk】获取信息失败: {str(e)}")
+            if isinstance(e, P115NotADirectoryError) and file_id and file_id != "0":
+                try:
+                    self._id_cache.remove(id=int(file_id))
+                    self._id_item_cache.remove(id=int(file_id))
+                except Exception:
+                    pass
+            try:
+                storage_chain = StorageChain()
+                fallback_dict = fileitem.model_dump(exclude={"storage"})
+                if isinstance(e, P115NotADirectoryError):
+                    fallback_dict["fileid"] = None
+                fileitem = FileItem(
+                    storage="u115",
+                    **fallback_dict,
+                )
+                fallback_items = storage_chain.list_files(
+                    fileitem=fileitem, recursion=False
+                )
+                if fallback_items:
+                    result_items = []
+                    for item in fallback_items:
+                        if item.fileid:
+                            self._id_cache.add_cache(
+                                id=int(item.fileid), directory=item.path.rstrip("/")
+                            )
+                            self._id_item_cache.add_cache(
+                                id=int(item.fileid),
+                                item={
+                                    "path": item.path,
+                                    "id": int(item.fileid),
+                                    "size": item.size,
+                                    "modify_time": item.modify_time,
+                                    "pickcode": item.pickcode,
+                                    "is_dir": bool(item.type == "dir"),
+                                },
+                            )
+                        result_item = FileItem(
+                            storage=self._disk_name,
+                            **item.model_dump(exclude={"storage"}),
+                        )
+                        result_items.append(result_item)
+                    return result_items
+            except Exception as e:
+                logger.error(f"【P115Disk】获取信息失败（原版）: {str(e)}")
+            return None
         return items
 
     def create_folder(self, fileitem: FileItem, name: str) -> Optional[FileItem]:
@@ -817,9 +880,14 @@ class P115Api:
         progress_callback = transfer_process(Path(fileitem.path).as_posix())
 
         try:
-            with stream(
-                "GET", download_url, headers={"user-agent": settings.USER_AGENT}
-            ) as r:
+            headers = {"user-agent": settings.USER_AGENT}
+            headers.update(
+                {
+                    key.lower(): value
+                    for key, value in (download_info.get("headers") or {}).items()
+                }
+            )
+            with stream("GET", download_url, headers=headers) as r:
                 r.raise_for_status()
                 downloaded_size = 0
 
@@ -862,20 +930,156 @@ class P115Api:
 
         :param filepath (Path): 文件路径
         :param size (int): 前多少字节，为 None 则计算整个文件
+
+        :raises InterruptedError: 传输被取消
         """
         sha1 = hashes.Hash(hashes.SHA1())
-        with open(filepath, "rb") as f:
-            if size:
-                chunk = f.read(size)
+        if size:
+            with open(filepath, "rb") as f:
                 if global_vars.is_transfer_stopped(filepath.as_posix()):
                     raise InterruptedError
+                chunk = f.read(size)
+            sha1.update(chunk)
+            return sha1.finalize().hex()
+
+        # 大分块读取：8KB → 8MB，并降低取消检查频率（每块查一次约 200k 次函数调用）
+        chunk_size = 8 * 1024 * 1024
+        path_str = filepath.as_posix()
+        with open(filepath, "rb") as f:
+            P115Api._hint_sequential_read(f)
+            while chunk := f.read(chunk_size):
+                if global_vars.is_transfer_stopped(path_str):
+                    raise InterruptedError
                 sha1.update(chunk)
-            else:
-                while chunk := f.read(8192):
-                    if global_vars.is_transfer_stopped(filepath.as_posix()):
-                        raise InterruptedError
-                    sha1.update(chunk)
         return sha1.finalize().hex()
+
+    @staticmethod
+    def _hint_sequential_read(fileobj) -> None:
+        """
+        向内核声明顺序读，触发预读以减少大文件哈希的随机停顿
+
+        :param fileobj: 已打开的文件对象
+        """
+        fadvise = getattr(os, "posix_fadvise", None)
+        if fadvise is None:
+            return
+        try:
+            fadvise(fileobj.fileno(), 0, 0, os.POSIX_FADV_SEQUENTIAL)
+        except (OSError, ValueError):
+            pass
+
+    @staticmethod
+    def _sha1_cache_key(filepath: Path, file_stat: os.stat_result) -> str:
+        """
+        构造文件 SHA1 缓存键
+
+        必须能唯一标识「当前文件内容」。仅用秒级 mtime 时，同路径、同字节数、
+        且 mtime 落在同一秒内的替换文件会命中旧哈希，进而把旧文件身份用于
+        115 秒传校验。因此改用：
+
+        - 纳秒级 mtime：常规写入必然变化；
+        - 纳秒级 ctime：原地覆盖并强制保留 mtime（cp -p、utime 还原）时仍会变化。
+          仅在本平台 ctime 随内容变化时纳入（见 CTIME_TRACKS_CONTENT_CHANGE）；
+          Windows 上 st_ctime 是创建时间，覆盖文件不改变它，拿它做失效依据会给出
+          「未变化」的错误结论，因此不纳入；
+        - inode：同秒同大小但被替换成新文件时变化。
+
+        :param filepath (Path): 文件路径
+        :param file_stat (os.stat_result): 文件的 os.stat 结果
+
+        :return str: 缓存键
+        """
+        mtime_ns = getattr(file_stat, "st_mtime_ns", None)
+        if mtime_ns is None:
+            mtime_ns = int(file_stat.st_mtime * 1_000_000_000)
+        inode = getattr(file_stat, "st_ino", 0)
+        if not CTIME_TRACKS_CONTENT_CHANGE:
+            return f"{filepath.as_posix()}:{file_stat.st_size}:{mtime_ns}:{inode}"
+        ctime_ns = getattr(file_stat, "st_ctime_ns", None)
+        if ctime_ns is None:
+            ctime_ns = int(file_stat.st_ctime * 1_000_000_000)
+        return (
+            f"{filepath.as_posix()}:{file_stat.st_size}:{mtime_ns}:{ctime_ns}:{inode}"
+        )
+
+    def _get_cached_sha1(self, filepath: Path) -> Optional[str]:
+        """
+        读取文件 SHA1 缓存（键为路径 + 大小 + 纳秒 mtime + inode）
+
+        读取路径只做查询，不做容量清理：写入路径已保证条目数不超过上限，
+        若在查询前清空会让下一次查询必然 miss，反而使刚写入的哈希失效。
+
+        :param filepath (Path): 文件路径
+
+        :return str: 命中返回 SHA1，未命中返回 None
+        """
+        if not SHA1_CACHE_ENABLED:
+            return None
+        try:
+            file_stat = filepath.stat()
+        except OSError:
+            return None
+        key = self._sha1_cache_key(filepath, file_stat)
+        with self._sha1_lock:
+            return self._sha1_cache.get(key)
+
+    def _store_cached_sha1(
+        self, filepath: Path, value: str, expected_key: Optional[str] = None
+    ) -> None:
+        """
+        写入文件 SHA1 缓存
+
+        :param filepath (Path): 文件路径
+        :param value (str): 计算得到的 SHA1
+        :param expected_key (str): 读取开始前的缓存键。给出时只有当前文件状态
+            仍与该键一致才写入，避免把旧内容的哈希挂到新状态的键上
+        """
+        if not SHA1_CACHE_ENABLED:
+            return
+        try:
+            file_stat = filepath.stat()
+        except OSError:
+            return
+        key = self._sha1_cache_key(filepath, file_stat)
+        if expected_key is not None and key != expected_key:
+            logger.debug(
+                f"【P115Disk】SHA1 读取期间文件状态变化，跳过缓存: {filepath.name}"
+            )
+            return
+        with self._sha1_lock:
+            if len(self._sha1_cache) >= self._sha1_cache_max:
+                self._sha1_cache.clear()
+            self._sha1_cache[key] = value
+
+    def _sha1_with_cache(self, filepath: Path) -> str:
+        """
+        计算文件 SHA1，命中缓存时直接返回
+
+        上传重试、重复上传同一文件（常见于秒传场景）可省去整文件哈希。
+
+        :param filepath (Path): 文件路径
+
+        :return str: 文件 SHA1
+        """
+        cached = self._get_cached_sha1(filepath)
+        if cached:
+            logger.debug(f"【P115Disk】SHA1 命中缓存: {filepath}")
+            return cached
+        # 读取前记录文件状态，读完再比对：读取期间文件被写入或替换时，
+        # 这段内容对应的哈希不能挂到新状态的键上，否则重试会拿到不匹配的值
+        begin_key = None
+        try:
+            begin_key = self._sha1_cache_key(filepath, filepath.stat())
+        except OSError:
+            pass
+        started = monotonic()
+        value = self._calc_sha1(filepath)
+        self._store_cached_sha1(filepath, value, expected_key=begin_key)
+        logger.info(
+            f"【P115Disk】SHA1 计算完成: {filepath.name} "
+            f"耗时 {monotonic() - started:.1f}s"
+        )
+        return value
 
     def _get_oss_token(self) -> Tuple[str, str, str, str, datetime]:
         """
@@ -919,6 +1123,29 @@ class P115Api:
         remaining = (expiration_time - now).total_seconds()
         return remaining < threshold_minutes * 60
 
+    def _complete_upload(
+        self,
+        local_path: Path,
+        target_path: Path,
+        file_sha1: str,
+        upload_kind: str,
+    ) -> Optional[FileItem]:
+        """
+        查询上传后的文件并保存供 ED2K 插件核验的回执
+        """
+        item = self.get_item(target_path)
+        if not item:
+            return None
+        try:
+            from app.plugins.p115disk.upload_receipts import record_upload_result
+
+            record_upload_result(
+                local_path, item, upload_kind, source_sha1=file_sha1
+            )
+        except Exception as error:
+            logger.warning(f"【P115Disk】保存上传回执失败: {type(error).__name__}")
+        return item
+
     def upload(
         self,
         target_dir: FileItem,
@@ -952,10 +1179,10 @@ class P115Api:
             return None
         target_pid = target_dir_item.fileid
 
-        # 计算文件特征值
+        # 计算文件特征值（命中 SHA1 缓存时跳过整文件哈希）
         file_size = local_path.stat().st_size
         try:
-            file_sha1 = self._calc_sha1(local_path)
+            file_sha1 = self._sha1_with_cache(local_path)
         except InterruptedError:
             logger.info(f"【P115Disk】{local_path} 上传已取消！")
             return None
@@ -1036,15 +1263,9 @@ class P115Api:
             if init_resp.get("reuse"):
                 logger.info(f"【P115Disk】{target_name} 秒传成功")
                 progress_callback(100)
-                uploaded_item = self.get_item(target_path)
-                if uploaded_item:
-                    try:
-                        from .upload_receipts import record_upload_result
-
-                        record_upload_result(local_path, uploaded_item, "instant", source_sha1=file_sha1)
-                    except Exception as error:
-                        logger.warn(f"【P115Disk】保存ED2K上传类型回执失败: {error}")
-                return uploaded_item
+                return self._complete_upload(
+                    local_path, target_path, file_sha1, "instant"
+                )
 
             logger.debug(f"【P115Disk】上传初始化结果: {init_resp}")
 
@@ -1209,15 +1430,9 @@ class P115Api:
 
             if result.status == 200:
                 logger.info(f"【P115Disk】{target_name} 上传成功")
-                uploaded_item = self.get_item(target_path)
-                if uploaded_item:
-                    try:
-                        from .upload_receipts import record_upload_result
-
-                        record_upload_result(local_path, uploaded_item, "ordinary", source_sha1=file_sha1)
-                    except Exception as error:
-                        logger.warn(f"【P115Disk】保存ED2K上传类型回执失败: {error}")
-                return uploaded_item
+                return self._complete_upload(
+                    local_path, target_path, file_sha1, "ordinary"
+                )
             else:
                 logger.error(
                     f"【P115Disk】{target_name} 上传失败，状态码: {result.status}"
@@ -1430,7 +1645,8 @@ class P115Api:
                 available=int(resp["data"]["space_info"]["all_total"]["size"])
                 - int(resp["data"]["space_info"]["all_use"]["size"]),
             )
-        except Exception:
+        except Exception as e:
+            logger.warning("【P115Disk】获取存储使用情况失败：%s", e, exc_info=True)
             return None
 
     def support_transtype(self) -> dict:

@@ -1,4 +1,4 @@
-import hashlib
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,10 +60,12 @@ class TestV3P115DiskUpload(TestCase):
             {
                 "IdPathCache": id_cache,
                 "ItemIdCache": item_cache,
+                "os": os,
                 "RLock": RLock,
                 "RateLimiter": limiter,
                 "hashes": hashes,
                 "global_vars": self.stop,
+                "logger": self.logger,
             },
             "P115Api",
         )
@@ -130,16 +132,6 @@ class TestV3P115DiskUpload(TestCase):
         self.api.get_folder.assert_called_once_with(path=Path("/movies"))
         self.api.get_item.assert_called_once_with(Path(self.uploaded.path))
 
-    def test_success_receipt_carries_computed_content_digest(self) -> None:
-        receipts = ModuleType("app.plugins.p115disk.upload_receipts")
-        receipts.record_upload_result = MagicMock()
-        with patch.dict(sys.modules, {"app.plugins.p115disk.upload_receipts": receipts}):
-            self.assertIs(self.core.upload(self.target, self.path), self.uploaded)
-        receipts.record_upload_result.assert_called_once_with(
-            self.path, self.uploaded, "instant",
-            source_sha1=hashlib.sha1(self.path.read_bytes()).hexdigest(),
-        )
-
     def test_two_instances_keep_separate_clients_and_cache_invalidation(self) -> None:
         """
         一个存储实例上传不清理另一个实例的同路径缓存
@@ -177,6 +169,26 @@ class TestV3P115DiskUpload(TestCase):
             self.client.upload_file_init.call_args.kwargs["filename"], "renamed.mkv"
         )
         self.api.get_item.assert_called_once_with(Path("/movies/renamed.mkv"))
+
+    def test_upload_receipt_includes_source_sha1(self) -> None:
+        receipts = ModuleType("app.plugins.p115disk.upload_receipts")
+        receipts.record_upload_result = MagicMock(return_value=True)
+        with patch.dict(
+            sys.modules, {"app.plugins.p115disk.upload_receipts": receipts}
+        ):
+            result = self.api._complete_upload(
+                self.path,
+                Path(self.uploaded.path),
+                "source-sha1",
+                "instant",
+            )
+        self.assertIs(result, self.uploaded)
+        receipts.record_upload_result.assert_called_once_with(
+            self.path,
+            self.uploaded,
+            "instant",
+            source_sha1="source-sha1",
+        )
 
     def test_patch_without_client_does_not_initialize_upload(self) -> None:
         """

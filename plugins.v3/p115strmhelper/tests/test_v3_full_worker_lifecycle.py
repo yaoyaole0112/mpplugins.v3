@@ -10,9 +10,10 @@ from time import perf_counter
 from types import MethodType, SimpleNamespace
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 from unittest import TestCase
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import test_v3_sync_lifecycle as sync_fixture
+from test_v3_full_scan_retry import FullScanIterator
 from test_v3_worker_queue import _compile
 
 
@@ -44,16 +45,31 @@ class TestV3FullWorkerLifecycle(TestCase):
             full_sync_batch_num=1,
         )
         self.namespace = dict(
-            Any=Any, Dict=Dict, List=List, Optional=Optional, Set=Set, Tuple=Tuple,
-            Path=Path, Thread=self._thread, ThreadPoolExecutor=ThreadPoolExecutor,
-            as_completed=as_completed, dumps=lambda item: json_dumps(item).encode(),
-            Queue=Queue, Empty=Empty, batched=batched, perf_counter=perf_counter,
-            configer=self.config, logger=MagicMock(), P115Client=object,
-            MediaInfoDownloader=object, CBase64=MagicMock(),
-            StrmExecHistoryManager=MagicMock(), sentry_manager=MagicMock(),
+            Any=Any,
+            Dict=Dict,
+            List=List,
+            Optional=Optional,
+            Set=Set,
+            Tuple=Tuple,
+            Path=Path,
+            Thread=self._thread,
+            ThreadPoolExecutor=ThreadPoolExecutor,
+            as_completed=as_completed,
+            dumps=lambda item: json_dumps(item).encode(),
+            Queue=Queue,
+            Empty=Empty,
+            batched=batched,
+            perf_counter=perf_counter,
+            configer=self.config,
+            logger=MagicMock(),
+            P115Client=object,
+            MediaInfoDownloader=object,
+            CBase64=MagicMock(),
+            StrmExecHistoryManager=MagicMock(),
+            sentry_manager=MagicMock(),
             get_pid_by_path=MagicMock(return_value=1),
-            iter_files_skim_serial=MagicMock(return_value=iter(())),
-            retry_read_request=MagicMock(),
+            iter_files_skim=MagicMock(return_value=iter(())),
+            FullScanIterator=FullScanIterator,
             ProcessResult=namedtuple(
                 "ProcessResult", ["status", "path", "message", "data", "path_entry"]
             ),
@@ -65,9 +81,15 @@ class TestV3FullWorkerLifecycle(TestCase):
         )
         self.helper = object.__new__(cls)
         for name in (
-            "total_count", "elapsed_time", "total_db_write_count", "strm_count",
-            "mediainfo_count", "strm_fail_count", "mediainfo_fail_count",
-            "remove_unless_strm_count", "strm_cleanup_deferred_count",
+            "total_count",
+            "elapsed_time",
+            "total_db_write_count",
+            "strm_count",
+            "mediainfo_count",
+            "strm_fail_count",
+            "mediainfo_fail_count",
+            "remove_unless_strm_count",
+            "strm_cleanup_deferred_count",
         ):
             setattr(self.helper, name, 0)
         self.helper.strm_exec_history_kind = None
@@ -86,8 +108,8 @@ class TestV3FullWorkerLifecycle(TestCase):
         self.helper.write_queue = Queue()
         self.helper.result_queue = Queue()
         self.fixture.namespace["FullSyncStrmHelper"] = lambda **kwargs: self.helper
-        self.fixture.namespace["configer"].get_config.side_effect = (
-            lambda key: False if key == "notify" else f"{self.temporary.name}#/media"
+        self.fixture.namespace["configer"].get_config.side_effect = lambda key: (
+            False if key == "notify" else f"{self.temporary.name}#/media"
         )
         self.config.get_ios_ua_app = lambda: {}
         self.config.get_config = lambda key: getattr(self.config, key)
@@ -165,80 +187,17 @@ class TestV3FullWorkerLifecycle(TestCase):
             raise RuntimeError("隔离迭代失败")
 
         def submit(owner: Any, *args: Any) -> Any:
-            owner.write_queue.put((Path(self.temporary.name) / "a.strm", "url", "a.mkv"))
+            owner.write_queue.put(
+                (Path(self.temporary.name) / "a.strm", "url", "a.mkv")
+            )
             return self.namespace["ProcessResult"]("submitted", None, None, None, None)
 
-        self.namespace["iter_files_skim_serial"] = iterate
-        self.helper._FullSyncStrmHelper__process_single_item = MethodType(submit, self.helper)
+        self.namespace["iter_files_skim"] = iterate
+        self.helper._FullSyncStrmHelper__process_single_item = MethodType(
+            submit, self.helper
+        )
         self.helper._FullSyncStrmHelper__flush_write_buffer = self._block
         self._assert_waits()
-
-    def test_recovered_read_continues_pagination_without_duplicate_processing(self) -> None:
-        from test_full_read_retry import load_read_retry, ProtocolError
-
-        retry = load_read_retry()
-        requested = []
-        processed = []
-
-        def request(**kwargs):
-            page = kwargs["params"]["page"]
-            requested.append(page)
-            if requested == [1, 2]:
-                raise ProtocolError("incomplete chunked read")
-            return {"id": page, "path": f"/media/{page}.mkv"}
-
-        def iterate(client, **kwargs):
-            if self.config.full_sync_iter_function == "iter_files":
-                self.assertEqual(kwargs["max_workers"], 0)
-                self.assertEqual(kwargs["page_size"], 500)
-                self.assertEqual(kwargs["first_page_size"], 500)
-                self.assertTrue(kwargs["path_already"])
-            for page in (1, 2):
-                yield kwargs["request"]("https://example.invalid/list", params={"page": page})
-
-        self.namespace["iter_files_skim_serial"] = iterate
-        self.namespace["iter_files"] = iterate
-        self.namespace["retry_read_request"] = retry.retry_read_request
-        self.helper._FullSyncStrmHelper__process_db_item = MagicMock(return_value=(set(), set()))
-        self.helper._FullSyncStrmHelper__process_single_item = lambda item, *args: processed.append(item["id"])
-        self.helper.mediainfodownloader.batch_auto_downloader.return_value = (0, 0, [])
-        with patch.object(retry, "request", side_effect=request), patch.object(retry, "sleep"):
-            self.assertTrue(self.helper.generate_strm_files(f"{self.temporary.name}#/media"))
-        self.assertEqual(requested, [1, 2, 2])
-        self.assertEqual(processed, [1, 2])
-        self.assertEqual(self.helper.total_count, 2)
-        self.assertFalse(any(child.is_alive() for child in self.children))
-
-    def test_recovered_standard_iterator_uses_same_request_retry(self) -> None:
-        self.config.full_sync_iter_function = "iter_files"
-        self.config.get_ios_ua_app = lambda: {}
-        self.test_recovered_read_continues_pagination_without_duplicate_processing()
-
-    def test_exhausted_read_never_cleans_partial_tree_or_refreshes_media(self) -> None:
-        from test_full_read_retry import load_read_retry, ProtocolError
-
-        retry = load_read_retry()
-
-        def iterate(client, **kwargs):
-            yield {"id": 1, "path": "/media/1.mkv"}
-            kwargs["request"]("https://example.invalid/list", params={"page": 2})
-
-        self.helper.remove_unless_strm = True
-        self.namespace["iter_files_skim_serial"] = iterate
-        self.namespace["retry_read_request"] = retry.retry_read_request
-        self.helper._FullSyncStrmHelper__process_db_item = MagicMock(return_value=(set(), set()))
-        self.helper._FullSyncStrmHelper__process_single_item = MagicMock(return_value=None)
-        self.helper._flush_deferred_strm_cleanup_batch = MagicMock()
-        with patch.object(retry, "request", side_effect=ProtocolError("incomplete chunked read")) as request:
-            with patch.object(retry, "sleep"):
-                self.assertFalse(self.helper.generate_strm_files(f"{self.temporary.name}#/media"))
-        self.assertEqual(request.call_count, 3)
-        self.helper.local_tree.compare_entry_counts.assert_not_called()
-        self.helper._flush_deferred_strm_cleanup_batch.assert_not_called()
-        self.helper.mediaserver_helper.refresh_mediaserver.assert_not_called()
-        self.assertFalse(any(child.is_alive() for child in self.children))
-        self.assertEqual(self.helper.write_queue.unfinished_tasks, 0)
-        self.assertEqual(self.helper.result_queue.unfinished_tasks, 0)
 
     def test_invalid_mapping_joins_idle_workers(self) -> None:
         """

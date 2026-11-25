@@ -1,6 +1,8 @@
 from pathlib import Path, PurePosixPath
 from typing import Any, List, Dict, Tuple, Optional
 
+from p115client.const import ID_TO_DIRNODE_CACHE
+
 from app.sdk.plugin import _PluginBase
 from app.schemas import FileItem, Response, StorageOperSelectionEventData, StorageUsage
 from app.schemas.exception import StorageQueryError
@@ -11,6 +13,12 @@ from app.sdk.services import StorageHelper
 
 from .p115_api import P115Api
 from .p115_client import create_client, build_timeout_config
+
+
+try:
+    from app.schemas.file import FileItemQueryResult
+except ImportError:
+    FileItemQueryResult = None
 
 
 class P115Disk(_PluginBase):
@@ -28,7 +36,7 @@ class P115Disk(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "3.0.6"
+    plugin_version = "3.0.4"
     # 插件作者
     plugin_author = "DDSRem"
     # 作者主页
@@ -146,7 +154,7 @@ class P115Disk(_PluginBase):
                 "auth": "bear",
                 "methods": ["POST"],
                 "summary": "清理缓存",
-                "description": "清理115网盘文件路径ID缓存和文件详情ID缓存",
+                "description": "清理115网盘文件路径ID缓存、文件详情ID缓存和 P115Client 目录节点缓存",
             }
         ]
 
@@ -428,7 +436,7 @@ class P115Disk(_PluginBase):
                             {
                                 "component": "div",
                                 "props": {"class": "text-caption text-medium-emphasis"},
-                                "text": "清理115网盘文件路径ID缓存和文件详情ID缓存",
+                                "text": "清理115网盘文件路径ID缓存、文件详情ID缓存和 P115Client 目录节点缓存",
                             },
                         ],
                     },
@@ -451,6 +459,7 @@ class P115Disk(_PluginBase):
             "delete_file": self.delete_file,
             "rename_file": self.rename_file,
             "get_file_item": self.get_file_item,
+            "get_file_item_strict": self.get_file_item_strict,
             "get_parent_item": self.get_parent_item,
             "snapshot_storage": self.snapshot_storage,
             "storage_usage": self.storage_usage,
@@ -491,10 +500,17 @@ class P115Disk(_PluginBase):
                     "message": "插件未启用或未初始化",
                     "data": None,
                 }
+            usage = self._p115_api.usage()
+            if usage is None:
+                return {
+                    "success": False,
+                    "message": "无法获取 115 存储容量，请检查 Cookie 是否有效并重新登录",
+                    "data": None,
+                }
             return {
                 "success": True,
                 "message": "",
-                "data": self._p115_api.usage().model_dump(),
+                "data": usage.model_dump(),
             }
         return {
             "success": False,
@@ -527,18 +543,12 @@ class P115Disk(_PluginBase):
         :return List: 文件项列表，如果存储不匹配则返回 None
         """
 
-        if fileitem.storage != self._disk_name:
+        if fileitem.storage != self._disk_name or not self._p115_api:
             return None
-        if not self._enabled or not self._p115_api:
-            raise StorageQueryError("【115网盘Plus】存储未启用或未登录，请检查插件配置")
 
-        items = (
-            self._p115_api.iter_files(fileitem) if recursion
-            else self._p115_api.list(fileitem)
-        )
-        if items is None:
-            raise StorageQueryError("【115网盘Plus】目录读取失败，请稍后重试")
-        return items
+        if recursion:
+            return self._p115_api.iter_files(fileitem)
+        return self._p115_api.list(fileitem)
 
     def any_files(self, fileitem: FileItem, extensions: list = None) -> Optional[bool]:
         """
@@ -703,6 +713,25 @@ class P115Disk(_PluginBase):
 
         return self._p115_api.get_item(path)
 
+    def get_file_item_strict(self, storage: str, path: Path) -> Optional[Any]:
+        """
+        向宿主返回已完成的严格查询回执
+
+        :param storage (str): 存储类型
+        :param path (Path): 待查询路径
+
+        :return FileItemQueryResult: 确认存在或不存在的回执，非本存储返回 None
+
+        :raises RuntimeError: 存储未初始化或无法确认状态时传播错误
+        """
+        if storage != self._disk_name:
+            return None
+        if FileItemQueryResult is None:
+            raise RuntimeError("当前宿主不支持严格查询回执")
+        if not self._p115_api:
+            raise RuntimeError("存储尚未初始化，无法确认文件是否存在")
+        return FileItemQueryResult(item=self._p115_api.get_item_strict(path))
+
     def get_parent_item(self, fileitem: FileItem) -> Optional[FileItem]:
         """
         获取上级目录项
@@ -853,6 +882,9 @@ class P115Disk(_PluginBase):
 
             self._p115_api._id_cache.clear()
             self._p115_api._id_item_cache.clear()
+            # 原地清空，确保运行中任务持有的目录缓存引用同步失效
+            for cache in tuple(ID_TO_DIRNODE_CACHE.values()):
+                cache.clear()
 
             logger.info("【P115Disk】缓存清理成功")
             return Response(success=True, message="缓存清理成功")

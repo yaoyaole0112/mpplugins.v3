@@ -17,7 +17,10 @@ from ..core.p115 import get_pid_by_path
 from ..helper.clean import Cleaner
 from ..helper.life import MonitorLife
 from ..helper.mediainfo_download import MediaInfoDownloader
-from ..helper.monitor import directory_upload_stability_tracker
+from ..helper.monitor import (
+    directory_upload_rescan,
+    directory_upload_stability_tracker,
+)
 from ..helper.monitor.directory_upload_queue import (
     DirectoryUploadTask,
     directory_upload_queue,
@@ -453,7 +456,7 @@ class ServiceHelper:
             mediainfodownloader=self.mediainfodownloader,
         )
         strm_helper.strm_exec_history_kind = "full"
-        completed = strm_helper.generate_strm_files(
+        scan_result = strm_helper.generate_strm_files(
             full_sync_strm_paths=configer.get_config("full_sync_strm_paths"),
         )
         (
@@ -464,8 +467,6 @@ class ServiceHelper:
             remove_unless_strm_count,
             strm_cleanup_deferred_count,
         ) = strm_helper.get_generate_total()
-        if completed is False:
-            logger.error("【全量同步】云端扫描未完成，已保留已生成文件；请查看错误日志后重试")
         if configer.get_config("notify"):
             text = f"""
 📄 生成STRM文件 {strm_count} 个
@@ -477,21 +478,18 @@ class ServiceHelper:
                 text += f"🗑️ 清理无效STRM文件 {remove_unless_strm_count} 个"
             if strm_cleanup_deferred_count != 0:
                 text += f"\n⏳ 待二次确认清理无效 STRM {strm_cleanup_deferred_count} 个"
+            if scan_result is False:
+                text += "\n⚠️ " + (
+                    strm_helper.scan_error or "扫描未完成，请查看插件日志"
+                )
             post_message(
                 mtype=MessageType.Plugin,
                 title=(
-                    "115网盘全量同步未完成"
-                    if completed is False
+                    "⚠️【115网盘】全量 STRM 同步未完成"
+                    if scan_result is False
                     else i18n.translate("full_sync_done_title")
                 ),
-                text=(
-                    (
-                        "云端扫描未完成，以下为已处理数量，并非完整同步结果。请查看错误日志后重试。\n"
-                        + text
-                    )
-                    if completed is False
-                    else text
-                ),
+                text=text,
             )
 
     def start_full_sync(self):
@@ -683,6 +681,7 @@ class ServiceHelper:
             ]
             directory_upload_queue.start()
             directory_upload_stability_tracker.start(self.client, active_mon_paths)
+            directory_upload_rescan.start(self.client, active_mon_paths)
             for item in configer.directory_upload_path or []:
                 if not item:
                     continue
@@ -890,6 +889,7 @@ class ServiceHelper:
             for name, component in (
                 ("目录上传稳定性跟踪", directory_upload_stability_tracker),
                 ("目录上传", directory_upload_queue),
+                ("目录上传漏传巡检", directory_upload_rescan),
             ):
                 try:
                     if component.stop() is False:
