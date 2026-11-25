@@ -58,7 +58,7 @@ def _log_label(value: Any) -> str:
 DEFAULT_SCHEDULE = {
     "tools": {"enabled": False, "cron": "0 3 * * *", "path": "/strm", "auto_delete": True,
               "confirm_cleanup": False, "confirm_mode": "none"},
-    "p115_cleanup": {"enabled": False, "cron": "0 */2 * * *", "dir_ids": [], "dir_names": []},
+    "p115_cleanup": {"enabled": False, "cron": "0 */2 * * *", "dir_ids": [], "dir_names": [], "dir_paths": []},
     "p115_trash": {"enabled": False, "cron": "0 3 * * *"},
     "p115_move": {"enabled": False, "check_interval": 120, "rules": []},
 }
@@ -76,7 +76,7 @@ DEFAULT_NOTIFICATIONS = {
 }
 SCHEDULE_FIELDS = {
     "tools": {"enabled", "cron", "path", "auto_delete", "confirm_cleanup", "confirm_mode"},
-    "p115_cleanup": {"enabled", "cron", "dir_ids", "dir_names"},
+    "p115_cleanup": {"enabled", "cron", "dir_ids", "dir_names", "dir_paths"},
     "p115_trash": {"enabled", "cron"},
     "p115_move": {"enabled", "check_interval", "rules"},
 }
@@ -1476,8 +1476,10 @@ class EmeTools(_PluginBase):
             if len(identifiers) != len(set(identifiers)):
                 raise HTTPException(status_code=400, detail="115 清理目录不能重复")
             names = [str(item or "").strip() for item in updated.get("dir_names") or []]
+            paths = [str(item or "").strip() for item in updated.get("dir_paths") or []]
             updated["dir_ids"] = identifiers
             updated["dir_names"] = (names + [""] * len(identifiers))[:len(identifiers)]
+            updated["dir_paths"] = (paths + [""] * len(identifiers))[:len(identifiers)]
             if updated["enabled"] and not identifiers:
                 raise HTTPException(status_code=400, detail="请先填写清理目录")
         if section == "p115_move":
@@ -1564,6 +1566,13 @@ class EmeTools(_PluginBase):
     def _cleanup_preview(self):
         configured = self._schedule["p115_cleanup"]
         identifiers = list(configured.get("dir_ids") or [])
+
+        def configured_label(index, cid):
+            paths = configured.get("dir_paths") or []
+            names = configured.get("dir_names") or []
+            return ((paths[index] if index < len(paths) else "") or
+                    (names[index] if index < len(names) else "") or cid)
+
         if not identifiers:
             logger.info("媒体增强 清理文件：没有配置目录，跳过预览")
             return {"ok": False, "message": "请先保存 115 清理目录"}
@@ -1571,7 +1580,6 @@ class EmeTools(_PluginBase):
         if remaining and not P115Client.read_recovery_available_for_cookie(self._source_cookie()):
             message = self._p115_deferred_message(remaining)
             logger.info("媒体增强 清理文件：%s", message)
-            names = configured.get("dir_names") or []
             return {
                 "ok": False,
                 "deferred": True,
@@ -1581,7 +1589,7 @@ class EmeTools(_PluginBase):
                 "total_bytes": 0,
                 "folders": [{
                     "cid": cid,
-                    "name": (names[index] if index < len(names) else "") or cid,
+                    "name": configured_label(index, cid),
                     "files": 0,
                     "dirs": 0,
                     "size": 0,
@@ -1595,8 +1603,7 @@ class EmeTools(_PluginBase):
         with self._client() as client:
             client.enable_read_recovery(self._p115_stop)
             for index, cid in enumerate(identifiers):
-                names = configured.get("dir_names") or []
-                name = (names[index] if index < len(names) else "") or cid
+                name = configured_label(index, cid)
                 try:
                     files = client.list_files_in_dir(cid)
                     _, children = client.list_children(cid)
@@ -1613,10 +1620,9 @@ class EmeTools(_PluginBase):
                                    _log_label(name), cid, type(error).__name__, reason)
                     if isinstance(error, P115DirectoryUnavailable):
                         deferred = not error.exhausted
-                        names = configured.get("dir_names") or []
                         for position in range(index + 1, len(identifiers)):
                             folders.append({"cid": identifiers[position],
-                                            "name": (names[position] if position < len(names) else "") or identifiers[position],
+                                            "name": configured_label(position, identifiers[position]),
                                             "files": 0, "dirs": 0, "size": 0,
                                             "error": "115 请求已暂停，本轮未读取此目录"})
                         break

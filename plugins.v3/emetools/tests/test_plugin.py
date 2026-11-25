@@ -642,6 +642,19 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(response["config"]["check_interval"], 60)
         self.assertEqual(self.plugin.update_config.call_args.args[0]["schedule"]["p115_move"]["check_interval"], 60)
 
+    def test_cleanup_schedule_preserves_full_directory_paths(self):
+        with patch("emetools.Scheduler"):
+            response = self.run_async(self.plugin.save_schedule(ScheduleChange(
+                section="p115_cleanup",
+                settings={
+                    "dir_ids": ["123", "456"],
+                    "dir_names": ["已整理", "已整理"],
+                    "dir_paths": ["/影视资源/已整理"],
+                },
+            )))
+        self.assertEqual(response["config"]["dir_paths"], ["/影视资源/已整理", ""])
+        self.assertEqual(response["config"]["dir_names"], ["已整理", "已整理"])
+
     def test_move_rules_normalize_legacy_and_copy_modes(self):
         with patch("emetools.Scheduler"):
             response = self.run_async(self.plugin.save_schedule(ScheduleChange(

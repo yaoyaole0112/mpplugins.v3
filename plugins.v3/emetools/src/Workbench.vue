@@ -61,7 +61,7 @@ const notificationSettingsDirty = computed(() => settingsLoaded.value &&
   JSON.stringify(notificationSettings) !== savedNotificationSettings.value)
 const schedule = reactive({
   tools: { enabled: false, cron: '0 3 * * *', path: '/strm', auto_delete: true, confirm_cleanup: false, confirm_mode: 'none' },
-  p115_cleanup: { enabled: false, cron: '0 */2 * * *', dir_ids: [], dir_names: [] },
+  p115_cleanup: { enabled: false, cron: '0 */2 * * *', dir_ids: [], dir_names: [], dir_paths: [] },
   p115_trash: { enabled: false, cron: '0 3 * * *' },
   p115_move: { enabled: false, check_interval: 120, rules: [] },
 })
@@ -705,6 +705,7 @@ function applyStatus(data) {
   schedule.tools.confirm_mode = data.schedule?.tools?.confirm_mode || (schedule.tools.confirm_cleanup ? 'moviepilot' : 'none')
   cleanupDirs.value = (schedule.p115_cleanup.dir_ids || []).map((cid, index) => ({
     cid, name: schedule.p115_cleanup.dir_names?.[index] || '',
+    path: schedule.p115_cleanup.dir_paths?.[index] || '',
   }))
   schedule.p115_move.rules = (schedule.p115_move.rules || []).map(rule => ({ ...rule, mode: rule.mode === 'copy' ? 'copy' : 'move' }))
   savedCleanupDirs.value = JSON.stringify(cleanupDirs.value)
@@ -1118,7 +1119,8 @@ async function saveSchedule(section) {
     if (section === 'p115_cleanup') {
       if (cleanupDirs.value.some(item => !String(item.cid || '').trim())) throw new Error('请先选择清理目录或移除空白项，再保存配置')
       const dirs = cleanupDirs.value.map(item => ({ ...item }))
-      value = { enabled: value.enabled, cron: value.cron, dir_ids: dirs.map(item => item.cid), dir_names: dirs.map(item => item.name) }
+      value = { enabled: value.enabled, cron: value.cron, dir_ids: dirs.map(item => item.cid),
+        dir_names: dirs.map(item => item.name), dir_paths: dirs.map(item => item.path) }
     }
     if (section === 'p115_trash') value = { enabled: value.enabled, cron: value.cron }
     if (section === 'p115_move') {
@@ -1131,7 +1133,10 @@ async function saveSchedule(section) {
     if (section === 'p115_cleanup') {
       schedule.p115_cleanup.dir_ids = saved.dir_ids
       schedule.p115_cleanup.dir_names = saved.dir_names
-      savedCleanupDirs.value = JSON.stringify(saved.dir_ids.map((cid, index) => ({ cid, name: saved.dir_names[index] })))
+      schedule.p115_cleanup.dir_paths = saved.dir_paths
+      savedCleanupDirs.value = JSON.stringify(saved.dir_ids.map((cid, index) => ({
+        cid, name: saved.dir_names[index], path: saved.dir_paths[index],
+      })))
       preview.value = null
       cleanupToken.value = ''
     }
@@ -1315,7 +1320,13 @@ function selectFolder() {
   if (!folder.ready) return
   const { type, index, cid, path } = folder
   if (type === 'root') settings.strm_root = path
-  else if (type === 'cleanup') cleanupDirs.value[index] = { cid, name: folder.name }
+  else if (type === 'cleanup') {
+    const pathParts = [...folder.trail.map(item => item.name), folder.name]
+      .filter(name => name && name !== '根目录')
+    cleanupDirs.value[index] = {
+      cid, name: folder.name, path: pathParts.length ? `/${pathParts.join('/')}` : '/',
+    }
+  }
   else if (type === 'src' || type === 'dst') {
     rules.value[index][`${type}_id`] = cid
     rules.value[index][`${type}_name`] = folder.name
@@ -1583,7 +1594,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
       <template v-if="active === 'cleanup'">
         <section class="eme-card"><div class="eme-card-heading"><div><h3>115 清理目录</h3><p>目录内的文件与子文件夹删除后进入 115 回收站。</p></div><div class="eme-inline"><button class="eme-button secondary" @click="cleanupDirs.push({ cid: '', name: '' })">添加目录</button><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_cleanup')">保存配置</button></div></div>
           <p v-if="cleanupDirsDirty" class="eme-message eme-warning">清理目录有未保存的修改；选择目录后请点击“保存配置”，未保存前不能预览或确认清理。</p>
-          <div class="eme-cleanup-grid"><div v-for="(item, index) in cleanupDirs" :key="index" class="eme-cleanup-item"><button class="eme-button secondary eme-folder-choice" type="button" :title="item.name || '选择清理目录'" @click="browse('cleanup', index)">{{ item.name || '选择清理目录' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`移除清理目录 ${item.name || index + 1}`" @click="cleanupDirs.splice(index, 1)">✕</button></div></div><p v-if="!cleanupDirs.length" class="eme-hint">还没有清理目录。请添加并保存后再预览。</p>
+          <div class="eme-cleanup-grid"><div v-for="(item, index) in cleanupDirs" :key="index" class="eme-cleanup-item"><button class="eme-button secondary eme-folder-choice eme-cleanup-path" type="button" :title="item.path || item.name || '选择清理目录'" @click="browse('cleanup', index)">{{ item.path || item.name || '选择清理目录' }}</button><button class="eme-button text eme-remove" type="button" :aria-label="`移除清理目录 ${item.path || item.name || index + 1}`" @click="cleanupDirs.splice(index, 1)">✕</button></div></div><p v-if="!cleanupDirs.length" class="eme-hint">还没有清理目录。请添加并保存后再预览。</p>
           <div class="eme-actions"><button class="eme-button secondary" :disabled="busy || !settingsLoaded || cleanupDirsDirty || !!cleanupToken" @click="getPreview">预览待清理内容</button><template v-if="preview"><span>文件 {{ preview.file_count || 0 }} 个 · 文件夹 {{ preview.dir_count || 0 }} 个</span><button v-if="cleanupToken" class="eme-button danger" :disabled="busy || !settingsLoaded || cleanupDirsDirty || ['processing', 'queued'].includes(preview.state)" @click="confirmCleanup">{{ ['processing', 'queued'].includes(preview.state) ? '⌛️ 清理中…' : '确认清理文件' }}</button></template></div>
           <p class="eme-hint">预览与清理仅针对已保存的目录，确认时将重新检查目录内容。</p>
         </section>
@@ -1758,6 +1769,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
 .eme-cleanup-item,.eme-move-row{display:flex;align-items:center;min-width:0;gap:8px;padding:8px 10px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:10px}
 .eme-cleanup-item{width:274px;box-sizing:border-box}
 .eme-cleanup-item .eme-folder-choice{max-width:230px}
+.eme-cleanup-item .eme-cleanup-path{max-width:none;height:auto;min-height:38px;justify-content:flex-start;text-align:left;white-space:normal;overflow-wrap:anywhere;line-height:1.35}
 .eme-folder-choice{min-width:0;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:center;font-weight:600}
 .eme-remove{flex:none;color:#e45c5c!important;padding:8px 10px}
 .eme-move-row{margin:10px 0}
