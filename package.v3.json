@@ -67,7 +67,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流，使用 Tailscale 私网 HTTPS 共享下载审批，跨实例同规格下载前占位。",
     "labels": "刷流,资源去重,Tailscale",
-    "version": "1.0.65",
+    "version": "1.0.66",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -75,6 +75,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.66": "修复近期播出 AI 核验：TMDB ID 缺失时改用剧名/别名、季号和集号核验；本地搜索无结果时尝试 MP 自动模式下模型服务端联网搜索，并区分本地无证据与 AI 无候选。",
       "v1.0.65": "修复近期播出 AI 核验的 MoviePilot 网页搜索跨事件循环故障：将 LLM 与 SearchWebTool 调用提交到宿主主事件循环，避免信号量循环绑定错误导致所有搜索结果为空。",
       "v1.0.64": "细化近期播出日期核验结果：区分日期推断未满足条件、AI 未查到候选、搜索证据不足、身份/集号不匹配及日期规则未通过，并在人工核验失败时展示对应文件的具体原因。",
       "v1.0.63": "改进 AI 近期播出日期检索：扩展剧名别名和文件名搜索线索，记录模型候选与 MP 本地搜索证据数量，并区分候选未采纳原因。",

@@ -303,6 +303,91 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         self.assertEqual(results[11]["confidence"], "high")
         self.assertEqual(results[13]["confidence"], "medium")
 
+    def test_ai_accepts_douban_only_identity_without_fabricated_tmdb_id(self):
+        from app.agent.llm.helper import LLMHelper
+        from app.agent.tools.impl.search_web import SearchWebTool
+
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_ai_enabled = True
+        plugin.save_data = Mock()
+        title = "鲜味中国"
+        url = "https://v.qq.com/example/official-schedule.html"
+        quote = "《鲜味中国》2026年11月20日播出第4集"
+        row = {"url": url, "title": "鲜味中国官方排播", "snippet": quote}
+        answer = {
+            "title": title, "tmdb_id": None, "season": 1, "episode": 4,
+            "date": "2026-11-20", "confidence": "high", "source": url, "quote": quote,
+        }
+        response = SimpleNamespace(content=json.dumps([answer], ensure_ascii=False))
+        model = SimpleNamespace(
+            ainvoke=AsyncMock(return_value=response),
+            _moviepilot_server_tool_metadata={"mode": "local", "use_local_web_search": True},
+        )
+        with (
+            patch.object(LLMHelper, "get_llm", new=AsyncMock(return_value=model)),
+            patch.object(LLMHelper, "close_llm", new_callable=AsyncMock),
+            patch.object(
+                SearchWebTool, "run", new=AsyncMock(return_value=json.dumps([row], ensure_ascii=False))
+            ),
+        ):
+            results = plugin._recent_episode_ai_dates(title, SimpleNamespace(title=title), 1, [4])
+
+        self.assertEqual(results[4]["date"], "2026-11-20")
+        self.assertEqual(results[4]["confidence"], "high")
+        request = json.loads(model.ainvoke.await_args.args[0][-1].content)
+        self.assertIsNone(request["tmdb_id"])
+
+    def test_ai_uses_provider_search_when_local_search_has_no_evidence(self):
+        from app.agent.llm.helper import LLMHelper
+        from app.agent.tools.impl.search_web import SearchWebTool
+
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_ai_enabled = True
+        plugin.save_data = Mock()
+        title = "鲜味中国"
+        url = "https://v.qq.com/example/official-schedule.html"
+        answer = {
+            "title": title, "tmdb_id": None, "season": 1, "episode": 4,
+            "date": "2026-11-20", "confidence": "high", "source": url,
+            "quote": "《鲜味中国》2026年11月20日播出第4集",
+        }
+        native_response = SimpleNamespace(content=[{
+            "type": "text",
+            "text": json.dumps([answer], ensure_ascii=False),
+            "annotations": [{"type": "url_citation", "url": url}],
+        }])
+        local_model = SimpleNamespace(
+            _moviepilot_server_tool_metadata={"mode": "local", "use_local_web_search": True},
+        )
+        auto_model = SimpleNamespace(
+            ainvoke=AsyncMock(return_value=native_response),
+            bind_tools=Mock(return_value=SimpleNamespace(
+                ainvoke=AsyncMock(return_value=native_response)
+            )),
+            _moviepilot_server_tool_metadata={
+                "mode": "builtin", "server_tools": [{"type": "web_search"}],
+                "use_local_web_search": False,
+            },
+        )
+        with (
+            patch.object(
+                LLMHelper, "get_llm",
+                new=AsyncMock(side_effect=[local_model, auto_model]),
+            ) as make,
+            patch.object(LLMHelper, "close_llm", new_callable=AsyncMock),
+            patch.object(
+                SearchWebTool, "run",
+                new=AsyncMock(return_value="未找到相关搜索结果"),
+            ),
+        ):
+            results = plugin._recent_episode_ai_dates(
+                title, SimpleNamespace(title=title), 1, [4]
+            )
+
+        self.assertEqual(make.await_args_list[1].kwargs["web_search_mode"], "auto")
+        self.assertEqual(results[4]["date"], "2026-11-20")
+        self.assertEqual(results[4]["confidence"], "medium")
+
     def test_ai_respects_disabled_search_without_prompting_model(self):
         from app.agent.llm.helper import LLMHelper
 
