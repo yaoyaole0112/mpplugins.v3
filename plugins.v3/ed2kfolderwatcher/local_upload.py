@@ -121,6 +121,19 @@ class LocalUploadMixin:
             return None
         return receipt
 
+    def _local_upload_identity_matches(self, path, stat, identity):
+        current_identity = local_identity(stat)
+        if identity == current_identity:
+            return True
+        if self._local_upload_mode != "mp":
+            return False
+        receipt = self._mp_upload_receipt(path, stat)
+        return bool(
+            receipt and receipt.get("ctime_tolerant_identity") is True
+            and isinstance(identity, list) and len(identity) == len(current_identity)
+            and identity[:4] == current_identity[:4]
+        )
+
     def _local_upload_queue_path(self):
         return Path(self.get_data_path()) / "local_upload_queue.json"
 
@@ -128,7 +141,7 @@ class LocalUploadMixin:
         from . import ED2K_PART_SIZE, record_problem
         if (
             not record or not record.get("upload_verified") or record_problem(record)
-            or record.get("local_identity") != local_identity(stat)
+            or not self._local_upload_identity_matches(path, stat, record.get("local_identity"))
             or not re.fullmatch(r"[0-9a-f]{40}", record.get("local_sha1", ""))
             or record.get("upload_mode") != self._local_upload_mode
             or not scope or record.get("upload_scope") != scope
@@ -162,7 +175,10 @@ class LocalUploadMixin:
         return True
 
     def _local_upload_recovery_complete(self, path, stat, record, recovery):
-        if not record or not record.get("upload_verified") or record.get("local_identity") != local_identity(stat):
+        if (
+            not record or not record.get("upload_verified")
+            or not self._local_upload_identity_matches(path, stat, record.get("local_identity"))
+        ):
             return False
         if "upload_scope" not in recovery:
             try:
@@ -213,10 +229,17 @@ class LocalUploadMixin:
             except OSError:
                 restored[key] = item
                 continue
-            if key != str(path.resolve()) or local_identity(stat) != item["identity"] or not self._eligible(path):
+            if (
+                key != str(path.resolve())
+                or not self._local_upload_identity_matches(path, stat, item["identity"])
+                or not self._eligible(path)
+            ):
                 continue
             if self._local_upload_mode == "mp" and self._mp_upload_receipt(path, stat) is None:
                 continue
+            if item["identity"] != local_identity(stat):
+                item["identity"] = local_identity(stat)
+                changed = True
             record = records.get(key)
             if self._local_upload_recovery_complete(path, stat, record, recovery):
                 changed = self._settle_local_upload_record(record) or changed
@@ -303,9 +326,10 @@ class LocalUploadMixin:
                             self._write_results(None, cache_path, records)
                     self._remove_local_upload_queue(key)
                     continue
-                if local_identity(stat) != item["identity"] or not self._eligible(path):
+                if not self._local_upload_identity_matches(path, stat, item["identity"]) or not self._eligible(path):
                     self._remove_local_upload_queue(key)
                     continue
+                item["identity"] = local_identity(stat)
                 self._upload_active = {
                     "path": str(path), "name": path.name, "size": stat.st_size,
                     "bytes_read": 0, "phase": "upload", "progress_known": False,
@@ -580,7 +604,8 @@ class LocalUploadMixin:
         from . import ed2k_hash, ed2k_link, record_problem
         record = records.get(key)
         identity = local_identity(stat)
-        valid = (record and not record_problem(record) and record.get("local_identity") == identity
+        valid = (record and not record_problem(record)
+                 and self._local_upload_identity_matches(path, stat, record.get("local_identity"))
                  and re.fullmatch(r"[0-9a-f]{40}", record.get("local_sha1", "")))
         if not valid:
             stopping = self._stopping

@@ -848,6 +848,31 @@ class LocalUploadTests(unittest.TestCase):
 
         self.assertEqual(self.plugin._local_upload_queue, {})
 
+    def test_mp_completed_record_with_ctime_drift_is_not_restored_or_rehashed(self):
+        self.configure(mode="mp")
+        path = self.sample()
+        self.plugin._enabled = True
+        self.plugin._on_local_upload_transfer(self.event(path))
+        self.plugin._process_file(path)
+        record = self.records()[str(path)]
+        record["local_identity"][4] += 1
+        self.plugin._write_results(None, self.plugin._paths()[2], {str(path): record})
+        self.plugin._local_upload_queue = {
+            str(path): {
+                "path": str(path), "identity": list(record["local_identity"]),
+                "queued_at": time.time(), "retry_at": 0, "attempts": 0,
+            }
+        }
+        self.plugin._save_local_upload_queue()
+
+        with patch.object(self.module, "ed2k_hash", side_effect=AssertionError("reuse completed hash")):
+            self.plugin._load_local_upload_queue()
+            self.plugin._queue_event(path, delay=0)
+
+        self.assertEqual(self.plugin._local_upload_queue, {})
+        self.assertEqual(self.plugin._pending, {})
+        self.assertTrue(self.records()[str(path)]["upload_verified"])
+
     def test_mp_receipt_rejects_changes_to_stable_file_identity(self):
         self.configure(mode="mp")
         path = self.sample()
