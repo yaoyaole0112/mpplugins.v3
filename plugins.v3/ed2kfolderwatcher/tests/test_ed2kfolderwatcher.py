@@ -3045,6 +3045,13 @@ class Ed2kTests(unittest.TestCase):
 
     def test_recent_page_and_empty_records(self):
         self.assertTrue(self.plugin.get_page())
+        self.assertEqual(self.plugin.get_render_mode(), ("vue", "dist/assets"))
+        native_page = self.plugin.get_native_page()
+        json.dumps(native_page, ensure_ascii=False)
+        self.assertIn("最近生成记录", str(native_page))
+        native_form = self.plugin.get_native_form()
+        json.dumps(native_form, ensure_ascii=False)
+        self.assertIn("通用设置", str(native_form["form"]))
         self.assertEqual(self.plugin.recent_records()["items"], [])
         self.assertEqual(self.plugin.recent_records()["total"], 0)
 

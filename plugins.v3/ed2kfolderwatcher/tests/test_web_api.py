@@ -44,6 +44,9 @@ class WebApiTests(unittest.TestCase):
         self.plugin._cloud_life_source = "shared"
         self.plugin._cron = "*/10 * * * *"
         self.plugin._telegram_token = "secret-bot-token"
+        self.plugin.plugin_version = "1.22.14"
+        self.plugin.get_native_page = Mock(return_value=[{"component": "VCard", "text": "原生页面"}])
+        self.plugin.get_native_form = Mock(return_value={"form": [], "defaults": {}})
         self.plugin.telegram_account_action = AsyncMock(return_value={"ok": True, "logged_in": True})
         self.plugin.telegram_account_status = AsyncMock(return_value={"ok": True, "logged_in": False})
         self.app = FastAPI()
@@ -280,6 +283,33 @@ class WebApiTests(unittest.TestCase):
         self.plugin.scan.assert_not_called()
         self.plugin.init_plugin.assert_not_called()
         self.plugin.update_config.assert_not_called()
+
+    def test_native_capabilities_page_and_form_are_admin_only(self):
+        routes_by_path = {route["path"]: route for route in self.routes}
+        self.assertTrue({
+            "/native/capabilities", "/native/page", "/native/form",
+        }.issubset(routes_by_path))
+        self.authorize()
+
+        capabilities = self.client.get("/native/capabilities")
+        self.assertEqual(capabilities.status_code, 200)
+        self.assertEqual(capabilities.json()["render_mode"], "vuetify")
+        self.assertEqual(capabilities.json()["schema_version"], 1)
+        self.assertEqual(capabilities.json()["version"], "1.22.14")
+        self.assertEqual(capabilities.headers["cache-control"], "no-store")
+
+        page = self.client.get("/native/page")
+        self.assertEqual(page.json()["page"][0]["text"], "原生页面")
+        self.plugin.get_native_page.assert_called_once_with()
+        form = self.client.get("/native/form")
+        self.assertEqual(form.json()["form"], [])
+        self.plugin.get_native_form.assert_called_once_with()
+
+        self.app.dependency_overrides[web_api.get_current_active_superuser] = lambda: (
+            (_ for _ in ()).throw(HTTPException(status_code=403, detail="Not enough permissions"))
+        )
+        for endpoint in ("/native/capabilities", "/native/page", "/native/form"):
+            self.assertEqual(self.client.get(endpoint).status_code, 403)
 
     def test_settings_save_returns_without_waiting_for_plugin_reload(self):
         self.authorize()

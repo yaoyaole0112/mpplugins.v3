@@ -200,6 +200,32 @@ def response(content):
 
 
 def build_routes(plugin):
+    async def native_capabilities(principal=Depends(get_current_active_superuser)):
+        return response({
+            "ok": True,
+            "plugin": "Ed2kFolderWatcher",
+            "version": plugin.plugin_version,
+            "render_mode": "vuetify",
+            "schema_version": 1,
+            "page": "/native/page",
+            "form": "/native/form",
+            "authentication": "bearer-admin",
+        })
+
+    async def native_page(principal=Depends(get_current_active_superuser)):
+        return response({
+            "ok": True,
+            "render_mode": "vuetify",
+            "page": await asyncio.to_thread(plugin.get_native_page),
+        })
+
+    async def native_form(principal=Depends(get_current_active_superuser)):
+        return response({
+            "ok": True,
+            "render_mode": "vuetify",
+            **plugin.get_native_form(),
+        })
+
     async def recent(principal=Depends(get_current_active_superuser)):
         return response(await asyncio.to_thread(plugin.recent_records))
 
@@ -308,6 +334,9 @@ def build_routes(plugin):
 
     return [{"path": path, "endpoint": endpoint, "methods": [method], "auth": "bear", "summary": summary}
             for path, endpoint, method, summary in (
+                ("/native/capabilities", native_capabilities, "GET", "MoviePilot App 原生页面能力声明"),
+                ("/native/page", native_page, "GET", "MoviePilot App 原生查看页面"),
+                ("/native/form", native_form, "GET", "MoviePilot App 原生设置表单"),
                 ("/records", recent, "GET", "最近生成链接与删源状态"),
                 ("/tasks/cancel", cancel_task, "POST", "取消尚未开始的文件任务"),
                 ("/records/delete-source", delete_source, "POST", "确认后手动删除记录对应的源文件"),
