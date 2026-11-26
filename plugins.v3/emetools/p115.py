@@ -287,6 +287,11 @@ class P115Client:
                 raise RuntimeError("115 目录分页不完整，已停止操作")
         return files, directories
 
+    def list_children_page(self, cid: str = "0", offset: int = 0):
+        files, directories, total, length = self._page(str(cid or "0"), int(offset))
+        next_offset = int(offset) + length
+        return files, directories, next_offset, total is None or next_offset >= total
+
     def list_files_in_dir(self, cid: str):
         queue = [str(cid)]
         visited = set()

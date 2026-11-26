@@ -133,7 +133,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.84"
+    plugin_version = "2.10.85"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1763,6 +1763,8 @@ class EmeTools(_PluginBase):
 
     _MOVE_COPY_RECORDS_KEY = "p115_move_copy_records"
     _MOVE_COPY_BASELINES_KEY = "p115_move_copy_baselines"
+    _MOVE_COPY_TREE_KEY = "p115_move_copy_tree"
+    _MOVE_COPY_TREE_SCAN_INTERVAL = 600
 
     def _move_copy_record_key(self, source, destination):
         return f"copy:{source}:{destination}"
@@ -1797,6 +1799,93 @@ class EmeTools(_PluginBase):
         baselines.add(record_key)
         self._save_move_copy_records(records)
         self.save_data(self._MOVE_COPY_BASELINES_KEY, sorted(baselines))
+
+    def _scan_move_copy_subdirectory(self, client, rule, root_folders, records, tree_state):
+        now = time.time()
+        last_scan = float(tree_state.get("last_scan") or 0)
+        if now - last_scan < self._MOVE_COPY_TREE_SCAN_INTERVAL:
+            return None
+
+        record_key = self._move_copy_record_key(rule["src_id"], rule["dst_id"])
+        states = tree_state.setdefault("rules", {})
+        state = states.setdefault(record_key, {"queue": [], "initialized": []})
+        queue = []
+        for item in state.get("queue") or []:
+            if isinstance(item, dict) and str(item.get("cid") or ""):
+                queue.append({"cid": str(item["cid"]), "offset": max(0, int(item.get("offset") or 0))})
+            elif str(item):
+                queue.append({"cid": str(item), "offset": 0})
+        initialized = {str(cid) for cid in state.get("initialized") or [] if str(cid)}
+        uncertain = {str(identifier) for identifier in state.get("uncertain") or [] if str(identifier)}
+        known = {item["cid"] for item in queue} | initialized
+        for folder in root_folders:
+            cid = str(folder.get("cid") or "")
+            if cid and cid not in known:
+                queue.append({"cid": cid, "offset": 0})
+                known.add(cid)
+        if not queue:
+            return None
+
+        task = queue.pop(0)
+        cid, offset = task["cid"], task["offset"]
+        known.discard(cid)
+        tree_state["last_scan"] = now
+        try:
+            files, folders, next_offset, complete = client.list_children_page(cid, offset)
+        except (RuntimeError, ValueError, OSError, httpx.HTTPError):
+            queue.insert(0, task)
+            state.update(queue=queue, initialized=sorted(initialized))
+            self.save_data(self._MOVE_COPY_TREE_KEY, tree_state)
+            raise
+
+        identifiers = [str(item["fid"]) for item in files] + [str(item["cid"]) for item in folders]
+        copied_ids = records.setdefault(record_key, set())
+        newly_copied = []
+        if cid not in initialized:
+            copied_ids.update(identifiers)
+            if complete:
+                initialized.add(cid)
+        else:
+            newly_copied = [identifier for identifier in identifiers
+                            if identifier not in copied_ids and identifier not in uncertain]
+            if newly_copied:
+                try:
+                    result = client.copy_files(newly_copied, rule["dst_id"])
+                except (RuntimeError, ValueError, OSError, httpx.HTTPError):
+                    uncertain.update(newly_copied)
+                    queue.insert(0, task)
+                    state.update(queue=queue, initialized=sorted(initialized),
+                                 uncertain=sorted(uncertain))
+                    self.save_data(self._MOVE_COPY_TREE_KEY, tree_state)
+                    raise RuntimeError("递归复制提交结果不确定，已停止自动重试；请先核实目标目录") from None
+                if not result.get("state"):
+                    queue.insert(0, task)
+                    state.update(queue=queue, initialized=sorted(initialized),
+                                 uncertain=sorted(uncertain))
+                    self.save_data(self._MOVE_COPY_TREE_KEY, tree_state)
+                    raise RuntimeError(str(result.get("error") or result.get("msg") or "115 复制失败"))
+                copied_ids.update(newly_copied)
+
+        for folder in folders:
+            child = str(folder.get("cid") or "")
+            if child and child not in known and (child in copied_ids or cid not in initialized):
+                queue.append({"cid": child, "offset": 0})
+                known.add(child)
+        if not complete:
+            queue.append({"cid": cid, "offset": next_offset})
+        if cid not in known:
+            queue.append({"cid": cid, "offset": 0})
+        state.update(queue=queue, initialized=sorted(initialized), uncertain=sorted(uncertain))
+        tree_state["last_scan"] = now
+        self.save_data(self._MOVE_COPY_TREE_KEY, tree_state)
+        self._save_move_copy_records(records)
+        if newly_copied:
+            logger.info("媒体增强 文件转存：递归检查子目录 CID=%s，发现并复制新增项目=%d",
+                        _log_label(cid), len(newly_copied))
+        else:
+            logger.info("媒体增强 文件转存：递归检查子目录 CID=%s，文件=%d，子目录=%d，无新增项目",
+                        _log_label(cid), len(files), len(folders))
+        return {"cid": cid, "files": files, "newly_copied": newly_copied}
 
     def _move_info(self, *, snapshot=False, copy_only=False):
         rules = copy.deepcopy(self._schedule["p115_move"]["rules"])
@@ -1869,6 +1958,10 @@ class EmeTools(_PluginBase):
                         "message": message}
             moved, errors, details, copy_records = 0, [], [], self._load_move_copy_records()
             baselines = self._load_move_copy_baselines()
+            tree_state = self.get_data(self._MOVE_COPY_TREE_KEY)
+            if not isinstance(tree_state, dict):
+                tree_state = {}
+            copy_roots, copy_details = {}, {}
             if expected is not None and copy_records != expected["copy_records"]:
                 return {"ok": False, "message": "增量复制记录已变化，请重新预览并确认"}
             with self._client() as client:
@@ -1886,13 +1979,15 @@ class EmeTools(_PluginBase):
                               "status": "empty", "item_count": 0, "skipped_count": 0,
                               "file_count": 0, "total_bytes": 0}
                     details.append(detail)
+                    record_key = self._move_copy_record_key(source, destination)
                     stage = "读取源目录"
                     try:
                         files, directories = client.list_children(source)
+                        if mode == "copy":
+                            copy_roots[source] = directories
                         if expected is not None and self._move_fingerprint(files, directories) != expected["entries"][source]:
                             raise ValueError("源目录内容已变化，已停止此规则，请重新预览")
                         identifiers = [item["fid"] for item in files] + [item["cid"] for item in directories]
-                        record_key = self._move_copy_record_key(source, destination)
                         if mode == "copy":
                             self._seed_copy_baseline(record_key, identifiers, copy_records, baselines)
                         logger.info("媒体增强 文件转存：%s %s → %s，源文件=%d，源目录=%d",
@@ -1940,7 +2035,7 @@ class EmeTools(_PluginBase):
                             detail["item_count"] = len(moved_ids)
                             moved_files = [item for item in files if item["fid"] in moved_ids]
                             moved_dirs = [item for item in directories if item["cid"] in moved_ids]
-                            count, size = self._move_tree_stats(client, moved_dirs)
+                            count, size = self._move_tree_stats(client, moved_dirs) if mode != "copy" else (0, 0)
                             detail["file_count"] = len(moved_files) + count
                             detail["total_bytes"] = sum(int(item.get("size") or 0) for item in moved_files) + size
                             if detail["status"] != "failed":
@@ -1960,6 +2055,37 @@ class EmeTools(_PluginBase):
                                        _log_label(detail["dst_name"] or destination), stage, type(error).__name__, reason)
                         if isinstance(error, P115DirectoryUnavailable):
                             self._move_retry_after = time.monotonic() + max(60, self._p115_cooldown_remaining())
+                            break
+                    finally:
+                        if mode == "copy":
+                            copy_details[record_key] = detail
+                if expected is None and not errors and copy_roots:
+                    next_rule = int(tree_state.get("next_rule") or 0) % len(run_rules)
+                    for offset in range(len(run_rules)):
+                        rule = run_rules[(next_rule + offset) % len(run_rules)]
+                        if (rule.get("mode") or "move") != "copy" or rule["src_id"] not in copy_roots:
+                            continue
+                        try:
+                            nested = self._scan_move_copy_subdirectory(
+                                client, rule, copy_roots[rule["src_id"]], copy_records, tree_state)
+                            tree_state["next_rule"] = (next_rule + offset + 1) % len(run_rules)
+                            self.save_data(self._MOVE_COPY_TREE_KEY, tree_state)
+                            if nested and nested["newly_copied"]:
+                                record_key = self._move_copy_record_key(rule["src_id"], rule["dst_id"])
+                                detail = copy_details.get(record_key)
+                                if detail:
+                                    nested_files = [item for item in nested["files"]
+                                                    if str(item["fid"]) in nested["newly_copied"]]
+                                    detail["item_count"] += len(nested["newly_copied"])
+                                    detail["file_count"] += len(nested_files)
+                                    detail["total_bytes"] += sum(int(item.get("size") or 0) for item in nested_files)
+                                    detail["status"] = "success"
+                                moved += len(nested["newly_copied"])
+                            break
+                        except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
+                            errors.append(f"{rule['src_id']} → {rule['dst_id']}：递归检查失败：{_log_label(error)}")
+                            if isinstance(error, P115DirectoryUnavailable):
+                                self._move_retry_after = time.monotonic() + max(60, self._p115_cooldown_remaining())
                             break
             self._record_run("p115_move")
             logger.info("媒体增强 文件转存：本次完成，已处理=%d，失败=%d，空目录=%d",

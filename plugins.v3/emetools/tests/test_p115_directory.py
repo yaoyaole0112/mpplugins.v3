@@ -247,6 +247,16 @@ class DirectoryFailureTests(unittest.TestCase):
         self.assertEqual(client._gate.list_endpoint, 1)
         self.assertGreaterEqual(self.clock, 160)
 
+    def test_list_children_page_returns_persistent_pagination_cursor(self):
+        client = self.make_client(lambda request: httpx.Response(
+            200, json={"state": True, "count": 1500, "data": [
+                {"fid": str(index), "fn": f"{index}.mkv", "fc": "1"} for index in range(1000)]}))
+        files, folders, next_offset, complete = client.list_children_page("123", 0)
+        self.assertEqual(len(files), 1000)
+        self.assertEqual(folders, [])
+        self.assertEqual(next_offset, 1000)
+        self.assertFalse(complete)
+
     def test_read_recovery_is_bounded_and_reports_exhaustion(self):
         calls = []
 
