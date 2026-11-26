@@ -66,7 +66,7 @@ from .models import (
 from .resource_dedup import evidence_key, index_records, resource_slot
 from .record_search import matches_record, record_page
 from .recent_air_search import (
-    cited_source_keys, has_retrieved_source, release_date, run_on_moviepilot_loop,
+    cited_source_keys, has_retrieved_source, infer_weekly_episode_dates, release_date, run_on_moviepilot_loop,
     search_episode_evidence, supports_official_date,
 )
 from .active_dedup import download_complete, download_files, download_state, paths_agree
@@ -288,7 +288,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，通过 Tailscale 私网 HTTPS 进行共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.70"
+    plugin_version = "1.0.71"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
@@ -5355,6 +5355,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     )),
                 ]), timeout=50)
 
+            local_errors = []
+
             async def request():
                 model, native_model, auto_model = None, None, None
                 native_results, citations = [], set()
@@ -5438,10 +5440,47 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     try:
                         if native_model is not None:
                             model = await make_model(web_search_mode="local")
-                        response = await invoke(model, rows)
+                        wanted_episode_text = {
+                            str(number) for number in prompt["episodes"]
+                        }
+
+                        def evidence_rank(row):
+                            source_host = urlparse(row.get("url", "")).hostname or ""
+                            text = f"{row.get('title', '')} {row.get('snippet', '')}"
+                            has_episode = any(
+                                re.search(
+                                    rf"(?:\bE{number}\b|第\s*{number}\s*[集话]|"
+                                    rf"\b{number}\s*회\b|episode\s*{number}\b)",
+                                    text, re.I,
+                                )
+                                for number in wanted_episode_text
+                            )
+                            official = source_host in {
+                                "tvn.cjenm.com", "v.qq.com", "www.iqiyi.com", "m.iqiyi.com",
+                                "mgtv.com", "www.mgtv.com", "youku.com", "www.netflix.com",
+                                "www.disneyplus.com",
+                            }
+                            return (not (official and has_episode), not official, not has_episode)
+
+                        compact_rows = [
+                            {
+                                "url": row.get("url", "")[:500],
+                                "title": row.get("title", "")[:180],
+                                "snippet": row.get("snippet", "")[:500],
+                            }
+                            for row in sorted(rows, key=evidence_rank)[:8]
+                        ]
+                        response = await invoke(model, compact_rows)
                         local_results = self._parse_recent_ai_response(response.content)
                     except Exception as err:
-                        logger.info(f"最近播出日期 AI 本地证据核验失败 {title}：{type(err).__name__}")
+                        detail = re.sub(
+                            r"(?:sk-[A-Za-z0-9_-]{8,}|Bearer\s+\S+)", "[redacted]", str(err)
+                        ).replace("\n", " ")[:240]
+                        local_errors.append(f"{type(err).__name__}: {detail}".rstrip(": "))
+                        logger.info(
+                            f"最近播出日期 AI 本地证据核验失败 {title}："
+                            f"{local_errors[-1]}"
+                        )
                         local_results = []
                     return [*native_results, *local_results], rows, citations
                 finally:
@@ -5463,11 +5502,15 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     candidates=len(results),
                 )
         except Exception as err:
+            detail = re.sub(
+                r"(?:sk-[A-Za-z0-9_-]{8,}|Bearer\s+\S+)", "[redacted]", str(err)
+            ).replace("\n", " ")[:240]
+            failure = f"{type(err).__name__}: {detail}".rstrip(": ")
             if diagnostics is not None:
                 diagnostics.update(
-                    status="error", message=f"AI核验调用失败（{type(err).__name__}）"
+                    status="error", message=f"AI核验调用失败（{failure}）"
                 )
-            logger.info(f"最近播出日期 AI 核验失败 {title}：{type(err).__name__}")
+            logger.info(f"最近播出日期 AI 核验失败 {title}：{failure}")
             return {}
         dates = {}
         wanted = set(int(number) for number in episodes)
@@ -5549,6 +5592,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                     if results else
                     (
                         f"MoviePilot本地搜索返回{len(evidence)}条网页证据，但AI未返回日期候选"
+                        + (f"；本地证据核验失败：{local_errors[-1]}" if local_errors else "")
                         if evidence else
                         "MoviePilot本地搜索未找到网页证据，且联网AI未返回日期候选"
                     )
@@ -5577,10 +5621,8 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
         sources: Dict[int, str],
         today: date,
     ) -> Set[int]:
-        """仅对同季最新有确切日期的集号之后的缺失候选应用容差。"""
+        """Infer missing dates from recent weekly cadence, then use a bounded gap tolerance."""
         missing = [number for number in episodes if not dates.get(number)]
-        # 日期字典来自整季 API，已知锚点可能不在当前候选文件的集号内
-        # （例如 TMDB 有 E08，种子只有 E09-E10）。
         known = [number for number, value in dates.items() if release_date(value)]
         if (
             not missing
@@ -5590,25 +5632,60 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
             return set()
         latest = max(known)
         latest_date = dates.get(latest)
-        if not latest_date or not self._air_date_is_recent(
-            latest_date, today, getattr(self, "_recent_missing_date_tolerance_days", 7)
-        ):
+        if not latest_date:
             return set()
-        inferred = {number for number in missing if number > latest}
-        if not inferred:
+        candidates = {number for number in missing if number > latest}
+        if not candidates:
             return set()
-        for number in inferred:
+
+        weekly_dates = infer_weekly_episode_dates(dates, candidates, today)
+        inferred = set()
+        tolerance = max(1, int(getattr(self, "_recent_missing_date_tolerance_days", 7)))
+        for number, projected_date in weekly_dates.items():
+            dates[number] = projected_date
+            sources[number] = (
+                f"日期推断（近月周播推算，锚点 S{season:02d}E{latest:02d}={latest_date}，"
+                f"每周+7天）"
+            )
+            inferred.add(number)
+
+        # Weekly cadence is preferable because it yields an episode date that is
+        # checked against the task's actual recent-airing window. If the data is
+        # irregular or too sparse, relax only the anchor-age gate by episode gap.
+        anchor_date = release_date(latest_date)
+        for number in sorted(candidates - inferred):
+            episode_gap = number - latest
+            allowed_age = (episode_gap + 1) * tolerance
+            anchor_age = (today - anchor_date).days if anchor_date else allowed_age + 1
+            if anchor_age > allowed_age:
+                continue
             dates[number] = latest_date
-            sources[number] = f"日期推断（S{season:02d}E{latest:02d}={latest_date}，仅为锚点日期）"
+            sources[number] = (
+                f"日期推断（缺失日期容差兜底，锚点 S{season:02d}E{latest:02d}="
+                f"{latest_date}，集差 {episode_gap}，允许锚点距今 {allowed_age} 天）"
+            )
+            inferred.add(number)
+
+        for number in inferred:
             if getattr(media, "tmdb_id", None):
                 self._record_recent_episode_evidence(
-                    media.tmdb_id, season, number, latest_date, sources[number], "inferred"
+                    media.tmdb_id, season, number, dates[number], sources[number], "inferred"
                 )
-        logger.info(
-            f"最近播出日期推断 {title}：已知 S{season:02d}E{latest:02d}={latest_date}，"
-            f"放行缺日期集号 {','.join(f'E{number:02d}' for number in sorted(inferred))}，"
-            f"容差 {getattr(self, '_recent_missing_date_tolerance_days', 7)} 天"
-        )
+        if inferred:
+            weekly = sorted(number for number in inferred if number in weekly_dates)
+            fallback = sorted(inferred - set(weekly))
+            if weekly:
+                logger.info(
+                    f"最近播出日期周播推算 {title}："
+                    + ", ".join(f"S{season:02d}E{number:02d}={dates[number]}" for number in weekly)
+                    + f"（依据最近一个月内的连续周播记录，后续进入任务最近播出天数判断）"
+                )
+            if fallback:
+                logger.info(
+                    f"最近播出日期容差兜底 {title}：锚点 S{season:02d}E{latest:02d}={latest_date}，"
+                    f"放行集号 {','.join(f'E{number:02d}' for number in fallback)}；"
+                    f"逐集允许锚点距今不超过（集差+1）×{tolerance}天"
+                )
         return inferred
 
     def _mp_identity_file_selection(
@@ -5842,19 +5919,28 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                 ai_diagnostics = {}
                 inference_reason = "未满足日期推断条件"
                 if not episode_group and eligible_missing:
+                    explicit_anchors = {
+                        number: value for number, value in dates.items() if release_date(value)
+                    }
                     inferred = self._infer_missing_episode_dates(
                         title, "", media, season, sorted(eligible_missing), dates, sources, today
                     )
-                    known_anchors = {
-                        number: value for number, value in dates.items() if release_date(value)
-                    }
-                    if not known_anchors:
+                    if not explicit_anchors:
                         inference_reason = "同季没有已知播出日期可作为推断锚点"
                     else:
-                        latest_number = max(known_anchors)
-                        latest_date = known_anchors[latest_number]
+                        latest_number = max(explicit_anchors)
+                        latest_date = explicit_anchors[latest_number]
                         tolerance = getattr(self, "_recent_missing_date_tolerance_days", 7)
-                        if not self._air_date_is_recent(latest_date, today, tolerance):
+                        weekly = {
+                            number for number in inferred
+                            if "近月周播推算" in sources.get(number, "")
+                        }
+                        fallback = inferred - weekly
+                        if weekly:
+                            inference_reason = "已依据最近一个月的连续周播记录推算具体日期"
+                        elif fallback:
+                            inference_reason = "已按（集差+1）×容差完成缺失日期兜底"
+                        elif not self._air_date_is_recent(latest_date, today, tolerance):
                             inference_reason = (
                                 f"最新明确播出日期 E{latest_number:02d}={latest_date} "
                                 f"已超出日期推断容差 {tolerance} 天"
@@ -5899,7 +5985,9 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                                     f"AI 来源置信度低，暂不自动下载"
                                 )
                     if any(not dates.get(number) or (
-                        not uses_fallback and (number in inferred or number in ai_dates)
+                        not uses_fallback and (
+                            number in inferred or number in ai_dates
+                        )
                     ) for number in numbers):
                         if episode_group:
                             raise ValueError(
@@ -5940,15 +6028,24 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
                         else f"S{season:02d}E{number:02d}={dates[number]}({sources[number]})"
                         for number in numbers
                     )
-                    if all(number in inferred or self._air_date_is_recent(dates[number], today, days)
-                           for number in numbers):
+                    def date_is_recent(number):
+                        source = sources.get(number, "")
+                        if number in inferred and "缺失日期容差兜底" in source:
+                            return True
+                        return self._air_date_is_recent(dates[number], today, days)
+
+                    if all(date_is_recent(number) for number in numbers):
                         accepted.append(path)
-                        logger.info(f"最近播出剧集规则通过文件 {path}：{detail}，明确日期下限 {cutoff}")
+                        logger.info(
+                            f"最近播出剧集规则通过文件 {path}：{detail}，"
+                            f"最近播出天数 {days} 天（明确日期/周播推算日期按日期范围判断，"
+                            "容差兜底集按扩展后的锚点容差判断）"
+                        )
                     else:
                         expired = [
                             f"S{season:02d}E{number:02d}={dates[number]}"
                             for number in numbers
-                            if number not in inferred and not self._air_date_is_recent(dates[number], today, days)
+                            if not date_is_recent(number)
                         ]
                         message = f"播出日期不在范围内：{'、'.join(expired)}；规则下限 {cutoff}"
                         rejected_paths[path] = message

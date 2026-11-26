@@ -5,6 +5,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 import json
 import re
 from datetime import date
+from datetime import timedelta
 from unicodedata import normalize
 from urllib.parse import urlsplit
 
@@ -15,6 +16,7 @@ OFFICIAL_SCHEDULE_HOSTS = {
     "mgtv.com", "www.mgtv.com", "w.mgtv.com", "youku.com", "www.youku.com",
     "v.youku.com", "tv.cctv.com", "www.cctv.com", "www.yangshipin.cn",
     "www.netflix.com", "www.disneyplus.com", "www.crunchyroll.com",
+    "tvn.cjenm.com",
 }
 
 
@@ -71,10 +73,14 @@ def supports_official_date(item, rows, value, episode, season, title_matches):
     quote = _evidence_text(item.get("quote"))
     if not source or source[0] not in OFFICIAL_SCHEDULE_HOSTS or not (8 <= len(quote) <= 300):
         return False
-    if not re.search(r"播出|上线|更新|开播|\b(?:airs?|aired|air date|premieres?|streams?|releases?)\b", quote):
+    if not re.search(
+        r"播出|上线|更新|开播|방송|방영|공개|\b(?:airs?|aired|air date|premieres?|streams?|releases?)\b",
+        quote,
+    ):
         return False
     dated = list(re.finditer(
-        r"(?<!\d)(?:(\d{4})\s*[-/.年]\s*)?(\d{1,2})\s*[-/.月]\s*(\d{1,2})(?:\s*日)?(?!\d)",
+        r"(?<!\d)(?:(\d{4})\s*[-/.年년]\s*)?(\d{1,2})\s*[-/.月월]\s*"
+        r"(\d{1,2})(?:\s*[日일])?(?!\d)",
         quote,
     ))
     if len(dated) != 1:
@@ -84,7 +90,8 @@ def supports_official_date(item, rows, value, episode, season, title_matches):
     if not year or (int(year), int(month), int(day)) != (value.year, value.month, value.day):
         return False
     episode_tags = re.findall(
-        r"(?:s\d+\s*e(\d+)(?!\d)|第\s*(\d+)\s*[集话]|episode\s+(\d+)(?!\d))", quote
+        r"(?:s\d+\s*e(\d+)(?!\d)|第\s*(\d+)\s*[集话]|episode\s+(\d+)(?!\d)|"
+        r"제?\s*(\d+)\s*회)", quote
     )
     if [int(next(tag for tag in tags if tag)) for tags in episode_tags] != [episode]:
         return False
@@ -99,11 +106,49 @@ def supports_official_date(item, rows, value, episode, season, title_matches):
         }
         if explicit_seasons and explicit_seasons != {season}:
             continue
-        if not explicit_seasons and season != 1:
+        if not explicit_seasons and season != 1 and source[0] != "tvn.cjenm.com":
             continue
-        if title_matches(row.get("title", "")):
+        # Korean official episode pages commonly use the broadcaster's Korean
+        # program title, which may not be present in MoviePilot's title aliases.
+        # The candidate itself is checked against the recognized identity before
+        # this function is called; here, verify its quoted episode/date in-page.
+        if title_matches(row.get("title", "")) or (
+            source[0] == "tvn.cjenm.com"
+            and str(row.get("title", "")).strip()
+            and episode_tags
+        ):
             return True
     return False
+
+
+def infer_weekly_episode_dates(dates, episodes, today, window_days=30):
+    """Project only a demonstrable weekly run from dates in the recent month."""
+    known = []
+    for number, value in dates.items():
+        aired = release_date(value)
+        if aired and today - timedelta(days=window_days) <= aired <= today:
+            known.append((int(number), aired))
+    known.sort()
+    if len(known) < 2:
+        return {}
+
+    # Use the consecutive weekly streak ending at the latest dated episode.
+    streak = [known[-1]]
+    for previous, current in zip(reversed(known[:-1]), reversed(known[1:])):
+        episode_gap = current[0] - previous[0]
+        day_gap = (current[1] - previous[1]).days
+        if episode_gap != 1 or not 6 <= day_gap <= 8:
+            break
+        streak.append(previous)
+    if len(streak) < 2:
+        return {}
+
+    latest_number, latest_date = known[-1]
+    return {
+        int(number): (latest_date + timedelta(days=7 * (int(number) - latest_number))).isoformat()
+        for number in episodes
+        if int(number) > latest_number
+    }
 
 
 async def search_episode_evidence(prompt):

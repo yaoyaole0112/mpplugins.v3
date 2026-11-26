@@ -233,6 +233,63 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         self.assertTrue(sources[11].startswith("日期推断"))
         self.assertTrue(plugin.save_data.called)
 
+    def test_recent_weekly_cadence_projects_real_episode_dates_before_recent_window(self):
+        path = "You.Quiz.On.The.Block.S04E370.2026.1080p.WEB-DL.mkv"
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_tolerance_days = 7
+        plugin._recent_episode_evidence = {}
+        plugin._recent_episode_ai_dates = Mock(return_value={})
+        plugin.save_data = Mock()
+        with patch("resourceflow.datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 11, 26)
+            result = self.select_files(
+                [path],
+                SimpleNamespace(tmdb_id=81978, title="刘在街头"),
+                {4: [(367, "2026-11-04"), (368, "2026-11-11")]},
+                days=3,
+                plugin=plugin,
+            )
+        self.assertEqual(result["accepted"], {path})
+        plugin._recent_episode_ai_dates.assert_not_called()
+
+    def test_episode_gap_expands_tolerance_when_weekly_cadence_is_unknown(self):
+        path = "You.Quiz.On.The.Block.S04E370.2026.1080p.WEB-DL.mkv"
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_tolerance_days = 7
+        plugin._recent_episode_evidence = {}
+        plugin._recent_episode_ai_dates = Mock(return_value={})
+        plugin.save_data = Mock()
+        with patch("resourceflow.datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 11, 26)
+            result = self.select_files(
+                [path],
+                SimpleNamespace(tmdb_id=81978, title="刘在街头"),
+                {4: [(368, "2026-11-11")]},
+                days=3,
+                plugin=plugin,
+            )
+        self.assertEqual(result["accepted"], {path})
+        self.assertIn("缺失日期容差兜底", plugin._recent_episode_evidence["81978:4:370"]["source"])
+
+    def test_episode_gap_tolerance_remains_bounded(self):
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_tolerance_days = 7
+        plugin._recent_episode_evidence = {}
+        plugin.save_data = Mock()
+        dates = {368: "2026-11-01"}
+        sources = {368: "TMDB整季API"}
+        inferred = plugin._infer_missing_episode_dates(
+            "刘在街头",
+            "",
+            SimpleNamespace(tmdb_id=81978),
+            4,
+            [370],
+            dates,
+            sources,
+            date(2026, 11, 26),
+        )
+        self.assertEqual(inferred, set())
+
     def test_missing_episode_fallback_does_not_use_special_or_old_anchor(self):
         plugin = ResourceFlow.__new__(ResourceFlow)
         plugin._recent_missing_date_tolerance_days = 7
@@ -364,7 +421,7 @@ class RecentEpisodeRuleTest(unittest.TestCase):
             results = plugin._recent_episode_ai_dates(media.title, media, 1, [11, 12, 13, 14, 15])
         self.assertNotIn("web_search_mode", make.await_args_list[0].kwargs)
         self.assertEqual(make.await_args_list[1].kwargs["web_search_mode"], "local")
-        search.assert_awaited_once()
+        self.assertEqual(search.await_count, 3)
         self.assertIn("search_results", model.ainvoke.await_args.args[0][-1].content)
         self.assertEqual(set(results), {11, 13})
         self.assertEqual(results[11]["confidence"], "high")
@@ -472,6 +529,23 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         model.ainvoke.assert_not_awaited()
         search.assert_not_awaited()
 
+    def test_ai_diagnostics_include_runtime_initialization_failure(self):
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_ai_enabled = True
+
+        def fail_and_close(coroutine):
+            coroutine.close()
+            raise RuntimeError("LLM provider runtime is not initialized")
+
+        diagnostics = {}
+        with patch("resourceflow.run_on_moviepilot_loop", side_effect=fail_and_close):
+            result = plugin._recent_episode_ai_dates(
+                "Show", SimpleNamespace(title="Show", tmdb_id=1), 1, [11],
+                diagnostics=diagnostics,
+            )
+        self.assertEqual(result, {})
+        self.assertIn("LLM provider runtime is not initialized", diagnostics["message"])
+
     def test_native_response_with_citation_but_no_matching_excerpt_cannot_pass(self):
         from app.agent.llm.helper import LLMHelper
 
@@ -501,6 +575,27 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         model.bind_tools.assert_called_once_with(tools)
         search.assert_awaited_once()
         self.assertEqual(result[11]["confidence"], "medium")
+
+    def test_official_tvn_korean_episode_quote_can_be_verified(self):
+        from resourceflow.recent_air_search import supports_official_date
+
+        url = "https://tvn.cjenm.com/ko/youquiz/episodes/"
+        quote = "2026년 11월 25일 방송 제370회"
+        row = {"url": url, "title": "유 퀴즈 온 더 블럭 370회", "snippet": quote}
+        item = {
+            "source": url,
+            "quote": quote,
+        }
+        self.assertTrue(
+            supports_official_date(
+                item,
+                [row],
+                date(2026, 11, 25),
+                370,
+                4,
+                lambda _: False,
+            )
+        )
 
     @patch.object(ResourceFlow, "_recent_episode_douban_id", return_value="")
     @patch.object(ResourceFlow, "_tmdb_web_episode_air_dates", return_value={})
