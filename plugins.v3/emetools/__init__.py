@@ -133,7 +133,7 @@ class EmeTools(_PluginBase):
     plugin_name = "媒体增强"
     plugin_desc = "在 MoviePilot 中提供订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理。"
     plugin_icon = ICON_URL
-    plugin_version = "2.10.83"
+    plugin_version = "2.10.84"
     plugin_author = "helios"
     plugin_order = 46
     plugin_config_prefix = "emetools_"
@@ -1495,7 +1495,9 @@ class EmeTools(_PluginBase):
                 if mode not in {"move", "copy"}:
                     raise HTTPException(status_code=400, detail="转存方式只能选择移动或复制")
                 rules.append({"src_id": source, "src_name": str(rule.get("src_name") or "").strip(),
+                              "src_path": str(rule.get("src_path") or "").strip(),
                               "dst_id": target, "dst_name": str(rule.get("dst_name") or "").strip(),
+                              "dst_path": str(rule.get("dst_path") or "").strip(),
                               "mode": mode})
             updated["rules"] = rules
             try:

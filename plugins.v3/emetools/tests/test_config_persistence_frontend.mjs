@@ -8,6 +8,7 @@ const monitorFunctions = source.slice(source.indexOf('async function loadMonitor
   source.slice(source.indexOf('async function monitorCommand('), source.indexOf('function logoutTelegram('))
 const scheduleFunctions = source.slice(source.indexOf('async function saveSchedule('), source.indexOf('async function startScan(')) +
   source.slice(source.indexOf('async function getPreview('), source.indexOf('async function confirmCleanup('))
+const folderFunctions = source.slice(source.indexOf('async function browse('), source.indexOf('function chooseSection('))
 const mediaFunctions = source.slice(source.indexOf('function applyMediaStatus('), source.indexOf('function scheduleMediaPoll(')) +
   source.slice(source.indexOf('async function mediaCommand('), source.indexOf('async function deleteMedia('))
 
@@ -143,6 +144,42 @@ test('incomplete move rules are drafts until explicitly saved', async () => {
   await context.saveSchedule('p115_move')
   assert.equal(calls.length, 1)
   assert.equal(savedMoveConfig.value, JSON.stringify(schedule.p115_move))
+})
+
+test('choosing and saving move folders preserves full paths and distinguishes same-name directories', async () => {
+  const { context, schedule, savedMoveConfig, calls } = scheduleFixture()
+  schedule.p115_move.rules.push({ src_id: '12', src_name: '整理', dst_id: '22', dst_name: '整理', mode: 'copy' })
+  context.folder = {}
+  const directories = {
+    0: [{ cid: '11', name: '根目录' }, { cid: '21', name: '分享池' }],
+    11: [{ cid: '12', name: '整理' }],
+    21: [{ cid: '22', name: '整理' }],
+  }
+  context.execute = async (operation, { cid }) => {
+    assert.equal(operation, 'p115_dirs')
+    return { dirs: directories[cid] || [] }
+  }
+  vm.runInContext(folderFunctions, context)
+  for (const [type, index] of [['src', 0], ['dst', 1]]) {
+    await context.browse(type)
+    await context.enterFolder(context.folder.dirs[index])
+    await context.enterFolder(context.folder.dirs[0])
+    context.selectFolder()
+  }
+  const savedRule = { src_id: '12', src_name: '整理', src_path: '/根目录/整理',
+    dst_id: '22', dst_name: '整理', dst_path: '/分享池/整理', mode: 'copy' }
+  context.post = async (path, payload) => {
+    calls.push({ path, payload: structuredClone(payload) })
+    return { config: { enabled: false, check_interval: 120, rules: [savedRule] } }
+  }
+  await context.saveSchedule('p115_move')
+  assert.deepEqual(calls[0].payload.settings.rules, [savedRule])
+  assert.equal(savedMoveConfig.value, JSON.stringify(schedule.p115_move))
+})
+
+test('move folder buttons prefer the full path and fall back to legacy directory names', () => {
+  assert.match(source, /{{ rule\.src_path \|\| rule\.src_name \|\| '选择源目录' }}/)
+  assert.match(source, /{{ rule\.dst_path \|\| rule\.dst_name \|\| '选择目标目录' }}/)
 })
 
 test('editing move rules during a pending save does not mark the new draft as saved', async () => {

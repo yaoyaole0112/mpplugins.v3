@@ -707,7 +707,10 @@ function applyStatus(data) {
     cid, name: schedule.p115_cleanup.dir_names?.[index] || '',
     path: schedule.p115_cleanup.dir_paths?.[index] || '',
   }))
-  schedule.p115_move.rules = (schedule.p115_move.rules || []).map(rule => ({ ...rule, mode: rule.mode === 'copy' ? 'copy' : 'move' }))
+  schedule.p115_move.rules = (schedule.p115_move.rules || []).map(rule => ({
+    ...rule, src_path: rule.src_path || '', dst_path: rule.dst_path || '',
+    mode: rule.mode === 'copy' ? 'copy' : 'move',
+  }))
   savedCleanupDirs.value = JSON.stringify(cleanupDirs.value)
   savedMoveConfig.value = JSON.stringify(schedule.p115_move)
   savedBasicSettings.value = JSON.stringify({ enabled: settings.enabled,
@@ -1114,6 +1117,7 @@ async function saveSchedule(section) {
   await work(async () => {
     let value = JSON.parse(JSON.stringify(schedule[section]))
     const originalMoveInterval = schedule.p115_move.check_interval
+    const originalMoveRules = section === 'p115_move' ? JSON.stringify(value.rules) : ''
     if (section === 'tools') value = { enabled: value.enabled, cron: value.cron, path: savedStrmRoot.value,
       auto_delete: value.auto_delete, confirm_cleanup: value.confirm_mode !== 'none', confirm_mode: value.confirm_mode }
     if (section === 'p115_cleanup') {
@@ -1142,6 +1146,7 @@ async function saveSchedule(section) {
     }
     if (section === 'p115_move') {
       if (Number(schedule.p115_move.check_interval) === Number(originalMoveInterval)) schedule.p115_move.check_interval = saved.check_interval
+      if (JSON.stringify(schedule.p115_move.rules) === originalMoveRules) schedule.p115_move.rules = saved.rules
       savedMoveConfig.value = JSON.stringify(saved)
       moveInfo.value = null
     }
@@ -1330,6 +1335,10 @@ function selectFolder() {
   else if (type === 'src' || type === 'dst') {
     rules.value[index][`${type}_id`] = cid
     rules.value[index][`${type}_name`] = folder.name
+    const pathParts = [...folder.trail, folder]
+      .filter(item => String(item.cid) !== '0' && item.name)
+      .map(item => item.name)
+    rules.value[index][`${type}_path`] = `/${pathParts.join('/')}`
   } else if (type === 'rapid_source') {
     rapid.configs[index].source_path = path
   } else if (type === 'rapid_failure') {
@@ -1607,7 +1616,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
       <template v-if="active === 'move'">
         <section class="eme-card"><div class="eme-card-heading"><div><h3>文件转存规则</h3><p>复制模式以首次扫描时的源目录为基线，此后仅复制新增项目；已有项目不会自动复制，可单独发起全量复制。</p></div><button class="eme-button primary" :disabled="busy || !settingsLoaded" @click="saveSchedule('p115_move')">保存规则</button></div>
           <p v-if="moveConfigDirty" class="eme-message eme-warning">转存规则或监控配置有未保存的修改；请选择完整的源和目标目录并点击“保存规则”，才能查看或执行新规则。</p>
-          <div v-for="(rule, index) in rules" :key="index" class="eme-move-row"><span class="eme-move-label">源</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.src_name || '选择源目录'" @click="browse('src', index)">{{ rule.src_name || '选择源目录' }}</button><span class="eme-move-arrow" aria-hidden="true">→</span><span class="eme-move-label">目标</span><button class="eme-button secondary eme-folder-choice" type="button" :title="rule.dst_name || '选择目标目录'" @click="browse('dst', index)">{{ rule.dst_name || '选择目标目录' }}</button><div class="eme-move-mode-options" role="group" :aria-label="`转存方式 ${index + 1}`"><button v-for="item in moveModeOptions" :key="item.value" type="button" class="eme-move-mode-button" :class="{ selected: rule.mode === item.value }" :aria-pressed="rule.mode === item.value" @click="selectMoveMode(index, item.value)">{{ item.title }}</button></div><button v-if="rule.mode === 'copy'" class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !!moveInfo?.token || !rule.src_id || !rule.dst_id" @click="copyExistingMoveItems(rule)">复制已有项目</button><button class="eme-button text eme-remove" type="button" :aria-label="`移除转存规则 ${index + 1}`" @click="rules.splice(index, 1)">✕</button></div>
+          <div v-for="(rule, index) in rules" :key="index" class="eme-move-row"><span class="eme-move-label">源</span><button class="eme-button secondary eme-folder-choice eme-move-path" type="button" :title="rule.src_path || rule.src_name || '选择源目录'" @click="browse('src', index)">{{ rule.src_path || rule.src_name || '选择源目录' }}</button><span class="eme-move-arrow" aria-hidden="true">→</span><span class="eme-move-label">目标</span><button class="eme-button secondary eme-folder-choice eme-move-path" type="button" :title="rule.dst_path || rule.dst_name || '选择目标目录'" @click="browse('dst', index)">{{ rule.dst_path || rule.dst_name || '选择目标目录' }}</button><div class="eme-move-mode-options" role="group" :aria-label="`转存方式 ${index + 1}`"><button v-for="item in moveModeOptions" :key="item.value" type="button" class="eme-move-mode-button" :class="{ selected: rule.mode === item.value }" :aria-pressed="rule.mode === item.value" @click="selectMoveMode(index, item.value)">{{ item.title }}</button></div><button v-if="rule.mode === 'copy'" class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !!moveInfo?.token || !rule.src_id || !rule.dst_id" @click="copyExistingMoveItems(rule)">复制已有项目</button><button class="eme-button text eme-remove" type="button" :aria-label="`移除转存规则 ${index + 1}`" @click="rules.splice(index, 1)">✕</button></div>
           <div class="eme-actions"><button class="eme-button secondary" @click="rules.push({ src_id: '', src_name: '', dst_id: '', dst_name: '', mode: 'move' })">添加规则</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !!moveInfo?.token" @click="getMove">预览待转存内容</button><button class="eme-button secondary" :disabled="busy || !settingsLoaded || moveConfigDirty || !rules.length" @click="runMove">{{ ['processing', 'queued'].includes(moveInfo?.state) ? '⌛️转存中' : moveInfo?.token ? (moveInfo.action === 'copy_existing' ? '确认复制已有项目' : '确认执行转存') : '预览并确认转存' }}</button><button v-if="moveInfo?.token" class="eme-button secondary" :disabled="busy || ['processing', 'queued'].includes(moveInfo.state)" @click="cancelConfirmation(moveInfo.token)">取消本次转存</button></div>
           <p class="eme-hint">手动转存需在网页或 TG 确认一次；两处同步状态。已启用的自动监控仍按保存的规则运行。</p>
           <p v-if="moveInfo" class="eme-hint">上次执行：{{ moveInfo.last_run || '暂无' }}；<span v-for="(item, key) in moveInfo.pending || {}" :key="key">{{ item.name }}：{{ item.count < 0 ? item.error : `${item.count} 项` }}；</span></p>
@@ -1774,6 +1783,7 @@ onUnmounted(() => { disposed = true; clearTimeout(p115PollTimer); clearTimeout(m
 .eme-remove{flex:none;color:#e45c5c!important;padding:8px 10px}
 .eme-move-row{margin:10px 0}
 .eme-move-row .eme-folder-choice{max-width:230px;height:38px;box-sizing:border-box}
+.eme-move-row .eme-move-path{height:auto;min-height:38px;white-space:normal;overflow-wrap:anywhere;line-height:1.35}
 .eme-move-mode-options{display:flex;align-items:center;gap:4px;width:132px;height:38px;flex:none;box-sizing:border-box}
 .eme-move-mode-button{height:38px;min-width:0;flex:1;box-sizing:border-box;padding:8px 7px;border:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:9px;background:rgb(var(--v-theme-background));color:inherit;cursor:pointer;white-space:nowrap}
 .eme-move-mode-button:hover{border-color:rgb(var(--v-theme-primary))}

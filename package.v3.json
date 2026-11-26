@@ -190,7 +190,7 @@
     "name": "媒体增强",
     "description": "MoviePilot 内置订阅监控、缺集检测、媒体清理、电影与剧集数据补全、无效数据清理及 115 文件管理",
     "labels": "工具,115网盘,订阅",
-    "version": "2.10.83",
+    "version": "2.10.84",
     "icon": "https://raw.githubusercontent.com/yaoyaole0112/mpplugins.v3/main/plugins.v3/emetools/icon.jpeg",
     "author": "helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -198,6 +198,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v2.10.84": "文件转存规则的源目录和目标目录显示完整115网盘路径；重新选择并保存目录后记录路径，旧配置兼容显示，转存仍按目录ID执行。",
       "v2.10.83": "115 清理目录显示完整网盘路径，便于区分不同路径下的同名目录。",
       "v2.10.82": "修复 MoviePilot 重启后媒体增强被标记为“插件依赖未就绪”：复用宿主自带的 OSS SDK，避免重复声明触发旧版 crcmod 检查；115 普通上传逻辑不变。",
       "v2.10.81": "文件转存复制规则首次扫描时记录源目录基线，后续自动和手动执行仅复制新增项目；移除清理复制记录入口，每条复制规则新增独立确认的“复制已有项目”，只全量复制所选规则当前源目录项目。",

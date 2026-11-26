@@ -659,10 +659,14 @@ class PluginTests(unittest.TestCase):
         with patch("emetools.Scheduler"):
             response = self.run_async(self.plugin.save_schedule(ScheduleChange(
                 section="p115_move", settings={"rules": [
-                    {"src_id": "1", "dst_id": "2"},
+                    {"src_id": "1", "src_name": "电影", "src_path": "/影视资源/电影",
+                     "dst_id": "2", "dst_name": "整理", "dst_path": "/影视资源/整理"},
                     {"src_id": "3", "dst_id": "4", "mode": "copy"},
                 ]})))
         self.assertEqual([rule["mode"] for rule in response["config"]["rules"]], ["move", "copy"])
+        self.assertEqual(response["config"]["rules"][0]["src_path"], "/影视资源/电影")
+        self.assertEqual(response["config"]["rules"][0]["dst_path"], "/影视资源/整理")
+        self.assertEqual(response["config"]["rules"][1]["src_path"], "")
 
     def test_helper_cookie_is_read_fresh_for_each_operation(self):
         self.plugin.get_config.side_effect = [{"cookies": "first"}, {"cookies": "second"}]
