@@ -1,5 +1,36 @@
+from http.client import IncompleteRead
 from itertools import batched
+from time import sleep
 from typing import Any, Callable, Dict, Iterator, Set, Tuple
+
+
+_NETWORK_RETRY_DELAYS = (1, 2)
+_URLLIB_TRANSPORT_ERRORS = {
+    "ConnectTimeoutError",
+    "IncompleteRead",
+    "ProtocolError",
+    "ReadTimeoutError",
+}
+
+
+def _is_transient_network_error(error: Exception) -> bool:
+    """
+    检查异常链中是否包含可恢复的连接中断或超时
+    """
+    seen: Set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (ConnectionError, TimeoutError, IncompleteRead)):
+            return True
+        if any(
+            cls.__module__ in ("urllib3_future.exceptions", "urllib3.exceptions")
+            and cls.__name__ in _URLLIB_TRANSPORT_ERRORS
+            for cls in type(current).__mro__
+        ):
+            return True
+        current = current.__cause__
+    return False
 
 
 def _is_missing_directory(error: Exception) -> bool:
@@ -30,10 +61,10 @@ class DirectoryScanError(RuntimeError):
 
 class FullScanIterator:
     """
-    分批扫描网盘文件，目录节点缺失时重建任务缓存并重试一次
+    分批扫描网盘文件，对目录节点缺失或临时网络故障进行有限重试
 
     Attributes:
-        retried: 是否已执行缓存重建重试，用于禁止不稳定扫描后的删除操作
+        retried: 是否已重试扫描，用于禁止不稳定扫描后的删除操作
     """
 
     def __init__(
@@ -60,16 +91,20 @@ class FullScanIterator:
         """
         只交付完整读取的批次，重试时跳过已经交付的文件
 
-        :raises DirectoryScanError: 清理缓存后扫描仍然失败
+        :raises DirectoryScanError: 重试预算用尽后扫描仍然失败
 
         :yields Tuple: 待处理的文件批次
         """
         delivered: Set[str] = set()
-        for attempt in range(2):
+        missing_directory_retried = False
+        network_retries = 0
+        network_retry_limit = len(_NETWORK_RETRY_DELAYS)
+        while True:
             # 使用新的任务缓存，避免共享缓存清理或旧扫描后台线程影响重试
             kwargs = dict(self._kwargs, id_to_dirnode={})
             source = None
             batches = None
+            delay = 0
             try:
                 while True:
                     try:
@@ -81,28 +116,48 @@ class FullScanIterator:
                         return
                     except Exception as error:
                         missing_directory = _is_missing_directory(error)
-                        if attempt:
-                            detail = (
-                                f"仍缺少目录信息（目录 ID：{error.args[0]}）"
-                                if missing_directory
-                                else f"遇到新的错误（{type(error).__name__}：{error}）"
+                        if missing_directory and not missing_directory_retried:
+                            missing_directory_retried = True
+                            self.retried = True
+                            self._warn(
+                                f"【全量STRM生成】网盘目录“{self._path}”的目录信息不完整"
+                                f"（缺失目录 ID：{error.args[0]}），正在清理本次任务的目录缓存"
+                                "并从头重试（1/1），已提交的文件会自动跳过"
                             )
-                            raise DirectoryScanError(
-                                f"网盘目录“{self._path}”清理目录缓存并重试 1 次后，{detail}，"
-                                "本次扫描已停止，已提交的文件仍会完成处理。"
-                                "请在 115 网页端检查目录是否可访问、是否有移动或删除，"
-                                "待网盘整理完成后重新运行；若持续失败，请附完整日志反馈。"
-                                "本次不会清理该目录的失效文件"
-                            ) from error
-                        if not missing_directory:
-                            raise
-                        self.retried = True
-                        self._warn(
-                            f"【全量STRM生成】网盘目录“{self._path}”的目录信息不完整"
-                            f"（缺失目录 ID：{error.args[0]}），正在清理本次任务的目录缓存"
-                            "并从头重试（1/1），已提交的文件会自动跳过"
+                            break
+                        transient_network = (
+                            not missing_directory and _is_transient_network_error(error)
                         )
-                        break
+                        if transient_network and network_retries < network_retry_limit:
+                            delay = _NETWORK_RETRY_DELAYS[network_retries]
+                            network_retries += 1
+                            self.retried = True
+                            self._warn(
+                                f"【全量STRM生成】网盘目录“{self._path}”扫描遇到临时网络错误"
+                                f"（{type(error).__name__}：{error}），"
+                                f"等待 {delay} 秒后从头重试"
+                                f"（{network_retries}/{network_retry_limit}），已提交的文件会自动跳过"
+                            )
+                            break
+                        if missing_directory:
+                            detail = (
+                                "清理目录缓存并重试 1 次后，"
+                                f"仍缺少目录信息（目录 ID：{error.args[0]}）。"
+                                "请在 115 网页端检查目录是否可访问、是否有移动或删除。"
+                            )
+                        elif transient_network:
+                            detail = (
+                                f"网络重试 {network_retry_limit} 次后仍失败"
+                                f"（{type(error).__name__}：{error}）。"
+                                "请检查 MoviePilot 到 115 的网络连接，待连接稳定后重新全量同步。"
+                            )
+                        else:
+                            raise
+                        raise DirectoryScanError(
+                            f"网盘目录“{self._path}”{detail}"
+                            "本次扫描已停止，已提交的文件仍会完成处理。"
+                            "本次不会清理该目录的失效文件。"
+                        ) from error
                     pending = []
                     for item in batch:
                         file_id = str(item["id"])
@@ -115,3 +170,5 @@ class FullScanIterator:
                 close = getattr(source, "close", None)
                 if close is not None:
                     close()
+            if delay:
+                sleep(delay)

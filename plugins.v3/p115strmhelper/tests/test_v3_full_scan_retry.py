@@ -2,7 +2,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from typing import Any, Dict, Iterator
 from unittest import TestCase
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call, patch
 
 
 _spec = spec_from_file_location(
@@ -35,6 +35,9 @@ class TestV3FullScanRetry(TestCase):
     """
     验证目录缓存恢复、批次交付与重试边界
     """
+
+    def setUp(self) -> None:
+        self.sleep = self.enterContext(patch.object(_scan, "sleep"))
 
     def test_retry_preserves_partial_batch_and_deduplicates_delivered_files(
         self,
@@ -97,9 +100,9 @@ class TestV3FullScanRetry(TestCase):
 
     def test_unrelated_errors_do_not_retry(self) -> None:
         """
-        网络故障、字段缺失与其他来源的数字键异常原样报错
+        业务错误、字段缺失与其他来源的数字键异常原样报错
         """
-        for error in (TimeoutError("超时"), KeyError("name"), KeyError(123)):
+        for error in (ValueError("业务错误"), KeyError("name"), KeyError(123)):
             with self.subTest(error=repr(error)):
                 iterate = MagicMock(side_effect=error)
                 warn = MagicMock()
@@ -110,9 +113,9 @@ class TestV3FullScanRetry(TestCase):
                 iterate.assert_called_once()
                 warn.assert_not_called()
 
-    def test_retry_network_failure_is_reported_without_a_third_attempt(self) -> None:
+    def test_retry_network_failure_is_reported_after_bounded_retries(self) -> None:
         """
-        重试遇到不同错误时显示真实原因并停止
+        目录缓存恢复后，网络故障仍受独立重试预算限制
         """
         attempts = []
 
@@ -123,9 +126,52 @@ class TestV3FullScanRetry(TestCase):
             raise TimeoutError("读取超时")
 
         scanner = FullScanIterator(object(), iterate, {}, 1, "/media", MagicMock())
-        with self.assertRaisesRegex(DirectoryScanError, "TimeoutError：读取超时"):
+        with self.assertRaisesRegex(DirectoryScanError, "网络重试 2 次后仍失败"):
             list(scanner)
+        self.assertEqual(len(attempts), 4)
+        self.assertTrue(scanner.retried)
+        self.assertEqual(self.sleep.call_args_list, [call(1), call(2)])
+
+    def test_wrapped_connection_reset_retries_and_skips_delivered_files(self) -> None:
+        """
+        urllib3 风格包装的断连会重扫，已交付文件不会重复
+        """
+        attempts = []
+
+        def iterate(client: Any, **kwargs: Any) -> Iterator[Dict]:
+            attempts.append(kwargs)
+            yield _item(1)
+            if len(attempts) == 1:
+                raise RuntimeError("request failed") from ConnectionResetError(
+                    "Remote end closed connection without response"
+                )
+            yield _item(2)
+
+        scanner = FullScanIterator(object(), iterate, {}, 1, "/media", MagicMock())
+        batches = list(scanner)
+        self.assertEqual(
+            [[item["id"] for item in batch] for batch in batches], [[1], [2]]
+        )
         self.assertEqual(len(attempts), 2)
+        self.assertTrue(scanner.retried)
+        self.sleep.assert_called_once_with(1)
+
+    def test_business_error_with_implicit_network_context_does_not_retry(self) -> None:
+        """
+        非网络类错误仍立即失败
+        """
+        def fail(*args: Any, **kwargs: Any) -> None:
+            try:
+                raise ConnectionResetError("previous request failed")
+            except ConnectionResetError:
+                raise PermissionError("authorization failed")
+
+        iterate = MagicMock(side_effect=fail)
+        scanner = FullScanIterator(object(), iterate, {}, 1, "/media", MagicMock())
+        with self.assertRaisesRegex(PermissionError, "authorization failed"):
+            list(scanner)
+        iterate.assert_called_once()
+        self.sleep.assert_not_called()
 
     def test_normal_scan_passes_parameters_and_isolates_cache(self) -> None:
         """
@@ -200,7 +246,7 @@ class TestV3FullScanRetry(TestCase):
             attempts.append(kwargs)
             yield _item(1)
             if len(attempts) == 1:
-                _missing_directory()
+                raise ConnectionResetError("Remote end closed connection without response")
             yield _item(2)
 
         fixture.namespace["iter_files_skim"] = iterate
@@ -214,6 +260,7 @@ class TestV3FullScanRetry(TestCase):
         helper.mediainfodownloader.batch_auto_downloader.return_value = (0, 0, {})
         self.assertTrue(helper.generate_strm_files(f"{fixture.temporary.name}#/media"))
         self.assertEqual(len(attempts), 2)
+        self.assertEqual([kwargs["max_workers"] for kwargs in attempts], [4, 4])
         self.assertEqual(helper.total_count, 2)
         self.assertEqual(helper._FullSyncStrmHelper__process_single_item.call_count, 2)
         helper._FullSyncStrmHelper__apply_remove_unless_strm_path.assert_not_called()

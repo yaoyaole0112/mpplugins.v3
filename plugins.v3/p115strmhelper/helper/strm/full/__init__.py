@@ -721,6 +721,7 @@ class FullSyncStrmHelper:
                     iter_func = iter_files_skim
                     iter_kwargs = {
                         "with_path": True,
+                        "max_workers": 4,
                         "cid": parent_id,
                         "with_ancestors": True,
                         **configer.get_ios_ua_app(),
@@ -910,6 +911,7 @@ class FullSyncStrmHelper:
                             iter_func = iter_files_skim
                             iter_kwargs = {
                                 "with_path": True,
+                                "max_workers": 4,
                                 "cid": parent_id,
                                 "with_ancestors": True,
                                 **configer.get_ios_ua_app(),
