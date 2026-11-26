@@ -3045,12 +3045,6 @@ class Ed2kTests(unittest.TestCase):
 
     def test_recent_page_and_empty_records(self):
         self.assertTrue(self.plugin.get_page())
-        self.assertEqual(self.plugin.get_render_mode()[0], "vuetify")
-        page = self.plugin.get_page()[0]["content"][0]["content"]
-        actions = page[2]["content"]
-        self.assertEqual(len(actions), 3)
-        self.assertTrue(all(item.get("events", {}).get("click", {}).get("api", "").startswith(
-            "plugin/Ed2kFolderWatcher/") for item in actions))
         self.assertEqual(self.plugin.recent_records()["items"], [])
         self.assertEqual(self.plugin.recent_records()["total"], 0)
 

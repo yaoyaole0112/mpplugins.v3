@@ -225,7 +225,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.22.14"
+    plugin_version = "1.22.13"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -548,8 +548,8 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         self._on_local_upload_transfer(event)
 
     @staticmethod
-    def get_render_mode() -> Tuple[str, Optional[str]]:
-        return "vuetify", None
+    def get_render_mode() -> Tuple[str, str]:
+        return "vue", "dist/assets"
 
     def _get_web_login(self):
         with self._web_login_lock:
@@ -2595,94 +2595,8 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
         return build_routes(self)
 
     def get_page(self) -> Optional[List[dict]]:
-        snapshot = self.recent_records()
-        if not snapshot.get("ok"):
-            return [{"component": "VAlert", "props": {"type": "error", "variant": "tonal"},
-                     "text": snapshot.get("message") or "读取生成记录失败，请稍后刷新。"}]
-
-        def button(label: str, path: str, method: str = "POST") -> dict:
-            return {
-                "component": "VBtn",
-                "props": {"color": "primary", "variant": "tonal", "class": "ma-1"},
-                "text": label,
-                "events": {"click": {
-                    "api": f"plugin/Ed2kFolderWatcher/{path}",
-                    "method": method,
-                }},
-            }
-
-        progress = snapshot.get("progress") or []
-        records = snapshot.get("items") or []
-        content = [
-            {"component": "VCardTitle", "text": "自动生成ED2K链接"},
-            {"component": "VCardSubtitle", "text": "进度与最近生成记录"},
-            {"component": "VCardActions", "content": [
-                button("刷新", "records", "GET"),
-                button("立即本地增量扫描", "local/run"),
-                button("立即网盘增量扫描", "cloud/run"),
-            ]},
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-             "text": f"工作线程：{'运行中' if snapshot.get('worker_alive') else '未运行'}；"
-                     f"处理中与等待任务：{len(progress)}；生成记录：{snapshot.get('total', 0)}"},
-            {"component": "VCardTitle", "text": "正在处理与等待队列"},
-        ]
-        if progress:
-            for item in progress[:100]:
-                size = item.get("size")
-                size_text = f"{int(size):,} B" if isinstance(size, (int, float)) else "大小未知"
-                position = item.get("queue_position")
-                position_text = f" · No.{position}" if position else ""
-                source = item.get("source") or "任务"
-                stage = item.get("stage") or "等待处理"
-                content.append({
-                    "component": "VAlert",
-                    "props": {"type": "info" if item.get("status") == "active" else "warning",
-                              "variant": "tonal", "class": "mb-2"},
-                    "text": f"{item.get('name') or '未知文件'}\n"
-                            f"{source} · {size_text}{position_text} · {stage}",
-                })
-        else:
-            content.append({"component": "VAlert", "props": {"type": "success", "variant": "tonal"},
-                            "text": "当前没有等待处理的任务。"})
-
-        content.append({"component": "VCardTitle", "text": "最近生成记录"})
-        if records:
-            for item in records:
-                status = item.get("display_status") or {}
-                status_label = status.get("label") or "状态待确认"
-                source_status = {
-                    "deleted": "源文件已删除",
-                    "retained": "源文件保留",
-                    "delete_failed": "删除失败，源文件保留",
-                    "delete_uncertain": "删除结果未确认",
-                }.get(item.get("source_status"), "")
-                size = item.get("size")
-                size_text = f"{int(size):,} B" if isinstance(size, (int, float)) else "大小未知"
-                link = item.get("link") or "未生成有效链接"
-                content.append({
-                    "component": "VCard",
-                    "props": {"class": "mb-2"},
-                    "content": [
-                        {"component": "VCardTitle", "text": item.get("name") or "未知文件"},
-                        {"component": "VCardSubtitle",
-                         "text": " · ".join(filter(None, (size_text, status_label, source_status)))},
-                        {"component": "VCardText", "text": link},
-                    ],
-                })
-        else:
-            content.append({"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                            "text": "暂无生成记录。"})
-
-        if snapshot.get("failed_tasks"):
-            content.append({"component": "VCardTitle", "text": "失败且已停止自动重试"})
-            for task in snapshot["failed_tasks"][:50]:
-                content.append({
-                    "component": "VAlert",
-                    "props": {"type": "error", "variant": "tonal", "class": "mb-2"},
-                    "text": f"{task.get('name') or '未知文件'} · 失败 {task.get('attempts', 0)} 次"
-                            + (f"\n{task.get('error')}" if task.get("error") else ""),
-                })
-        return [{"component": "VCard", "content": [{"component": "VCardText", "content": content}]}]
+        return [{"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                 "text": "最近生成的 ED2K 链接记录请使用新版查看页面；修改配置请在插件卡片三个点菜单中选择设置。"}]
 
     @staticmethod
     def _record_id(path: str, record: dict) -> str:
