@@ -2,7 +2,7 @@ import re
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from .channel_dedup import normalize_title
 
@@ -249,7 +249,37 @@ class ResourceFlowSettingsPayload(BaseModel):
     shared_min_download_kib_s: int = Field(SHARED_SLOW_DOWNLOAD_DEFAULTS["shared_min_download_kib_s"], ge=0, le=1048576)
     recent_missing_date_tolerance_days: int = Field(7, ge=1, le=30)
     recent_missing_date_ai_enabled: bool = False
+    recent_ai_api_base_url: Optional[str] = Field(None, max_length=500)
+    recent_ai_model: Optional[str] = Field(None, max_length=200)
+    recent_ai_api_key: Optional[SecretStr] = Field(None, max_length=2000)
+    recent_ai_api_key_clear: bool = False
     douban_only_action: Literal["exclude", "download"] = "exclude"
+
+    @field_validator("recent_ai_api_base_url", mode="before")
+    @classmethod
+    def validate_recent_ai_api_base_url(cls, value):
+        if value is None or not str(value).strip():
+            return None
+        from urllib.parse import urlsplit
+
+        cleaned = str(value).strip().rstrip("/")
+        parsed = urlsplit(cleaned)
+        if (parsed.scheme not in {"https", "http"} or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            raise ValueError("AI API 地址必须是有效的 HTTP(S) Base URL，不能包含账号、查询参数或片段")
+        if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("AI API 除本机服务外必须使用 HTTPS")
+        return cleaned
+
+    @field_validator("recent_ai_model", "recent_ai_api_key", mode="before")
+    @classmethod
+    def normalize_recent_ai_text(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, SecretStr):
+            value = value.get_secret_value()
+        cleaned = str(value).strip()
+        return cleaned or None
 
     @model_validator(mode="before")
     @classmethod

@@ -148,6 +148,10 @@ export function normalizeSettings(settings = {}) {
     Math.max(Number(result.recent_missing_date_tolerance_days || 7), 1), 30,
   )
   result.recent_missing_date_ai_enabled = Boolean(result.recent_missing_date_ai_enabled)
+  result.recent_ai_api_base_url = String(result.recent_ai_api_base_url || '').trim()
+  result.recent_ai_model = String(result.recent_ai_model || '').trim()
+  result.recent_ai_api_key = String(result.recent_ai_api_key || '')
+  result.recent_ai_api_key_clear = Boolean(result.recent_ai_api_key_clear)
   result.douban_only_action = result.douban_only_action === 'download' ? 'download' : 'exclude'
   return result
 }

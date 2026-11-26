@@ -98,6 +98,11 @@ const settingsDraft = ref({
   shared_min_download_kib_s: 100,
   recent_missing_date_tolerance_days: 7,
   recent_missing_date_ai_enabled: false,
+  recent_ai_api_base_url: '',
+  recent_ai_model: '',
+  recent_ai_api_key: '',
+  recent_ai_api_key_set: false,
+  recent_ai_api_key_clear: false,
   douban_only_action: 'exclude',
 })
 const hostToast = inject('moviepilot:toast', null)
@@ -180,6 +185,11 @@ async function loadStatus({ preserveSelection = true, loadDetail = true, resetDr
       shared_min_download_kib_s: Number(status.value.shared_min_download_kib_s ?? 100),
       recent_missing_date_tolerance_days: Number(status.value.recent_missing_date_tolerance_days || 7),
       recent_missing_date_ai_enabled: Boolean(status.value.recent_missing_date_ai_enabled),
+      recent_ai_api_base_url: status.value.recent_ai_api_base_url || '',
+      recent_ai_model: status.value.recent_ai_model || '',
+      recent_ai_api_key: '',
+      recent_ai_api_key_set: Boolean(status.value.recent_ai_api_key_set),
+      recent_ai_api_key_clear: false,
       douban_only_action: status.value.douban_only_action === 'download' ? 'download' : 'exclude',
     }
     const selectedStillExists = tasks.value.some(item => item.id === selectedTaskId.value)
@@ -986,6 +996,23 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                   label="启用 AI 官方排播核验" color="primary" density="compact" hide-details inset />
               </div>
             </div>
+            <div v-if="settingsDraft.recent_missing_date_ai_enabled"
+              class="global-settings__grid global-settings__recent-ai-config">
+              <VTextField v-model="settingsDraft.recent_ai_api_base_url"
+                label="AI API Base URL" placeholder="https://api.openai.com/v1"
+                hint="使用兼容 Chat Completions 的接口" persistent-hint
+                density="comfortable" hide-details="auto" />
+              <VTextField v-model="settingsDraft.recent_ai_model"
+                label="AI 模型名称" placeholder="模型 ID"
+                density="comfortable" hide-details="auto" />
+              <VTextField v-model="settingsDraft.recent_ai_api_key"
+                type="password" autocomplete="new-password"
+                :label="settingsDraft.recent_ai_api_key_set ? 'API Key（已保存，留空保持不变）' : 'AI API Key'"
+                density="comfortable" hide-details="auto" />
+              <VCheckbox v-if="settingsDraft.recent_ai_api_key_set"
+                v-model="settingsDraft.recent_ai_api_key_clear" label="清除已保存 API Key"
+                color="primary" density="compact" hide-details />
+            </div>
           </section>
           <section class="global-settings__section">
             <h3><VIcon icon="mdi-filter-check-outline" />选种与去重</h3>
@@ -1325,6 +1352,10 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   min-block-size: 48px;
 }
 
+.global-settings__recent-ai-config {
+  margin-block-start: 12px;
+}
+
 .global-settings__toggles {
   display: flex;
   flex-wrap: wrap;
@@ -1416,6 +1447,7 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 @container global-settings (min-width: 800px) {
   .global-settings__limits { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .global-settings__recent-date { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .global-settings__recent-ai-config { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @container global-settings (min-width: 480px) {

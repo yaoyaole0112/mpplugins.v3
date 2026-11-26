@@ -25,7 +25,8 @@ class ResourceFlowReleaseTests(unittest.TestCase):
         self.save_manifest()
         for name in ("models.py", "channel_dedup.py", "active_dedup.py", "resource_dedup.py",
                      "shared_protocol.py", "shared_coordinator.py", "shared_plugin.py", "shared_models.py",
-                     "telegram_rpc.py", "record_search.py", "shared_history.py", "shared_cache.py", "shared_http.py"):
+                     "telegram_rpc.py", "record_search.py", "shared_history.py", "shared_cache.py", "shared_http.py",
+                     "recent_air_ai.py"):
             (self.plugin / name).touch()
         (self.plugin / "dist/assets").mkdir(parents=True)
         (self.plugin / "dist/assets/remoteEntry.js").write_text("// built")

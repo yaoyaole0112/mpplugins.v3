@@ -546,6 +546,41 @@ class RecentEpisodeRuleTest(unittest.TestCase):
         self.assertEqual(result, {})
         self.assertIn("LLM provider runtime is not initialized", diagnostics["message"])
 
+    def test_plugin_direct_ai_uses_search_evidence_without_mp_llm_runtime(self):
+        plugin = ResourceFlow.__new__(ResourceFlow)
+        plugin._recent_missing_date_ai_enabled = True
+        plugin._recent_ai_api_base_url = "https://ai.example/v1"
+        plugin._recent_ai_model = "test-model"
+        plugin._recent_ai_api_key = "test-secret"
+        plugin.save_data = Mock()
+        title = "刘在街头"
+        url = "https://tvn.cjenm.com/ko/youquiz/episodes/"
+        quote = "2026년 11월 25일 방송 제370회"
+        row = {"url": url, "title": "유 퀴즈 온 더 블럭", "snippet": quote}
+        answer = [{
+            "title": title, "tmdb_id": 81978, "season": 4, "episode": 370,
+            "date": "2026-11-25", "confidence": "high", "source": url, "quote": quote,
+        }]
+        media = SimpleNamespace(
+            title=title, en_title="You Quiz on the Block", tmdb_id=81978, year="2018",
+        )
+        with (
+            patch("resourceflow.search_episode_evidence", new=AsyncMock(return_value=[row])),
+            patch("resourceflow.run_on_moviepilot_loop", side_effect=lambda coroutine: asyncio.run(coroutine)),
+            patch(
+                "resourceflow.recent_air_ai.request_recent_air_dates",
+                return_value=json.dumps(answer, ensure_ascii=False),
+            ) as request,
+        ):
+            results = plugin._recent_episode_ai_dates(title, media, 4, [370])
+
+        request.assert_called_once()
+        self.assertEqual(request.call_args.args[:3], (
+            "https://ai.example/v1", "test-model", "test-secret",
+        ))
+        self.assertEqual(results[370]["date"], "2026-11-25")
+        self.assertEqual(results[370]["confidence"], "high")
+
     def test_native_response_with_citation_but_no_matching_excerpt_cannot_pass(self):
         from app.agent.llm.helper import LLMHelper
 

@@ -30,6 +30,23 @@ class SelectedSpecsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ResourceFlowSettingsPayload(douban_only_action="guess")
 
+    def test_recent_ai_direct_api_settings_validate_secure_endpoints(self):
+        payload = ResourceFlowSettingsPayload(
+            recent_ai_api_base_url="https://api.example/v1/",
+            recent_ai_model=" model-a ",
+            recent_ai_api_key=" secret ",
+        )
+        self.assertEqual(payload.recent_ai_api_base_url, "https://api.example/v1")
+        self.assertEqual(payload.recent_ai_model, "model-a")
+        self.assertEqual(payload.recent_ai_api_key.get_secret_value(), "secret")
+        for url in (
+            "http://api.example/v1",
+            "https://user:pass@api.example/v1",
+            "https://api.example/v1?key=secret",
+        ):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                ResourceFlowSettingsPayload(recent_ai_api_base_url=url)
+
     def select(self, path=None, size=5000000000, accepted=None):
         return self.plugin._channel_dedup_file_selection(
             integration.make_torrent([(path or self.path, size)]), "Show S01", accepted

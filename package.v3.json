@@ -67,7 +67,7 @@
     "name": "资源刷流",
     "description": "独立资源刷流，使用 Tailscale 私网 HTTPS 共享下载审批，跨实例同规格下载前占位。",
     "labels": "刷流,资源去重,Tailscale",
-    "version": "1.0.71",
+    "version": "1.0.72",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680 / helios",
     "project_url": "https://github.com/yaoyaole0112/mpplugins.v3",
@@ -75,6 +75,7 @@
     "system_version": ">=3.0.0",
     "level": 2,
     "history": {
+      "v1.0.72": "新增插件独立 OpenAI-compatible Chat Completions 接入：可配置 API Base URL、模型与密钥，绕过 MoviePilot LLM provider 初始化；仍使用 MP 搜索网页证据并执行官方来源、身份、集号和原文校验。密钥仅保存于插件配置且不由状态接口回传。",
       "v1.0.71": "最近播出日期缺失时优先按近一个月已知连续周播记录推算具体日期，并按任务日期范围判断；周播规律不足时按（集差+1）×缺失日期容差兜底。缩小 AI 核验输入、记录 BadRequest 详情，并支持 TVN 官方域名及韩文集号/播出格式。",
       "v1.0.70": "优化全局设置在 MoviePilot App iOS 原生渲染下的自适应布局；简化低速下载设置名称，将仅豆瓣识别策略移入选种与去重，并重排共享审批连接配置以减少空白。",
       "v1.0.69": "新增全局“国产剧仅下载 4K 及以上”开关，默认关闭。按 MoviePilot 整理分类识别国产剧，在近期播出、去重和共享审批之前，仅保留可确认达到 2160p 的视频文件。",
