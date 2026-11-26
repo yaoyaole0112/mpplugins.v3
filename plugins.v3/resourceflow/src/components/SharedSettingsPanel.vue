@@ -255,16 +255,18 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
       <VTextField v-model="draft.https_authority_id" label="协调端共享账本 ID"
         class="shared-settings__instance" density="comfortable" hide-details />
     </div>
-    <div class="shared-settings__grid shared-settings__grid--token">
-      <VTextField v-model="draft.https_token" type="password" autocomplete="new-password"
-        :label="state.https_token_configured ? '本机私网审批密钥（已保存）' : '本机私网审批密钥'"
-        density="comfortable" hide-details />
+    <div class="shared-settings__credentials">
+      <div class="shared-settings__grid shared-settings__grid--token">
+        <VTextField v-model="draft.https_token" type="password" autocomplete="new-password"
+          :label="state.https_token_configured ? '本机私网审批密钥（已保存）' : '本机私网审批密钥'"
+          density="comfortable" hide-details />
+      </div>
+      <dl class="shared-settings__status">
+        <div><dt>协调端：</dt><dd>{{ state.host_coordinator ? state.coordinator_running ? '本机运行中' : '本机未运行' : '远端' }}</dd></div>
+        <div><dt>最近审批确认：</dt><dd>{{ timestamp(state.last_ok) }}</dd></div>
+        <div><dt>协调端规则版本：</dt><dd>{{ state.probe?.policy?.revision?.slice(0, 12) || '-' }}</dd></div>
+      </dl>
     </div>
-    <dl class="shared-settings__status">
-      <div><dt>协调端：</dt><dd>{{ state.host_coordinator ? state.coordinator_running ? '本机运行中' : '本机未运行' : '远端' }}</dd></div>
-      <div><dt>最近审批确认：</dt><dd>{{ timestamp(state.last_ok) }}</dd></div>
-      <div><dt>协调端规则版本：</dt><dd>{{ state.probe?.policy?.revision?.slice(0, 12) || '-' }}</dd></div>
-    </dl>
     </template>
     <template v-else>
     <div v-if="activeFilter" class="shared-settings__search approval-search">
@@ -354,15 +356,24 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 </template>
 
 <style scoped>
-.shared-settings { display: flex; flex-direction: column; gap: 20px; min-inline-size: 0; }
-.shared-settings--compact { gap: 18px; }
+.shared-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-inline-size: 0;
+  container: shared-panel / inline-size;
+}
+.shared-settings--compact { gap: 12px; }
 .shared-settings__search { grid-template-columns: minmax(0, 1fr) minmax(150px, 210px) 160px minmax(150px, 170px); }
 .shared-settings__grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 16px 24px; min-inline-size: 0; }
 .shared-settings__grid > * { min-inline-size: 0; }
 .shared-settings__subsection { display: grid; gap: 16px; min-inline-size: 0; }
 .shared-settings__grid--switches { align-items: center; }
-.shared-settings__grid--identity,
+.shared-settings__grid--identity { padding-block-start: 2px; }
+.shared-settings__credentials { display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; gap: 12px 24px; min-inline-size: 0; }
 .shared-settings__grid--token { padding-block-start: 2px; }
+.shared-settings--compact { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+.shared-settings__grid--coordinator :deep(textarea) { overflow-wrap: anywhere; word-break: break-word; }
 .shared-settings__instance :deep(input) { font-family: monospace; font-size: 11px; }
 .shared-settings__status { margin: 0; display: grid; gap: 10px; }
 .shared-settings__status > div { display: flex; justify-content: space-between; gap: 12px; }
@@ -382,8 +393,9 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
   min-inline-size: 0;
   justify-content: flex-start;
   gap: 4px;
-  flex-wrap: nowrap;
-  white-space: nowrap;
+  flex-wrap: wrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .shared-settings--compact .shared-settings__status > div:not(:last-child)::after {
   content: "·";
@@ -392,9 +404,15 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
 }
 .shared-settings--compact .shared-settings__status dt { flex-shrink: 0; }
 .shared-settings--compact .shared-settings__status dd { text-align: start; }
-@media (min-width: 600px) {
+@container shared-panel (min-width: 480px) {
   .shared-settings__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .shared-settings--compact .shared-settings__status { grid-template-columns: none; }
+}
+@container shared-panel (min-width: 920px) {
+  .shared-settings__grid--identity { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .shared-settings__grid--coordinator { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); }
+  .shared-settings__credentials { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .shared-settings--compact .shared-settings__status { justify-content: flex-start; }
 }
 .shared-settings__records { min-inline-size: 0; }
 .shared-settings__record > * { margin-inline-start: 0; }
@@ -437,7 +455,13 @@ defineExpose({ save, test, ready, busy, canTest, refresh: () => perform(() => lo
   .shared-settings__record-head .shared-settings__badge { max-inline-size: 56%; white-space: normal; }
   .shared-settings__meta { flex-direction: column; align-items: flex-start; gap: 4px; }
   .shared-settings__media-summary { font-size: 15px; }
-  .shared-settings--compact .shared-settings__status > div { flex-wrap: wrap; white-space: normal; }
   .shared-settings__status dd { margin-inline-start: auto; }
+}
+@container shared-panel (max-width: 479px) {
+  .shared-settings--compact { gap: 10px; }
+  .shared-settings__grid { gap: 12px; }
+  .shared-settings__subsection { gap: 12px; }
+  .shared-settings__credentials { gap: 8px; }
+  .shared-settings--compact .shared-settings__status { padding: 10px; gap: 6px; }
 }
 </style>

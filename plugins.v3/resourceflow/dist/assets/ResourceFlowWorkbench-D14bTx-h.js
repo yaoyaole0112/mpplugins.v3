@@ -1342,63 +1342,64 @@ const _hoisted_5$1 = {
   key: 2,
   class: "shared-settings__grid shared-settings__grid--remote"
 };
-const _hoisted_6$1 = { class: "shared-settings__grid shared-settings__grid--token" };
-const _hoisted_7$1 = { class: "shared-settings__status" };
-const _hoisted_8$1 = {
+const _hoisted_6$1 = { class: "shared-settings__credentials" };
+const _hoisted_7$1 = { class: "shared-settings__grid shared-settings__grid--token" };
+const _hoisted_8$1 = { class: "shared-settings__status" };
+const _hoisted_9$1 = {
   key: 0,
   class: "shared-settings__search approval-search"
 };
-const _hoisted_9$1 = {
+const _hoisted_10$1 = {
   key: 1,
   class: "shared-settings__records"
 };
-const _hoisted_10$1 = {
+const _hoisted_11$1 = {
   key: 0,
   class: "text-body-2 text-medium-emphasis"
 };
-const _hoisted_11$1 = { class: "shared-settings__record-head" };
-const _hoisted_12$1 = {
+const _hoisted_12$1 = { class: "shared-settings__record-head" };
+const _hoisted_13$1 = {
   key: 0,
   class: "shared-settings__heading"
 };
-const _hoisted_13$1 = { key: 1 };
-const _hoisted_14$1 = ["data-tone"];
-const _hoisted_15$1 = {
+const _hoisted_14$1 = { key: 1 };
+const _hoisted_15$1 = ["data-tone"];
+const _hoisted_16$1 = {
   key: 0,
   class: "shared-settings__torrent-title"
 };
-const _hoisted_16$1 = { class: "shared-settings__meta text-caption" };
-const _hoisted_17$1 = { key: 0 };
-const _hoisted_18$1 = { key: 1 };
-const _hoisted_19$1 = { key: 2 };
-const _hoisted_20$1 = {
+const _hoisted_17$1 = { class: "shared-settings__meta text-caption" };
+const _hoisted_18$1 = { key: 0 };
+const _hoisted_19$1 = { key: 1 };
+const _hoisted_20$1 = { key: 2 };
+const _hoisted_21$1 = {
   key: 2,
   class: "shared-settings__error text-body-2"
 };
-const _hoisted_21$1 = { class: "shared-settings__ids" };
-const _hoisted_22$1 = { class: "shared-settings__id text-caption" };
-const _hoisted_23$1 = {
+const _hoisted_22$1 = { class: "shared-settings__ids" };
+const _hoisted_23$1 = { class: "shared-settings__id text-caption" };
+const _hoisted_24$1 = {
   key: 0,
   class: "shared-settings__id text-caption"
 };
-const _hoisted_24$1 = {
+const _hoisted_25$1 = {
   key: 2,
   class: "shared-settings__records"
 };
-const _hoisted_25$1 = {
+const _hoisted_26$1 = {
   key: 0,
   class: "text-body-2 text-medium-emphasis"
 };
-const _hoisted_26$1 = { class: "shared-settings__record-head" };
-const _hoisted_27$1 = { class: "shared-settings__heading" };
-const _hoisted_28$1 = { class: "shared-settings__preview shared-settings__media-summary shared-settings__info text-body-2" };
-const _hoisted_29$1 = ["data-tone"];
-const _hoisted_30$1 = { class: "shared-settings__torrent-title" };
-const _hoisted_31$1 = { class: "shared-settings__meta shared-settings__claim-meta text-caption" };
-const _hoisted_32$1 = { class: "shared-settings__claim-owner" };
-const _hoisted_33$1 = { class: "shared-settings__ids" };
-const _hoisted_34$1 = { class: "shared-settings__id text-caption" };
-const _hoisted_35$1 = {
+const _hoisted_27$1 = { class: "shared-settings__record-head" };
+const _hoisted_28$1 = { class: "shared-settings__heading" };
+const _hoisted_29$1 = { class: "shared-settings__preview shared-settings__media-summary shared-settings__info text-body-2" };
+const _hoisted_30$1 = ["data-tone"];
+const _hoisted_31$1 = { class: "shared-settings__torrent-title" };
+const _hoisted_32$1 = { class: "shared-settings__meta shared-settings__claim-meta text-caption" };
+const _hoisted_33$1 = { class: "shared-settings__claim-owner" };
+const _hoisted_34$1 = { class: "shared-settings__ids" };
+const _hoisted_35$1 = { class: "shared-settings__id text-caption" };
+const _hoisted_36$1 = {
   key: 0,
   class: "shared-settings__id text-caption"
 };
@@ -1800,34 +1801,36 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"])
               ])),
           _createElementVNode$1("div", _hoisted_6$1, [
-            _createVNode$1(_component_VTextField, {
-              modelValue: draft.value.https_token,
-              "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((draft.value.https_token) = $event)),
-              type: "password",
-              autocomplete: "new-password",
-              label: state.value.https_token_configured ? '本机私网审批密钥（已保存）' : '本机私网审批密钥',
-              density: "comfortable",
-              "hide-details": ""
-            }, null, 8, ["modelValue", "label"])
-          ]),
-          _createElementVNode$1("dl", _hoisted_7$1, [
-            _createElementVNode$1("div", null, [
-              _cache[14] || (_cache[14] = _createElementVNode$1("dt", null, "协调端：", -1)),
-              _createElementVNode$1("dd", null, _toDisplayString$1(state.value.host_coordinator ? state.value.coordinator_running ? '本机运行中' : '本机未运行' : '远端'), 1)
+            _createElementVNode$1("div", _hoisted_7$1, [
+              _createVNode$1(_component_VTextField, {
+                modelValue: draft.value.https_token,
+                "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((draft.value.https_token) = $event)),
+                type: "password",
+                autocomplete: "new-password",
+                label: state.value.https_token_configured ? '本机私网审批密钥（已保存）' : '本机私网审批密钥',
+                density: "comfortable",
+                "hide-details": ""
+              }, null, 8, ["modelValue", "label"])
             ]),
-            _createElementVNode$1("div", null, [
-              _cache[15] || (_cache[15] = _createElementVNode$1("dt", null, "最近审批确认：", -1)),
-              _createElementVNode$1("dd", null, _toDisplayString$1(timestamp(state.value.last_ok)), 1)
-            ]),
-            _createElementVNode$1("div", null, [
-              _cache[16] || (_cache[16] = _createElementVNode$1("dt", null, "协调端规则版本：", -1)),
-              _createElementVNode$1("dd", null, _toDisplayString$1(state.value.probe?.policy?.revision?.slice(0, 12) || '-'), 1)
+            _createElementVNode$1("dl", _hoisted_8$1, [
+              _createElementVNode$1("div", null, [
+                _cache[14] || (_cache[14] = _createElementVNode$1("dt", null, "协调端：", -1)),
+                _createElementVNode$1("dd", null, _toDisplayString$1(state.value.host_coordinator ? state.value.coordinator_running ? '本机运行中' : '本机未运行' : '远端'), 1)
+              ]),
+              _createElementVNode$1("div", null, [
+                _cache[15] || (_cache[15] = _createElementVNode$1("dt", null, "最近审批确认：", -1)),
+                _createElementVNode$1("dd", null, _toDisplayString$1(timestamp(state.value.last_ok)), 1)
+              ]),
+              _createElementVNode$1("div", null, [
+                _cache[16] || (_cache[16] = _createElementVNode$1("dt", null, "协调端规则版本：", -1)),
+                _createElementVNode$1("dd", null, _toDisplayString$1(state.value.probe?.policy?.revision?.slice(0, 12) || '-'), 1)
+              ])
             ])
           ])
         ], 64))
       : (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 5 }, [
           (activeFilter.value)
-            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_8$1, [
+            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_9$1, [
                 _createVNode$1(_component_VTextField, {
                   modelValue: activeFilter.value.query,
                   "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((activeFilter.value.query) = $event)),
@@ -1870,18 +1873,18 @@ return (_ctx, _cache) => {
               ]))
             : _createCommentVNode$1("", true),
           (__props.recordTab === 'requests')
-            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_9$1, [
+            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_10$1, [
                 (!recordsLoading.value && !recordRows.value.items.length)
-                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_10$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.owner || activeFilter.value.media_type || activeFilter.value.status ? '无匹配记录' : '暂无共享申请'), 1))
+                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_11$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.owner || activeFilter.value.media_type || activeFilter.value.status ? '无匹配记录' : '暂无共享申请'), 1))
                   : _createCommentVNode$1("", true),
                 (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(requestRows.value, (row) => {
                   return (_openBlock$1(), _createElementBlock$1("article", {
                     key: row.request_id,
                     class: "shared-settings__record"
                   }, [
-                    _createElementVNode$1("div", _hoisted_11$1, [
+                    _createElementVNode$1("div", _hoisted_12$1, [
                       (row.mediaSummaries.length)
-                        ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_12$1, [
+                        ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_13$1, [
                             (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(row.mediaSummaries, (summary, index) => {
                               return (_openBlock$1(), _createElementBlock$1("div", {
                                 key: index,
@@ -1891,7 +1894,7 @@ return (_ctx, _cache) => {
                               ]))
                             }), 128))
                           ]))
-                        : (_openBlock$1(), _createElementBlock$1("strong", _hoisted_13$1, _toDisplayString$1(row.title), 1)),
+                        : (_openBlock$1(), _createElementBlock$1("strong", _hoisted_14$1, _toDisplayString$1(row.title), 1)),
                       _createElementVNode$1("span", {
                         class: "shared-settings__badge",
                         "data-tone": phaseColors[row.phase] || 'secondary'
@@ -1901,22 +1904,22 @@ return (_ctx, _cache) => {
                           size: "16"
                         }, null, 8, ["icon"]),
                         _createTextVNode$1(" " + _toDisplayString$1(requestSummary(row)), 1)
-                      ], 8, _hoisted_14$1)
+                      ], 8, _hoisted_15$1)
                     ]),
                     (row.mediaSummaries.length)
-                      ? (_openBlock$1(), _createElementBlock$1("strong", _hoisted_15$1, _toDisplayString$1(row.title), 1))
+                      ? (_openBlock$1(), _createElementBlock$1("strong", _hoisted_16$1, _toDisplayString$1(row.title), 1))
                       : _createCommentVNode$1("", true),
-                    _createElementVNode$1("div", _hoisted_16$1, [
+                    _createElementVNode$1("div", _hoisted_17$1, [
                       _createElementVNode$1("span", null, "申请时间：" + _toDisplayString$1(timestamp(row.created)), 1),
                       _createElementVNode$1("span", null, "最近更新：" + _toDisplayString$1(timestamp(row.updated)), 1),
                       (row.download_started_at)
-                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_17$1, "下载开始：" + _toDisplayString$1(timestamp(row.download_started_at)), 1))
+                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_18$1, "下载开始：" + _toDisplayString$1(timestamp(row.download_started_at)), 1))
                         : _createCommentVNode$1("", true),
                       (row.slow_cancel_at)
-                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_18$1, "低速处理：" + _toDisplayString$1(timestamp(row.slow_cancel_at)), 1))
+                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_19$1, "低速处理：" + _toDisplayString$1(timestamp(row.slow_cancel_at)), 1))
                         : _createCommentVNode$1("", true),
                       (row.timeout_at)
-                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_19$1, "超时处理：" + _toDisplayString$1(timestamp(row.timeout_at)), 1))
+                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_20$1, "超时处理：" + _toDisplayString$1(timestamp(row.timeout_at)), 1))
                         : _createCommentVNode$1("", true),
                       _createElementVNode$1("span", null, "站点：" + _toDisplayString$1(row.site_name || '-'), 1)
                     ]),
@@ -1927,7 +1930,7 @@ return (_ctx, _cache) => {
                         }, _toDisplayString$1(row.error), 3))
                       : _createCommentVNode$1("", true),
                     (row.integrity_error)
-                      ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_20$1, _toDisplayString$1(row.integrity_error), 1))
+                      ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_21$1, _toDisplayString$1(row.integrity_error), 1))
                       : _createCommentVNode$1("", true),
                     (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(row.rejectionSummaries, (reason, index) => {
                       return (_openBlock$1(), _createElementBlock$1("p", {
@@ -1935,28 +1938,28 @@ return (_ctx, _cache) => {
                         class: "shared-settings__reason text-body-2"
                       }, _toDisplayString$1(reason), 1))
                     }), 128)),
-                    _createElementVNode$1("div", _hoisted_21$1, [
-                      _createElementVNode$1("span", _hoisted_22$1, "申请编号：" + _toDisplayString$1(row.request_id), 1),
+                    _createElementVNode$1("div", _hoisted_22$1, [
+                      _createElementVNode$1("span", _hoisted_23$1, "申请编号：" + _toDisplayString$1(row.request_id), 1),
                       (row.claimSummary)
-                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_23$1, " 关联占位：" + _toDisplayString$1(row.claimSummary), 1))
+                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_24$1, " 关联占位：" + _toDisplayString$1(row.claimSummary), 1))
                         : _createCommentVNode$1("", true)
                     ])
                   ]))
                 }), 128))
               ]))
             : (__props.recordTab === 'records' && (state.value.host_coordinator || state.value.enabled))
-              ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_24$1, [
+              ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_25$1, [
                   (!recordsLoading.value && !recordRows.value.items.length)
-                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_25$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.owner || activeFilter.value.media_type || activeFilter.value.status ? '无匹配记录' : '暂无共享占位'), 1))
+                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_26$1, _toDisplayString$1(activeFilter.value.query || activeFilter.value.owner || activeFilter.value.media_type || activeFilter.value.status ? '无匹配记录' : '暂无共享占位'), 1))
                     : _createCommentVNode$1("", true),
                   (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(recordRows.value.items, (row) => {
                     return (_openBlock$1(), _createElementBlock$1("article", {
                       key: row.id,
                       class: "shared-settings__record"
                     }, [
-                      _createElementVNode$1("div", _hoisted_26$1, [
-                        _createElementVNode$1("div", _hoisted_27$1, [
-                          _createElementVNode$1("div", _hoisted_28$1, [
+                      _createElementVNode$1("div", _hoisted_27$1, [
+                        _createElementVNode$1("div", _hoisted_28$1, [
+                          _createElementVNode$1("div", _hoisted_29$1, [
                             _createElementVNode$1("span", null, _toDisplayString$1(_unref$1(releaseDetails)(row)), 1)
                           ])
                         ]),
@@ -1969,19 +1972,19 @@ return (_ctx, _cache) => {
                             size: "16"
                           }, null, 8, ["icon"]),
                           _createTextVNode$1(" " + _toDisplayString$1(phaseNames[row.state] || row.state), 1)
-                        ], 8, _hoisted_29$1)
+                        ], 8, _hoisted_30$1)
                       ]),
-                      _createElementVNode$1("strong", _hoisted_30$1, _toDisplayString$1(row.title), 1),
-                      _createElementVNode$1("div", _hoisted_31$1, [
+                      _createElementVNode$1("strong", _hoisted_31$1, _toDisplayString$1(row.title), 1),
+                      _createElementVNode$1("div", _hoisted_32$1, [
                         _createElementVNode$1("span", null, "下载时间：" + _toDisplayString$1(timestamp(row.created)), 1),
                         _createElementVNode$1("span", null, "最近更新：" + _toDisplayString$1(timestamp(row.updated)), 1),
                         _createElementVNode$1("span", null, "站点：" + _toDisplayString$1(row.site_name || '-'), 1),
-                        _createElementVNode$1("span", _hoisted_32$1, "下载方：" + _toDisplayString$1(row.label || '-'), 1)
+                        _createElementVNode$1("span", _hoisted_33$1, "下载方：" + _toDisplayString$1(row.label || '-'), 1)
                       ]),
-                      _createElementVNode$1("div", _hoisted_33$1, [
-                        _createElementVNode$1("span", _hoisted_34$1, "占位编号：" + _toDisplayString$1(row.id), 1),
+                      _createElementVNode$1("div", _hoisted_34$1, [
+                        _createElementVNode$1("span", _hoisted_35$1, "占位编号：" + _toDisplayString$1(row.id), 1),
                         (row.request_id)
-                          ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_35$1, "关联申请：" + _toDisplayString$1(row.request_id), 1))
+                          ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_36$1, "关联申请：" + _toDisplayString$1(row.request_id), 1))
                           : _createCommentVNode$1("", true)
                       ])
                     ]))
@@ -2005,7 +2008,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-748f9931"]]);
+const SharedSettingsPanel = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-20e24e6a"]]);
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,mergeProps:_mergeProps,createElementBlock:_createElementBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle} = await importShared('vue');
 
@@ -2093,7 +2096,7 @@ const _hoisted_56 = { class: "global-settings__section" };
 const _hoisted_57 = { class: "global-settings__grid global-settings__recent-date" };
 const _hoisted_58 = { class: "global-settings__recent-ai" };
 const _hoisted_59 = { class: "global-settings__section" };
-const _hoisted_60 = { class: "global-settings__grid" };
+const _hoisted_60 = { class: "global-settings__grid global-settings__selection" };
 const _hoisted_61 = { class: "global-settings__spec-row" };
 const _hoisted_62 = { class: "global-settings__attributes" };
 const _hoisted_63 = {
@@ -3664,7 +3667,7 @@ return (_ctx, _cache) => {
                       max: "1440",
                       step: "1",
                       suffix: "分钟",
-                      label: "共享下载低速观察时长",
+                      label: "下载低速观察时长",
                       density: "comfortable",
                       "hide-details": "auto"
                     }, null, 8, ["modelValue"]),
@@ -3677,7 +3680,7 @@ return (_ctx, _cache) => {
                       max: "1048576",
                       step: "1",
                       suffix: "KiB/s",
-                      label: "共享下载最低平均速度",
+                      label: "下载最低平均速度",
                       density: "comfortable",
                       "hide-details": "auto"
                     }, null, 8, ["modelValue"])
@@ -3713,15 +3716,7 @@ return (_ctx, _cache) => {
                         "hide-details": "",
                         inset: ""
                       }, null, 8, ["modelValue"])
-                    ]),
-                    _createVNode(_component_VSelect, {
-                      modelValue: settingsDraft.value.douban_only_action,
-                      "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((settingsDraft.value.douban_only_action) = $event)),
-                      items: doubanOnlyActions,
-                      label: "当仅豆瓣可识别时",
-                      density: "comfortable",
-                      "hide-details": ""
-                    }, null, 8, ["modelValue"])
+                    ])
                   ])
                 ]),
                 _createElementVNode("section", _hoisted_59, [
@@ -3732,7 +3727,7 @@ return (_ctx, _cache) => {
                   _createElementVNode("div", _hoisted_60, [
                     _createVNode(_component_VSwitch, {
                       modelValue: settingsDraft.value.global_torrent_blacklist_enabled,
-                      "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((settingsDraft.value.global_torrent_blacklist_enabled) = $event)),
+                      "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((settingsDraft.value.global_torrent_blacklist_enabled) = $event)),
                       label: "种子黑名单",
                       hint: "开启共享下载审批的任务站点之间，按完整种子名称排重",
                       "persistent-hint": "",
@@ -3742,12 +3737,21 @@ return (_ctx, _cache) => {
                     }, null, 8, ["modelValue"]),
                     _createVNode(_component_VSwitch, {
                       modelValue: settingsDraft.value.domestic_drama_4k_only,
-                      "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((settingsDraft.value.domestic_drama_4k_only) = $event)),
+                      "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((settingsDraft.value.domestic_drama_4k_only) = $event)),
                       label: "国产剧仅下载 4K 及以上",
                       color: "primary",
                       density: "compact",
                       "hide-details": "",
                       inset: ""
+                    }, null, 8, ["modelValue"]),
+                    _createVNode(_component_VSelect, {
+                      modelValue: settingsDraft.value.douban_only_action,
+                      "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((settingsDraft.value.douban_only_action) = $event)),
+                      items: doubanOnlyActions,
+                      class: "global-settings__selection-policy",
+                      label: "当仅豆瓣可识别时",
+                      density: "comfortable",
+                      "hide-details": ""
                     }, null, 8, ["modelValue"])
                   ]),
                   (sharedHost.value)
@@ -4180,6 +4184,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-9eb068f6"]]);
+const ResourceFlowWorkbench = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-518a72c3"]]);
 
 export { ResourceFlowWorkbench as R };

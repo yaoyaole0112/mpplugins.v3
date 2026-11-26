@@ -104,6 +104,26 @@ async def verify_settings_layout(dialog, width):
         [...element.children].slice(0, 3).map(child => child.getBoundingClientRect().top)''')
     if width >= 600:
         assert max(status) - min(status) < 2, (width, status)
+    credentials = await dialog.locator('.shared-settings__credentials').evaluate('''element => {
+        const bounds = element.getBoundingClientRect()
+        const [secret, status] = [...element.children].map(child => child.getBoundingClientRect())
+        return {sideBySide: status.left >= secret.right && Math.abs(secret.top - status.top) < 3,
+            stacked: status.top >= secret.bottom - 1, fits: element.scrollWidth <= element.clientWidth + 1,
+            width: bounds.width}
+    }''')
+    assert credentials['fits'] and (
+        (credentials['width'] >= 920 and credentials['sideBySide'])
+        or (credentials['width'] < 920 and credentials['stacked'])
+    ), credentials
+    identity = await dialog.locator('.shared-settings__grid--identity').evaluate('''element => {
+        const boxes = [...element.children].map(child => child.getBoundingClientRect())
+        return {width: element.getBoundingClientRect().width,
+            columns: boxes.filter(box => Math.abs(box.top - boxes[0].top) < 3).length,
+            fits: element.scrollWidth <= element.clientWidth + 1}
+    }''')
+    assert identity['fits'] and identity['columns'] == (
+        3 if identity['width'] >= 920 else 2 if identity['width'] >= 480 else 1
+    ), identity
     specs = await dialog.locator('.global-settings__spec-row').evaluate('''element => {
         const attributes = element.querySelector('.global-settings__attributes').getBoundingClientRect()
         const policy = element.querySelector('.global-settings__unknown').getBoundingClientRect()
@@ -715,9 +735,16 @@ async def verify_selection_settings(base_url, output, executable_path, host_css=
                 "基础", "运行限额与删种", "缺失播出日期兜底", "选种与去重",
                 "共享下载审批", "规范媒体身份绑定",
             ]
+            assert await dialog.get_by_label("下载低速观察时长", exact=True).count() == 1
+            assert await dialog.get_by_label("下载最低平均速度", exact=True).count() == 1
+            assert await dialog.get_by_label("共享下载低速观察时长", exact=True).count() == 0
+            assert await dialog.get_by_label("共享下载最低平均速度", exact=True).count() == 0
             assert await dialog.get_by_text(re.compile(r"Telegram|协调 Bot")).count() == 0
             assert await dialog.get_by_label("协调端 Tailscale HTTPS 域名").input_value() == "approval.example.ts.net"
-            douban = dialog.locator(".v-select").filter(has=page.locator("label", has_text="当仅豆瓣可识别时"))
+            douban = dialog.locator(".global-settings__selection .v-select")
+            assert await douban.count() == 1
+            assert await dialog.locator(".global-settings__recent-date").get_by_label(
+                "当仅豆瓣可识别时", exact=True).count() == 0
             assert await douban.get_by_text("排除过滤", exact=True).count() == 1
             await douban.click()
             await page.get_by_role("option", name="排除过滤", exact=True).wait_for()

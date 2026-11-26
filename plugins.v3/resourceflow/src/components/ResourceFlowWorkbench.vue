@@ -967,10 +967,10 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
               <VTextField v-model.number="settingsDraft.global_maxdlspeed" type="number" min="0"
                 label="全局总下载带宽（KB/s）" density="comfortable" clearable hide-details />
               <VTextField v-model.number="settingsDraft.shared_slow_download_minutes" type="number"
-                min="1" max="1440" step="1" suffix="分钟" label="共享下载低速观察时长"
+                min="1" max="1440" step="1" suffix="分钟" label="下载低速观察时长"
                 density="comfortable" hide-details="auto" />
               <VTextField v-model.number="settingsDraft.shared_min_download_kib_s" type="number"
-                min="0" max="1048576" step="1" suffix="KiB/s" label="共享下载最低平均速度"
+                min="0" max="1048576" step="1" suffix="KiB/s" label="下载最低平均速度"
                 density="comfortable" hide-details="auto" />
             </div>
           </section>
@@ -985,18 +985,19 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
                 <VSwitch v-model="settingsDraft.recent_missing_date_ai_enabled"
                   label="启用 AI 官方排播核验" color="primary" density="compact" hide-details inset />
               </div>
-              <VSelect v-model="settingsDraft.douban_only_action" :items="doubanOnlyActions"
-                label="当仅豆瓣可识别时" density="comfortable" hide-details />
             </div>
           </section>
           <section class="global-settings__section">
             <h3><VIcon icon="mdi-filter-check-outline" />选种与去重</h3>
-            <div class="global-settings__grid">
+            <div class="global-settings__grid global-settings__selection">
               <VSwitch v-model="settingsDraft.global_torrent_blacklist_enabled" label="种子黑名单"
                 hint="开启共享下载审批的任务站点之间，按完整种子名称排重"
                 persistent-hint color="primary" density="compact" inset />
               <VSwitch v-model="settingsDraft.domestic_drama_4k_only" label="国产剧仅下载 4K 及以上"
                 color="primary" density="compact" hide-details inset />
+              <VSelect v-model="settingsDraft.douban_only_action" :items="doubanOnlyActions"
+                class="global-settings__selection-policy" label="当仅豆瓣可识别时"
+                density="comfortable" hide-details />
             </div>
             <template v-if="sharedHost">
               <h4 class="text-subtitle-2">共享规格去重字段</h4>
@@ -1259,6 +1260,9 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
 
 .global-settings__body {
   gap: 0;
+  container: global-settings / inline-size;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 .global-settings__section {
@@ -1304,6 +1308,10 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 16px 24px;
+  min-inline-size: 0;
+}
+
+.global-settings__selection-policy {
   min-inline-size: 0;
 }
 
@@ -1401,13 +1409,23 @@ defineExpose({ loadStatus, refreshAll, loading, saving })
   }
 }
 
-@media (min-width: 600px) {
+@container global-settings (min-width: 480px) {
   .global-settings__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-@media (min-width: 960px) {
+@container global-settings (min-width: 800px) {
   .global-settings__limits { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .global-settings__recent-date { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .global-settings__recent-date { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@container global-settings (min-width: 480px) {
+  .global-settings__selection-policy { grid-column: 1 / -1; max-inline-size: 32rem; }
+}
+
+@container global-settings (max-width: 479px) {
+  .global-settings__section { gap: 12px; padding-block: 12px; }
+  .global-settings__grid { gap: 12px; }
+  .global-settings__selection-policy { inline-size: 100%; }
 }
 
 @media (max-width: 599px) {

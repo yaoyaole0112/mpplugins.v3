@@ -288,7 +288,7 @@ class ResourceFlow(SharedResourceMixin, _PluginBase):
     plugin_name = "资源刷流"
     plugin_desc = "独立资源刷流，通过 Tailscale 私网 HTTPS 进行共享下载审批。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "1.0.69"
+    plugin_version = "1.0.70"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "resourceflow_"
