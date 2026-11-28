@@ -44,7 +44,7 @@ class WebApiTests(unittest.TestCase):
         self.plugin._cloud_life_source = "shared"
         self.plugin._cron = "*/10 * * * *"
         self.plugin._telegram_token = "secret-bot-token"
-        self.plugin.plugin_version = "1.22.16"
+        self.plugin.plugin_version = "1.22.17"
         self.plugin.get_native_page = Mock(return_value=[{"component": "VCard", "text": "原生页面"}])
         self.plugin.get_native_form = Mock(return_value={"form": [], "defaults": {}})
         self.plugin.telegram_account_action = AsyncMock(return_value={"ok": True, "logged_in": True})
@@ -308,7 +308,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(capabilities.status_code, 200)
         self.assertEqual(capabilities.json()["render_mode"], "vuetify")
         self.assertEqual(capabilities.json()["schema_version"], 1)
-        self.assertEqual(capabilities.json()["version"], "1.22.16")
+        self.assertEqual(capabilities.json()["version"], "1.22.17")
         self.assertEqual(capabilities.headers["cache-control"], "no-store")
 
         page = self.client.get("/native/page")

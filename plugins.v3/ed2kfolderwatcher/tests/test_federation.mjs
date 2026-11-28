@@ -102,6 +102,15 @@ test('Telegram forwarding delay is loaded, saved and present in the built settin
   assert.match(bundle, /telegram_forward_delay/)
 })
 
+test('Telegram delay settings share a responsive grid', async () => {
+  const source = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
+  const fields = source.match(/<div class="fields telegram-wait-fields">([\s\S]*?)<\/div>\s*<!-- <select/)[1]
+  assert.match(fields, /聚合转发延迟等待秒数/)
+  assert.match(fields, /ED2K链接 Telegram 延迟转发秒数/)
+  assert.match(source, /\.fields\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/)
+  assert.match(source, /@media\(max-width:650px\)[\s\S]*?\.fields\{grid-template-columns:1fr/)
+})
+
 test('upload progress and independent delete settings are exposed', async () => {
   const page = await readFile(new URL('../src/Page.vue', import.meta.url), 'utf8')
   assert.match(page, /task\.progress_known !== false/)
