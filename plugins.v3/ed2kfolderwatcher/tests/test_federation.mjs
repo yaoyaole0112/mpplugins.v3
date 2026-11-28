@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile, access } from 'node:fs/promises'
+import { readFile, access, readdir } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import * as vue from 'vue'
@@ -87,6 +87,19 @@ test('ordinary-upload forwarding has an independent Telegram target and hides st
   assert.match(panel, /ordinary_upload_telegram_targets/)
   assert.match(panel, /普通上传专用接收目标/)
   assert.equal(page.includes('v-if="item.upload_path"'), false)
+})
+
+test('Telegram forwarding delay is loaded, saved and present in the built settings panel', async () => {
+  const source = await readFile(new URL('../src/Panel.vue', import.meta.url), 'utf8')
+  assert.match(source, /telegram_forward_delay: 0/)
+  assert.match(source, /'telegram_forward_delay'/)
+  assert.match(source, /v-model\.number="settings\.telegram_forward_delay"/)
+  const assets = new URL('../dist/assets/', import.meta.url)
+  const panelBundle = (await readdir(assets)).find(name => /^Panel-.*\.js$/.test(name))
+  assert.ok(panelBundle)
+  const bundle = await readFile(new URL(panelBundle, assets), 'utf8')
+  assert.match(bundle, /ED2K链接 Telegram 延迟转发秒数/)
+  assert.match(bundle, /telegram_forward_delay/)
 })
 
 test('upload progress and independent delete settings are exposed', async () => {
