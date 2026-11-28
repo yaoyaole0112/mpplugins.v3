@@ -173,13 +173,18 @@ async def search_episode_evidence(prompt):
     season_tags = " ".join(f"S{int(prompt['season']):02d}E{number:02d}" for number in episodes)
     year = str(prompt.get("year") or "").strip()
     year_part = f" {year}" if year else ""
+    # Search both localized wording and native season/episode markers. A
+    # media database year can describe the series premiere rather than the
+    # season currently being released.
     queries = [
+        f"{title} {season_tags} air date release date{year_part}",
+        f"{title} {season_tags} episode {episodes[0]} aired{year_part}",
         f"{title} {tags} 播出日期{year_part}",
         f"{title} {periods} 更新 播出时间{year_part}",
     ]
     for alias in aliases[:2]:
+        queries.append(f"{alias} {season_tags} air date{year_part}")
         queries.append(f"{alias} {tags} 播出日期{year_part}")
-    queries.append(f"{title} {season_tags} 播出日期{year_part}")
 
     async def search(query):
         try:
