@@ -225,7 +225,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     plugin_name = "自动生成ED2K链接"
     plugin_desc = "监控本地目录或增量扫描115/CloudDrive存储，流式生成ED2K链接。"
     plugin_icon = "https://raw.githubusercontent.com/MoviePilot/MoviePilot-Plugins/main/icons/link.png"
-    plugin_version = "1.22.14"
+    plugin_version = "1.22.15"
     plugin_author = "helios"
     plugin_order = 99
     plugin_config_prefix = "ed2kfolderwatcher_"
@@ -251,6 +251,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
     _telegram_enabled = False
     _telegram_aggregate = False
     _telegram_aggregate_window = 600.0
+    _telegram_forward_delay = 0
     _telegram_mode = "user"
     _telegram_token = ""
     _telegram_chat_id = ""
@@ -394,6 +395,10 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             self._telegram_aggregate_window = max(0, min(3600, int(config.get("telegram_aggregate_window", 600))))
         except (TypeError, ValueError):
             self._telegram_aggregate_window = 600
+        try:
+            self._telegram_forward_delay = max(0, min(86400, int(config.get("telegram_forward_delay", 0))))
+        except (TypeError, ValueError):
+            self._telegram_forward_delay = 0
         self._telegram_mode = "user"
         self._telegram_token = str(config.get("telegram_token") or "").strip()
         self._telegram_chat_id = str(config.get("telegram_chat_id") or "").strip()
@@ -724,9 +729,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 now = time.monotonic()
                 for group_key in batch.get("group_expected", {}):
                     if group_key not in batch.get("group_flush_at", {}):
-                        delay = self._telegram_aggregate_window if (
-                            self._telegram_enabled and self._telegram_aggregate and group_key is not None
-                        ) else 0
+                        delay = self._batch_delivery_delay(group_key)
                         batch["group_flush_at"][group_key] = now + delay
                 expected_groups = set(batch.get("group_expected", {}))
                 complete = batch.get("group_flushed", set()) >= expected_groups
@@ -845,12 +848,23 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             for unsent in grouped.values():
                 self._notify_records(unsent, checkpoint=lambda: self._write_results(output, cache_path, records))
             self._write_results(output, cache_path, records)
+        if self._ordinary_upload_telegram_enabled:
+            for key, context, record in eligible:
+                if (record.get("upload_kind") == "ordinary"
+                        and not record.get("ordinary_upload_telegram_sent")):
+                    self._notify_ordinary_upload_record(
+                        record, checkpoint=lambda: self._write_results(output, cache_path, records),
+                    )
+            self._write_results(output, cache_path, records)
         failed = []
         for key, context, unused in eligible:
             record = records.get(key)
             if not record:
                 continue
-            if self._telegram_enabled and not record.get("telegram_sent"):
+            if ((self._telegram_enabled and not record.get("telegram_sent"))
+                    or (self._ordinary_upload_telegram_enabled
+                        and record.get("upload_kind") == "ordinary"
+                        and not record.get("ordinary_upload_telegram_sent"))):
                 failed.append(context)
                 continue
             if not record.get("upload_mode"):
@@ -864,7 +878,9 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                     continue
                 if self._local_upload_delete_cloud_copy and not record.get("upload_cloud_copy_deleted"):
                     self._delete_uploaded_cloud_copy(record, output, cache_path, records)
-                if self._local_upload_delete_source and (output is not None or self._telegram_enabled):
+                if self._local_upload_delete_source and (
+                        output is not None or self._telegram_enabled
+                        or (self._ordinary_upload_telegram_enabled and record.get("ordinary_upload_telegram_sent"))):
                     self._finish_uploaded_local_delete(context["path"], record, output, cache_path, records)
                 else:
                     self._clear_retry_failure(key)
@@ -924,9 +940,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 remaining = any(batch["groups"].get(key) == group_key for key in batch["contexts"])
                 if not complete or remaining:
                     batch["group_flushed"].discard(group_key)
-                    delay = self._telegram_aggregate_window if (
-                        self._telegram_enabled and self._telegram_aggregate and group_key is not None
-                    ) else 0
+                    delay = self._batch_delivery_delay(group_key)
                     batch["group_flush_at"][group_key] = max(
                         batch["group_flush_at"].get(group_key, 0), time.monotonic() + delay)
                 else:
@@ -1085,6 +1099,48 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             group_key = batch["groups"][key]
             batch["group_results"].setdefault(group_key, set()).add(key)
 
+    def _batch_delivery_delay(self, group_key, *, ordinary_delivery=False) -> float:
+        aggregate_delay = (
+            self._telegram_aggregate_window
+            if self._telegram_enabled and self._telegram_aggregate and group_key is not None
+            else 0
+        )
+        if not self._telegram_enabled and not ordinary_delivery:
+            return 0
+        return max(float(self._telegram_forward_delay), float(aggregate_delay))
+
+    def _needs_deferred_forward(self, record: dict) -> bool:
+        normal_delivery = self._telegram_enabled
+        ordinary_delivery = (
+            self._ordinary_upload_telegram_enabled
+            and record.get("upload_kind") == "ordinary"
+        )
+        return bool(
+            (normal_delivery and (self._telegram_aggregate or self._telegram_forward_delay > 0))
+            or (ordinary_delivery and self._telegram_forward_delay > 0)
+        )
+
+    def _defer_batch_context(self, key: str, context: dict, name: str, batch_id=None) -> None:
+        created = batch_id is None or batch_id not in self._batches
+        if created:
+            batch_id = self._new_batch("telegram-delivery")
+        batch_id = self._register_batch_item(batch_id, key, name)
+        with self._condition:
+            batch = self._batches.get(batch_id)
+            if not batch:
+                return
+            group_key = batch["groups"][key]
+            context["batch_group"] = group_key
+            batch["contexts"][key] = context
+            self._mark_batch_item_result(batch, key)
+            batch["group_flush_at"][group_key] = max(
+                batch["group_flush_at"].get(group_key, 0),
+                time.monotonic() + self._batch_delivery_delay(group_key),
+            )
+            if created:
+                batch["sealed"] = True
+            self._condition.notify_all()
+
     def _register_batch_item(self, batch_id: str, key: str, name: str = None, *, merge=True) -> str:
         with self._condition:
             batch = self._batches.get(batch_id)
@@ -1108,9 +1164,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                     batch["group_expected"].setdefault(group_key, set()).add(key)
                     batch["group_results"].setdefault(group_key, set())
                     batch["group_flushed"].discard(group_key)
-                    delay = self._telegram_aggregate_window if (
-                        self._telegram_enabled and self._telegram_aggregate and group_key is not None
-                    ) else 0
+                    delay = self._batch_delivery_delay(group_key)
                     if new_item:
                         batch["group_flush_at"][group_key] = time.monotonic() + delay
                     return target_batch_id
@@ -1850,13 +1904,33 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
                 self._cloud_status["completed"] += 1
                 logger.info(f"自动生成ED2K链接：网盘文件生成完成：{item['storage']}：{item['name']}")
             self._write_results(output, cache_path, records)
-            if self._telegram_aggregate and self._active_batch_id in self._batches:
+            if self._needs_deferred_forward(record) and self._active_batch_id in self._batches:
                 with self._condition:
                     batch = self._batches.get(self._active_batch_id)
                     if batch:
                         batch["contexts"][key] = {"kind": "cloud", "item": item, "storage": storage,
                             "output": output, "cache_path": cache_path,
                             "batch_group": batch["groups"].get(key)}
+                        self._mark_batch_item_result(batch, key)
+                        group_key = batch["groups"].get(key)
+                        if group_key is not None:
+                            batch["group_flush_at"][group_key] = max(
+                                batch["group_flush_at"].get(group_key, 0),
+                                time.monotonic() + self._batch_delivery_delay(group_key),
+                            )
+                        self._condition.notify_all()
+                if self._needs_deferred_forward(record):
+                    self._cloud_observed.pop(record_key(item), None)
+                    self._cloud_status["reconnecting"] = False
+                    self._cloud_status["file"] = ""
+                    return
+            if self._needs_deferred_forward(record):
+                self._defer_batch_context(
+                    key,
+                    {"kind": "cloud", "item": item, "storage": storage,
+                     "output": output, "cache_path": cache_path},
+                    item["name"],
+                )
                 self._cloud_observed.pop(record_key(item), None)
                 self._cloud_status["reconnecting"] = False
                 self._cloud_status["file"] = ""
@@ -2374,13 +2448,30 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             self._write_results(output, cache_path, records)
             if self._local_active:
                 self._local_active["stage"] = "正在完成链接投递与后续处理"
-            if self._telegram_aggregate and self._active_batch_id in self._batches:
+            if self._needs_deferred_forward(record) and self._active_batch_id in self._batches:
                 with self._condition:
                     batch = self._batches.get(self._active_batch_id)
                     if batch:
                         batch["contexts"][key] = {"kind": "local", "path": path, "signature": signature,
                             "output": output, "cache_path": cache_path,
                             "batch_group": batch["groups"].get(key)}
+                        self._mark_batch_item_result(batch, key)
+                        group_key = batch["groups"].get(key)
+                        if group_key is not None:
+                            batch["group_flush_at"][group_key] = max(
+                                batch["group_flush_at"].get(group_key, 0),
+                                time.monotonic() + self._batch_delivery_delay(group_key),
+                            )
+                        self._condition.notify_all()
+                if self._needs_deferred_forward(record):
+                    return
+            if self._needs_deferred_forward(record):
+                self._defer_batch_context(
+                    key,
+                    {"kind": "local", "path": path, "signature": signature,
+                     "output": output, "cache_path": cache_path},
+                    path.name,
+                )
                 return
             if self._telegram_aggregate:
                 candidates = self._aggregate_candidates(record, cache_path, records)
@@ -2899,7 +2990,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             self._web_login = None
 
     def _save_config(self) -> None:
-        fields = ("enabled", "movie_series_parallel", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "local_delete_source", "cloud_delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_aggregate", "telegram_aggregate_window", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "ordinary_upload_telegram_enabled", "ordinary_upload_telegram_targets", "ordinary_upload_telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
+        fields = ("enabled", "movie_series_parallel", "folder", "recursive", "cron", "output", "output_enabled", "monitor_enabled", "scan_enabled", "extensions", "min_age", "min_file_size", "local_delete_source", "cloud_delete_source", "delete_small_files", "cloud_delete_enabled", "telegram_enabled", "telegram_aggregate", "telegram_aggregate_window", "telegram_forward_delay", "telegram_mode", "telegram_chat_id", "telegram_thread_id", "ordinary_upload_telegram_enabled", "ordinary_upload_telegram_targets", "ordinary_upload_telegram_thread_id", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron", "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source")
         config = {name: getattr(self, f"_{name}") for name in fields + UPLOAD_FIELDS + ("retry_limit",)}
         config.update(telegram_token=self._telegram_token, onlyonce=self._onlyonce,
                       cloud_delete_scope=self._cloud_delete_scope,
@@ -2954,6 +3045,7 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             field("VSwitch", "telegram_enabled", "发送 ED2K 链接到 Telegram"),
             field("VSwitch", "telegram_aggregate", "聚合转发", hint="同剧名同季数链接合并为一条换行消息。", persistent_hint=True),
             field("VTextField", "telegram_aggregate_window", "聚合转发延迟等待秒数", type="number", min=0, max=3600, hint="同剧同季新增文件重置等待；到期先发已完成链接，剩余后续补发，默认600秒。", persistent_hint=True),
+            field("VTextField", "telegram_forward_delay", "ED2K链接 Telegram 延迟转发秒数", type="number", min=0, max=86400, hint="链接生成及上传核验完成后等待指定秒数再发送；同样适用于FUCK孤本普通上传。0表示不额外延迟；聚合等待时间较长时按较长时间执行。", persistent_hint=True),
             # field("VSelect", "telegram_mode", "Telegram 发送方式", items=[{"title": "Bot Token（机器人）", "value": "bot"}, {"title": "个人账号（Telethon）", "value": "user"}]),
             # field("VTextField", "telegram_token", "Telegram Bot Token", type="password"),
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-5"}, "text": "仅使用个人账号发送，可在插件页面完成授权；请使用可信网络或 HTTPS。"},
@@ -2964,4 +3056,4 @@ class Ed2kFolderWatcher(LocalUploadMixin, _PluginBase):
             field("VTextarea", "ordinary_upload_telegram_targets", "普通上传专用接收目标（多个）", rows=1, placeholder="@孤本接收机器人, @频道用户名", hint="仅对已确认普通上传且核验成功的文件发送；MP模式依据115插件上传回执判断，回执缺失时不发送。", persistent_hint=True),
             field("VTextField", "ordinary_upload_telegram_thread_id", "默认话题线程 ID（可选）", placeholder="不使用默认话题时留空", hint="指定单个目标话题可在目标后加 |话题ID。", persistent_hint=True),
             field("VSwitch", "onlyonce", "保存后立即扫描一次"),
-        ]}], {"enabled": False, "movie_series_parallel": self._movie_series_parallel, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "local_delete_source": False, "local_upload_delete_source": False, "local_upload_delete_cloud_copy": False, "cloud_delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "ordinary_upload_telegram_enabled": False, "ordinary_upload_telegram_targets": "", "ordinary_upload_telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared", "local_upload_enabled": False, "local_upload_mode": "mp", "local_upload_folder": "", "local_upload_target": "", "local_upload_rate": self._local_upload_rate}
+        ]}], {"enabled": False, "movie_series_parallel": self._movie_series_parallel, "folder": "", "recursive": True, "include_subdirectories": self._recursive if self._recursive == self._cloud_recursive else None, "monitor_enabled": True, "scan_enabled": False, "output_enabled": True, "output": "", "extensions": "", "min_age": 60, "min_file_size": "", "min_file_size_gb": minimum_gb_value(self._min_file_size), "retry_limit": self._retry_limit, "local_delete_source": False, "local_upload_delete_source": False, "local_upload_delete_cloud_copy": False, "cloud_delete_source": False, "delete_small_files": False, "cloud_delete_enabled": False, "telegram_enabled": False, "telegram_aggregate": False, "telegram_aggregate_window": 600, "telegram_forward_delay": self._telegram_forward_delay, "telegram_mode": "user", "telegram_chat_id": "", "telegram_thread_id": "", "ordinary_upload_telegram_enabled": False, "ordinary_upload_telegram_targets": "", "ordinary_upload_telegram_thread_id": "", "cron": DEFAULT_CRON, "onlyonce": False, "cloud_enabled": False, "cloud_scan_enabled": False, "cloud_storage": "115网盘Plus", "cloud_folder": "", "cloud_recursive": True, "cloud_cron": DEFAULT_CRON, "cloud_read_timeout": 300, "cloud_monitor_enabled": False, "cloud_life_source": "shared", "local_upload_enabled": False, "local_upload_mode": "mp", "local_upload_folder": "", "local_upload_target": "", "local_upload_rate": self._local_upload_rate}

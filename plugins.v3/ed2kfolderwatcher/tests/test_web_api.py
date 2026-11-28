@@ -44,7 +44,7 @@ class WebApiTests(unittest.TestCase):
         self.plugin._cloud_life_source = "shared"
         self.plugin._cron = "*/10 * * * *"
         self.plugin._telegram_token = "secret-bot-token"
-        self.plugin.plugin_version = "1.22.14"
+        self.plugin.plugin_version = "1.22.15"
         self.plugin.get_native_page = Mock(return_value=[{"component": "VCard", "text": "原生页面"}])
         self.plugin.get_native_form = Mock(return_value={"form": [], "defaults": {}})
         self.plugin.telegram_account_action = AsyncMock(return_value={"ok": True, "logged_in": True})
@@ -147,6 +147,19 @@ class WebApiTests(unittest.TestCase):
         for value in (-1, 3601, "bad", True):
             with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
                 web_api.validate_settings(self.plugin, {"telegram_aggregate_window": value})
+
+    def test_telegram_forward_delay_validation_and_snapshot(self):
+        result = web_api.validate_settings(self.plugin, {"telegram_forward_delay": "86400"})
+        self.assertEqual(result["telegram_forward_delay"], 86400)
+        self.plugin._telegram_forward_delay = 86400
+        self.assertEqual(web_api.settings_snapshot(self.plugin)["telegram_forward_delay"], 86400)
+        for value in (-1, 86401, "bad", True):
+            with self.subTest(value=value), self.assertRaises(web_api.UserAccountError):
+                web_api.validate_settings(self.plugin, {"telegram_forward_delay": value})
+
+    def test_telegram_forward_delay_validation_error_names_setting(self):
+        with self.assertRaisesRegex(web_api.UserAccountError, "Telegram延迟转发时间"):
+            web_api.validate_settings(self.plugin, {"telegram_forward_delay": 86401})
 
     def test_retry_limit_validation_and_snapshot(self):
         result = web_api.validate_settings(self.plugin, {"retry_limit": 4})
@@ -295,7 +308,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(capabilities.status_code, 200)
         self.assertEqual(capabilities.json()["render_mode"], "vuetify")
         self.assertEqual(capabilities.json()["schema_version"], 1)
-        self.assertEqual(capabilities.json()["version"], "1.22.14")
+        self.assertEqual(capabilities.json()["version"], "1.22.15")
         self.assertEqual(capabilities.headers["cache-control"], "no-store")
 
         page = self.client.get("/native/page")

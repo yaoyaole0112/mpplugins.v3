@@ -18,7 +18,7 @@ from . import clouddrive_upload
 
 CONFIG_FIELDS = ("enabled", "folder", "recursive", "monitor_enabled", "output_enabled", "output", "extensions",
                  "min_age", "min_file_size", "local_delete_source", "cloud_delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "cron", "telegram_enabled", "telegram_mode",
-                 "telegram_chat_id", "telegram_thread_id", "telegram_aggregate", "telegram_aggregate_window", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
+                 "telegram_chat_id", "telegram_thread_id", "telegram_aggregate", "telegram_aggregate_window", "telegram_forward_delay", "cloud_enabled", "cloud_scan_enabled", "cloud_storage", "cloud_folder", "cloud_recursive", "cloud_cron",
                  "cloud_read_timeout", "cloud_monitor_enabled", "cloud_life_source", "retry_limit", "movie_series_parallel",
                  "ordinary_upload_telegram_enabled", "ordinary_upload_telegram_targets", "ordinary_upload_telegram_thread_id") + UPLOAD_FIELDS
 BOOLEAN_FIELDS = {"enabled", "recursive", "monitor_enabled", "output_enabled", "local_delete_source", "local_upload_delete_source", "local_upload_delete_cloud_copy", "cloud_delete_source", "delete_small_files", "cloud_delete_enabled", "scan_enabled", "telegram_enabled", "telegram_aggregate", "cloud_enabled", "cloud_scan_enabled", "cloud_recursive", "cloud_monitor_enabled", "movie_series_parallel", "local_upload_enabled", "ordinary_upload_telegram_enabled"}
@@ -59,10 +59,12 @@ def validate_settings(plugin, values):
         if name in BOOLEAN_FIELDS:
             if not isinstance(value, bool):
                 raise UserAccountError("开关配置格式不正确")
-        elif name in {"min_age", "cloud_read_timeout", "telegram_aggregate_window", "retry_limit", "local_upload_rate"}:
+        elif name in {"min_age", "cloud_read_timeout", "telegram_aggregate_window", "telegram_forward_delay", "retry_limit", "local_upload_rate"}:
             lower, upper = (0, 128) if name == "local_upload_rate" else ((0, 86400) if name == "min_age" else ((30, 1800) if name == "cloud_read_timeout" else ((0, 10) if name == "retry_limit" else (0, 3600))))
+            if name == "telegram_forward_delay":
+                lower, upper = 0, 86400
             if isinstance(value, bool) or not str(value).isdigit() or not lower <= int(value) <= upper:
-                label = {"min_age": "文件稳定时间", "cloud_read_timeout": "网盘读取超时", "retry_limit": "自动重试次数", "telegram_aggregate_window": "聚合转发等待时间", "local_upload_rate": "直传速度上限"}[name]
+                label = {"min_age": "文件稳定时间", "cloud_read_timeout": "网盘读取超时", "retry_limit": "自动重试次数", "telegram_aggregate_window": "聚合转发等待时间", "telegram_forward_delay": "Telegram延迟转发时间", "local_upload_rate": "直传速度上限"}[name]
                 raise UserAccountError(f"{label}必须为 {lower} 到 {upper} 的整数")
             value = int(value)
         else:

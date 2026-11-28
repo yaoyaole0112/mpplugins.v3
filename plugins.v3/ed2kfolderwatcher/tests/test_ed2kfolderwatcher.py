@@ -63,6 +63,26 @@ class Ed2kTests(unittest.TestCase):
         self.assertNotEqual(key("美国谍梦.S06E07.mkv"), key("继承之战.S06E07.mkv"))
         self.assertIsNone(key("电影.mkv"))
 
+    def test_telegram_delay_applies_to_regular_and_ordinary_upload_delivery(self):
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = False
+        self.plugin._telegram_forward_delay = 45
+        self.assertTrue(self.plugin._needs_deferred_forward({"upload_kind": "instant"}))
+        self.assertFalse(self.plugin._needs_deferred_forward({"upload_kind": "ordinary"}))
+        self.plugin._ordinary_upload_telegram_enabled = True
+        self.assertTrue(self.plugin._needs_deferred_forward({"upload_kind": "ordinary"}))
+        self.assertEqual(self.plugin._batch_delivery_delay(("__single__", "item")), 45)
+        self.plugin._telegram_enabled = False
+        self.assertEqual(self.plugin._batch_delivery_delay(("__single__", "item")), 0)
+        self.assertEqual(
+            self.plugin._batch_delivery_delay(("__single__", "item"), ordinary_delivery=True),
+            45,
+        )
+        self.plugin._telegram_enabled = True
+        self.plugin._telegram_aggregate = True
+        self.plugin._telegram_aggregate_window = 120
+        self.assertEqual(self.plugin._batch_delivery_delay(("show", 1)), 120)
+
     def test_media_kind_is_conservative_and_episode_markers_win(self):
         classify = self.module.media_kind
         for name in ("剧.S01E02.mkv", "综艺.EP05.mkv", "综艺.20261109.mkv", "动画 - 12.mkv", "剧.第十二集.mkv"):

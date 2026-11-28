@@ -509,6 +509,17 @@ class LocalUploadMixin:
                 "link": record["link"],
             }
             self._mark_batch_item_result(batch, key)
+            group_key = batch["groups"][key]
+            ordinary_delivery = (
+                self._ordinary_upload_telegram_enabled
+                and record.get("upload_kind") == "ordinary"
+            )
+            batch["group_flush_at"][group_key] = max(
+                batch["group_flush_at"].get(group_key, 0),
+                time.monotonic() + self._batch_delivery_delay(
+                    group_key, ordinary_delivery=ordinary_delivery,
+                ),
+            )
             if batch_id == created:
                 batch["sealed"] = True
             self._condition.notify_all()
@@ -892,6 +903,11 @@ class LocalUploadMixin:
         else:
             with self._cloud_request_lock:
                 self._verify_uploaded(storage, record["upload_cloud_item"], record)
+        if self._needs_deferred_forward(record):
+            record.update(upload_state="verified", upload_note="上传及内容核验已完成，等待Telegram延时转发")
+            self._write_results(output, cache_path, records)
+            self._queue_uploaded_forward(path, record, output, cache_path)
+            return
         ordinary_forward_required = (
             self._ordinary_upload_telegram_enabled and record.get("upload_kind") == "ordinary"
         )
